@@ -745,6 +745,61 @@ def preflight() -> None:
         task_sandbox.preflight(task_root=workspace_root())
 
 
+def preflight_before_serving() -> None:
+    """Everything a task will need, asked before there is a task — for `grid join` (issue 58).
+
+    `run_task` asks `preflight()` and `resolve_binary()` at claim time, which is after a member is
+    already waiting on this provider. Until this existed, that was the ONLY moment either was asked:
+    `grid join` printed its banner, `grid project status` said online, and the provider looked
+    healthy right up until somebody else's task died on it.
+
+    The **same two functions**, never a copy of them. A second opinion here about the sandbox, the
+    permission mode or the version floor would be one more thing to keep in step, and every failure
+    this plane has recorded is two readings of one rule that got edited apart.
+
+    One question is asked here and nowhere else — whether the workspace root is reachable at all —
+    and it is asked **unconditionally**, unlike the checks inside `preflight()` that belong to the
+    sandbox. An unwritable root fails every task with the sandbox on or off.
+    """
+    preflight()
+    resolve_binary()
+    _require_a_reachable_workspace_root()
+
+
+def _require_a_reachable_workspace_root() -> None:
+    """Refuse a workspace root this provider could not put a task under.
+
+    The macOS default is the shape this exists for: `DEFAULT_WORKSPACE_ROOT` is under `/var`, which
+    is root-owned there, so a provider without `sudo` fails EVERY task with "could not create
+    /var/grid/…" — one member's task at a time, forever, with every health signal green.
+
+    **A probe, never a creation.** Which directory the root should be, and with what mode and what
+    refusals, is issue 62's decision; making one here would pre-empt it and would also mean a
+    `grid join` that failed left a directory behind.
+
+    `os.access` is advisory — it knows nothing about ACLs, a read-only mount, or a full disk — so
+    this is an early warning that can MISS, never a guarantee. A root it passes and `mkdir` then
+    refuses fails exactly where it does today, at `ensure_workspace`. The direction to be wrong in
+    is letting a working provider through, because the alternative is refusing one.
+    """
+    root = workspace_root()
+    if root.exists() and not root.is_dir():
+        raise OSError(
+            f"the task workspace root {root} is not a directory, so no task can be checked out "
+            f"under it; point {WORKSPACE_ROOT_ENV} somewhere else")
+
+    reachable = root
+    while not reachable.exists():
+        if reachable.parent == reachable:  # reached the filesystem root without finding anything
+            break
+        reachable = reachable.parent
+    if reachable.is_dir() and os.access(reachable, os.W_OK | os.X_OK):
+        return
+    raise OSError(
+        f"this provider cannot create a task workspace under {root}: {reachable} is not writable "
+        f"by it. Point {WORKSPACE_ROOT_ENV} at a short path this account can write")
+
+
 def _require_version_for_the_sandbox(binary: str) -> None:
     """Refuse a binary that would accept the confinement policy and ignore it.
 

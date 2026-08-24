@@ -1587,45 +1587,73 @@ def test_a_misconfigured_deadline_falls_back_instead_of_retiring_task_serving(mo
     assert "1h" in capsys.readouterr().err
 
 
-def test_tool_activity_is_published_while_the_agent_is_still_running(agent):
+def test_tool_activity_is_published_while_the_agent_is_still_running(agent, tmp_path):
     """Issue 03's first acceptance criterion — "while it is still running, not after".
 
-    Proven by ordering against the child's own clock: the tool call is emitted, then the child sleeps
-    before writing anything else. A publisher that buffered to the end would see the tool event only
-    after that sleep, so asserting the event arrived BEFORE the child exited is the whole test.
+    Proven by ORDERING against a gate this test holds shut, not by a wall clock. The child emits the
+    tool call and then blocks until the test creates `gate`, so it cannot reach its result line — let
+    alone exit — while the gate is shut. An event that arrives in that window therefore arrived while
+    the agent was still running, on any machine at any load.
 
-    The sleep and the bound are deliberately a factor of THREE apart. A threshold sitting exactly on
-    the child's own sleep has no margin in either direction: it fails on any scheduling hiccup, and
-    the temptation is then to widen it until it no longer distinguishes a live publisher from a
-    buffered one. Live is ~0.05s and buffered is ~3s, so 1.5s separates them with room on both sides.
+    ⚠️ The bound this replaces was `at < 1.5s` against a child that slept 3s, and it read as a
+    regression under the very load this feature creates: 2.90s with the machine at load 9.03 and 29
+    `claude` processes of its own test round (ND-19). The property it named still held — 2.90s was
+    still inside the child's sleep — so the threshold was wrong, not the publisher. Any absolute
+    bound here measures the machine as much as the code; a gate measures only the code.
+
+    Both controls are machine-checked rather than eyeballed:
+    · a publisher that BUFFERED to the end delivers nothing until the child exits, and the child
+      cannot exit while the gate is shut, so the wait below runs out and the test fails;
+    · `task.result` must be ABSENT from the same snapshot — that is what proves the child was still
+      running rather than already finished, which an arrival time alone can never establish.
     """
+    import threading
     import time
 
     from remote import tasks
 
+    gate = tmp_path / "release-the-child"
     seen = []
     agent(
         "printf '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\","
         "\"id\":\"t1\",\"name\":\"Edit\",\"input\":{\"file_path\":\"/w/app.py\"}}]}}\\n'\n"
-        "sleep 3\n"
+        f"while [ ! -f '{gate}' ]; do sleep 0.05; done\n"
         "printf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,"
         "\"result\":\"done\"}\\n'\n"
     )
 
-    started = time.monotonic()
-    outcome = tasks.run_task(
-        _job(), publish=lambda kind, **f: seen.append((kind, f, time.monotonic() - started)))
-    whole_run = time.monotonic() - started
+    finished = {}
+    worker = threading.Thread(
+        target=lambda: finished.update(outcome=tasks.run_task(
+            _job(), publish=lambda kind, **f: seen.append((kind, f)))),
+        daemon=True)
+    worker.start()
+    try:
+        # Generous, and bounded only so a broken publisher fails instead of hanging: the event
+        # arrives in ~0.2s idle and took 2.90s under the worst load measured. It is not a property
+        # of the code under test — every assertion below reads the snapshot, not the clock.
+        deadline = time.monotonic() + 15
+        while (time.monotonic() < deadline and worker.is_alive()
+               and not any(kind == "task.tool_use" for kind, _ in seen)):
+            time.sleep(0.02)
+        while_the_child_was_blocked = list(seen)
+    finally:
+        # In a finally so a failed assertion costs a second rather than the run's whole deadline.
+        gate.write_text("go", encoding="utf-8")
 
-    assert outcome.state == "completed"
-    tool_events = [e for e in seen if e[0] == "task.tool_use"]
-    assert tool_events, f"no tool activity was published at all: {seen}"
-    kind, fields, at = tool_events[0]
-    assert (fields["tool"], fields["path"]) == ("Edit", "/w/app.py")
-    assert at < 1.5, f"the tool call surfaced only after the child's 3s sleep ({at:.2f}s)"
-    # The child really did outlive the event — without this the bound above would also be satisfied
-    # by a child that exited immediately, which proves nothing about publishing DURING a run.
-    assert whole_run > 2.5, f"the child did not actually sleep ({whole_run:.2f}s)"
+    worker.join(timeout=30)
+    assert not worker.is_alive(), "the run never finished after the gate was opened"
+
+    tool_events = [e for e in while_the_child_was_blocked if e[0] == "task.tool_use"]
+    assert tool_events, (
+        "no tool activity was published while the child was blocked — a publisher that buffers to "
+        f"the end looks exactly like this: {while_the_child_was_blocked}")
+    assert tool_events[0][1]["tool"] == "Edit"
+    assert tool_events[0][1]["path"] == "/w/app.py"
+    assert not any(kind == "task.result" for kind, _ in while_the_child_was_blocked), (
+        "the child had already finished, so this proves nothing about publishing DURING a run: "
+        f"{while_the_child_was_blocked}")
+    assert finished["outcome"].state == "completed"
 
 
 def test_a_large_burst_neither_stalls_nor_drops_events(agent):
@@ -5426,3 +5454,96 @@ def test_checkout_result_still_refuses_when_there_is_no_branch(tmp_path):
     with pytest.raises(task_repo.CheckoutError):
         task_repo.checkout_result(tmp_path / "d", url=remote.url, token="tok",
                                   branch="", commit=commit)
+
+
+# --- issue 58: the provider is asked before a member is waiting -----------------------------------
+
+
+def test_preflight_before_serving_asks_what_a_claim_would_ask(monkeypatch, tmp_path):
+    """The delegation, pinned. `grid join` must not grow a second opinion about any of this."""
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    asked: list[str] = []
+    monkeypatch.setattr(task_agent, "preflight", lambda: asked.append("preflight"))
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: asked.append("binary") or "claude")
+
+    task_agent.preflight_before_serving()
+
+    assert asked == ["preflight", "binary"]
+
+
+def test_preflight_before_serving_refuses_a_workspace_root_it_cannot_write(monkeypatch, tmp_path):
+    """The macOS shape: `/var` is root-owned, so a provider without sudo fails EVERY task with
+    "could not create /var/grid/…" — one member's task at a time, forever, every signal green."""
+    from remote import task_agent
+
+    denied = tmp_path / "denied"
+    denied.mkdir(mode=0o500)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(denied / "grid" / "tasks"))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.preflight_before_serving()
+
+    assert "GRID_TASK_ROOT" in str(excinfo.value), (
+        f"the refusal does not say what to change: {excinfo.value}")
+    assert str(denied) in str(excinfo.value), (
+        f"the refusal does not say which directory refused it: {excinfo.value}")
+
+
+def test_preflight_before_serving_accepts_a_root_that_does_not_exist_yet(monkeypatch, tmp_path):
+    """The positive control, and the ordinary case: a root under a writable parent is fine, and
+    nothing is created here — which directory the root should be, and with what mode, is issue 62's
+    decision and this must not pre-empt it."""
+    from remote import task_agent
+
+    root = tmp_path / "grid" / "tasks"
+    monkeypatch.setenv("GRID_TASK_ROOT", str(root))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    task_agent.preflight_before_serving()
+
+    assert not root.exists(), "the probe created the root; that is issue 62's decision to make"
+
+
+def test_preflight_before_serving_refuses_a_root_that_is_a_file(monkeypatch, tmp_path):
+    """A root that exists and is not a directory is a different fault from an unwritable one, and
+    saying "not writable" about it would send an operator to `chmod`."""
+    from remote import task_agent
+
+    root = tmp_path / "root"
+    root.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(root))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.preflight_before_serving()
+
+    assert "not a directory" in str(excinfo.value).lower(), str(excinfo.value)
+
+
+def test_preflight_before_serving_does_not_move_the_version_floor(monkeypatch, tmp_path):
+    """⚠️ The floor is enforced only while the sandbox is ON, and that is the SHAPE of the rule
+    rather than a convenience — it protects a control that fails open, so an operator who turned the
+    control off deliberately gets the provider that existed before issue 23, older agent included.
+
+    Asking earlier may not quietly tighten it. This is the check that would be "fixed" back.
+
+    ⚠️ A REAL binary reporting a real old version, resolved the real way — not a patched
+    `_binary_version`. With the sandbox off that reader is never reached, so patching it would have
+    left this test green against a `preflight_before_serving` that grew a version check of its own
+    through some other door, which is exactly the regression it exists to catch.
+    """
+    from remote import task_agent, task_sandbox
+
+    binary, _ = _claude_reporting(tmp_path, "2.0.1 (Claude Code)")
+    _resolving_to(monkeypatch, binary)
+    monkeypatch.setenv(task_sandbox.SANDBOX_ENV, "0")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+
+    task_agent.preflight_before_serving()  # an ancient binary, and the sandbox is off: allowed

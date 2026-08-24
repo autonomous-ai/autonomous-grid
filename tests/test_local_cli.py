@@ -6865,6 +6865,9 @@ def _mock_remote_spawn(monkeypatch, *, pid=4242):
         # `spawned["cmd"]` absent, and the assertions raise KeyError rather than passing.
         if run_records.REMOTE_ENGINE_MARKER in cmd:
             spawned["cmd"] = cmd
+            # The child's environment, kept beside its argv: task serving is opted into through the
+            # environment the parent hands over, so this is where issue 58's decision is observable.
+            spawned["env"] = kw.get("env") or {}
         return type("P", (), {"pid": pid})()
 
     monkeypatch.setattr(cli.remote_provider.subprocess, "Popen", fake_popen)
@@ -13036,10 +13039,12 @@ def test_task_worker_that_fails_to_START_does_not_take_the_engine_down(monkeypat
     would propagate out of `_serve_loop` to the top-level handler, unregister the node and kill the
     process. A task-plane STARTUP fault must be as survivable as a task-plane runtime fault.
     """
-    from remote import serve
+    from remote import serve, task_opt_in
 
     monkeypatch.setenv("GRID_TASKS", "1")
-    monkeypatch.setattr(serve, "_task_serving_enabled", _raise(RuntimeError("cannot start thread")))
+    # Patched where the opt-in now LIVES (issue 57). `_start_task_worker` looks the name up on the
+    # module at call time, so this reaches the same guarded block the pre-move patch did.
+    monkeypatch.setattr(task_opt_in, "serving_enabled", _raise(RuntimeError("cannot start thread")))
     monkeypatch.setattr(serve, "_poll_loop", lambda state: state.stop.set())
     monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
     state = _serve_state(monkeypatch, tmp_path)
@@ -32744,6 +32749,106 @@ def test_task_get_on_an_ordinary_failed_turn_says_no_such_thing(monkeypatch, tmp
     assert "combine" not in (captured.out + captured.err).lower()
 
 
+def test_task_get_says_when_the_project_no_longer_holds_what_the_turn_changed(
+        monkeypatch, tmp_path, capsys):
+    """ND-16/F-3. A turn whose work a later one overwrote still reads `completed` everywhere.
+
+    Measured live 2026-08-20 (scenario A2): a merge turn in SOMEBODY ELSE's conversation dropped B's
+    line on purpose and said so in its own result — which B cannot read, because
+    `grid task list --project` returns only the asker's own turns. `task get` said `completed`,
+    `task diff` showed B's own change, and only `grid project file` revealed the project did not
+    hold it. The PRD's person fires one task and walks away, so "your next turn will be told" is not
+    a way for them to find out.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "project_id": "p-1", "state": "completed",
+        "result_text": "shared.txt now contains exactly one line: STATUS: bravo",
+        "changed_since_count": 1, "changed_since_paths": ["shared.txt"],
+    }))
+
+    rc = cli.main(["task", "get", "t-1"])
+
+    assert rc == 0, "a turn that completed did not stop completing because somebody edited it after"
+    out = capsys.readouterr().out
+    assert "shared.txt" in out
+    assert "changed again" in out, out
+    assert "grid project file p-1 shared.txt" in out, (
+        "the person is told their work may be gone with no way to look at what is there now")
+
+
+def test_task_get_quotes_a_path_it_tells_somebody_to_paste(monkeypatch, tmp_path, capsys):
+    """A repository that arrived through `import` holds whatever names its author gave it, and the
+    line below is a command a person copies. Unquoted, `my notes.txt` reaches `grid project file` as
+    two arguments and is refused — a warning about lost work whose one next step does not run."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "project_id": "p-1", "state": "completed",
+        "changed_since_count": 1, "changed_since_paths": ["my notes.txt"]}))
+
+    cli.main(["task", "get", "t-1"])
+
+    out = capsys.readouterr().out
+    assert "grid project file p-1 'my notes.txt'" in out, out
+
+
+def test_task_get_says_nothing_when_the_turn_still_stands(monkeypatch, tmp_path, capsys):
+    """The control, and the one that decides whether the sentence means anything: `0` is the
+    ordinary answer for the ordinary turn, and a warning that appears on every task is furniture."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "project_id": "p-1", "state": "completed", "result_text": "done",
+        "changed_since_count": 0, "changed_since_paths": [],
+    }))
+
+    cli.main(["task", "get", "t-1"])
+
+    assert "changed again" not in capsys.readouterr().out
+
+
+def test_task_get_on_a_relay_that_cannot_answer_that_question_says_nothing(
+        monkeypatch, tmp_path, capsys):
+    """The degrade direction, and it is the one this pair exists to pin. An older relay sends
+    NEITHER key, and absence must read as "nothing to show" — never as a warning invented client
+    side. The relay is deployed before this CLI (see the register in CLAUDE.md), so this is the
+    ordinary state of every grid for the length of a rollout."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "project_id": "p-1", "state": "completed", "result_text": "done"}))
+
+    rc = cli.main(["task", "get", "t-1"])
+
+    assert rc == 0
+    assert "changed again" not in capsys.readouterr().out
+
+
+def test_task_get_ignores_a_changed_since_pair_it_cannot_read(monkeypatch, tmp_path, capsys):
+    """A count without paths, a string where a number belongs, a `null` list. None of these can be
+    rendered into a true sentence, and the reading for all of them is the one absence already has.
+
+    Not defensive tidiness: this is the shape a proxy, a partial write or a future relay produces,
+    and the alternative is an `AttributeError` on a read whose exit code means *the task ended
+    badly* — a client-side parse fault delivered to a script as a verdict about somebody's work."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    for broken in ({"changed_since_count": 2},
+                   {"changed_since_count": "2", "changed_since_paths": ["a.txt"]},
+                   {"changed_since_count": 2, "changed_since_paths": None},
+                   {"changed_since_count": True, "changed_since_paths": ["a.txt"]},
+                   {"changed_since_paths": ["a.txt"]}):
+        _mock_relay(monkeypatch, lambda r, extra=broken: httpx.Response(200, json={
+            "id": "t-1", "project_id": "p-1", "state": "completed", **extra}))
+
+        rc = cli.main(["task", "get", "t-1"])
+
+        assert rc == 0, broken
+        assert "changed again" not in capsys.readouterr().out, broken
+
+
 def test_task_list_shows_a_merge_turn_as_a_step_rather_than_as_something_somebody_typed(
         monkeypatch, tmp_path, capsys):
     """ADR 0034 D-g (issue 42). A merge turn's `prompt` is the RELAY's — `merge_tiers._MERGE_PROMPT`,
@@ -33287,6 +33392,56 @@ def test_project_status_says_a_provider_has_withdrawn_and_when_it_returns(
     assert "2" in out and "1" in out
     assert "2026-08-09T11:30:00+00:00" in out, "the time it comes back is the actionable half"
     assert "paused" in out.lower() or "withdraw" in out.lower()
+
+
+def test_project_status_does_not_tell_a_team_to_add_a_provider_for_a_paused_one(
+        monkeypatch, tmp_path, capsys):
+    """B7.2. The two states look identical from the outside — a queue that is not moving — and they
+    want OPPOSITE actions. Nobody is serving means find another machine; everybody is serving and
+    out of headroom means wait, and buying a second subscription for the same account would not have
+    helped. Sending a team to `grid join` for the second is the expensive kind of wrong.
+
+    The distinction lives in the code as two branches of `_print_providers`, and until this case
+    nothing held them apart: the `grid join` line could migrate into the withdrawn sentence and
+    every existing test would stay green, because they assert what IS said and not what is not.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 3, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
+        "providers": {"online": 2, "paused": 2, "resumes_at": "2026-08-09T11:30:00+00:00"}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out
+    assert "withdrawn" in out, "the reason the queue is not moving went missing entirely"
+    assert "headroom" in out, "a team is told work is stuck without being told why"
+    assert "grid join" not in out, (
+        f"a team whose providers are out of subscription headroom is being told to add another "
+        f"provider, which does not help and costs money:\n{out}")
+
+
+def test_project_status_DOES_say_to_add_one_when_nobody_is_serving(
+        monkeypatch, tmp_path, capsys):
+    """The positive control, and B7.2 means nothing without it: the advice has to appear in the one
+    state it is right for, or the case above would pass on a build that never gives advice at all."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 3, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
+        "providers": {"online": 0, "paused": 0, "resumes_at": None}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out
+    assert "grid join" in out, out
+    assert "withdrawn" not in out, (
+        "a fleet with nobody online is being described as withdrawn, which tells a team to wait for "
+        "a return that is not coming")
 
 
 def test_project_status_stays_quiet_about_a_fleet_that_is_all_serving(
@@ -37829,3 +37984,116 @@ def test_leaving_under_json_prints_the_relays_document_and_nothing_else(monkeypa
     assert cli.main(["project", "leave", "P1", "--yes", "--json"]) == 0
 
     assert json.loads(capsys.readouterr().out) == _leave_reply()
+
+
+# --- issue 58: `grid join` says why it will not serve tasks ---------------------------------------
+
+
+def _child_env(spawned: dict) -> dict[str, str]:
+    """What the detached serve child was handed. `_mock_remote_spawn` keeps it beside the argv."""
+    assert "env" in spawned, "the join did not spawn a serve child"
+    return spawned["env"]
+
+
+def _the_child_would_claim_tasks(spawned: dict) -> bool:
+    """Ask the child's OWN predicate against the child's OWN environment.
+
+    Never `env["GRID_TASKS"] == "0"`: that is a second reading of the opt-in living in a test, and
+    it would keep passing after somebody widened or narrowed the spellings `serving_enabled` accepts.
+    """
+    from unittest import mock
+
+    from remote import task_opt_in
+
+    with mock.patch.dict(os.environ, _child_env(spawned), clear=True):
+        return task_opt_in.serving_enabled()
+
+
+def test_remote_join_without_the_task_opt_in_asks_the_provider_nothing(monkeypatch, tmp_path):
+    """Opt-in is off by default and costs nothing when it is off — no `claude --version`, no probe
+    of a workspace root nobody configured."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.delenv("GRID_TASKS", raising=False)
+    monkeypatch.setattr(task_agent, "preflight_before_serving",
+                        lambda: pytest.fail("the join checked task serving nobody asked for"))
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+
+@pytest.mark.parametrize("fault", [
+    # What each check actually raises, and one that nothing raises on purpose.
+    RuntimeError,   # `resolve_binary` — not installed, or below the floor with the sandbox on
+    SystemExit,     # ⚠️ `task_sandbox`'s clean-error idiom. An `except Exception` alone MISSES this
+                    # one, and missing it aborts the whole join — inference included
+    OSError,        # the workspace root, and `link_transcript`'s containment refusals
+    ValueError,     # a malformed `GRID_TASK_ENV_PASSTHROUGH` or config directory
+    KeyError,       # a BUG in one of the checks, which must still cost inference nothing
+])
+def test_remote_join_with_a_broken_task_config_still_serves_inference(
+        monkeypatch, tmp_path, capsys, fault):
+    """The whole point of the issue. Refusing the join would take a working inference provider down
+    over a task misconfiguration — including for the operator who keeps `GRID_TASKS=1` in a shell
+    profile — so the join lands, the child serves, and only task serving is withheld."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", _raise(
+        fault("Claude Code isn't installed on this provider; install it with: curl -fsSL …")))
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == ["m"], "the inference join did not land"
+    assert spawned["cmd"][-3:-2] == ["__remote-engine"], "no serve child was spawned"
+    err = capsys.readouterr().err
+    assert "install it with" in err, f"the refusal does not say what to fix: {err!r}"
+    assert "respawn" in err, f"the refusal does not say how to retry it: {err!r}"
+    assert not _the_child_would_claim_tasks(spawned), (
+        "the child was spawned still claiming tasks it cannot finish")
+
+
+def test_remote_join_with_a_working_task_config_says_task_serving_is_on(monkeypatch, tmp_path, capsys):
+    """Today the banner says nothing about tasks in any case, so an operator who typed the variable
+    correctly gets exactly the same output as one who typed it wrong."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+    assert "tasks=on" in capsys.readouterr().out
+    assert _the_child_would_claim_tasks(spawned), "the opt-in did not reach the child"
+
+
+def test_the_task_check_runs_before_the_join_stops_or_spawns_anything(monkeypatch, tmp_path):
+    """⚠️ The ordering IS the property. A provider that was serving inference a second ago must
+    still be serving it after a task check that failed — so the check may not run from inside the
+    lock, after the prior child has been terminated on the way to finding out."""
+    from remote import task_agent
+    from shared import run_records
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    order: list[str] = []
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: order.append("checked"))
+    real_terminate = run_records.terminate_recorded
+    monkeypatch.setattr(run_records, "terminate_recorded",
+                        lambda prior: (order.append("stopped"), real_terminate(prior))[1])
+    monkeypatch.setattr(cli.remote_provider, "_spawn_remote_engine", lambda *a, **k: (
+        order.append("spawned"), type("P", (), {"pid": 4242})())[1])
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+    assert order and order[0] == "checked", (
+        f"the join acted before it asked whether this provider can run a task: {order}")
+    assert "spawned" in order, "the join never spawned, so this proves nothing about the order"
+    assert spawned is not None

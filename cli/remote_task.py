@@ -15,6 +15,7 @@ import argparse
 import base64
 import datetime
 import json
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -1844,8 +1845,64 @@ def _task_get(args: argparse.Namespace) -> int:
         print(f"\nThe grid could not combine this work with a colleague's change. Your work is "
               f"safe in this conversation — ask for it again with:\n"
               f"  grid task send {conversation or '<conversation-id>'} --prompt '<what to do>'")
+    for line in _changed_since_note(task):
+        print(line)
     result = task.get("result_text")
     if result:
         print("\n--- result ---")
         print(result.rstrip("\n"))
     return code
+
+
+# How many of the relay's sample this prints. The relay already caps what it sends
+# (`turn_superseded.MAX_PATHS`); this is the second, smaller bound on what a person reads in a
+# terminal, and the count beside it is what stays true either way.
+_CHANGED_SINCE_NAMED = 5
+
+
+def _changed_since_note(task: dict) -> list[str]:
+    """Say when the project no longer holds what this turn changed (ND-16/F-3). Lines, or none.
+
+    ⚠️ **The failure this closes is a turn that reads like a success everywhere.** Under ADR 0034
+    D-d the relay applies every finished turn itself, and D-g hands a collision to a turn in the
+    OTHER conversation — whose decision to drop somebody's work is recorded where that somebody
+    cannot read it, because `grid task list --project` returns only the asker's own turns. Measured
+    live 2026-08-20: `state=completed`, `grid task diff` showing their own change, and the project
+    holding somebody else's line.
+
+    ⚠️ **BOTH keys, and both type-checked, or this says nothing.** They arrive together from a relay
+    that can answer at all, and absence is what every relay deployed before this feature sends — so a
+    missing or unreadable pair must read as *nothing to show*, never as a warning made up here. A
+    count of `0` is the relay's positive answer that the work still stands, and it is the ordinary
+    case: a note that appeared on every task would be furniture within a day.
+
+    ⚠️ `bool` is refused explicitly. It is a subclass of `int`, so `True` would otherwise print
+    *1 of the files …* for a relay that sent a flag where a count belongs.
+    """
+    count = task.get("changed_since_count")
+    paths = task.get("changed_since_paths")
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return []
+    if not isinstance(paths, list):
+        return []
+    named = [path for path in paths[:_CHANGED_SINCE_NAMED] if isinstance(path, str) and path]
+    if not named:
+        return []
+    files = "file" if count == 1 else "files"
+    lines = ["",
+             f"{count} {files} this task changed {'has' if count == 1 else 'have'} been changed "
+             f"again since it ran:"]
+    lines += [f"  {path}" for path in named]
+    if count > len(named):
+        lines.append(f"  … and {count - len(named)} more")
+    # The project id comes off the task rather than from the caller's arguments: `grid task get`
+    # takes only a task id, and a person who has to go and find the project id first is a person who
+    # reads the warning and does nothing about it.
+    project = task.get("project_id")
+    lines.append("What the project holds now may not be what this result describes. Read what is "
+                 "there with:")
+    # `shlex.quote` leaves an ordinary path exactly as it is and wraps one with a space in it. A
+    # command somebody is told to run has to be a command they can paste, and a repository that came
+    # in through `POST …/import` can hold any name its author gave it.
+    lines.append(f"  grid project file {project or '<project-id>'} {shlex.quote(named[0])}")
+    return lines
