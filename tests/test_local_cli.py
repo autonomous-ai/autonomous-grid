@@ -38164,6 +38164,11 @@ def test_tasks_flag_alone_starts_a_provider_that_claims_tasks(monkeypatch, tmp_p
     _seed_running_remote_grid(monkeypatch, tmp_path)
     spawned = _mock_remote_spawn(monkeypatch)
     monkeypatch.delenv("GRID_TASKS", raising=False)
+    monkeypatch.delenv("GRID_TASK_ROOT", raising=False)
+    # ⚠️ The default root is a REAL path (`/Users/Shared/grid`, `/var/grid`), and `--tasks` creates
+    # it. Pointed at tmp_path so this test does not write to the developer's machine — and does not
+    # pass on macOS while failing on a Linux runner that cannot write `/var`.
+    monkeypatch.setattr(task_agent, "DEFAULT_WORKSPACE_ROOT", str(tmp_path / "default-root"))
     monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
 
     assert cli.main(["join", "--serve", "m", "--tasks"]) == 0
@@ -38218,6 +38223,8 @@ def test_the_flag_wins_over_the_environment(
     _seed_running_remote_grid(monkeypatch, tmp_path)
     spawned = _mock_remote_spawn(monkeypatch)
     monkeypatch.setenv(variable, "/from/the/environment" if flag == "--tasks-root" else "9")
+    if variable != "GRID_TASK_ROOT":
+        monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "named"))  # never the real default
     monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
 
     assert cli.main(["join", "--serve", "m", "--tasks", flag, flag_value]) == 0
@@ -38272,6 +38279,11 @@ def test_tasks_flag_runs_the_preflight(monkeypatch, tmp_path, capsys):
     _seed_running_remote_grid(monkeypatch, tmp_path)
     spawned = _mock_remote_spawn(monkeypatch)
     monkeypatch.delenv("GRID_TASKS", raising=False)
+    monkeypatch.delenv("GRID_TASK_ROOT", raising=False)
+    # ⚠️ The default root is a REAL path (`/Users/Shared/grid`, `/var/grid`), and `--tasks` creates
+    # it. Pointed at tmp_path so this test does not write to the developer's machine — and does not
+    # pass on macOS while failing on a Linux runner that cannot write `/var`.
+    monkeypatch.setattr(task_agent, "DEFAULT_WORKSPACE_ROOT", str(tmp_path / "default-root"))
     monkeypatch.setattr(task_agent, "preflight_before_serving",
                         _raise(RuntimeError("Claude Code isn't installed on this provider")))
 
@@ -38498,3 +38510,38 @@ def test_the_hot_reload_path_says_it_too(monkeypatch, tmp_path, capsys):
     assert "cmd" not in spawned, "this went down the respawn path, so it proves nothing about reload"
     assert [s for _, s in spawned["signals"] if s != 0], "no reload signal was sent"
     assert "respawn" in capsys.readouterr().err, "a reload that cannot apply the opt-in said nothing"
+
+
+@pytest.mark.parametrize("how", ["flag", "variable"])
+def test_a_root_the_operator_NAMED_is_not_judged_by_the_defaults_rules(
+        monkeypatch, tmp_path, capsys, how):
+    """⚠️ Issue 62's strict rules exist because **nobody chose** the default. A path a person named
+    is their business — the line `ensure_workspace` has always drawn — so a world-readable one they
+    pointed at is used, not refused.
+
+    Without this the feature would refuse the setups it was written to serve: an operator who
+    already runs `/srv/grid` at 0755 would be told to `chmod` a directory they configured on purpose.
+    """
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    named = tmp_path / "named"
+    named.mkdir()
+    named.chmod(0o755)  # readable by everyone, and deliberately so
+    # The real default would be created if the named root were ignored — this is what proves it is not.
+    monkeypatch.setattr(task_agent, "DEFAULT_WORKSPACE_ROOT", str(tmp_path / "never-made"))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+    argv = ["join", "--serve", "m", "--tasks"]
+    if how == "flag":
+        monkeypatch.delenv("GRID_TASK_ROOT", raising=False)
+        argv += ["--tasks-root", str(named)]
+    else:
+        monkeypatch.setenv("GRID_TASK_ROOT", str(named))
+
+    assert cli.main(argv) == 0
+
+    assert _the_child_would_claim_tasks(spawned), (
+        f"a root the operator named was judged by the default's rules: {capsys.readouterr().err!r}")
+    assert not (tmp_path / "never-made").exists(), "the default root was made despite a named one"

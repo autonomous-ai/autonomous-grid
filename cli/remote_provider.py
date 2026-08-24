@@ -256,7 +256,7 @@ def _task_serving_drift(live: list[dict[str, object]], desired: dict[str, object
     return None
 
 
-def _decide_task_serving() -> _TaskServing:
+def _decide_task_serving(*, may_make_the_root: bool = False) -> _TaskServing:
     """Ask, in the parent, whether the child about to be spawned could actually run a task.
 
     Every one of these answers exists already — and until this ran, `run_task` was the only place
@@ -285,6 +285,11 @@ def _decide_task_serving() -> _TaskServing:
     from remote import task_agent
 
     try:
+        # ⚠️ Only `--tasks` may CREATE a directory, and only the default one. An operator who named
+        # a root — by flag or by variable — named a path they own, and issue 62's stricter rules are
+        # for the default nobody chose (`ensure_default_workspace_root` says why).
+        if may_make_the_root and not (os.getenv(task_agent.WORKSPACE_ROOT_ENV) or "").strip():
+            task_agent.ensure_default_workspace_root()
         task_agent.preflight_before_serving()
     except (Exception, SystemExit) as exc:  # noqa: BLE001 — inference must survive any of them
         return _TaskServing(requested=True, problem=str(exc) or exc.__class__.__name__)
@@ -377,7 +382,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # get rather than the one this shell happens to export (issue 61).
     task_flags = _task_env_from_flags(args)
     with _as_the_child_will_see_it(task_flags):
-        task_serving = _decide_task_serving()
+        task_serving = _decide_task_serving(may_make_the_root=bool(getattr(args, "tasks", None)))
     if task_serving.problem:
         print(
             f"Task serving is off for this join: {task_serving.problem}\n"

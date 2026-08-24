@@ -9,18 +9,37 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import task_repo, task_sandbox, task_worktree
 
-# LOCKSTEP (PRD `.scratch/distributed-tasks/PRD.md`): **every provider must use the identical
-# absolute path**, because Claude Code derives a session's transcript directory from the working
-# directory (`~/.claude/projects/<abs-cwd with / → ->/`). A provider using a different prefix cannot
-# `--resume` a session another one started, which is the whole of issue 06.
-DEFAULT_WORKSPACE_ROOT = "/var/grid"
-# Overridable only so tests and dev boxes need not write under `/var`. An operator who changes this
-# on one provider and not the others breaks cross-provider resume — the flag is not a preference.
+def default_workspace_root(platform: str | None = None) -> str:
+    """Where task workspaces go when nobody said (issue 62). Per PLATFORM, and that is now allowed.
+
+    ⚠️ **The rule this used to obey is retired** (ADR 0032, amended). It said every provider in a
+    grid must run tasks at an identical absolute path, because Claude Code derives a session's
+    transcript directory from the working directory. That was true of the design it was written
+    for, and **issue 06 replaced that design**: the transcript now lives inside the git worktree and
+    travels in the ordinary result commit, and `link_transcript` plants the per-cwd symlink at
+    whatever name *this* provider's own workspace flattens to. Every provider computes its own name
+    and reaches the same conversation. Issue 35's measurement 5 put exactly this question — a
+    transcript pushed to `refs/grid/agent/<id>`, fetched into a second repository, materialized **at
+    a different absolute path**, and resumed there — and it resumed.
+
+    `/var` is root-owned on macOS, so a provider without `sudo` cannot use `/var/grid` and fails
+    EVERY task on it. `/Users/Shared` is the short, outside-`$HOME` place a normal account can write
+    — see `ensure_default_workspace_root` for what that costs and how it is paid for.
+    """
+    return "/Users/Shared/grid" if (platform or sys.platform) == "darwin" else "/var/grid"
+
+
+DEFAULT_WORKSPACE_ROOT = default_workspace_root()
+# Overridable, and a real choice rather than a lockstep value: what constrains a root is local to
+# one provider — the flattened name must clear `TRANSCRIPT_NAME_MAX_CHARS`, the path must be outside
+# `$HOME` and `GRID_HOME` for the sandbox, and this account must be able to write it.
 WORKSPACE_ROOT_ENV = "GRID_TASK_ROOT"
 
 
@@ -361,9 +380,11 @@ def transcript_dir_name(cwd: Path) -> str:
     caller that trusted the string. A live two-task run is what found it — every unit test compared
     our own computation against itself and agreed.
 
-    It also sharpens the lockstep rule: providers must agree on the **resolved** absolute workspace
-    path. One provider reaching `/var/grid` through a symlink and another not is already two
-    different conversations as far as Claude Code is concerned.
+    ⚠️ **This used to say providers must agree on the resolved absolute workspace path.** They do
+    not (ADR 0032, amended by issue 62): the transcript travels in the git worktree since issue 06,
+    so each provider computes its own name and finds the same conversation there. What survives is
+    the RESOLVING — the name must come from the path the child reports, not from the string we
+    built, because a process's `getcwd` has already followed every symlink on the way in.
     """
     return _TRANSCRIPT_NAME_REPLACED.sub("-", str(cwd.resolve(strict=False)))
 
@@ -798,6 +819,81 @@ def _require_a_reachable_workspace_root() -> None:
     raise OSError(
         f"this provider cannot create a task workspace under {root}: {reachable} is not writable "
         f"by it. Point {WORKSPACE_ROOT_ENV} at a short path this account can write.")
+
+
+def ensure_default_workspace_root() -> Path:
+    """Create the platform default root, privately — or refuse one this provider cannot trust.
+
+    ⚠️ **A root the FLAG chose is not a root the operator chose, and it needs a stricter rule than
+    `ensure_workspace` applies.** That function deliberately leaves an existing directory's mode
+    alone ("anything that already existed is the operator's business") and deliberately permits a
+    symlink above the workspace level, because relocating storage that way is legitimate. Both are
+    right for a path a person named. Neither is right for a default nobody chose — which is why this
+    runs ONLY for the default, and never for `--tasks-root` or `GRID_TASK_ROOT`.
+
+    MEASURED on macOS 26.6, 2026-08-24: `/Users/Shared` is `drwxrwxrwt` root:wheel — **1777, and
+    sticky**. The sticky bit stops one account deleting another's entries; it does **not** stop a
+    second local account creating the grid root there first. And a directory created there under the
+    default umask lands `0755` — every local account able to read every member's checked-out
+    repository and every `.grid/agent/` transcript on the machine.
+
+    So the property delivered is: **this provider can write the root, and no other account can read
+    it.** Stated as a property rather than as "owned by another uid", because a `/var/grid` created
+    once with `sudo` and then handed to a non-root provider is a legitimate and likely Linux setup —
+    what disqualifies it is being readable by everyone, not who made it, and the fix is one `chmod`.
+
+    The mode goes to `mkdir` rather than a following `chmod`, so no window exists in which the
+    directory is readable; and `mkdir` is NOT `exist_ok`, so a second account that wins the race
+    between the check and the create is caught rather than adopted.
+    """
+    root = Path(DEFAULT_WORKSPACE_ROOT)
+    if root.is_symlink():
+        raise OSError(
+            f"the default task workspace root {root} is a symlink, and this provider will not run "
+            f"agents under a path it did not place. Name one yourself with --tasks-root.")
+    if root.exists():
+        _require_a_private_directory(root)
+        return root
+    if not root.parent.is_dir():
+        raise OSError(
+            f"{root.parent} does not exist, so the default task workspace root cannot be created "
+            f"there; name one yourself with --tasks-root.")
+    try:
+        os.mkdir(root, 0o700)
+    except FileExistsError:
+        # Another account created it between the check above and this call — the race the sticky
+        # world-writable parent makes real. Judge what is there rather than assuming it is ours.
+        _require_a_private_directory(root)
+    except OSError as exc:
+        raise OSError(
+            f"could not create the default task workspace root {root} ({exc.strerror or exc}); "
+            f"name one yourself with --tasks-root.") from exc
+    return root
+
+
+def _require_a_private_directory(root: Path) -> None:
+    """Refuse a pre-existing default root that another account owns or can read.
+
+    Three refusals, each for its own reason. **Not a directory**: nothing can be checked out under
+    it, and saying "not writable" about it would send an operator to `chmod`. **Another account's**:
+    this provider would be running agents inside a directory somebody else controls. **Readable by
+    group or other**: the members' repositories and their conversations are in there.
+    """
+    info = root.stat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError(
+            f"the default task workspace root {root} exists and is not a directory; name one "
+            f"yourself with --tasks-root.")
+    if info.st_uid != os.getuid():
+        raise OSError(
+            f"the default task workspace root {root} belongs to another account (uid "
+            f"{info.st_uid}), and this provider will not run agents inside it. Give it to this "
+            f"account, or name a different one with --tasks-root.")
+    if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise OSError(
+            f"the default task workspace root {root} can be read by other accounts on this machine, "
+            f"and members' repositories and conversations are kept under it. Close it with "
+            f"`chmod 700 {root}`, or name a different one with --tasks-root.")
 
 
 def _require_version_for_the_sandbox(binary: str) -> None:
