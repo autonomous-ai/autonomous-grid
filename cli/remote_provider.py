@@ -14,6 +14,7 @@ while the `cli` package is still initialising.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import os
 import signal
@@ -152,6 +153,54 @@ class _TaskServing(NamedTuple):
         return self.requested and self.problem is None
 
 
+def _task_env_from_flags(args: argparse.Namespace) -> dict[str, str]:
+    """What `--tasks`/`--max-tasks`/`--tasks-root` change in the serve child's environment.
+
+    The flags SET the environment the child is handed rather than moving the reading into the run
+    record, and that is deliberate — `task_opt_in.serving_enabled`'s docstring records why the
+    opt-in is read at serve time. This adds a second way to set it, not a second place to read it.
+
+    **The flag wins over an exported variable**, which is the ordinary expectation and is said in
+    `--help` so nobody has to discover it. `--tasks` is the exception that proves nothing: there is
+    no `--no-tasks`, so it can only ever turn serving ON — and turning it on is the one thing that
+    must be a person typing it, never something inferred.
+    """
+    from remote import task_agent, task_opt_in
+
+    overrides: dict[str, str] = {}
+    if getattr(args, "tasks", None):
+        overrides[task_opt_in.SERVING_ENV] = "1"
+    count = getattr(args, "max_tasks", None)
+    if count is not None:
+        overrides[task_opt_in.WORKERS_ENV] = str(count)
+    root = getattr(args, "tasks_root", None)
+    if root is not None:
+        overrides[task_agent.WORKSPACE_ROOT_ENV] = str(root)
+    return overrides
+
+
+@contextlib.contextmanager
+def _as_the_child_will_see_it(overrides: dict[str, str]):
+    """Run a check under the environment the serve child is about to be handed.
+
+    The checks read `os.environ` because that is what the CHILD reads, so asking them about a
+    `--tasks-root` this process was never started with means putting the value where they look.
+    A scoped mutation with a `finally`, rather than threading every variable through every check:
+    the alternative is a second way to express the provider's configuration, and a second way to
+    express it is a second way for the two to disagree.
+    """
+    saved = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def _decide_task_serving() -> _TaskServing:
     """Ask, in the parent, whether the child about to be spawned could actually run a task.
 
@@ -269,7 +318,11 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # a second ago must still be serving it after a task check that failed — so this may not run
     # from inside the block that has already terminated the prior child on its way to finding out.
     # It is also the last point where nothing has been written: a pure read, then the mutation.
-    task_serving = _decide_task_serving()
+    # The flags first, so every check below asks about the configuration the child will actually
+    # get rather than the one this shell happens to export (issue 61).
+    task_flags = _task_env_from_flags(args)
+    with _as_the_child_will_see_it(task_flags):
+        task_serving = _decide_task_serving()
     if task_serving.problem:
         print(
             f"Task serving is off for this join: {task_serving.problem}\n"
@@ -277,8 +330,10 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     # Withheld from the CHILD, never from this process: the opt-in travels in the environment the
-    # parent hands over, and the child reads it once at startup.
-    engine_env = _task_serving_override(task_serving)
+    # parent hands over, and the child reads it once at startup. The withholding is applied LAST so
+    # it outranks `--tasks` — a provider that cannot run a task may not be told to claim one by a
+    # flag, however explicitly it was typed.
+    engine_env = {**task_flags, **(_task_serving_override(task_serving) or {})} or None
 
     # Remote has ONE identity per grid (the token pins the relay node_id), so `grid join` is additive:
     # merge this join's engines into whatever is already serving, then respawn the single detached engine.

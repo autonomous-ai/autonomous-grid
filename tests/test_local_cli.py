@@ -38129,3 +38129,222 @@ def test_the_join_runs_the_REAL_check_not_a_stand_in(monkeypatch, tmp_path, caps
     assert cli.provider._read_records("n1")["remote"]["models"] == ["m"], "inference did not join"
     assert not _the_child_would_claim_tasks(spawned), (
         "the child was spawned still claiming tasks this provider cannot run")
+
+
+# --- issue 61: `grid join --tasks` is the surface of task serving ---------------------------------
+
+
+def _child_task_env(spawned: dict) -> dict[str, str]:
+    """The three task variables the child was actually handed, whatever set them."""
+    from remote import task_agent, task_opt_in
+
+    env = _child_env(spawned)
+    return {k: env.get(k) for k in
+            (task_opt_in.SERVING_ENV, task_opt_in.WORKERS_ENV, task_agent.WORKSPACE_ROOT_ENV)}
+
+
+def test_join_help_says_this_provider_can_serve_tasks(capsys):
+    """Task serving was configured entirely through the environment, and `grid join --help` had no
+    word about it — a provider could not discover the feature from the CLI that has it."""
+    from cli.parser import build_parser
+
+    parser = build_parser()
+    joins = [a for a in parser._subparsers._group_actions[0].choices.items() if a[0] == "join"]
+    assert joins, "no `join` subparser"
+    text = joins[0][1].format_help()
+
+    assert "--tasks" in text, "`grid join --help` still says nothing about task serving"
+    assert "--tasks-root" in text and "--max-tasks" in text
+
+
+def test_tasks_flag_alone_starts_a_provider_that_claims_tasks(monkeypatch, tmp_path):
+    """No environment variable set anywhere — the flag is the whole opt-in."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.delenv("GRID_TASKS", raising=False)
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(["join", "--serve", "m", "--tasks"]) == 0
+
+    assert _the_child_would_claim_tasks(spawned), "the flag did not reach the child"
+
+
+def test_the_task_flags_reach_the_child(monkeypatch, tmp_path):
+    """`--max-tasks` sizes the pool and `--tasks-root` places the workspaces; both are read by the
+    CHILD from its environment, so this asserts what the child was handed."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+    root = tmp_path / "elsewhere"
+
+    assert cli.main(["join", "--serve", "m", "--tasks",
+                     "--max-tasks", "3", "--tasks-root", str(root)]) == 0
+
+    env = _child_task_env(spawned)
+    assert env["GRID_MAX_TASKS"] == "3"
+    assert env["GRID_TASK_ROOT"] == str(root)
+
+
+def test_the_environment_still_works_with_no_flag(monkeypatch, tmp_path):
+    """Providers are running on these variables today; a rollout may not move them."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setenv("GRID_MAX_TASKS", "2")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+    assert _the_child_would_claim_tasks(spawned)
+    assert _child_task_env(spawned)["GRID_MAX_TASKS"] == "2"
+
+
+@pytest.mark.parametrize("variable, flag, flag_value, expected", [
+    ("GRID_MAX_TASKS", "--max-tasks", "5", "5"),
+    ("GRID_TASK_ROOT", "--tasks-root", "/Users/Shared/from-the-flag", "/Users/Shared/from-the-flag"),
+])
+def test_the_flag_wins_over_the_environment(
+        monkeypatch, tmp_path, variable, flag, flag_value, expected):
+    """Stated in `--help` as well as tested: an operator who passes a flag AND has an old variable
+    exported in a shell profile must not have to work out which one is live."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv(variable, "/from/the/environment" if flag == "--tasks-root" else "9")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(["join", "--serve", "m", "--tasks", flag, flag_value]) == 0
+
+    assert _child_task_env(spawned)[variable] == expected
+
+
+@pytest.mark.parametrize("bad, because", [
+    ("0", "at least 1"),
+    ("-1", "at least 1"),
+    ("three", "not a whole number"),
+])
+def test_a_bad_max_tasks_is_refused_in_front_of_the_operator(monkeypatch, tmp_path, capsys, bad, because):
+    """⚠️ **Deliberately NOT `GRID_MAX_TASKS`'s rule.** That variable falls back and says so,
+    because refusing would take task serving down for the life of a running process. A flag is a
+    different situation: the operator is at the terminal, they just typed it, and a typo they are
+    told about costs one retry. `argparse` exits 2, which is "ask again" rather than "done"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["join", "--serve", "m", "--tasks", "--max-tasks", bad])
+
+    assert excinfo.value.code == 2, "a typo was accepted, or refused as though the join had run"
+    err = capsys.readouterr().err
+    assert "--max-tasks" in err
+    # ⚠️ The REASON, not just the flag name. Before the flag existed this assertion passed on
+    # argparse's "unrecognized arguments: --max-tasks" — a test green because its subject was
+    # missing is the shape this suite has been caught by before.
+    assert because in err, f"refused for the wrong reason: {err!r}"
+
+
+def test_no_other_flag_turns_task_serving_on(monkeypatch, tmp_path):
+    """⚠️ Opt-in is not a convenience: a task loop spends the operator's own agent subscription, so
+    nothing in this feature may turn it on for them. `--tasks` is a person typing it."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.delenv("GRID_TASKS", raising=False)
+
+    assert cli.main(["join", "--serve", "m", "--max-tasks", "4",
+                     "--tasks-root", str(tmp_path / "r"), "--respawn"]) == 0
+
+    assert not _the_child_would_claim_tasks(spawned), (
+        "a flag other than --tasks turned task serving on")
+
+
+def test_tasks_flag_runs_the_preflight(monkeypatch, tmp_path, capsys):
+    """The flag is a second door onto task serving, and issue 58's check guards the first. A door
+    that skips the guard is the failure this repository has recorded more than once."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.delenv("GRID_TASKS", raising=False)
+    monkeypatch.setattr(task_agent, "preflight_before_serving",
+                        _raise(RuntimeError("Claude Code isn't installed on this provider")))
+
+    assert cli.main(["join", "--serve", "m", "--tasks"]) == 0
+
+    assert "isn't installed" in capsys.readouterr().err
+    assert not _the_child_would_claim_tasks(spawned)
+
+
+@pytest.mark.parametrize("flag, extra", [
+    ("--tasks", []),
+    ("--max-tasks", ["4"]),
+    ("--tasks-root", ["/Users/Shared/x"]),
+])
+def test_the_task_flags_are_remote_only(monkeypatch, tmp_path, flag, extra):
+    """The task plane is the relay's; local mode has no equivalent of its poll loop. Refused the way
+    every other remote-only join flag is.
+
+    ⚠️ This is also what pins `default=None` on all three. `provider._reject_remote_only_flags`
+    decides "was this flag used" with `is not None`, so a `store_true` defaulting to False would
+    refuse EVERY local `grid join` — the group's own comment says so, and this parametrised row for
+    `--tasks` is what would catch it.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_grid_config(name="home", port=8090)
+    args = cli.build_parser().parse_args(["join", "home", "--serve", "m", flag, *extra])
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_join(args)
+
+    assert flag in str(exc.value) and "remote" in str(exc.value).lower()
+
+
+def test_a_plain_local_join_is_not_refused_by_the_task_flags(monkeypatch, tmp_path):
+    """The other half of the pair above, and the one that fails if `--tasks` ever defaults to False:
+    a local join that names no task flag must reach its own error, not the remote-only one."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_grid_config(name="home", port=8090)
+    args = cli.build_parser().parse_args(["join", "home", "--serve", "m"])
+
+    assert getattr(args, "tasks", None) is None, "--tasks defaults to False, which refuses every local join"
+
+
+@pytest.mark.parametrize("env_root_ok, flag_root_ok, tasks_on", [
+    (False, True, True),    # the flag rescues a root the shell exported wrongly
+    (True, False, False),   # and it can break one the shell had right — the flag is what is checked
+])
+def test_the_preflight_checks_the_root_the_FLAG_names(
+        monkeypatch, tmp_path, capsys, env_root_ok, flag_root_ok, tasks_on):
+    """⚠️ The reason `_as_the_child_will_see_it` exists at all.
+
+    The checks read `os.environ`, because that is what the CHILD reads. A `--tasks-root` this
+    process was never started with therefore reaches them only if the parent puts it where they
+    look — otherwise `grid join --tasks --tasks-root <good>` is refused over a stale variable in a
+    shell profile, and `--tasks-root <bad>` sails through on a good one. Both directions, because
+    only the pair shows that the FLAG is what was consulted.
+
+    `preflight` and `resolve_binary` are stubbed so this needs no Claude Code on the box; the
+    workspace-root check is the real one, and it is the whole subject here.
+    """
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+    denied = tmp_path / "denied"
+    denied.mkdir(mode=0o500)
+    good, bad = tmp_path / "fine" / "root", denied / "root"
+    monkeypatch.setenv("GRID_TASK_ROOT", str(good if env_root_ok else bad))
+
+    assert cli.main(["join", "--serve", "m", "--tasks",
+                     "--tasks-root", str(good if flag_root_ok else bad)]) == 0
+
+    assert _the_child_would_claim_tasks(spawned) is tasks_on, (
+        f"the check consulted the environment's root, not the flag's: {capsys.readouterr().err!r}")
