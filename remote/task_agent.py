@@ -118,10 +118,18 @@ CLAUDE_CONFIG_DIR_ENV = "GRID_TASK_CLAUDE_CONFIG_DIR"
 # The flag is not changed here: it is what closes the execution hole, and buying memory discovery
 # back by reopening that is issue 22's decision to take, not a side effect of this one.
 _SETTING_SOURCES = "user"
-# `.mcp.json` is the same hole wearing a different name — a stdio server is a command line, and it is
-# STARTED at session start (measured: the control run's server process ran; with this flag the init
-# event's `mcp_servers` is empty). It also drops the operator's own MCP servers, which is right for a
-# task agent: nothing about the provider's desktop belongs in a stranger's repository.
+# `.mcp.json` is the same hole wearing a different name — a stdio server is a command line, and a
+# session that registers one runs it. With this flag the init event's `mcp_servers` is empty, so
+# there is nothing to run. It also drops the operator's own MCP servers, which is right for a task
+# agent: nothing about the provider's desktop belongs in a stranger's repository.
+#
+# ⚠️ **WHEN it runs was corrected on 2026-08-24 against 2.1.241**, because the original claim here
+# said "STARTED at session start" and that is no longer true. The servers are now connected LAZILY,
+# in the background, queued behind every other one the operator has configured: measured 16.4 s from
+# spawn to the workspace server's command line running, with the entry sitting at `"status":
+# "pending"` throughout a turn that ended in 2.5 s. Nothing about the hole changes — a registered
+# server is still executed, just later — but a test that watched for the side effect inside a short
+# turn saw nothing in EITHER arm, and `tests/e2e_agent_settings.py` now pins the name instead.
 _STRICT_MCP_CONFIG = "--strict-mcp-config"
 
 

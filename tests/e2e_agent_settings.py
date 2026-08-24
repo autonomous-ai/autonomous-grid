@@ -20,6 +20,49 @@ What was measured while writing this (Claude Code **2.1.223**, macOS, 2026-08-06
 | 4 | `CLAUDE.md` + `.claude/agents/` + `.claude/skills/`, guarded | the model answered from `CLAUDE.md` — the instruction class still loads |
 | 5 | a `SessionStart` hook in the *user* scope (`CLAUDE_CONFIG_DIR/settings.json`), guarded | it **ran** — `user` keeps the operator's own settings |
 
+⚠️ **Row 3 no longer holds the way it was taken, and the MCP pair was repaired for it.**
+Re-measured 2026-08-24 on Claude Code **2.1.241**, macOS. On 2.1.223 a project `.mcp.json` server
+was started *at session start*, so a marker file the server touched was a sound signal. It is now
+started **lazily, in the background, behind every other configured server**:
+
+| run | turn | `probe` in the `init` record's `mcp_servers` | marker file |
+|---|---|---|---|
+| guarded | 2.2–2.6 s | **absent — the whole list is `[]`** | absent, 5/5 |
+| control | 2.6–3.8 s | present, `"status": "pending"`, 5/5 | **absent, 5/5** |
+| control, held open by a `sleep` in the turn | 30.3 s | present, `pending` | **present** |
+
+Measured lag from the child's spawn to the server's command line actually running: **16.4 s**. That
+number is a property of the OPERATOR's machine rather than of the guard — `probe` is queued behind
+the ten user-scope MCP servers this operator happens to have, every one of them still `pending`
+when a one-word turn ends. So the marker cannot be the control's signal any more, and a sleep long
+enough to catch it would be tuned to one developer's `~/.claude.json` and wrong on the fleet.
+
+What the pair asserts instead is the binary's own report of what it took from the workspace: the
+`init` record's `mcp_servers`, **by name**. Deterministic in both directions, 5/5 per cell, and for
+the guarded arm it is the stronger claim — a server that was never registered cannot be started at
+any later moment, where "no marker after 2.5 seconds" now says almost nothing. That the command
+line really does run when it IS registered is measured in the table above and deliberately not
+asserted per-run. **The security property was never in doubt**: `--strict-mcp-config` empties the
+list, and it was a test that had stopped being able to demonstrate it.
+
+⚠️ **The pair cannot say WHICH flag closed the hole, and must not be read as if it could.**
+Measured the same day, a 2×2 over the two flags with the argv captured at the spawn:
+
+| argv | `probe` registered | servers in the list |
+|---|---|---|
+| `--setting-sources user --strict-mcp-config` | no | 0 |
+| `--setting-sources user` alone | no | 10 — the operator's own |
+| `--strict-mcp-config` alone | no | 0 |
+| neither | **yes** | 11 |
+
+Either flag alone closes it, by different routes: `--setting-sources user` drops the *project*
+settings source so `.mcp.json` is never read at all, while `--strict-mcp-config` empties the list
+outright, the operator's own servers included. So deleting ONE of the two leaves both tests here
+green — confirmed by mutation, not reasoned. That is not a hole, because the argv is pinned
+elsewhere and by name: the same mutation fails three tests in `tests/test_task_agent.py`, and
+`tests/e2e_cross_repo/fake_claude.py` refuses an argv missing either flag. This module answers what
+the VENDOR does with the flags; that they are *sent* is a contract kept in those two places.
+
 Requires a logged-in Claude Code, and it costs money — a handful of turns on the cheapest model.
 Not collected by `pytest tests/` (the module is `e2e_*`, like `tests/e2e_doggi.py`). Run:
 
@@ -212,6 +255,58 @@ def _strip_the_guard(task_agent) -> None:
     task_agent.agent_argv = unguarded
 
 
+@pytest.fixture
+def mcp_servers():
+    """Every `mcp_servers` list the child announced, captured off the real stream.
+
+    Patched at `StreamTranslator.feed` — the seam every line of the child's stdout already passes
+    through — for the reason `_strip_the_guard` patches `agent_argv` rather than hand-building an
+    argv: the product's own path runs untouched and the test watches it, instead of the test
+    becoming a second implementation of it.
+
+    The `init` record is the binary's own statement of what it loaded, emitted before the model is
+    called. It is what row 3 of the docstring's original table already read (`17 entries` → `[]`),
+    so this is the signal that measurement used, promoted to the assertion now that the server's
+    side effect has moved out of reach of a short turn.
+    """
+    from remote import task_stream
+
+    announced: list[list] = []
+    original = task_stream.StreamTranslator.feed
+
+    def spy(self, line: str):
+        try:
+            record = json.loads(line.strip())
+        except (ValueError, RecursionError):
+            record = None
+        if (isinstance(record, dict) and record.get("type") == "system"
+                and record.get("subtype") == "init"):
+            # `KeyError` and not `.get`, deliberately: a vendor that stopped reporting the key at
+            # all would otherwise hand the guarded test an empty list and a free pass, which is the
+            # one direction this whole module refuses to fail in.
+            announced.append(record["mcp_servers"])
+        return original(self, line)
+
+    task_stream.StreamTranslator.feed = spy
+    try:
+        yield announced
+    finally:
+        task_stream.StreamTranslator.feed = original
+
+
+def _server_names(announced: list[list]) -> list[str]:
+    """The names in the session's one `init` record.
+
+    Exactly one, asserted rather than assumed: no record at all means the child died before it said
+    anything, and reading that as "the workspace's server was not registered" would turn every
+    unrelated spawn failure into a passing security test.
+    """
+    assert len(announced) == 1, (
+        f"expected exactly one `init` record from the child, saw {len(announced)} — a run that "
+        f"never announced its configuration cannot answer what it loaded from the workspace")
+    return [entry.get("name") for entry in announced[0]]
+
+
 @pytest.fixture(autouse=True)
 def _restore_agent_argv():
     """Put `agent_argv` back, whatever a control run did to it."""
@@ -257,28 +352,44 @@ def test_the_control_proves_the_hook_would_otherwise_run(live, tmp_path):
         "project hooks by itself, or the hook never had a chance to run for an unrelated reason")
 
 
-def test_an_mcp_server_in_the_workspace_is_not_started(live, tmp_path):
-    """An MCP stdio entry is a command line, and the server is started at session start."""
+def test_an_mcp_server_in_the_workspace_is_not_started(live, tmp_path, mcp_servers):
+    """An MCP stdio entry is a command line, and the workspace does not get to name one.
+
+    Asserted on the NAME, because since 2.1.241 the command line runs long after the turn that
+    would have to observe it — see the module docstring. A server the session never registered
+    cannot be started at any later moment either, which is why this reads as the stronger half.
+    """
     marker = tmp_path / "MCP_STARTED"
 
     outcome = _run(
         tmp_path, {".mcp.json": _mcp_config(marker), "a.txt": "x\n"},
         "Reply with exactly OK. Create no file.", guarded=True, project="guarded-mcp")
 
+    assert "probe" not in _server_names(mcp_servers), (
+        "the workspace's own .mcp.json was taken: this session registered the server it names, and "
+        "a registered stdio server is a command line this provider will run")
+    # Belt and braces, and NOT the evidence — see the docstring. A one-word turn ends ~14 seconds
+    # before the spawn would happen, so this is silent whether the guard holds or not; it is kept
+    # because it is the direct statement of the property, not because it can detect its breach.
     assert not marker.exists(), (
         "a server named by the workspace's own .mcp.json was started on the provider")
     assert outcome.state == "completed", outcome.error
 
 
-def test_the_control_proves_the_mcp_server_would_otherwise_start(live, tmp_path):
-    """The other half of the pair — measured to fire, so its silence above means something."""
-    marker = tmp_path / "MCP_STARTED"
+def test_the_control_proves_the_mcp_server_would_otherwise_be_taken(live, tmp_path, mcp_servers):
+    """The other half of the pair — measured to fire, so its silence above means something.
 
-    _run(tmp_path, {".mcp.json": _mcp_config(marker), "a.txt": "x\n"},
+    If this one ever fails, the test above has stopped being evidence. It has failed once already,
+    and the answer was to re-measure it rather than delete it: the signal moved from the server's
+    own side effect to the name, because the vendor moved when the side effect happens.
+    """
+    _run(tmp_path, {".mcp.json": _mcp_config(tmp_path / "MCP_STARTED"), "a.txt": "x\n"},
          "Reply with exactly OK. Create no file.", guarded=False, project="control-mcp")
 
-    assert marker.exists(), (
-        "the control did not start the server, so the guarded run proves nothing here")
+    assert "probe" in _server_names(mcp_servers), (
+        "the control did not register the workspace's server, so the guarded run proves nothing "
+        "here: either the vendor stopped reading a project .mcp.json by itself, or this session "
+        "never got far enough to say what it had loaded")
 
 
 def test_the_instruction_class_still_reaches_the_model(live, tmp_path):
