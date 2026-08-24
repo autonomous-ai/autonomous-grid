@@ -2188,8 +2188,9 @@ commands; check `bubblewrap` and `socat` first.
 
 **`grid join` checks all of this before it serves.** With `GRID_TASKS` on, the join asks the same
 questions a task would — is Claude Code installed and new enough, is the permission mode and
-passthrough list valid, can the sandbox start, and can this account create a workspace under
-`GRID_TASK_ROOT` — and it asks them *in the terminal you typed the command in*. A provider that
+passthrough list valid, can the sandbox start, **are `bubblewrap` and `socat` both installed** (on
+Linux, with the sandbox on), and can this account create a workspace under `GRID_TASK_ROOT` — and it
+asks them *in the terminal you typed the command in*. A provider that
 fails any of them still **serves inference**: the join lands, the answer says what to change, and
 only task serving is withheld until you fix it and re-run `grid join --respawn`. Before this, every
 one of those was checked only after a task had been claimed, so the first person to find out was a

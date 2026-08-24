@@ -6,6 +6,7 @@ claim/run/report loop's own tests stay beside the rest of the task-loop suite.
 """
 import json
 import stat
+import sys
 import subprocess
 from pathlib import Path
 
@@ -5691,3 +5692,87 @@ def test_ensure_workspace_still_leaves_an_existing_directorys_mode_alone(monkeyp
     task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER, _CONVERSATION))
 
     assert stat.S_IMODE(root.stat().st_mode) == 0o777, "ensure_workspace repaired a mode it found"
+
+
+# --- issue 59: a Linux provider knows it is missing bubblewrap or socat --------------------------
+
+
+def _packages(monkeypatch, present):
+    """Make `shutil.which` answer for exactly the sandbox packages in `present`."""
+    import shutil as shutil_module
+
+    from remote import task_agent
+    monkeypatch.setattr(task_agent.shutil, "which",
+                        lambda name: f"/usr/bin/{name}" if name in present else None)
+    return shutil_module
+
+
+@pytest.mark.parametrize("present, missing", [
+    (("bwrap",), "socat"),   # ⚠️ bwrap alone is NOT enough — measured on Ubuntu 24.04 / 2.1.223
+    (("socat",), "bwrap"),
+    ((), "bwrap"),
+])
+def test_a_linux_provider_missing_a_sandbox_package_is_told_at_join(
+        monkeypatch, tmp_path, present, missing):
+    """The only enforcement before this was Claude Code's own `failIfUnavailable`, which fires
+    inside the child — after the claim, after the repository was fetched, on a member's task."""
+    from remote import task_agent
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("GRID_TASK_SANDBOX", raising=False)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    _packages(monkeypatch, present)
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.preflight_before_serving()
+
+    assert missing in str(excinfo.value), str(excinfo.value)
+    assert "apt install bubblewrap socat" in str(excinfo.value)
+
+
+def test_a_linux_provider_with_both_packages_is_allowed(monkeypatch, tmp_path):
+    """⚠️ The positive control. Every assertion above is "it refused", which is exactly what a probe
+    that refuses everything also reports — and that probe would take task serving off every Linux
+    provider in the fleet."""
+    from remote import task_agent
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("GRID_TASK_SANDBOX", raising=False)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    _packages(monkeypatch, ("bwrap", "socat"))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    task_agent.preflight_before_serving()
+
+
+def test_the_sandbox_package_probe_does_not_run_off_linux(monkeypatch, tmp_path):
+    """macOS needs neither package. A probe that fired there is a refusal handed to a provider that
+    would have worked — the opposite of what this issue is for."""
+    from remote import task_agent
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.delenv("GRID_TASK_SANDBOX", raising=False)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    _packages(monkeypatch, ())  # neither present, and it must not matter
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    task_agent.preflight_before_serving()
+
+
+def test_the_sandbox_package_probe_does_not_run_with_the_sandbox_off(monkeypatch, tmp_path):
+    """The packages are the SANDBOX's requirement. An operator who turned the sandbox off
+    deliberately gets the provider that existed before it — the same shape as the version floor."""
+    from remote import task_agent, task_sandbox
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv(task_sandbox.SANDBOX_ENV, "0")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    _packages(monkeypatch, ())
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    task_agent.preflight_before_serving()

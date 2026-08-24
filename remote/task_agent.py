@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import stat
 import sys
 from dataclasses import dataclass
@@ -784,7 +785,44 @@ def preflight_before_serving() -> None:
     """
     preflight()
     resolve_binary()
+    _require_the_sandbox_packages()
     _require_a_reachable_workspace_root()
+
+
+# What the Linux sandbox needs on the box, and it is **two packages, not one** (issue 59). MEASURED
+# on Ubuntu 24.04 against Claude Code 2.1.223: with `bwrap` present and `socat` absent the run still
+# refuses, naming `socat`. A probe that checked only `bwrap` would report healthy for a provider
+# that fails every task it claims. A stock provider VM has neither.
+# Named the way the VENDOR names them in its own refusal — `bubblewrap (bwrap) not installed,
+# socat not installed` — so an operator who meets both messages is reading about one thing.
+_SANDBOX_PACKAGES = (("bwrap", "bubblewrap (bwrap)"), ("socat", "socat"))
+_SANDBOX_PACKAGE_INSTALL = "apt install bubblewrap socat"
+
+
+def _require_the_sandbox_packages() -> None:
+    """Refuse a Linux provider whose sandbox cannot start, before it claims anybody's task.
+
+    Until this existed, the only enforcement was Claude Code's own `failIfUnavailable` — which fires
+    **inside the child**, after the claim and after the repository was fetched, and reports it on a
+    member's task. Nothing in this tree checked: `bwrap`, `bubblewrap` and `socat` appeared in the
+    source only inside comments.
+
+    **Linux only, and only while the sandbox is on.** macOS needs neither package, so a probe that
+    fired there would be a refusal handed to a provider that would have worked; and the packages are
+    the sandbox's own requirement, so an operator who turned the sandbox off deliberately gets the
+    provider that existed before it — the same shape the version floor has, and for the same reason.
+    """
+    if sys.platform != "linux" or not task_sandbox.enabled():
+        return
+    missing = [package for binary, package in _SANDBOX_PACKAGES if shutil.which(binary) is None]
+    if not missing:
+        return
+    raise OSError(
+        f"the task sandbox needs {' and '.join(missing)} on this box, and "
+        f"{'they are' if len(missing) > 1 else 'it is'} not installed — every task would fail "
+        f"inside the agent with `sandbox required but unavailable`. Install both with: "
+        f"{_SANDBOX_PACKAGE_INSTALL}, or set {task_sandbox.SANDBOX_ENV}=0 to run agents unconfined "
+        f"deliberately.")
 
 
 def _require_a_reachable_workspace_root() -> None:
