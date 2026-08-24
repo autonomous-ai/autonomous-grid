@@ -38097,3 +38097,35 @@ def test_the_task_check_runs_before_the_join_stops_or_spawns_anything(monkeypatc
         f"the join acted before it asked whether this provider can run a task: {order}")
     assert "spawned" in order, "the join never spawned, so this proves nothing about the order"
     assert spawned is not None
+
+
+def test_the_join_runs_the_REAL_check_not_a_stand_in(monkeypatch, tmp_path, capsys):
+    """The seam every other test in this group mocks away.
+
+    ⚠️ The four tests above patch `preflight_before_serving`, and its own unit tests patch
+    `preflight` and `resolve_binary` — so `cmd_remote_join` → `preflight_before_serving` →
+    `preflight` had **never executed as one chain**. Mocking on both sides of a seam is how a
+    contract comes to be verified by nothing, and this repository has paid for that before.
+
+    Nothing here is patched but the grid and the spawn. The refusal is reached through
+    `GRID_TASK_PERMISSION_MODE`, deliberately: it is the FIRST thing `preflight()` checks, it needs
+    no subprocess and no Claude Code on the box, so this test asserts the same thing on a developer's
+    Mac and on a Linux CI runner that has no agent installed at all.
+    """
+    from remote import task_sandbox
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.delenv(task_sandbox.SANDBOX_ENV, raising=False)  # sandbox on: the mode is refused
+    monkeypatch.setenv("GRID_TASK_PERMISSION_MODE", "bypassPermissions")
+
+    assert cli.main(["join", "--serve", "m"]) == 0, "a task misconfiguration failed the whole join"
+
+    err = capsys.readouterr().err
+    assert "GRID_TASK_SANDBOX" in err, (
+        f"the real check's own sentence did not reach the operator's terminal: {err!r}")
+    assert "respawn" in err, f"the refusal does not say how to retry it: {err!r}"
+    assert cli.provider._read_records("n1")["remote"]["models"] == ["m"], "inference did not join"
+    assert not _the_child_would_claim_tasks(spawned), (
+        "the child was spawned still claiming tasks this provider cannot run")

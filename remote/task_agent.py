@@ -786,7 +786,7 @@ def _require_a_reachable_workspace_root() -> None:
     if root.exists() and not root.is_dir():
         raise OSError(
             f"the task workspace root {root} is not a directory, so no task can be checked out "
-            f"under it; point {WORKSPACE_ROOT_ENV} somewhere else")
+            f"under it; point {WORKSPACE_ROOT_ENV} somewhere else.")
 
     reachable = root
     while not reachable.exists():
@@ -797,7 +797,7 @@ def _require_a_reachable_workspace_root() -> None:
         return
     raise OSError(
         f"this provider cannot create a task workspace under {root}: {reachable} is not writable "
-        f"by it. Point {WORKSPACE_ROOT_ENV} at a short path this account can write")
+        f"by it. Point {WORKSPACE_ROOT_ENV} at a short path this account can write.")
 
 
 def _require_version_for_the_sandbox(binary: str) -> None:
