@@ -405,12 +405,15 @@ def transcript_dir_name(cwd: Path) -> str:
 # back and the push lands. Issue 06's failure exactly, re-armed by ADR 0034 D-c, which adds 37
 # characters to every workspace path.
 #
-# ⚠️ **200, not 207, and the data cannot tell them apart.** Every truncated name is 207 long, which
-# is what BOTH "cap at 207" and "cap at 200, then append 7" produce; the only name observed kept
-# whole was 186, which discriminates neither. The direction to be wrong in is refusing a provider
-# that would have worked, never accepting one that silently loses every conversation it runs. The
-# stock layout flattens to **135**, so this has 65 characters of headroom against a real deployment
-# and cannot fire on one.
+# ⚠️ **200 is EXACT, and that was settled on 2026-08-24 against Claude Code 2.1.241.** This comment
+# used to say the data could not tell "cap at 207" from "cap at 200, then append 7" apart, because
+# the only name observed kept whole was 186. Re-measured at the boundary, one character at a time:
+# 197, 199 and **200** are written verbatim; **201**, 203 and 207 are all written as exactly **207**
+# characters. So the rule is a 200-character prefix plus a hyphen and a 6-character hash, and this
+# constant is the limit itself rather than a conservative guess at it.
+# The direction to be wrong in is still refusing a provider that would have worked, never accepting
+# one that silently loses every conversation it runs. The stock layout flattens to **135**, so this
+# has 65 characters of headroom against a real deployment and cannot fire on one.
 TRANSCRIPT_NAME_MAX_CHARS = 200
 
 
