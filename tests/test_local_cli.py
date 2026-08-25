@@ -32749,6 +32749,65 @@ def test_task_get_on_an_ordinary_failed_turn_says_no_such_thing(monkeypatch, tmp
     assert "combine" not in (captured.out + captured.err).lower()
 
 
+def test_task_get_labels_a_merge_turns_result_as_the_grid_combining_work(
+        monkeypatch, tmp_path, capsys):
+    """C7.3 / ND-03. A merge turn's result is the GRID's narration, and it reads like git.
+
+    Measured live on `dt-edge`: a merge turn's `result_text` is the agent reporting on a collision
+    it was sent to resolve — `git add`, `<<<<<<<`, index state — printed under a bare
+    `--- result ---` to somebody who never asked for a merge turn and may not know what one is.
+
+    The prompt side of exactly this turn is ALREADY handled: `task list` swaps a merge turn's
+    grid-written prompt for `_MERGE_TURN_LABEL` rather than showing it as the person's own words.
+    The result side never got the same decision, so the one surface that shows what the grid did
+    presents it as the answer to a request nobody made.
+
+    ⚠️ **The text itself is KEPT, and that is the same call `error=` already made two blocks up**
+    (*"Kept AND followed, rather than replaced: the two readers need different things"*). Whoever
+    runs the grid needs the agent's own account of the collision; filtering it would make the fault
+    undiagnosable. What is added is whose words these are — the cheapest thing that turns a
+    non-sequitur back into a report.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "m-1", "conversation_id": "c-1", "kind": "merge", "state": "completed",
+        "result_text": "Ran `git add src/main.py` after resolving the <<<<<<< markers by hand.",
+    }))
+
+    rc = cli.main(["task", "get", "m-1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "combining this work with a colleague's" in out, (
+        f"a merge turn's result is presented as an ordinary answer, so a person reads the grid's "
+        f"own git narration as the reply to something they asked for: {out!r}")
+    assert "git add" in out, (
+        "the agent's account of the collision was filtered out — whoever runs the grid needs it, "
+        "and this refusal to render it is the over-correction ADR 0034 D-g warns about")
+
+
+def test_task_get_leaves_an_ordinary_turns_result_alone(monkeypatch, tmp_path, capsys):
+    """The control, and it is what keeps the label meaningful: a label on every result is furniture.
+
+    An ordinary turn's result IS the answer to what the person asked, so nothing about colleagues
+    or combining belongs anywhere near it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "conversation_id": "c-1", "kind": "message", "state": "completed",
+        "result_text": "Renamed the column and updated its two callers.",
+    }))
+
+    cli.main(["task", "get", "t-1"])
+
+    out = capsys.readouterr().out
+    assert "--- result ---" in out, out
+    assert "colleague" not in out.lower(), (
+        "an ordinary turn's own answer is announced as the grid combining somebody's work")
+
+
 def test_task_get_says_when_the_project_no_longer_holds_what_the_turn_changed(
         monkeypatch, tmp_path, capsys):
     """ND-16/F-3. A turn whose work a later one overwrote still reads `completed` everywhere.

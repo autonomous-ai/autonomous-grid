@@ -3024,6 +3024,53 @@ def test_a_claim_with_no_member_key_is_refused_instead_of_falling_back_to_the_pr
     assert not list((root / "projects").glob("proj-1/*/workspace/ran.txt")), "the agent ran"
 
 
+def test_a_claim_whose_member_key_is_null_says_the_person_left_rather_than_upgrade_the_relay(
+        agent, tmp_path, monkeypatch):
+    """The OTHER way this key goes missing, and it is not a version skew at all (ADR 0035 D-c).
+
+    The relay sends `"member_key": null` — the key PRESENT, the value null — when the turn's owner
+    left the project, or was removed from it, while their turn sat queued. That is an ordinary
+    departure, not an old relay: `tasks.py`'s claim says so in as many words (*"`None` when the
+    owner is no longer a member — a removal while the task sat queued"*), and grid-src's
+    `test_a_task_whose_owner_left_the_project_claims_with_no_key_rather_than_a_made_up_one` pins the
+    relay half, its docstring resting the readable half on THIS side: *"the honest answer is `None`,
+    which the provider turns into a readable refusal."*
+
+    Every other test of this refusal deletes the key, so until this one the two arrived as the same
+    sentence — and that sentence tells whoever reads it to **upgrade the relay**, which for a
+    departure is a repair to something that is not broken. Same class as the `conversation_id`
+    split next door, and the reason that one is pinned rather than left to review.
+
+    ⚠️ The REFUSAL is not what changes and must not: it is still terminal, still fail-closed, and
+    still creates no workspace. What is asserted here is only which of the two true things it says.
+    """
+    from remote import task_agent, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    agent("echo should-never-run > ran.txt\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    departed = _job_with_input(commit, member_key=None)
+    assert "member_key" in departed, "the key must be PRESENT and null, or this tests the old case"
+
+    outcome = tasks.run_task(departed, remote=remote)
+
+    assert outcome.state == "failed", outcome
+    assert "Upgrade the relay" not in (outcome.error or ""), (
+        f"a person leaving the project is reported as a relay that needs upgrading, sending "
+        f"whoever reads it to fix something that is working exactly as ADR 0035 D-c asks: "
+        f"{outcome.error!r}")
+    assert "no longer a member" in (outcome.error or ""), (
+        f"the refusal does not say what actually happened, so nobody reading it can tell a "
+        f"departure from a version skew: {outcome.error!r}")
+    # The fail-closed half, unchanged — asserted on the filesystem rather than the message for the
+    # reason the sibling test gives: the message is what a future edit keeps while quietly
+    # restoring the fallback underneath it.
+    root = task_agent.workspace_root()
+    assert not (root / "projects" / "proj-1" / "workspace").exists(), (
+        "a project-level workspace was created — the fallback this refusal exists to prevent")
+    assert not list((root / "projects").glob("proj-1/*/workspace/ran.txt")), "the agent ran"
+
+
 def test_a_claim_with_no_conversation_id_is_refused_instead_of_falling_back_to_the_member(
         agent, tmp_path, monkeypatch):
     """ADR 0034 D-c, and exactly `member_key`'s class one level down (issue 38).
