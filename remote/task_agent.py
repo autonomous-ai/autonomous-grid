@@ -939,10 +939,53 @@ def _require_a_private_directory(root: Path) -> None:
             f"{info.st_uid}), and this provider will not run agents inside it. Give it to this "
             f"account, or name a different one with --tasks-root.")
     if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-        raise OSError(
-            f"the default task workspace root {root} can be read by other accounts on this machine, "
-            f"and members' repositories and conversations are kept under it. Close it with "
-            f"`chmod 700 {root}`, or name a different one with --tasks-root.")
+        raise OSError(_not_private_enough(root))
+
+
+def _shares_the_root_with_a_relay(root: Path) -> bool:
+    """Whether a relay keeps its own project repositories under this root.
+
+    Cheap and read-only: one listing, no recursion. Imported locally because this is the only place
+    in the path layer that needs the sweep's vocabulary, and a module-level import for one constant
+    would couple `task_agent` to the evictor for the whole process.
+
+    Answers False for a root it cannot read, which is the direction that changes nothing: the caller
+    is choosing which of two true sentences to print, and the ordinary one is still correct.
+    """
+    from remote import task_evict
+
+    try:
+        return any(entry.is_dir() and entry.name.endswith(task_evict.RELAY_REPO_SUFFIX)
+                   for entry in (root / "projects").iterdir())
+    except OSError:
+        return False
+
+
+def _not_private_enough(root: Path) -> str:
+    """Why a group- or other-readable task root is refused, and what to do about it.
+
+    ⚠️ **Two sentences, because the obvious advice is destructive on the box this most often bites.**
+    The default root is `/var/grid` on Linux, and grid-src's `config.task_repo_root` is
+    `/var/grid/projects` — so on a machine running a relay AND a provider, which ADR 0033 calls the
+    ordinary small-team case, `chmod 700` is aimed at the server's own 2.1 GB store (measured on the
+    dev VM, where it is mode 755 and holds every project on the grid). Telling an operator to close
+    the permissions on a directory another service is serving from is advice that can take a grid
+    down, and it was the ONLY advice this refusal gave.
+
+    So when the relay's repositories are there, the remedy named is the one that is always safe —
+    give this provider a root of its own — and `chmod` is named as the thing NOT to do, because an
+    operator who has read the first version of this message will otherwise reach for it anyway.
+    """
+    shared = (
+        " It also holds a relay's own project repositories, so this provider is sharing a directory"
+        " with the server for this grid. Do not change this directory's permissions: they are that"
+        " server's to choose, and closing them can stop it serving every project on the grid."
+        if _shares_the_root_with_a_relay(root) else
+        f" Close it with `chmod 700 {root}`, or"
+    )
+    return (f"the default task workspace root {root} can be read by other accounts on this machine, "
+            f"and members' repositories and conversations are kept under it.{shared} "
+            f"Give this provider a root of its own with --tasks-root.")
 
 
 def _require_version_for_the_sandbox(binary: str) -> None:

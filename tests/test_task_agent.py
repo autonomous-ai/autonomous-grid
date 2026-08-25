@@ -5693,6 +5693,44 @@ def test_a_world_readable_default_root_is_refused_whoever_owns_it(monkeypatch, t
     assert "chmod 700" in str(excinfo.value), str(excinfo.value)
 
 
+def test_a_root_a_relay_is_serving_from_is_not_told_to_chmod_the_relays_store(
+        monkeypatch, tmp_path):
+    """⚠️ The advice above is DESTRUCTIVE on the machine it most often bites, and it was the only
+    advice this refusal gave.
+
+    Measured on the dev VM 2026-08-25: `default_workspace_root()` is `/var/grid` on Linux, grid-src's
+    `config.task_repo_root` is `/var/grid/projects`, and that directory is mode 755 holding 2.1 GB of
+    the relay's own project repositories. ADR 0033 calls a box running both the ordinary small-team
+    case — so `chmod 700 /var/grid` is aimed at the store the server for that grid is reading from,
+    and an operator who follows it can take the grid down.
+
+    So when the relay's repositories are there the remedy named is the one that is always safe, and
+    `chmod` is named as the thing NOT to do — because somebody who has read the other version of
+    this message will otherwise reach for it anyway.
+    """
+    from remote import task_agent
+
+    root = tmp_path / "grid"
+    (root / "projects").mkdir(mode=0o755, parents=True)
+    # Exactly what grid-src's `task_repo.repo_for` leaves under `TASK_REPO_ROOT`.
+    (root / "projects" / "b3f1c0de-0000-4000-8000-000000000003.git").mkdir()
+    root.chmod(0o755)
+    _default_root_at(monkeypatch, root)
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.ensure_default_workspace_root()
+
+    message = str(excinfo.value)
+    assert "chmod" not in message, (
+        f"the provider told an operator to change the permissions of a directory the relay is "
+        f"serving every project on this grid from: {message!r}")
+    assert "--tasks-root" in message, (
+        f"the one remedy that is always safe was not named: {message!r}")
+    assert "sharing a directory" in message, (
+        f"the message does not say WHY chmod is wrong here, so it reads as an arbitrary "
+        f"restriction and the next operator works around it: {message!r}")
+
+
 def test_a_root_that_is_already_ours_and_private_is_adopted_silently(monkeypatch, tmp_path):
     """The positive control, and the ordinary second run. A rule that refused this would make
     `grid join --tasks` work once and fail every time after."""

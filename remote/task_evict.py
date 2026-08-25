@@ -56,6 +56,37 @@ _BYTES_PER_GB = 1024 ** 3
 # cannot make itself look recently used and outlive a colleague's.
 LAST_USED_NAME = "last-used"
 
+# ⚠️ **The task root is NOT this provider's alone by default, and the sweep deletes directories.**
+# Measured on the dev VM 2026-08-25, both halves of a collision that is the fleet's own default:
+# `task_agent.default_workspace_root()` is `/var/grid` on Linux, and grid-src's
+# `config.task_repo_root` is `/var/grid/projects` — so a box running a relay AND a provider, which
+# ADR 0033 calls the ordinary small-team case, has the relay's bare repositories as siblings of this
+# provider's project directories.
+#
+# Without this, `_conversations` reads `<project_id>.git/objects` as a member and
+# `<project_id>.git/objects/pack` as a conversation, and `_evict` removes it with `shutil.rmtree`.
+# Reproduced: the relay's whole object store gone in one sweep — and the LRU order takes the least
+# recently written pack FIRST, so the oldest history goes before anything else.
+#
+# `_evict`'s docstring argues — correctly — that junk under the task root should be collectable,
+# *"so the one thing the bound most needs to remove would be the one thing it could not"*. That
+# argument assumed the root belongs to this provider, and it still holds for everything that is not
+# named this way. What changes is only that the relay's repositories are not junk.
+#
+# ⚠️ **A CROSS-REPO SPELLING, and the only thing holding this off a live repository.** grid-src
+# builds the path as `f"{project_id}.git"` (`task_repo.repo_path`, `projects.py`) and validates it
+# the same way. A project id is a uuid4, so no directory this provider creates can end this way.
+# `tests/test_task_lease.py` parses grid-src for the suffix rather than restating it here, because a
+# rename there would otherwise turn this guard off in silence and the failure is a deleted
+# repository.
+#
+# ⚠️ A marker-based check ("does it contain `workspace/` or `cache/`?") was written first and
+# REMOVED: mutation showed it dead — deleting it left every test green, because this suffix catches
+# the collision first — and it loses on its own anyway, since an imported repository with a branch
+# named `cache/…` has a `refs/heads/cache` directory. Two guards on one list are one guard, and the
+# unexercised one is where the next same-class bug hides.
+RELAY_REPO_SUFFIX = ".git"
+
 
 def _warn(message: str) -> None:
     print(f"\n[tasks] {message}", file=sys.stderr)
@@ -159,7 +190,8 @@ def _conversations(root: Path) -> list[tuple[tuple[str, str, str], Path]]:
         # Same predicate as `_subdirectories`, symlinks included: a symlinked project directory
         # would let the sweep walk — and delete — through a link out of the tree entirely.
         project_dirs = sorted(entry for entry in projects.iterdir()
-                              if entry.is_dir() and not entry.is_symlink())
+                              if entry.is_dir() and not entry.is_symlink()
+                              and not entry.name.endswith(RELAY_REPO_SUFFIX))
     except OSError as exc:
         # A failure to list `projects/` ITSELF is still a real one, and still says so.
         _warn(f"could not list {projects} to bound the provider's workspaces ({exc})")

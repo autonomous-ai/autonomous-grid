@@ -518,6 +518,64 @@ def test_the_transcript_ref_prefix_this_provider_pushes_to_is_the_one_the_fence_
         "TRANSCRIPT_PREFIX", module="task_repo.py")
 
 
+def _relay_bare_repo_suffix():
+    """The suffix grid-src gives a project's bare repository, parsed out of its `task_repo`.
+
+    Parsed rather than restated because it is not a named constant on that side — it is the tail of
+    an f-string, `Path(root) / f"{project_id}.git"` — and a value nobody named is exactly the one a
+    refactor renames without noticing it was load-bearing somewhere else.
+
+    ⚠️ Matched by SHAPE, not by function name. The first draft of this pinned `repo_path`, which is
+    the name of a keyword argument at the call site and not of the function; it failed loudly, which
+    is the only reason the mistake was visible at all. Keying on the name would also have made a
+    harmless rename over there look like a suffix change over here — and the suffix is the thing
+    that matters, so that is what is read.
+    """
+    import ast
+
+    source = _relay_module("task_repo.py")
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    found = set()
+    for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+        if not (isinstance(node, ast.Return) and isinstance(node.value, ast.BinOp)):
+            continue
+        joined = node.value.right
+        if not (isinstance(joined, ast.JoinedStr) and joined.values):
+            continue
+        tail = joined.values[-1]
+        if isinstance(tail, ast.Constant) and isinstance(tail.value, str):
+            found.add(tail.value)
+    assert len(found) == 1, (
+        f"expected exactly one `Path(...) / f'…'` return in grid-src's task_repo.py to read the "
+        f"bare-repo suffix from, found {sorted(found)} — this check can no longer say which "
+        f"spelling this provider's sweep has to recognise")
+    return found.pop()
+
+
+def test_the_directory_the_sweep_refuses_to_collect_is_the_one_the_relay_creates():
+    """⚠️ The only thing standing between this provider's eviction sweep and a live repository.
+
+    A relay and a provider on one box share `/var/grid/projects` **by default** —
+    `task_agent.default_workspace_root()` is `/var/grid` on Linux and grid-src's
+    `config.task_repo_root` is `/var/grid/projects` — so the relay's bare repos are siblings of this
+    provider's project directories. `task_evict` walks that tree three levels deep and `rmtree`s
+    what it finds, so without the suffix check `<project_id>.git/objects/pack` is an ordinary
+    eviction candidate. Reproduced in `tests/test_task_evict.py`: the relay's whole object store,
+    gone in one sweep.
+
+    Nothing on the wire carries this name, which is what makes it a lockstep value rather than a
+    protocol one: both sides derive it, and drift is silent AND catastrophic in one direction only.
+    A rename on the relay side does not break a request or fail a test over there — it quietly
+    re-arms a `shutil.rmtree` over here.
+    """
+    from remote import task_evict
+
+    assert task_evict.RELAY_REPO_SUFFIX == _relay_bare_repo_suffix(), (
+        "grid-src names a project's bare repository with a different suffix now, so this "
+        "provider's sweep no longer recognises one and will collect it as a stale workspace")
+
+
 def test_the_two_refusal_codes_this_cli_branches_on_are_the_ones_the_relay_sends():
     """The CLI's half of the parsed-`detail` register (ADR 0033 D-o, issue 26).
 
