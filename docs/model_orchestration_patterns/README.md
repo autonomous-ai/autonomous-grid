@@ -51,6 +51,52 @@ is defined above. *WAL* is the write-ahead log that backs the state ledger.
 These recur throughout; where a term is loaded before it is defined here, the
 definition lives in this block.
 
+## Why local changes the architecture
+
+A cloud API makes every extra sample a metered purchase. It may also put the
+request behind account quotas, rate limits, network latency, a vendor outage,
+or a daily/weekly allowance. A local model reverses that optimization: the
+machine is already yours, so another token creates **no marginal token bill**
+and asks no vendor for permission. The prompt can stay on the home network,
+the weights and runtime can be pinned, and an agent can keep working every
+second of the day without consuming an API allowance.
+
+That freedom does **not** make compute infinite or literally free. The local
+bill is paid in hardware, electricity, heat, memory bandwidth, wall-clock, and
+wear. A home box has a fixed number of seats; models that do not co-reside must
+swap through RAM/VRAM; a long fan delays the next live request. Privacy also
+holds only while every advisor, verifier, tool, telemetry sink, and backup stays
+inside the boundary the operator chose. The useful distinction is therefore
+**unmetered tokens, physically bounded execution**.
+
+| Constraint | Cloud API | Local AI at home | Architectural consequence |
+|---|---|---|---|
+| marginal inference | billed or allowance-metered | no per-token invoice | spend extra samples where error is expensive |
+| limiting resource | vendor quota, price, network | seats, VRAM/RAM, heat, wall-clock | schedule from live capacity; admit and degrade under load |
+| model lifecycle | vendor chooses availability and upgrades | operator pins weights, quantization, runtime | make residency, swaps, and model identity explicit state |
+| privacy boundary | request leaves the machine | can remain on-device/LAN | never hide an external advisor, tool, or escalation call |
+| idle time | belongs to the vendor | belongs to the operator | use preemptible slack for probes, canaries, learning, and cache warming |
+| continuity | service and account must remain available | can run offline and 24/7 | persist sessions and policy state; recover from local crashes |
+
+The harness follows from those economics. It is not a cloud router with the
+price column deleted. It needs a live-seat inventory, a bounded task-graph
+executor, cancellation and preemption, warm-session reuse, one tool-grounded
+truth path, one append-only state ledger, and a legal `answer / refuse /
+escalate` outcome. Redundant workers stay read-only; exactly one selected actor
+may touch the world. Those are the shared primitives underneath the catalog,
+and every pattern below either consumes them or must degrade honestly when the
+box cannot provide them.
+
+**Example roster, checked 2026-08-25.** The concrete names are current,
+open-weight reference points rather than requirements:
+[`Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B),
+[`Qwen3.6-35B-A3B`](https://huggingface.co/Qwen/Qwen3.6-35B-A3B),
+[`DeepSeek-V4-Flash`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash),
+[`GLM-5.2`](https://huggingface.co/zai-org/GLM-5.2), and
+[`Laguna-S-2.1`](https://huggingface.co/poolside/Laguna-S-2.1). Grid aliases
+such as `qwen38-27b-mtp` name a local build or quantization of those weights;
+they are not claims that every model fits every home machine.
+
 Read the register before you draw or write. The figure style that the
 diagrams in this catalog follow is written up in `docs/STYLE.md` and
 `docs/DIAGRAMS.md`; the canonical standard that vendors them is
@@ -117,7 +163,7 @@ The same four roles and two edge types appear in all twenty-seven figures;
 | 3 | **Master / Slave** | a planner splits the job, specialists each do a part | the job is many jobs wearing one coat |
 | 4 | **Adversarial** | two careful reads, a judge on the disagreement | the answer is costly to get wrong |
 | 5 | **Strategy** | each request picks *which* pattern runs | the request mix is varied enough to need a choice |
-| 6 | **Brute-Force** | many identical tries, keep the best | brute coverage beats cleverness |
+| 6 | **Brute-Force** | try several search paths, keep the best verified result | coverage beats planning and success is cheap to check |
 | 7 | **Ensemble** | same prompt, keep the average not a winner | the answer is numeric and noise-averaging helps |
 | 8 | **Verifier Gate** | one draft, a check, retry on fail | cheap to check, costly to get wrong |
 | 9 | **Debate** | two reads that loop until they agree | a single adversary isn't enough |
@@ -340,7 +386,7 @@ temperature or framing is still one prior with a different wiggle, and with a
 single GPU and one strong model, N samples are N draws of that same prior; say
 so directly instead of pretending it's a real vote. The family caveat carries
 the reminder that even #7 and #9 state outright: two sibling quantizations of
-one lineage (`qwen38-27b-mtp` vs `qwen38-35b-a3b-mtp`) share a training tail and
+one lineage (`qwen38-27b-mtp` vs `qwen36-35b-a3b-mtp`) share a training tail and
 are still correlated, so "different family" has to mean *different where it
 matters*, not merely a different build. When only one decorrelated family is
 resident, the honest move is to downgrade the confidence claim (#2 → #1), not
@@ -356,7 +402,7 @@ def fan_out(request, models):
     return expand(reads)              # a better model joins on a tie
 ```
 
-**On the Grid stack.** A ticket-classification request fans the same prompt to three workers over the OpenClaw lane — `qwen38-27b-mtp` and `qwen38-35b-a3b-mtp` on one node, `glm-5.2` (a cross-vendor counterweight) on another — then votes. The honest reading of this example is not "three voices agree" but **2-of-3 is a shared-family quorum that can pass on the Qwen tail**: the two Qwen workers share a training tail, so their agreement is evidence only *conditional on* `glm-5.2`'s genuine cross-vendor independence. Had all three been same-family, the "unanimity" would be fake — three runs of the same prior passing on the same blind spot, which the evaluator should treat as a *stronger* form of the single-read risk, not a weaker one, since the fan certifies rather than breaks it. The example exposes that the vote is a measurement of *internal* agreement, not of truth.
+**On the Grid stack.** A ticket-classification request fans the same prompt to three workers over the OpenClaw lane — `qwen38-27b-mtp` and `qwen36-35b-a3b-mtp` on one node, `glm-5.2` (a cross-vendor counterweight) on another — then votes. The honest reading of this example is not "three voices agree" but **2-of-3 is a shared-family quorum that can pass on the Qwen tail**: the two Qwen workers share a training tail, so their agreement is evidence only *conditional on* `glm-5.2`'s genuine cross-vendor independence. Had all three been same-family, the "unanimity" would be fake — three runs of the same prior passing on the same blind spot, which the evaluator should treat as a *stronger* form of the single-read risk, not a weaker one, since the fan certifies rather than breaks it. The example exposes that the vote is a measurement of *internal* agreement, not of truth.
 
 ---
 
@@ -419,7 +465,7 @@ def split_and_merge(request, planner, specialists):
     return planner.merge(pieces)                        # purple: combine
 ```
 
-**On the Grid stack.** A multi-file refactor: `qwen38-35b-a3b-mtp` (the strongest local reasoning model on the box) plans the change over the Claude Code (stream-json) lane, then the OpenClaw lane fans the sub-tasks to per-file workers — `qwen38-27b-mtp` for mechanical edits, `qwen3-coder` for boilerplate — and a merge stitches the parts. The bet is the seam cut: if the planner miscuts, the merge reconciles parts that were never meant to go together. On a one-GPU box the planner and the specialists contend for the same seat — a three-way fan is really three queued calls plus the plan — so the honest form of the pattern is a mastered chain, not a genuinely parallel broadcast.
+**On the Grid stack.** A multi-file refactor: `qwen36-35b-a3b-mtp` (the strongest local reasoning model on the box) plans the change over the Claude Code (stream-json) lane, then the OpenClaw lane fans the sub-tasks to per-file workers — `qwen38-27b-mtp` for mechanical edits, `qwen3-coder` for boilerplate — and a merge stitches the parts. The bet is the seam cut: if the planner miscuts, the merge reconciles parts that were never meant to go together. On a one-GPU box the planner and the specialists contend for the same seat — a three-way fan is really three queued calls plus the plan — so the honest form of the pattern is a mastered chain, not a genuinely parallel broadcast.
 
 ---
 
@@ -495,7 +541,7 @@ def adversarial(request, read_a, read_b, judge):
     return verdict
 ```
 
-**On the Grid stack.** A contract-clause interpretation gets two adversarial reads — `qwen38-35b-a3b-mtp` and the cross-vendor `glm-5.2` on separate nodes — and a third lane judges. The judge is not a bigger same-family model (it would share the reads' blind spot): the honest judge here is **Hermes (ACP)** running a tool-grounded check — it re-reads the cited clause with a deterministic extraction against the contract text rather than ruling from vibes. Two same-family reads would be two runs of the same prior, so the divergence is a setup property (here, across vendor), not an instruction. When even the tool check can't decide (both reads cite incompatible groundings), the judge abstains and hands up to the human on the Grid Enterprise lane — the abstain exit is the part of #4 that usually collapses into #1, so the example tests it.
+**On the Grid stack.** A contract-clause interpretation gets two adversarial reads — `qwen36-35b-a3b-mtp` and the cross-vendor `glm-5.2` on separate nodes — and a third lane judges. The judge is not a bigger same-family model (it would share the reads' blind spot): the honest judge here is **Hermes (ACP)** running a tool-grounded check — it re-reads the cited clause with a deterministic extraction against the contract text rather than ruling from vibes. Two same-family reads would be two runs of the same prior, so the divergence is a setup property (here, across vendor), not an instruction. When even the tool check can't decide (both reads cite incompatible groundings), the judge abstains and hands up to the human on the Grid Enterprise lane — the abstain exit is the part of #4 that usually collapses into #1, so the example tests it.
 
 ---
 
@@ -567,92 +613,103 @@ def auto(request, inventory):
 
 **Related Patterns.** Every pattern; Pheromone Router (#14) is the learned Strategy.
 
-## 6. Brute-Force — many identical tries, keep the best
+## 6. Brute-Force — many approaches, keep the best
 
-![Brute-Force — a deck of identical workers, best of N into the answer](images/brute.svg)
+![Brute-Force — one goal fans into several approaches, then a deterministic selector keeps the best](images/brute.svg)
 
-**Intent.** Run N *identical* tries at the same rough draft and keep the best
-one. This is the "spin off twenty agents doing the same thing" mode, made
-literal.
+**Intent.** Spend a fixed budget on several independent, read-only approaches
+to the same goal, then keep the best result that passes an objective check.
+This is generate-and-test made literal: search broadly, verify cheaply, commit
+once.
 
-**Also Known As.** best-of-N selection; sampling without cleverness
+**Also Known As.** best-of-N selection; randomized restarts; generate-and-test
 
-**Motivation.** Some answers are found by coverage, not by cleverness — open a
-path, and the first N tries that stumble onto it are as good as any planner's
-guess. When tokens are free this becomes the *cheapest* kind of brute force:
-no ranker, no planner to get the seam wrong, just many tries and a selection
-step. This is best-of-N *selection* — family to self-consistency's *vote*: the
-established result that choosing beats a single greedy draw is Wang et al. 2022,
-though its headline is majority-voting over samples, so selection's own claim
-here is the weaker (and sufficient) one — best-of-N ≤ top-sample is never worse
-than one greedy draw, trivially, independent of iid. Keep the two un-blurred:
-self-consistency's vote has the fancy citation; Brute-Force's pick has the
-floor bound.
+**Motivation.** Some problems are easier to recognize than to construct: a
+test can identify a valid patch, a solver can check a witness, a schema can
+accept an artifact, but no planner knows which search path will reach it. Local
+inference makes breadth affordable. Give attempts different seeds, search
+orders, decompositions, or heuristics; let an objective gate reject them; stop
+when the budget or success condition binds. If each attempt has independent
+success probability *p*, N attempts find at least one success with probability
+`1 - (1 - p)^N`. Correlated attempts earn less, which is why "N copies of one
+prompt" is the degenerate form, not the design target.
 
-**Applicability.** Brute coverage beats cleverness — open a path and the
-first N tries that stumble onto it are as good as any planner's guess, and
-tokens are free. Avoid it when the answer is uniformly hard: the best of N
-bad tries is still a bad try, and coverage only raises the floor.
+**Applicability.** Use it when the solution space is broad, success is cheap
+to check, and several plausible approaches can search independently. Avoid it
+when quality is subjective or no external evaluator exists: "best" then means
+"most persuasive to another model," and N samples only amplify that bias.
 
-**Structure.** Terminal → dot → a **stack** (a deck of workers, drawn as one
-node several sheets deep — the count is a knob you don't have to name) →
-purple `best` → terminal. The deck is the whole point: literally many of the
-same.
+**Structure.** Terminal → fan → three visible green attempts (`direct`,
+`decompose`, `search`) → purple `test + select` → terminal. Three is only the
+diagram's readable stand-in for N. The fan communicates independent search;
+the single purple join communicates one deterministic decision and one result.
 
-**Mechanics.** The workers have *no* specialisation and *no* coordination —
-they are the same model, same prompt, hoping for different luck. The label
-"same rough draft" is the honest version of *give it a rough shot and let
-repetition win*. `best` is the only decision node, and its job is a *pick*,
-not a judgment — which means it has to be built as the pattern's *verifier*:
-every pass in this catalog has a decision somewhere, and #6's happens to be
-the selector. So "take the best" must be a deterministic gated rule (fits the
-schema, contains the required artifact, passes #8's check), never an LLM
-"pick the best one" — an LLM picker is just an un-verified verifier that
-rewards the most fluent sample, and it quietly upgrades this from coverage to
-judgment. Because several samples can pass the gate together, `best` needs a
-tie-break: name the rule in advance (first pass in submission order / cheapest
-of the passing / lowest token-cost-per-passing-sample), or the pick trails
-into exactly the fluent-picker arbitrariness the gate exists to kill.
+**Mechanics.** Every attempt receives the same goal and acceptance contract but
+a distinct search policy. Attempts do not coordinate, see one another's drafts,
+or act on the world. A fixed-concurrency executor runs at most the free-seat
+budget and may stop early once a result clears a sufficient score. `test +
+select` must be deterministic or externally grounded (tests passed, constraints
+satisfied, measured score), never an LLM asked which prose feels best. If
+several attempts pass, use a predeclared tie-break such as fewest failing tests,
+smallest valid patch, lowest latency, then stable submission order.
 
-**Consequences.** Lowest engineering cost of the whole set — selection beats
-voting, averaging, and verification. But it is the most sample-hungry: it
-spends N tokens for one answer with no more reliability signal than "one of
-these was best," and it cannot raise the ceiling — only the floor. That is a
-real statistical bound, not a slogan: under iid draws the best of N cannot
-beat the best sample in expectation (best-of-N ≤ top-sample), so Brute-Force
-buys a floor, never a ceiling. It shines on satisfiability-style problems
-(any valid answer wins), not on noise where the average is the truth — and if
-the "best" sample is still uniformly hard, the floor is where it always was.
+**Consequences.** The orchestration is simple and embarrassingly parallel, and
+its success probability can rise quickly when attempts fail independently. It
+is also sample-hungry, and diversity has a price: more prompts, seeds, or model
+families to maintain. It cannot repair a blind evaluator; optimizing N
+candidates against the wrong test produces a better test-gamer. On one GPU the
+fan is serialized, so the operator spends wall-clock instead of money.
 
-**Known Uses.** Best-of-N sampling (BoN): draw many candidates and keep the best by a metric, used to push RLHF reward margins; and 'keep sampling until a test passes' is brute-force retry in code/tool loops.
+**Known Uses.** Best-of-N test-time sampling, randomized-restart search,
+fuzzing, property-based generation, and "generate patches until the tests pass"
+all use the same shape: vary the search path, apply one objective oracle, retain
+one winner.
 
-**Failure mode.** The best of N bad tries is still a bad try. Brute coverage
-raises the floor; it does nothing for an answer that is uniformly hard.
+**Failure mode.** Apparent breadth is correlated repetition, or the evaluator
+rewards the wrong property. The first wastes N runs on one blind spot; the
+second selects the most effective exploit of that blind spot.
 
-**Refinements.** One more constraint turns the deck
-from a hazard into bounded coverage: **only one worker may act.** N identical
-tries is only safe if the workers are read-only. If a worker can call a tool
-or run code, N tries = N executions — cap N, and let only the selected worker
-act after the rest have run as simulation, not action. (The gated-selector
-rule is in Mechanics above; it is the pattern's verifier and must be
-deterministic.)
+**Refinements.** Three rules turn search breadth into bounded coverage.
+
+1. **Vary the search, not the acceptance contract.** Seeds, decompositions, and
+   heuristics may differ; the success test stays identical across attempts.
+2. **Measure realized diversity.** Log approach ids and output fingerprints; if
+   the pool collapses to clones, either inject a new approach or stop paying for
+   pretend breadth. #11 formalizes the stronger version that hard-filters
+   duplicates before pooling.
+3. **Only one worker may act.** N attempts are safe only as read-only sandboxes.
+   The selected result crosses a separate, idempotent commit gate exactly once.
 
 **Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
 ```python
-def brute_force(request, worker, n, gate, tie_break):
-    drafts = [worker(request) for _ in range(n)]   # N identical, read-only tries
-    passing = [d for d in drafts if gate(d)]        # deterministic gate, never an LLM picker
+def brute_force(request, approaches, executor, check, tie_break):
+    attempts = executor.map(                         # fixed concurrency; read-only sandboxes
+        lambda approach: run(request, approach, read_only=True),
+        approaches,
+    )
+    scored = [(attempt, check(attempt)) for attempt in attempts]
+    passing = [(attempt, score) for attempt, score in scored if score.passed]
     if not passing:
-        return None                                 # a floor, not a ceiling
-    best = tie_break(passing)                       # pre-named: first pass / cheapest
-    return best                                     # losers were simulation; only `best` may act
+        return refuse("no approach passed", attempts=len(attempts))
+    winner = tie_break(passing)                      # objective score, then stable rule
+    return commit_once(winner, key=request.round_id) # one actor after N simulations
 ```
 
-**On the Grid stack.** A self-contained unit test must be right, so the router runs eight identical tries of `qwen3-coder` over the Hermes lane and keeps the best by test pass. The example enforces the hard rule: only the selected worker may act. If the workers can call tools or run code, eight tries is eight executions — so the losing tries run as pure simulation and the single winner is the only one allowed to write or execute. With a single executor seat, those eight tries are eight serialized runs; the count is a knob, and the local win is that the seven losers cost tokens you never paid for, not that they ran in parallel.
+**On the Grid stack.** A failing concurrency test gets six read-only patch
+attempts: `Qwen3.8-27B` tries the smallest lock-order change and a decomposition
+by call path, `DeepSeek-V4-Flash` tries a counterexample-first search, and three
+seeded restarts explore other minimal diffs. The same test suite and patch-size
+tie-break judge all six. On a one-seat home box they run serially; on a grid
+they fill only free seats. Five losers never touch the working tree. The one
+passing patch crosses the `round_id` commit gate once. The local advantage is
+not magical parallelism—it is six serious attempts with no six-call API bill or
+daily allowance consumed.
 
 ---
 
-**Related Patterns.** Fan-Out (#2) votes and Brute-Force picks; Verifier Gate (#8) supplies the deterministic gate #6's `best` needs.
+**Related Patterns.** Fan-Out (#2) votes while Brute-Force selects; Verifier
+Gate (#8) supplies the objective check; Negative Selection (#11) rejects
+correlated attempts when approach labels alone do not create real diversity.
 
 ## 7. Ensemble — same prompt, keep the average
 
@@ -722,7 +779,7 @@ def ensemble(request, workers, trim=0.2):
     return est, spread                              # the average with its dispersion, never mean alone
 ```
 
-**On the Grid stack.** A numeric forecast request runs the same prompt on `qwen38-27b-mtp`, `qwen38-35b-a3b-mtp`, and `glm-5.2` over three lanes and averages. The example's point: if the three are correlated (two share the Qwen training tail), the ensemble has low variance and the wrong needle — averaging bakes in the shared bias. #12's covariance fix answers exactly this. The honest caveat rides on the report: a mean without its dispersion looks more certain than it is, and one garbage sample (a hallucinated huge number) drags a plain mean — which is why a median or trimmed-mean with outlier rejection is the defensible pooling rule here, not the arithmetic mean.
+**On the Grid stack.** A numeric forecast request runs the same prompt on `qwen38-27b-mtp`, `qwen36-35b-a3b-mtp`, and `glm-5.2` over three lanes and averages. The example's point: if the three are correlated (two share the Qwen training tail), the ensemble has low variance and the wrong needle — averaging bakes in the shared bias. #12's covariance fix answers exactly this. The honest caveat rides on the report: a mean without its dispersion looks more certain than it is, and one garbage sample (a hallucinated huge number) drags a plain mean — which is why a median or trimmed-mean with outlier rejection is the defensible pooling rule here, not the arithmetic mean.
 
 ---
 
@@ -891,7 +948,7 @@ def debate(request, read_a, read_b, judge, k=3):
     return verdict
 ```
 
-**On the Grid stack.** Two reads of `qwen38-35b-a3b-mtp` and `qwen38-27b-mtp` loop until they agree on a borderline design call. Same-family reads converge fast — so this pattern only earns its loop if the reads are forced apart (two families, or a devil's-advocate framing on one side); otherwise "agreement" is both priming errors certified over K rounds, which is worse than #4's single quiet slip. The example logs per-round deltas: a prompt convergence is a success, and an oscillation that never converges is a signal to stop and hand the call to a non-debate arbiter — a tool check, a bigger model, or the human.
+**On the Grid stack.** Two reads of `qwen36-35b-a3b-mtp` and `qwen38-27b-mtp` loop until they agree on a borderline design call. Same-family reads converge fast — so this pattern only earns its loop if the reads are forced apart (two families, or a devil's-advocate framing on one side); otherwise "agreement" is both priming errors certified over K rounds, which is worse than #4's single quiet slip. The example logs per-round deltas: a prompt convergence is a success, and an oscillation that never converges is a signal to stop and hand the call to a non-debate arbiter — a tool check, a bigger model, or the human.
 
 ---
 
@@ -1059,7 +1116,7 @@ def negative_selection(request, reads, judge):
     return judge(a, b)                                    # judge only the forced-divergent pair
 ```
 
-**On the Grid stack.** Before judging divergent answers, the router forces divergence by construction — asking a `qwen38-35b-a3b-mtp` worker and a `glm-5.2` worker each to state *what it would not say* — then judges on `qwen38-27b-mtp`. In a diverse-by-construction pool the two-family split is the point: a same-family pair fails the screen almost by definition. The example exposes that the model-distinguishability distance is a hidden dependency: the judge's reproducibility depends on the embedding being pinned, so the divergence metric must live in the metric-determinism trust class, not be treated as arithmetic.
+**On the Grid stack.** Before judging divergent answers, the router forces divergence by construction — asking a `qwen36-35b-a3b-mtp` worker and a `glm-5.2` worker each to state *what it would not say* — then judges on `qwen38-27b-mtp`. In a diverse-by-construction pool the two-family split is the point: a same-family pair fails the screen almost by definition. The example exposes that the model-distinguishability distance is a hidden dependency: the judge's reproducibility depends on the embedding being pinned, so the divergence metric must live in the metric-determinism trust class, not be treated as arithmetic.
 
 ---
 
@@ -1144,7 +1201,7 @@ def markowitz(request, models, cov):
     return blend(models, weights, covariance=cov.sha())   # attrib the blend: caller sees it's a blend
 ```
 
-**On the Grid stack.** A demand forecast is not averaged but correlation-weighted: two same-family models (`qwen38-27b-mtp`, `qwen38-35b-a3b-mtp`) contribute *less* than their count because they track each other's errors, while the cross-vendor `glm-5.2` earns a heavier weight for being negatively/noisily correlated. The covariance must be computed over **labeled outcomes, not raw disagreement** — two models agreeing-wrong together is the correlation that matters, and same-model disagreement is a consistency signal, not an error. The example exposes that the returned value is a blend with no single contributing answer — the envelope must carry `usage.output_blend` with the model weights and the covariance-matrix hash, so the caller knows what it actually got, and on a model with no history it must degrade to a plain average and say so (`usage.weighting: unmeasured`).
+**On the Grid stack.** A demand forecast is not averaged but correlation-weighted: two same-family models (`qwen38-27b-mtp`, `qwen36-35b-a3b-mtp`) contribute *less* than their count because they track each other's errors, while the cross-vendor `glm-5.2` earns a heavier weight for being negatively/noisily correlated. The covariance must be computed over **labeled outcomes, not raw disagreement** — two models agreeing-wrong together is the correlation that matters, and same-model disagreement is a consistency signal, not an error. The example exposes that the returned value is a blend with no single contributing answer — the envelope must carry `usage.output_blend` with the model weights and the covariance-matrix hash, so the caller knows what it actually got, and on a model with no history it must degrade to a plain average and say so (`usage.weighting: unmeasured`).
 
 ---
 
@@ -1449,7 +1506,7 @@ def byzantine_adjudicator(request, workers, n, k=3):
     return judge(full_fan(request, n))                # adversarial: spend the expensive path on purpose
 ```
 
-**On the Grid stack.** When three workers disagree on a sensitive request, the router distinguishes *noise* (answers scatter, a small N fixes it) from *byzantine* (answers cluster into two confident camps — the same-family signature of a shared wrong prior, which a bare majority lets win) and spends more samples on the adversarial case. The escalated adjudicator can only break the shared prior if it is genuinely divergent *from the camp*: on a same-vendor stack, the designated judge `qwen38-35b-a3b-mtp` is the same family as the fighting Qwen workers, so it shares their blind spot and the "structurally divergent arbiter" the Byzantine premise requires may not exist — verify judge-family diversity *before* escalating, else route to a cross-vendor (`glm-5.2`), a tool-grounded check, or the human. The camp test must be numeric (≥60% in one cluster, ≤1 middle), and the classifier fires before the vote commits — the worst case silently pays fan-out + classification + a whole #4, so sniff with a small N first before committing to the full fan. Every escalation surfaces `usage.escalation_depth` and `usage.divergence_shape` visibly, because this adjudicator is the most dangerous node in the catalog.
+**On the Grid stack.** When three workers disagree on a sensitive request, the router distinguishes *noise* (answers scatter, a small N fixes it) from *byzantine* (answers cluster into two confident camps — the same-family signature of a shared wrong prior, which a bare majority lets win) and spends more samples on the adversarial case. The escalated adjudicator can only break the shared prior if it is genuinely divergent *from the camp*: on a same-vendor stack, the designated judge `qwen36-35b-a3b-mtp` is the same family as the fighting Qwen workers, so it shares their blind spot and the "structurally divergent arbiter" the Byzantine premise requires may not exist — verify judge-family diversity *before* escalating, else route to a cross-vendor (`glm-5.2`), a tool-grounded check, or the human. The camp test must be numeric (≥60% in one cluster, ≤1 middle), and the classifier fires before the vote commits — the worst case silently pays fan-out + classification + a whole #4, so sniff with a small N first before committing to the full fan. Every escalation surfaces `usage.escalation_depth` and `usage.divergence_shape` visibly, because this adjudicator is the most dangerous node in the catalog.
 
 ---
 
@@ -1617,7 +1674,7 @@ def materialized(request, key, compute):
     return answer, {"x-grid-cache": "miss"}
 ```
 
-**On the Grid stack.** A repeated request hits the materialized cache by semantic key (`x-grid-cache: hit|miss`) instead of recomputing — e.g. a "summarize this repo" on `qwen38-35b-a3b-mtp` over the Claude Code (stream-json) lane, where the cache key is the (request-class, repo-fingerprint, model) triple and the hit returns in mate-in-one time. The example places a confidence floor and a verifier identity on every entry and invalidates on doubt — because a cache serializes a verification error globally: one rubber-stamped "verified" write-back serves that wrong answer to every future requester. The cached answer is never more trusted than the check that wrote it, and the fingerprint + staleness go in the `x-grid-cache-fingerprint` / `x-grid-cache-staleness` envelope, with a `bypass`/`fresh` path so a user debugging current data is never served a stale hit against their will.
+**On the Grid stack.** A repeated request hits the materialized cache by semantic key (`x-grid-cache: hit|miss`) instead of recomputing — e.g. a "summarize this repo" on `qwen36-35b-a3b-mtp` over the Claude Code (stream-json) lane, where the cache key is the (request-class, repo-fingerprint, model) triple and the hit returns in mate-in-one time. The example places a confidence floor and a verifier identity on every entry and invalidates on doubt — because a cache serializes a verification error globally: one rubber-stamped "verified" write-back serves that wrong answer to every future requester. The cached answer is never more trusted than the check that wrote it, and the fingerprint + staleness go in the `x-grid-cache-fingerprint` / `x-grid-cache-staleness` envelope, with a `bypass`/`fresh` path so a user debugging current data is never served a stale hit against their will.
 
 ---
 
@@ -2019,7 +2076,7 @@ def delphi_consensus(request, workers, min_rounds, round_cap, bar):
     return escalate(est)                              # round cap refuses/escalates, never rubber-stamps a tight-wrong
 ```
 
-**On the Grid stack.** A sensitive estimate runs in anonymous rounds — each worker privately writes a number and a reason, sees only the median and interquartile spread, and revises until the spread closes. `qwen38-27b-mtp`, `qwen38-35b-a3b-mtp`, and the cross-vendor `glm-5.2` participate under `round_id`-keyed anonymity over the OpenClaw lane. The single-node cost must be owned: three models that don't co-reside on a 1-GPU/Apple box turn "rounds" into serial VRAM swaps, so **Delphi on one box is sequential re-loads, not parallel rounds** — the round cap is not a nicety here, it is the difference between a measured estimate and a thrash. The anonymity is scoped, not absolute: per-outlier targeting ("you're an outlier, defend yourself") and movement-logging both require the router to hold the worker→number mapping, so the attribution is retained only long enough to run the rounds and audited for leaks — or the pattern must pick one and drop the other. The example earns the median only while the anonymity, the iteration, and the minimum-rounds floor all hold — the moment any breaks, it collapses into #7 with extra steps.
+**On the Grid stack.** A sensitive estimate runs in anonymous rounds — each worker privately writes a number and a reason, sees only the median and interquartile spread, and revises until the spread closes. `qwen38-27b-mtp`, `qwen36-35b-a3b-mtp`, and the cross-vendor `glm-5.2` participate under `round_id`-keyed anonymity over the OpenClaw lane. The single-node cost must be owned: three models that don't co-reside on a 1-GPU/Apple box turn "rounds" into serial VRAM swaps, so **Delphi on one box is sequential re-loads, not parallel rounds** — the round cap is not a nicety here, it is the difference between a measured estimate and a thrash. The anonymity is scoped, not absolute: per-outlier targeting ("you're an outlier, defend yourself") and movement-logging both require the router to hold the worker→number mapping, so the attribution is retained only long enough to run the rounds and audited for leaks — or the pattern must pick one and drop the other. The example earns the median only while the anonymity, the iteration, and the minimum-rounds floor all hold — the moment any breaks, it collapses into #7 with extra steps.
 
 ---
 
@@ -2115,7 +2172,7 @@ def trial_sequential(klass, model, incumbent, effect_size, ledger):
             return refuse(klass, model, reason, usage(learner_eta_days=eta, learner_starved=True))
 ```
 
-**On the Grid stack.** The learner is deciding whether `qwen38-35b-a3b-mtp`
+**On the Grid stack.** The learner is deciding whether `qwen36-35b-a3b-mtp`
 (local, 32GB Apple silicon) deserves to steal real requests from the incumbent
 `laguna-s-2.1` pin on structured extraction. The router has pre-registered
 N = 200 verified outcomes for that {class, model} from an estimated effect
@@ -2435,7 +2492,7 @@ def condorcet_pool(request, voters, candidates):
 
 **On the Grid stack.** Three models land three mutually exclusive readings of
 a genuinely ambiguous request — `qwen38-27b-mtp` takes the literal parse, the
-bigger `qwen38-35b-a3b-mtp` the contextual one, `glm-5.2` a third — 4/3/3,
+bigger `qwen36-35b-a3b-mtp` the contextual one, `glm-5.2` a third — 4/3/3,
 where the plurality lead is not the group's preferred answer. Instead of
 crowning the 4-vote faction, each voter states a preference order over the
 three answers and the router tallies the tournament: the answer that beats
@@ -2690,7 +2747,7 @@ def thompson_router(request, klass, arms, posterior, breaker, capacity):
 ```
 
 **On the Grid stack.** A request-class is split between `qwen38-27b-mtp` and
-the bigger `qwen38-35b-a3b-mtp`; an older habit has the router favoring A for
+the bigger `qwen36-35b-a3b-mtp`; an older habit has the router favoring A for
 "interpretation" requests. Its Thompson bank says A's posterior is confident,
 B's is wide — so B *still gets pulled* on class-23's harder requests, proves
 faster on the tail, and the posterior concentrates onto B within a week —

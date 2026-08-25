@@ -1,7 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2044 13244" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2044 15586" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
 <title id="t">model orchestration patterns — all figures</title>
-<rect width="2044" height="13244" fill="#fff"/>
-<g transform="translate(30,40)">
+<rect width="2044" height="15586" fill="#fff"/>
+<text x="40" y="65" fill="#2b2b29" font-size="28" font-weight="700">Mate-in-One</text>
+<text x="40" y="97" fill="#2b2b29" font-size="23">pick the best fit</text>
+<g transform="translate(30,118)">
 
   <title id="t">Mate-in-One — pick the best fit</title>
   <defs>
@@ -17,10 +19,9 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1188" height="214" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Mate-in-One — pick the best fit</text>
   <text x="216" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">one prompt</text>
   <text x="514" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">best fit</text>
-  <text x="849" y="74" text-anchor="middle" fill="#2b2b29" font-size="20">a single answer</text>
+  <text x="849" y="73" text-anchor="middle" fill="#2b2b29" font-size="20">a single answer</text>
   <path d="M 120 92 C 216 92, 216 92, 312 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 92 C 514 92, 514 92, 605 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 750 92 C 849 92, 849 92, 948 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -34,7 +35,9 @@
   <text x="1020" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,344)">
+<text x="40" y="447" fill="#2b2b29" font-size="28" font-weight="700">Fan-Out</text>
+<text x="40" y="479" fill="#2b2b29" font-size="23">same prompt, N answers, a vote</text>
+<g transform="translate(30,500)">
 
   <title id="t">Fan-Out — same prompt, N answers, a vote</title>
   <defs>
@@ -50,7 +53,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1520" height="568" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Fan-Out — same prompt, N answers, a vote</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
   <text x="1172" y="295" text-anchor="middle" fill="#2b2b29" font-size="23">a single answer</text>
   <text x="1095" y="327" text-anchor="start" fill="#2b2b29" font-size="23">ties → expand</text>
@@ -81,7 +83,9 @@
   <text x="1352" y="456" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,1002)">
+<text x="40" y="1183" fill="#2b2b29" font-size="28" font-weight="700">Master / Slave</text>
+<text x="40" y="1215" fill="#2b2b29" font-size="23">a planner splits the job</text>
+<g transform="translate(30,1236)">
 
   <title id="t">Master / Slave — a planner splits the job</title>
   <defs>
@@ -97,10 +101,9 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1582" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Master / Slave — a planner splits the job</text>
-  <text x="204" y="192" text-anchor="middle" fill="#2b2b29" font-size="21">plan + split</text>
+  <text x="204" y="191" text-anchor="middle" fill="#2b2b29" font-size="21">plan + split</text>
   <text x="490" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">specialists</text>
-  <text x="1246" y="192" text-anchor="middle" fill="#2b2b29" font-size="19">a single answer</text>
+  <text x="1246" y="191" text-anchor="middle" fill="#2b2b29" font-size="19">a single answer</text>
   <path d="M 120 210 C 204 210, 204 210, 287 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 449 210 C 552 210, 552 92, 655 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 449 210 C 548 210, 548 328, 647 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -121,7 +124,9 @@
   <text x="1413" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,1542)">
+<text x="40" y="1801" fill="#2b2b29" font-size="28" font-weight="700">Adversarial</text>
+<text x="40" y="1833" fill="#2b2b29" font-size="23">two careful reads, a judge</text>
+<g transform="translate(30,1854)">
 
   <title id="t">Adversarial — two careful reads, a judge</title>
   <defs>
@@ -137,7 +142,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1504" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Adversarial — two careful reads, a judge</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">careful disagreement</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -158,7 +162,9 @@
   <text x="1335" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,2082)">
+<text x="40" y="2419" fill="#2b2b29" font-size="28" font-weight="700">Strategy</text>
+<text x="40" y="2451" fill="#2b2b29" font-size="23">each request chooses a pattern</text>
+<g transform="translate(30,2472)">
 
   <title id="t">Strategy — each request chooses a pattern</title>
   <defs>
@@ -174,8 +180,7 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1340" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Strategy — each request chooses a pattern</text>
-  <text x="187" y="192" text-anchor="middle" fill="#2b2b29" font-size="16">each request</text>
+  <text x="187" y="190" text-anchor="middle" fill="#2b2b29" font-size="16">each request</text>
   <text x="490" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">cost × speed × needs</text>
   <path d="M 120 210 C 187 210, 187 210, 254 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 482 210 C 598 210, 598 92, 714 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -198,9 +203,11 @@
   <text x="1171" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,2622)">
+<text x="40" y="3037" fill="#2b2b29" font-size="28" font-weight="700">Brute-Force</text>
+<text x="40" y="3069" fill="#2b2b29" font-size="23">many approaches, keep the best</text>
+<g transform="translate(30,3090)">
 
-  <title id="t">Brute-Force — many identical tries, keep the best</title>
+  <title id="t">Brute-Force — many approaches, keep the best</title>
   <defs>
     <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
@@ -213,140 +220,39 @@
     <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
-  <rect width="1654" height="214" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Brute-Force — many identical tries, keep the best</text>
-  <text x="464" y="43" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
-  <text x="972" y="74" text-anchor="middle" fill="#2b2b29" font-size="21">a pick, not a judgment</text>
-  <path d="M 120 92 C 219 92, 219 92, 318 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 418 92 C 464 92, 464 92, 510 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 822 92 C 972 92, 972 92, 1121 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1232 92 C 1323 92, 1323 92, 1414 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <rect x="20" y="59" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="70" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
-  <circle cx="368" cy="92" r="9" fill="#2b2b29"/>
-  <rect x="502" y="51" width="313" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
-  <rect x="494" y="43" width="313" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
-  <rect x="510" y="59" width="313" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="666" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">same rough draft</text>
-  <text x="666" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">N identical</text>
-  <text x="666" y="161" text-anchor="middle" fill="#2b2b29" font-size="21">a stack — many of the same</text>
-  <rect x="1121" y="59" width="111" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="1177" y="102" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">best</text>
-  <rect x="1414" y="59" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1486" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
-
-</g>
-<g transform="translate(30,2926)">
-
-  <title id="t">Verifier Gate — one draft, a check, retry on fail</title>
-  <defs>
-    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-  </defs>
-  <rect width="1188" height="214" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Verifier Gate — one draft, a check, retry on fail</text>
-  <text x="212" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">one try</text>
-  <text x="853" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">ok</text>
-  <text x="288" y="147" text-anchor="end" fill="#2b2b29" font-size="23">fail → retry</text>
-  <path d="M 120 92 C 212 92, 212 92, 304 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 432 92 C 531 92, 531 92, 630 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 758 92 C 853 92, 853 92, 948 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 758 92 C 897 92, 897 165, 827 165 C 165 165, 165 92, 304 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <rect x="20" y="59" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="70" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
-  <rect x="304" y="59" width="128" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="368" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">draft</text>
-  <rect x="630" y="59" width="128" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="694" y="102" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">check</text>
-  <rect x="948" y="59" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1020" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
-
-</g>
-<g transform="translate(30,3230)">
-
-  <title id="t">Debate — two reads that loop until they agree</title>
-  <defs>
-    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-  </defs>
-  <rect width="1504" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Debate — two reads that loop until they agree</text>
-  <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">careful disagreement</text>
-  <text x="1168" y="192" text-anchor="middle" fill="#2b2b29" font-size="19">a single answer</text>
-  <text x="302" y="399" text-anchor="end" fill="#2b2b29" font-size="23">disagree → again</text>
+  <rect width="1764" height="450" fill="#fff"/>
+  <text x="219" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">same goal</text>
+  <text x="1394" y="191" text-anchor="middle" fill="#2b2b29" font-size="21">one verified winner</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 418 210 C 506 210, 506 328, 594 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 738 92 C 842 92, 842 210, 945 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 738 328 C 842 328, 842 210, 945 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1073 210 C 1168 210, 1168 210, 1262 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1073 210 C 1239 210, 1239 417, 1156 417 C 152 417, 152 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 474 210, 474 92, 531 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 474 210, 474 210, 531 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 474 210, 474 328, 531 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 801 92 C 902 92, 902 210, 1003 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 801 210 C 902 210, 902 210, 1003 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 801 328 C 902 328, 902 210, 1003 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1265 210 C 1394 210, 1394 210, 1522 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
   <circle cx="368" cy="210" r="9" fill="#2b2b29"/>
-  <rect x="594" y="59" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="666" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read A</text>
-  <rect x="594" y="295" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="666" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read B</text>
-  <rect x="945" y="177" width="128" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="1009" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">judge</text>
-  <rect x="1262" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1335" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <rect x="531" y="59" width="270" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">direct</text>
+  <text x="666" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">minimal change</text>
+  <rect x="531" y="177" width="270" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">decompose</text>
+  <text x="666" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">split problem</text>
+  <rect x="531" y="295" width="270" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">search + test</text>
+  <text x="666" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">counterexample</text>
+  <rect x="1003" y="177" width="262" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1134" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">test + select</text>
+  <text x="1134" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">one deterministic gate</text>
+  <rect x="1522" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1594" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,3770)">
-
-  <title id="t">Pipeline — each step consumes the last</title>
-  <defs>
-    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
-    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
-  </defs>
-  <rect width="1892" height="214" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Pipeline — each step consumes the last</text>
-  <path d="M 120 92 C 212 92, 212 92, 304 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 432 92 C 518 92, 518 92, 605 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 783 92 C 895 92, 895 92, 1006 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1134 92 C 1233 92, 1233 92, 1332 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1460 92 C 1555 92, 1555 92, 1650 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <rect x="20" y="59" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="70" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
-  <rect x="304" y="59" width="128" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="368" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">scout</text>
-  <rect x="605" y="59" width="178" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="694" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">manifest</text>
-  <rect x="1006" y="59" width="128" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1070" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">write</text>
-  <rect x="1332" y="59" width="128" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1396" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">check</text>
-  <rect x="1650" y="59" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1722" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
-
-</g>
-<g transform="translate(30,4074)">
+<text x="40" y="3655" fill="#2b2b29" font-size="28" font-weight="700">Ensemble</text>
+<text x="40" y="3687" fill="#2b2b29" font-size="23">same prompt, keep the average</text>
+<g transform="translate(30,3708)">
 
   <title id="t">Ensemble — same prompt, keep the average</title>
   <defs>
@@ -362,9 +268,8 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1486" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Ensemble — same prompt, keep the average</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
-  <text x="1155" y="192" text-anchor="middle" fill="#2b2b29" font-size="14">average the answers</text>
+  <text x="1155" y="189" text-anchor="middle" fill="#2b2b29" font-size="14">average the answers</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 210, 594 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -388,9 +293,11 @@
   <text x="1318" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,4614)">
+<text x="40" y="4273" fill="#2b2b29" font-size="28" font-weight="700">Verifier Gate</text>
+<text x="40" y="4305" fill="#2b2b29" font-size="23">one draft, a check, retry on fail</text>
+<g transform="translate(30,4326)">
 
-  <title id="t">Markowitz Ensemble — correlation-weighted, not just averaged</title>
+  <title id="t">Verifier Gate — one draft, a check, retry on fail</title>
   <defs>
     <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
@@ -403,34 +310,105 @@
     <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
-  <rect width="1638" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Markowitz Ensemble — correlation-weighted, not just averaged</text>
-  <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
+  <rect width="1188" height="214" fill="#fff"/>
+  <text x="212" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">one try</text>
+  <text x="853" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">ok</text>
+  <text x="288" y="147" text-anchor="end" fill="#2b2b29" font-size="23">fail → retry</text>
+  <path d="M 120 92 C 212 92, 212 92, 304 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 432 92 C 531 92, 531 92, 630 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 758 92 C 853 92, 853 92, 948 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 758 92 C 897 92, 897 165, 827 165 C 165 165, 165 92, 304 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="20" y="59" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="304" y="59" width="128" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="368" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">draft</text>
+  <rect x="630" y="59" width="128" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="694" y="102" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">check</text>
+  <rect x="948" y="59" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1020" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+
+</g>
+<text x="40" y="4655" fill="#2b2b29" font-size="28" font-weight="700">Debate</text>
+<text x="40" y="4687" fill="#2b2b29" font-size="23">two reads that loop until they agree</text>
+<g transform="translate(30,4708)">
+
+  <title id="t">Debate — two reads that loop until they agree</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1504" height="450" fill="#fff"/>
+  <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">careful disagreement</text>
+  <text x="1168" y="191" text-anchor="middle" fill="#2b2b29" font-size="19">a single answer</text>
+  <text x="302" y="399" text-anchor="end" fill="#2b2b29" font-size="23">disagree → again</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 418 210 C 506 210, 506 210, 594 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 328, 594 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 738 92 C 808 92, 808 210, 878 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 738 210 C 808 210, 808 210, 878 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 738 328 C 808 328, 808 210, 878 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1140 210 C 1268 210, 1268 210, 1397 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 738 92 C 842 92, 842 210, 945 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 738 328 C 842 328, 842 210, 945 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1073 210 C 1168 210, 1168 210, 1262 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1073 210 C 1239 210, 1239 417, 1156 417 C 152 417, 152 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
   <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
   <circle cx="368" cy="210" r="9" fill="#2b2b29"/>
   <rect x="594" y="59" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="666" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
-  <rect x="594" y="177" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="666" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <text x="666" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read A</text>
   <rect x="594" y="295" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="666" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
-  <rect x="878" y="177" width="262" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="1009" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">weighted mean</text>
-  <text x="1009" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">correlation-weighted</text>
-  <rect x="1397" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1469" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <text x="666" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read B</text>
+  <rect x="945" y="177" width="128" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1009" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">judge</text>
+  <rect x="1262" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1335" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,5154)">
+<text x="40" y="5273" fill="#2b2b29" font-size="28" font-weight="700">Pipeline</text>
+<text x="40" y="5305" fill="#2b2b29" font-size="23">each step consumes the last</text>
+<g transform="translate(30,5326)">
+
+  <title id="t">Pipeline — each step consumes the last</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1892" height="214" fill="#fff"/>
+  <path d="M 120 92 C 212 92, 212 92, 304 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 432 92 C 518 92, 518 92, 605 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 783 92 C 895 92, 895 92, 1006 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1134 92 C 1233 92, 1233 92, 1332 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1460 92 C 1555 92, 1555 92, 1650 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="20" y="59" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="304" y="59" width="128" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="368" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">scout</text>
+  <rect x="605" y="59" width="178" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="694" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">manifest</text>
+  <rect x="1006" y="59" width="128" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1070" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">write</text>
+  <rect x="1332" y="59" width="128" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1396" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">check</text>
+  <rect x="1650" y="59" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1722" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+
+</g>
+<text x="40" y="5655" fill="#2b2b29" font-size="28" font-weight="700">Negative Selection</text>
+<text x="40" y="5687" fill="#2b2b29" font-size="23">force divergence before you judge</text>
+<g transform="translate(30,5708)">
 
   <title id="t">Negative Selection — force divergence before you judge</title>
   <defs>
@@ -446,7 +424,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1964" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Negative Selection — force divergence before you judge</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -475,7 +452,52 @@
   <text x="1795" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,5694)">
+<text x="40" y="6273" fill="#2b2b29" font-size="28" font-weight="700">Markowitz Ensemble</text>
+<text x="40" y="6305" fill="#2b2b29" font-size="23">correlation-weighted, not just averaged</text>
+<g transform="translate(30,6326)">
+
+  <title id="t">Markowitz Ensemble — correlation-weighted, not just averaged</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1638" height="450" fill="#fff"/>
+  <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
+  <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 506 210, 506 210, 594 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 506 210, 506 328, 594 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 738 92 C 808 92, 808 210, 878 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 738 210 C 808 210, 808 210, 878 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 738 328 C 808 328, 808 210, 878 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1140 210 C 1268 210, 1268 210, 1397 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="368" cy="210" r="9" fill="#2b2b29"/>
+  <rect x="594" y="59" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="594" y="177" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="594" y="295" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="878" y="177" width="262" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1009" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">weighted mean</text>
+  <text x="1009" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">correlation-weighted</text>
+  <rect x="1397" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1469" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+
+</g>
+<text x="40" y="6891" fill="#2b2b29" font-size="28" font-weight="700">PID Confidence Loop</text>
+<text x="40" y="6923" fill="#2b2b29" font-size="23">a budget that tracks error, history, trend</text>
+<g transform="translate(30,6944)">
 
   <title id="t">PID Confidence Loop — a budget that tracks error, history, trend</title>
   <defs>
@@ -491,7 +513,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1616" height="214" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">PID Confidence Loop — a budget that tracks error, history, trend</text>
   <text x="284" y="163" text-anchor="end" fill="#2b2b29" font-size="23">P · I · D re-command</text>
   <path d="M 120 92 C 195 92, 195 92, 270 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 466 92 C 573 92, 573 92, 680 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -512,7 +533,9 @@
   <text x="1447" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,5998)">
+<text x="40" y="7273" fill="#2b2b29" font-size="28" font-weight="700">Pheromone Router</text>
+<text x="40" y="7305" fill="#2b2b29" font-size="23">learn which shape wins, with decay</text>
+<g transform="translate(30,7326)">
 
   <title id="t">Pheromone Router — learn which shape wins, with decay</title>
   <defs>
@@ -528,7 +551,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1256" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Pheromone Router — learn which shape wins, with decay</text>
   <text x="470" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">learned weights</text>
   <text x="477" y="399" text-anchor="end" fill="#2b2b29" font-size="23">verified → reinforce, others decay</text>
   <path d="M 120 210 C 208 210, 208 210, 296 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -554,7 +576,9 @@
   <text x="1087" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,6538)">
+<text x="40" y="7891" fill="#2b2b29" font-size="28" font-weight="700">Byzantine Adjudicator</text>
+<text x="40" y="7923" fill="#2b2b29" font-size="23">dose spend by the shape of doubt</text>
+<g transform="translate(30,7944)">
 
   <title id="t">Byzantine Adjudicator — dose spend by the shape of doubt</title>
   <defs>
@@ -570,7 +594,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1554" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Byzantine Adjudicator — dose spend by the shape of doubt</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -596,7 +619,9 @@
   <text x="1385" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,7078)">
+<text x="40" y="8509" fill="#2b2b29" font-size="28" font-weight="700">Straggler Backup</text>
+<text x="40" y="8541" fill="#2b2b29" font-size="23">duplicate only the overdue worker</text>
+<g transform="translate(30,8562)">
 
   <title id="t">Straggler Backup — duplicate only the overdue worker</title>
   <defs>
@@ -612,11 +637,10 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="880" height="332" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Straggler Backup — duplicate only the overdue worker</text>
   <text x="208" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">one try</text>
-  <text x="539" y="74" text-anchor="middle" fill="#2b2b29" font-size="20">a single answer</text>
-  <text x="368" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">overdue</text>
-  <text x="560" y="138" text-anchor="middle" fill="#2b2b29" font-size="23">first to finish</text>
+  <text x="539" y="73" text-anchor="middle" fill="#2b2b29" font-size="20">a single answer</text>
+  <text x="368" y="148" text-anchor="middle" fill="#2b2b29" font-size="23">overdue</text>
+  <text x="560" y="148" text-anchor="middle" fill="#2b2b29" font-size="23">first to finish</text>
   <path d="M 120 92 C 208 92, 208 92, 296 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 440 92 C 539 92, 539 92, 638 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 368 125 C 368 151, 368 151, 368 177" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
@@ -632,7 +656,9 @@
   <text x="368" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">over budget → spawn</text>
 
 </g>
-<g transform="translate(30,7500)">
+<text x="40" y="9009" fill="#2b2b29" font-size="28" font-weight="700">Materialized Answer</text>
+<text x="40" y="9041" fill="#2b2b29" font-size="23">cache the verified answer by a semantic key</text>
+<g transform="translate(30,9062)">
 
   <title id="t">Materialized Answer — cache the verified answer by a semantic key</title>
   <defs>
@@ -648,10 +674,9 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1206" height="332" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Materialized Answer — cache the verified answer by a semantic key</text>
   <text x="694" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">hit → short-circuits</text>
-  <text x="510" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">miss → compute</text>
-  <text x="861" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">verified → cache</text>
+  <text x="510" y="148" text-anchor="middle" fill="#2b2b29" font-size="23">miss → compute</text>
+  <text x="861" y="148" text-anchor="middle" fill="#2b2b29" font-size="23">verified → cache</text>
   <path d="M 120 92 C 216 92, 216 92, 312 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 92 C 694 92, 694 92, 964 92" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
   <path d="M 424 92 C 510 92, 510 210, 596 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -667,7 +692,9 @@
   <text x="1037" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,7922)">
+<text x="40" y="9509" fill="#2b2b29" font-size="28" font-weight="700">Canary Trust-Equity</text>
+<text x="40" y="9541" fill="#2b2b29" font-size="23">earn a vote before you ever cast one</text>
+<g transform="translate(30,9562)">
 
   <title id="t">Canary Trust-Equity — earn a vote before you ever cast one</title>
   <defs>
@@ -683,10 +710,9 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1598" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Canary Trust-Equity — earn a vote before you ever cast one</text>
-  <text x="195" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">same request</text>
+  <text x="195" y="148" text-anchor="middle" fill="#2b2b29" font-size="23">same request</text>
   <text x="208" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">shadow</text>
-  <text x="954" y="192" text-anchor="middle" fill="#2b2b29" font-size="15">shadow → compare → gate</text>
+  <text x="954" y="190" text-anchor="middle" fill="#2b2b29" font-size="15">shadow → compare → gate</text>
   <text x="1267" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">earns a vote</text>
   <path d="M 120 210 C 195 210, 195 92, 270 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 208 210, 208 328, 296 328" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
@@ -708,7 +734,9 @@
   <text x="1430" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,8462)">
+<text x="40" y="10127" fill="#2b2b29" font-size="28" font-weight="700">CVaR Budgeting</text>
+<text x="40" y="10159" fill="#2b2b29" font-size="23">size the spend by the tail, not the mean</text>
+<g transform="translate(30,10180)">
 
   <title id="t">CVaR Budgeting — size the spend by the tail, not the mean</title>
   <defs>
@@ -724,8 +752,7 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1206" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">CVaR Budgeting — size the spend by the tail, not the mean</text>
-  <text x="470" y="43" text-anchor="middle" fill="#2b2b29" font-size="23">pick the tail-safe shape</text>
+  <text x="470" y="50" text-anchor="middle" fill="#2b2b29" font-size="23">pick the tail-safe shape</text>
   <path d="M 120 210 C 216 210, 216 210, 312 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 210 C 523 210, 523 92, 622 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 210 C 510 210, 510 328, 596 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -746,7 +773,9 @@
   <text x="1037" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,9002)">
+<text x="40" y="10745" fill="#2b2b29" font-size="28" font-weight="700">Circuit Breaker + Bulkhead</text>
+<text x="40" y="10777" fill="#2b2b29" font-size="23">fail fast, quarantine the toxic class</text>
+<g transform="translate(30,10798)">
 
   <title id="t">Circuit Breaker + Bulkhead — fail fast, quarantine the toxic class</title>
   <defs>
@@ -762,7 +791,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1846" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Circuit Breaker + Bulkhead — fail fast, quarantine the toxic class</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -792,7 +820,9 @@
   <text x="1678" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,9542)">
+<text x="40" y="11363" fill="#2b2b29" font-size="28" font-weight="700">Delphi Consensus</text>
+<text x="40" y="11395" fill="#2b2b29" font-size="23">anonymous numeric rounds until agreement</text>
+<g transform="translate(30,11416)">
 
   <title id="t">Delphi Consensus — anonymous numeric rounds until the spread closes</title>
   <defs>
@@ -808,7 +838,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1604" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Delphi Consensus — anonymous numeric rounds until the spread closes</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">anonymous, N models</text>
   <text x="1252" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">convergence</text>
   <text x="302" y="399" text-anchor="end" fill="#2b2b29" font-size="23">revise → R rounds</text>
@@ -837,7 +866,9 @@
   <text x="1436" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,10082)">
+<text x="40" y="11981" fill="#2b2b29" font-size="28" font-weight="700">Trial Sequential Analysis</text>
+<text x="40" y="12013" fill="#2b2b29" font-size="23">the learner only wins once N is met</text>
+<g transform="translate(30,12034)">
 
   <title id="t">Trial Sequential Analysis — the learner only wins once N is met</title>
   <defs>
@@ -853,9 +884,8 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1716" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Trial Sequential Analysis — the learner only wins once N is met</text>
   <text x="186" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">same class</text>
-  <text x="1393" y="192" text-anchor="middle" fill="#2b2b29" font-size="17">only at the threshold</text>
+  <text x="1393" y="190" text-anchor="middle" fill="#2b2b29" font-size="17">only at the threshold</text>
   <path d="M 120 210 C 191 210, 191 92, 262 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 195 210, 195 328, 270 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 474 92 C 573 92, 573 210, 672 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -878,7 +908,9 @@
   <text x="1564" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">best</text>
 
 </g>
-<g transform="translate(30,10622)">
+<text x="40" y="12599" fill="#2b2b29" font-size="28" font-weight="700">Evidence-Bar Ladder</text>
+<text x="40" y="12631" fill="#2b2b29" font-size="23">proof threshold scales with the cost of error</text>
+<g transform="translate(30,12652)">
 
   <title id="t">Evidence-Bar Ladder — proof threshold scales with the cost of error</title>
   <defs>
@@ -894,7 +926,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1340" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Evidence-Bar Ladder — proof threshold scales with the cost of error</text>
   <path d="M 120 210 C 178 210, 178 210, 237 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 499 210 C 636 210, 636 92, 773 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 499 210 C 628 210, 628 210, 756 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -920,7 +951,9 @@
   <text x="1171" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,11162)">
+<text x="40" y="13217" fill="#2b2b29" font-size="28" font-weight="700">Type-Revelation Screening</text>
+<text x="40" y="13249" fill="#2b2b29" font-size="23">probe a model's type in idle, before trust</text>
+<g transform="translate(30,13270)">
 
   <title id="t">Type-Revelation Screening — probe a model's type in idle, before trust</title>
   <defs>
@@ -936,8 +969,7 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1766" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Type-Revelation Screening — probe a model's type in idle, before trust</text>
-  <text x="330" y="43" text-anchor="middle" fill="#2b2b29" font-size="23">idle, off critical path</text>
+  <text x="330" y="50" text-anchor="middle" fill="#2b2b29" font-size="23">idle, off critical path</text>
   <path d="M 120 210 C 191 210, 191 92, 262 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 212 210, 212 328, 304 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 474 92 C 565 92, 565 210, 655 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -960,7 +992,9 @@
   <text x="1598" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 
 </g>
-<g transform="translate(30,11702)">
+<text x="40" y="13835" fill="#2b2b29" font-size="28" font-weight="700">Condorcet Pairwise Pooling</text>
+<text x="40" y="13867" fill="#2b2b29" font-size="23">head-to-head beats plurality</text>
+<g transform="translate(30,13888)">
 
   <title id="t">Condorcet Pairwise Pooling — head-to-head beats plurality</title>
   <defs>
@@ -976,9 +1010,8 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1538" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Condorcet Pairwise Pooling — head-to-head beats plurality</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">3+ camps</text>
-  <text x="1214" y="192" text-anchor="middle" fill="#2b2b29" font-size="15">Condorcet, not plurality</text>
+  <text x="1214" y="190" text-anchor="middle" fill="#2b2b29" font-size="15">Condorcet, not plurality</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 210, 594 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -1003,7 +1036,9 @@
   <text x="1385" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">best</text>
 
 </g>
-<g transform="translate(30,12242)">
+<text x="40" y="14453" fill="#2b2b29" font-size="28" font-weight="700">Slack-Stealing Scheduler</text>
+<text x="40" y="14485" fill="#2b2b29" font-size="23">background only in the idle a live request leaves</text>
+<g transform="translate(30,14506)">
 
   <title id="t">Slack-Stealing Scheduler — background only in the idle</title>
   <defs>
@@ -1019,7 +1054,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="988" height="332" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Slack-Stealing Scheduler — background only in the idle</text>
   <text x="569" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">yields</text>
   <path d="M 120 92 C 183 92, 183 92, 245 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 491 92 C 615 92, 615 92, 739 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -1040,7 +1074,9 @@
   <text x="812" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">yields on arrival</text>
 
 </g>
-<g transform="translate(30,12664)">
+<text x="40" y="14953" fill="#2b2b29" font-size="28" font-weight="700">Thompson Posterior Router</text>
+<text x="40" y="14985" fill="#2b2b29" font-size="23">route by sampling each posterior, not argmax</text>
+<g transform="translate(30,15006)">
 
   <title id="t">Thompson Posterior Router — route by sampling each posterior</title>
   <defs>
@@ -1056,8 +1092,7 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1306" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Thompson Posterior Router — route by sampling each posterior</text>
-  <text x="966" y="192" text-anchor="middle" fill="#2b2b29" font-size="13">verified wins feed back</text>
+  <text x="966" y="189" text-anchor="middle" fill="#2b2b29" font-size="13">verified wins feed back</text>
   <path d="M 120 210 C 187 210, 187 92, 254 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 187 210, 187 210, 254 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 187 210, 187 328, 254 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
