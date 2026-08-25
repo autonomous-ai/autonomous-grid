@@ -48,17 +48,63 @@ You get `grid` (and the `agrid` alias) on your PATH — a self-contained binary 
 [uv](https://docs.astral.sh/uv/)-managed install on macOS. Pin a release with `GRID_VERSION=0.1.0`.
 Contributors can instead clone and `uv tool install -e . --force`.
 
-These four steps are the local path; remote mode changes
-[three commands](#working-from-anywhere).
+### What you are about to build
+
+Say you own three computers and one of them has a good graphics card. Normally an AI model runs on
+one machine, and only that machine can use it.
+
+A **grid** puts a single address in front of all of them. Your apps send every request to that one
+address; the grid works out which computer has the right model and forwards it there. Add a
+computer and its models join the pool. Turn one off and the rest keep working.
+
+Three words appear throughout, and they mean exactly this:
+
+| | |
+|---|---|
+| **grid** | the single address your apps talk to. One computer hosts it. |
+| **engine** | the program that actually runs a model. Grid installs one for you. |
+| **model** | the AI itself — a file you download once, several gigabytes. |
+
+Four steps, and **each one says which computer to run it on** — that is the part that trips people
+up. Step 1 happens once, on one machine. Step 2 is repeated on every machine that will run a model.
+Remote mode changes [three commands](#working-from-anywhere).
 
 ### 1 · Start a grid
 
+**Run on: one computer, once.** Pick whichever machine is usually left on — a Mac mini, a desktop,
+the box already sitting in the corner. It does **not** need a graphics card, because this machine is
+directing traffic, not running models.
+
 ```bash
 grid up
+# grid=home
 # grid_url=http://192.168.1.25:8090
 ```
 
+`grid up` starts a small program that keeps running in the background on this computer. That
+program *is* the grid: it listens on the address printed above, keeps track of which computers have
+joined, and passes each request to whichever one can answer it. Nothing is downloaded and no model
+runs yet — you have just opened the front door.
+
+**Copy that `grid_url` somewhere.** Every other computer needs it in step 2, and your apps need it
+in step 4. `home` is just a name; you can have more than one grid later.
+
+To stop it again: `grid down`. The setup is remembered, so `grid up` brings it straight back.
+
+> **If you see a warning that nothing can reach the address**, the grid is running fine — it simply
+> picked the wrong one of your machine's network addresses, which happens on computers running a
+> VPN. Follow the two commands the warning prints. To try everything on a single computer first,
+> use `grid up --advertise-host 127.0.0.1`.
+
+One more thing, only if you ever make a second grid: creating it does not switch you to it.
+`grid up research` builds a grid called *research*, but `grid info`, `grid models` and `grid chat`
+keep meaning the first one until you run `grid use research`. With a single grid — where most
+people stay — this never comes up.
+
 ### 2 · Add a computer
+
+**Run on: every computer that will run a model** — including the one from step 1, if it has a GPU
+worth using. Repeat this whole step per machine.
 
 A model needs an **inference engine** to run it — Grid does not run models itself. Bring one you
 already have, or install the one Grid ships (llama.cpp).
@@ -113,31 +159,90 @@ failing partway through a build.
 
 **On Linux with no GPU** the same command installs the CPU build and says so.
 
-Now pull a model. `grid catalog` lists what the catalog ships, filtered to your hardware — or pull
-any GGUF on Hugging Face with `<hf-repo>:<file>`.
+Next, download a model onto this computer. Grid keeps a short list of models it knows are worth
+running, each under a **short name** you can pass to `grid pull`:
 
 ```bash
-# Apple Silicon, 32 GB unified memory or more
-grid pull qwen36-35b-a3b-mtp
-# Saved ~/.grid/models/Qwen3.6-35B-A3B-UD-IQ3_S.gguf
-
-# NVIDIA, 24 GB VRAM or more
-grid pull qwen36-27b-mtp
-# Saved ~/.grid/models/Qwen3.6-27B-UD-Q5_K_XL.gguf
+grid catalog
+# Grid can pull:
+#   qwen36-35b-a3b-mtp   unsloth/Qwen3.6-35B-A3B-MTP-GGUF/...  (Apple Silicon, min 32 GB, language)
+#   qwen36-27b-mtp       unsloth/Qwen3.6-27B-MTP-GGUF/...      (NVIDIA, min 24 GB, language)
 ```
 
-**`grid pull` takes a catalog label; `--serve` takes the filename on disk** — the one `pull` just
-printed, which `grid catalog` reprints any time under **Local models:**. `--advertise-as` hands the
-grid back a short name to ask for:
+Pick the one matching this computer and pull it. This downloads several gigabytes:
+
+```bash
+grid pull qwen36-35b-a3b-mtp                       # Apple Silicon, 32 GB unified memory or more
+# Resolved catalog label 'qwen36-35b-a3b-mtp' -> unsloth/Qwen3.6-35B-A3B-MTP-GGUF/...
+# Saved /Users/you/.grid/models/Qwen3.6-35B-A3B-UD-IQ3_S.gguf
+
+grid pull qwen36-27b-mtp                           # NVIDIA, 24 GB VRAM or more
+# Saved /home/you/.grid/models/Qwen3.6-27B-UD-Q5_K_XL.gguf
+```
+
+**Not in the catalog?** Models live on a site called Hugging Face, and any model there in the
+`.gguf` format works. Give the repository, a colon, then the exact filename inside it — both are
+visible on that model's "Files" tab:
+
+```bash
+grid pull unsloth/gemma-3-4b-it-GGUF:gemma-3-4b-it-Q4_K_M.gguf
+#         └──── the repository ────┘ └──── the file in it ────┘
+```
+
+**Models that can see pictures work too, and you do not have to do anything extra.** A model like
+that is shipped as two files — the model, plus a second one that handles images — and `grid pull`
+fetches both when it finds them:
+
+```bash
+grid pull ggml-org/SmolVLM-256M-Instruct-GGUF:SmolVLM-256M-Instruct-Q8_0.gguf
+# Saved ~/.grid/models/SmolVLM-256M-Instruct-Q8_0.gguf
+# This is a vision model. Downloading mmproj-SmolVLM-256M-Instruct-Q8_0.gguf ...
+# Saved ~/.grid/models/SmolVLM-256M-Instruct-Q8_0.mmproj.gguf
+```
+
+When you serve it in a moment, Grid spots that second file on its own and turns image support on —
+you will see `Vision: serving with projector …` — and tells the grid the model accepts pictures, so
+your apps can send them.
+
+Now hand that model to the grid. **The name you pull with and the name you serve with are
+different**, and this is the one place people get stuck: `grid pull` takes the short catalog name,
+while `--serve` takes the **filename that was saved** — the path printed on the `Saved` line above.
+`--advertise-as` then gives the grid a short name again, so your apps ask for something readable
+instead of a filename:
 
 ```bash
 grid join http://192.168.1.25:8090 \
     --serve Qwen3.6-35B-A3B-UD-IQ3_S.gguf \
     --advertise-as qwen36-35b-a3b-mtp \
     --name mac-studio
-
-# NVIDIA: --serve Qwen3.6-27B-UD-Q5_K_XL.gguf --advertise-as qwen36-27b-mtp --name gpu-box
 ```
+
+Reading that command left to right: join *the grid at this address* (the `grid_url` from step 1),
+start the engine on *this model file*, tell the grid to call it *qwen36-35b-a3b-mtp*, and list this
+computer as *mac-studio*.
+
+It waits until the model is genuinely loaded, then tells you so:
+
+```
+✓ Serving on grid 'home'
+    qwen36-35b-a3b-mtp
+  engine address   http://192.168.1.10:8081/v1
+  this computer    mac-studio
+
+  Try it:   grid chat -m qwen36-35b-a3b-mtp "hello"
+  Stop it:  grid leave home --engine mac-studio
+```
+
+Large models take a while to load. If it is still loading, you get a `tail -f` command to watch
+progress instead — and if it fails, the reason is printed right there, not buried in a file.
+
+On NVIDIA the only change is the filename:
+
+```bash
+    --serve Qwen3.6-27B-UD-Q5_K_XL.gguf --advertise-as qwen36-27b-mtp --name gpu-box
+```
+
+Forgotten the filename? `grid catalog` reprints every model on this machine under **Local models:**.
 
 The built-in engine sizes itself to the machine: at load it measures free memory and takes the
 largest context that fits, capped by what the model was trained for. Pin it with `--ctx-size N` when
@@ -157,20 +262,38 @@ Repeat for each computer.
 
 ### 3 · Ask it something
 
+**Run on: the computer from step 1.** That machine already knows the grid, so these commands need
+no arguments. From any *other* computer, name the grid by its URL — `grid models
+http://192.168.1.25:8090`, `grid chat --grid http://192.168.1.25:8090 ...` — otherwise you get
+`No grids yet. Run 'grid up' to bring one online.`, which means *this* machine has no grid
+configured, not that your grid is down.
+
+First see what the grid can actually serve right now — this answers "did step 2 work":
+
 ```bash
-grid chat -m qwen36-35b-a3b-mtp "write a haiku about local GPUs"
 grid models --verbose
 # MODEL               ENGINE      WHERE
 # qwen36-35b-a3b-mtp  mac-studio  http://192.168.1.10:8081/v1
 # qwen3-coder         gpu-4090    http://192.168.1.20:8000/v1
 ```
 
-The first name is the one you gave `--advertise-as`; the second is the model the 4090 was already
-serving behind Ollama.
+One row per model the grid can reach. `MODEL` is the name to ask for — `qwen36-35b-a3b-mtp` is the
+one you set with `--advertise-as`, and `qwen3-coder` came from the Ollama machine, which was already
+serving it under that name. `ENGINE` is the `--name` you gave each computer. An empty list means no
+computer has joined yet; go back to step 2.
+
+Then ask it something, using a name from the `MODEL` column:
+
+```bash
+grid chat -m qwen36-35b-a3b-mtp "write a haiku about local GPUs"
+```
 
 ### 4 · Point your apps at it
 
-`grid info --env` prints the exports for whichever mode you are in:
+**Run on: whichever computer your app runs on.** Your app talks to the grid the same way it talks
+to OpenAI — one base URL and a key — so anything that speaks the OpenAI API works unmodified.
+
+`grid info --env` prints those two values for whichever mode you are in:
 
 ```bash
 grid info --env
@@ -258,7 +381,7 @@ Three commands change. `chat`, `models`, `info` and your apps are identical.
 | | 🏠 local | 🌐 remote |
 |---|---|---|
 | **start a grid** | `grid up` | `grid up research` then `grid use research` |
-| **add a computer** | `grid join <grid_url> --at <address on your network>` | `grid join research --at http://localhost:8000/v1` |
+| **add a computer** | `grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1` | `grid join research --at http://localhost:8000/v1` |
 | **API key** | `local-grid` — auth is off | your per-grid token, from `grid info --env` |
 
 Remote `--at` is `localhost` because the engine polls outbound; nothing reaches in. `grid ls` lists
@@ -282,16 +405,16 @@ one of the two it ships: `llama.cpp` for text, ComfyUI for media. Both work the 
 ```bash
 grid engine install llama.cpp           # the text engine — add --from-source for CUDA on Linux
 grid pull qwen36-35b-a3b-mtp            # a text MODEL — see `grid catalog`, or any HF GGUF
-grid join <grid> --serve Qwen3.6-35B-A3B-UD-IQ3_S.gguf --advertise-as qwen36-35b-a3b-mtp
+grid join http://192.168.1.25:8090 --serve Qwen3.6-35B-A3B-UD-IQ3_S.gguf --advertise-as qwen36-35b-a3b-mtp
                                         # --serve takes the FILENAME `grid pull` saved
 
 grid engine install comfyui             # the media engine
 grid engine pull image_generation       # a media BUNDLE — also image_editing, i2v
-grid join <grid> --media --bundle image_generation
+grid join http://192.168.1.25:8090 --media --bundle image_generation
 grid image "a compact walnut desk beside a sunlit window"
 ```
 
-On local, `grid image` needs `--grid <grid_url>` — use-commands take the grid as a flag, because
+On local, `grid image` needs `--grid http://192.168.1.25:8090` — use-commands take the grid as a flag, because
 the positional argument is the prompt.
 
 ### No GPU at all? Join with an API key
