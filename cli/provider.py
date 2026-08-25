@@ -465,16 +465,44 @@ def _spawn_engine(
             f"Engine {engine_id} exited before it registered. See {log_path}:\n{_log_tail(log_path)}"
         )
 
-    print(f"Joined engine {engine_id} to {cfg['name']} (pid={proc.pid})")
-    if endpoint_url:
-        print(f"endpoint_url={endpoint_url}")
-    if models:
-        print(f"models={','.join(models)}")
-    print(f"log={log_path}")
-    if status == "starting":
-        print("(still starting — run `grid models` shortly to confirm it is live)")
-    print(f"Check `grid models {cfg['name']}`; stop with `grid leave {cfg['name']} --engine {engine_id}`.")
+    _report_join(cfg, args, engine_id, models, endpoint_url, log_path, status)
     return 0
+
+
+def _report_join(cfg, args, engine_id, models, endpoint_url, log_path, status) -> None:
+    """Say whether the model is actually being served, in the words someone new would use.
+
+    This used to print "Joined engine ... (pid=…)" and leave it there. "Joined" only ever meant
+    "the process was launched" — the model could still be loading, or about to fail — and the four
+    lines that say what really happened (model loaded, vision on, registered with the grid) go to a
+    log file nobody thinks to open. So the reader was told a pid and a path and left to work out
+    for themselves whether it had worked.
+
+    The advertised name is what gets printed, because that is the name they will type next. The
+    old line printed the FILENAME here while the log printed the advertised name — the same label
+    over two different values, and the one on screen was the one you cannot use.
+    """
+    advertised = _advertised_text_models(list(models or []), list(getattr(args, "advertise_as", []) or []))
+    served = advertised or list(models or [])
+
+    if status == "starting":
+        print(f"\nEngine '{engine_id}' is starting — the model is still loading.")
+        print(f"  Watch it:   tail -f {log_path}")
+        print(f"  Check it:   grid models {cfg['name']}")
+        print(f"  Stop it:    grid leave {cfg['name']} --engine {engine_id}")
+        return
+
+    print(f"\n✓ Serving on grid '{cfg['name']}'")
+    for name in served:
+        print(f"    {name}")
+    if endpoint_url:
+        print(f"  engine address   {endpoint_url}")
+    print(f"  this computer    {engine_id}")
+    print()
+    if served:
+        print(f"  Try it:   grid chat -m {served[0]} \"hello\"")
+    print(f"  Stop it:  grid leave {cfg['name']} --engine {engine_id}")
+    print(f"  Log:      {log_path}")
 
 
 def _await_engine_start(grid_url: str, node_id: str, proc, grace: float = 3.0) -> str:
