@@ -1431,6 +1431,7 @@ def _build_record(
         "n_predict": getattr(args, "n_predict", None),
         "parallel": getattr(args, "parallel", None),
         "flash_attn": getattr(args, "flash_attn", None),
+        "mmproj": getattr(args, "mmproj", None),
         "temp": getattr(args, "temp", None),
         "reasoning_budget": getattr(args, "reasoning_budget", None),
         "started_at": runtime.utc_now(),

@@ -95,36 +95,49 @@ def _install_llama_cpp(args: argparse.Namespace) -> int:
             return 0
         path = installer.install_macos_prebuilt()
         print(f"Installed llama-server -> {path}")
+        print("Metal build — it uses this Mac's GPU. Nothing else to install.")
         return 0
 
     from shared.system import gpu
 
     gpus = gpu.enumerate_gpus()
-    if not gpus and not args.target_sm:
-        raise SystemExit(
-            "No NVIDIA GPUs detected (nvidia-smi missing or returned nothing). "
-            "Pass --target-sm <sm_XX> to override."
-        )
-
     sm_required = (args.target_sm,) if args.target_sm else tuple(item.compute_cap_sm for item in gpus)
-    print(f"Detected GPUs: {', '.join(sm_required) if sm_required else '(none)'}")
+    if sm_required:
+        print(f"Detected GPUs: {', '.join(sm_required)}")
 
     if args.from_source:
-        target_sm = sm_required[0]
-        path = installer.install_from_source(target_sm)
-        print(f"Installed llama-server from source -> {path}")
+        if not sm_required:
+            raise SystemExit(
+                "--from-source builds the CUDA engine, but no NVIDIA GPU was detected "
+                "(nvidia-smi missing or returned nothing). Pass --target-sm <sm_XX> to override."
+            )
+        path = installer.install_from_source(sm_required[0])
+        print(f"Installed llama-server from source (CUDA {sm_required[0]}) -> {path}")
         return 0
 
-    tarball = installer.pick_tarball(gpus) if not args.target_sm else None
-    if not tarball and args.target_sm:
-        for candidate in installer.TARBALLS:
-            if args.target_sm in candidate.supports_sm:
-                tarball = candidate
-                break
-    if not tarball:
-        raise SystemExit(
-            "No pinned tarball covers this GPU set. Re-run with --from-source to build llama.cpp locally."
-        )
-    path = installer.install_pinned(tarball)
-    print(f"Installed llama-server ({tarball.label}) -> {path}")
+    # llama.cpp publishes CUDA binaries for Windows only — every Linux asset in a release is CPU,
+    # Vulkan, ROCm, SYCL or OpenVINO. So an NVIDIA box gets Vulkan, which runs on the same cards
+    # with no toolchain, and is told plainly how to get CUDA instead. This used to be two pinned
+    # entries with PLACEHOLDER urls that could never be filled, so the command simply dead-ended.
+    kind = "vulkan" if gpus else "cpu"
+    path = installer.install_linux_prebuilt(kind)
+    print(f"Installed llama-server -> {path}")
+    if not gpus:
+        print("No GPU detected — this is the CPU build.")
+        return 0
+
+    # Answer "can I have CUDA?" here, so nobody has to go and probe their own toolchain to find
+    # out. The same prober gates `--from-source`, so this can never advise a build that would
+    # then refuse to start.
+    print()
+    print("This is the Vulkan build — it runs on your NVIDIA GPUs with no CUDA toolkit.")
+    ready, blocker = installer.cuda_build_readiness(sm_required[0].removeprefix("sm_"))
+    if ready:
+        print("CUDA is faster, and this machine can build it:")
+        print("    grid engine install llama.cpp --from-source")
+    else:
+        print()
+        print("CUDA would be faster, but not from this machine yet:")
+        for line in blocker.splitlines():
+            print(f"  {line}")
     return 0

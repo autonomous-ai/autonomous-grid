@@ -11,6 +11,7 @@ import shlex
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 import tarfile
 import threading
@@ -35,7 +36,7 @@ from shared.agent import codex_installer
 from shared.agent import installer as agent_installer
 from shared.engine import comfyui, installer, launcher
 from shared.system import arch
-from shared.models import api_catalog, catalog, download, media_bundles
+from shared.models import api_catalog, catalog, download, gguf, media_bundles
 from local import media_server
 from local.server import create_app
 from shared.system import detect
@@ -3235,6 +3236,207 @@ def test_launcher_start_llm_adds_alias_flag(monkeypatch, tmp_path):
         "--alias",
         "your-model",
     ]
+
+
+def _launch_argv(monkeypatch, tmp_path, **kwargs):
+    """Spawn a model through `start_llm` with the process faked out, and hand back the argv."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    model_path = paths.models_dir() / "your-model.gguf"
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    model_path.write_bytes(b"model")
+    calls = {}
+
+    def fake_popen(cmd, **kw):
+        calls["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr(launcher, "llama_server_path", lambda: "/usr/local/bin/llama-server")
+    monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+    launcher.start_llm("your-model.gguf", port=8081, **kwargs)
+    return calls["cmd"]
+
+
+def test_start_llm_leaves_the_fit_flags_unset_by_default(monkeypatch, tmp_path):
+    """The launch must NOT name a context size, a flash-attn mode, or a jinja toggle.
+
+    llama.cpp fits the context to free device memory on its own, but only for arguments still
+    holding their default — naming one takes that dimension away from the fitter. The old launch
+    hardcoded `--ctx-size 128000` and so allocated a 128k KV cache for a 4k model.
+    """
+    cmd = _launch_argv(monkeypatch, tmp_path)
+    for flag in ("--ctx-size", "--flash-attn", "--jinja", "--mmproj"):
+        assert flag not in cmd, f"{flag} must stay unset so llama.cpp can fit the model itself"
+    # Still ours to impose: one slot, and never silently drop the head of a conversation.
+    assert "--parallel" in cmd and "--no-context-shift" in cmd
+
+
+def test_start_llm_passes_through_an_operator_override(monkeypatch, tmp_path):
+    cmd = _launch_argv(monkeypatch, tmp_path, ctx_size=32000, flash_attn="off")
+    assert cmd[cmd.index("--ctx-size") + 1] == "32000"
+    assert cmd[cmd.index("--flash-attn") + 1] == "off"
+
+
+def test_start_llm_pins_gpu_layers_only_on_unified_memory(monkeypatch, tmp_path):
+    """Apple Silicon must not let llama.cpp spill layers to "system memory" — it is the same pool."""
+    monkeypatch.setattr(launcher, "runtime_profile", lambda: launcher.APPLE_SILICON_RUNTIME)
+    cmd = _launch_argv(monkeypatch, tmp_path)
+    assert cmd[cmd.index("--n-gpu-layers") + 1] == "all"
+
+    monkeypatch.setattr(launcher, "runtime_profile", lambda: launcher.NVIDIA_RUNTIME)
+    # Discrete VRAM: spilling to real system RAM is a legitimate partial offload, so leave it alone.
+    assert "--n-gpu-layers" not in _launch_argv(monkeypatch, tmp_path)
+
+
+def test_start_llm_refuses_ctx_size_zero(monkeypatch, tmp_path):
+    """`-c 0` reads as "full trained window, do not reduce" — a swap-heavy mode that looks like unset."""
+    with pytest.raises(SystemExit, match="full trained context"):
+        _launch_argv(monkeypatch, tmp_path, ctx_size=0)
+
+
+def test_start_llm_refuses_a_missing_projector(monkeypatch, tmp_path):
+    with pytest.raises(SystemExit, match="Multimodal projector not found"):
+        _launch_argv(monkeypatch, tmp_path, mmproj="mmproj-BF16.gguf")
+
+
+def _cuda_ready(monkeypatch, arches):
+    """Pretend the build tools are installed and nvcc reports [arches]."""
+    from shared.engine import installer
+
+    monkeypatch.setattr(installer.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(installer, "_nvcc_architectures", lambda: set(arches))
+    return installer
+
+
+def test_cuda_readiness_names_the_missing_tools(monkeypatch):
+    from shared.engine import installer
+
+    monkeypatch.setattr(installer.shutil, "which", lambda tool: None)
+    ready, message = installer.cuda_build_readiness("120")
+    assert ready is False
+    assert "cmake" in message and "nvcc" in message
+
+
+def test_cuda_readiness_rejects_a_toolkit_too_old_for_the_card(monkeypatch):
+    """The whole point: say so BEFORE the clone, not `nvcc fatal` ten minutes into a build."""
+    installer = _cuda_ready(monkeypatch, ["compute_75", "compute_86", "compute_89"])
+    ready, message = installer.cuda_build_readiness("120")
+    assert ready is False
+    assert "compute_120" in message and "compute_89" in message
+
+    with pytest.raises(SystemExit, match="compute_120"):
+        installer.require_cuda_arch("120")
+
+
+def test_cuda_readiness_accepts_a_current_toolkit(monkeypatch):
+    installer = _cuda_ready(monkeypatch, ["compute_89", "compute_120"])
+    assert installer.cuda_build_readiness("120") == (True, "")
+    installer.require_cuda_arch("120")  # must not raise
+
+
+def test_cuda_readiness_does_not_block_when_nvcc_stays_silent(monkeypatch):
+    """An unreadable nvcc must not veto a build that would have worked — let the compiler decide."""
+    installer = _cuda_ready(monkeypatch, [])
+    ready, _ = installer.cuda_build_readiness("120")
+    assert ready is True
+
+
+def _write_gguf(path, kv):
+    """Write a minimal GGUF carrying [kv] as `{key: (value_type, value)}`. Enough for the readers."""
+    blob = b""
+    for key, (vtype, value) in kv.items():
+        blob += struct.pack("<Q", len(key)) + key.encode() + struct.pack("<I", vtype)
+        if vtype == 8:  # string
+            blob += struct.pack("<Q", len(value)) + value.encode()
+        elif vtype == 7:  # bool
+            blob += struct.pack("<?", value)
+        else:  # uint32
+            blob += struct.pack("<I", value)
+    path.write_bytes(
+        b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", 0) + struct.pack("<Q", len(kv)) + blob
+    )
+
+
+def test_projector_beside_pairs_by_sidecar_name(tmp_path):
+    """Two vision models share a flat directory, so the projector must be found by name, not scan."""
+    model = tmp_path / "Qwen3.6-VL-UD-IQ3_S.gguf"
+    _write_gguf(model, {"general.architecture": (8, "qwen3vl")})
+    # The dotted stem is the trap: `with_suffix` would read `.6-VL-UD-IQ3_S` as the suffix.
+    projector = tmp_path / "Qwen3.6-VL-UD-IQ3_S.mmproj.gguf"
+    _write_gguf(projector, {"clip.has_vision_encoder": (7, True)})
+
+    assert gguf.projector_beside(model) == projector
+
+
+def test_projector_beside_ignores_a_file_that_is_not_a_projector(tmp_path):
+    """The sidecar name is our own convention — the header is what actually decides."""
+    model = tmp_path / "text-only.gguf"
+    _write_gguf(model, {"general.architecture": (8, "llama")})
+    impostor = tmp_path / "text-only.mmproj.gguf"
+    _write_gguf(impostor, {"general.architecture": (8, "llama")})
+
+    assert gguf.projector_beside(model) is None
+
+
+def test_projector_beside_returns_none_for_a_text_model(tmp_path):
+    model = tmp_path / "text-only.gguf"
+    _write_gguf(model, {"general.architecture": (8, "llama")})
+    assert gguf.projector_beside(model) is None
+
+
+def test_start_llm_enables_vision_without_being_asked(monkeypatch, tmp_path):
+    """`grid join --serve <vision model>` must serve vision with no extra flag.
+
+    Whether a model can see is a fact about the files on this disk, not about what the operator
+    remembered to type — so the launcher looks, rather than waiting to be told.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    paths.models_dir().mkdir(parents=True, exist_ok=True)
+    _write_gguf(paths.models_dir() / "your-model.mmproj.gguf", {"clip.has_vision_encoder": (7, True)})
+
+    cmd = _launch_argv(monkeypatch, tmp_path)
+    assert cmd[cmd.index("--mmproj") + 1] == str(paths.models_dir() / "your-model.mmproj.gguf")
+
+
+def test_find_projector_prefers_f16_and_tolerates_a_dead_api(monkeypatch):
+    siblings = [{"rfilename": n} for n in
+                ("model-Q4_K_M.gguf", "mmproj-F32.gguf", "mmproj-BF16.gguf", "mmproj-F16.gguf")]
+
+    monkeypatch.setattr(
+        download.httpx, "get",
+        lambda *a, **k: SimpleNamespace(status_code=200, json=lambda: {"siblings": siblings}),
+    )
+    assert download.find_projector("unsloth/whatever-GGUF") == "mmproj-F16.gguf"
+
+    # A rate-limited or offline API costs the projector, never the model the user asked for.
+    def boom(*a, **k):
+        raise download.httpx.ConnectError("no network")
+
+    monkeypatch.setattr(download.httpx, "get", boom)
+    assert download.find_projector("unsloth/whatever-GGUF") is None
+
+
+def test_find_projector_returns_none_for_a_text_only_repo(monkeypatch):
+    siblings = [{"rfilename": "model-Q4_K_M.gguf"}, {"rfilename": "README.md"}]
+    monkeypatch.setattr(
+        download.httpx, "get",
+        lambda *a, **k: SimpleNamespace(status_code=200, json=lambda: {"siblings": siblings}),
+    )
+    assert download.find_projector("unsloth/text-GGUF") is None
+
+
+def test_start_llm_serves_vision_when_a_projector_is_named(monkeypatch, tmp_path):
+    """A vision GGUF is text-only until its projector is loaded, so `--mmproj` is the whole switch.
+
+    Without it llama-server reports `modalities.vision: false` on /props and the grid advertises the
+    model as text-only — correctly, but the operator has no way to say otherwise.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    projector = paths.models_dir() / "mmproj-F16.gguf"
+    projector.parent.mkdir(parents=True, exist_ok=True)
+    projector.write_bytes(b"projector")
+
+    cmd = _launch_argv(monkeypatch, tmp_path, mmproj="mmproj-F16.gguf")
+    assert cmd[cmd.index("--mmproj") + 1] == str(projector)
 
 
 def test_run_engine_launches_local_llama_server_by_default(monkeypatch, tmp_path):

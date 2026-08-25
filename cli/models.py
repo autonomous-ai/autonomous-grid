@@ -363,7 +363,30 @@ def cmd_pull(args: argparse.Namespace) -> int:
     print(f"Downloading {repo}/{filename} ...")
     target = download.download(repo, filename, on_progress=download.stderr_progress)
     print(f"Saved {target}")
+    _pull_projector(repo, target)
     return 0
+
+
+def _pull_projector(repo: str, model_path) -> None:
+    """Fetch the repo's multimodal projector, if it has one, so vision needs no second command.
+
+    Saved as ``<model-stem>.mmproj.gguf`` rather than under its own name: every vision repo calls
+    its projector some spelling of ``mmproj-F16.gguf``, so keeping the original name would make two
+    vision models in one flat models directory overwrite each other, and would leave nothing tying
+    a projector to the weights it belongs to. `grid join --serve` reads this exact name back.
+    """
+    from shared.models import download, gguf
+
+    projector = download.find_projector(repo)
+    if not projector:
+        return
+    target = model_path.parent / (model_path.stem + gguf.PROJECTOR_SUFFIX)
+    if target.is_file():
+        print(f"Vision projector already present: {target.name}")
+        return
+    print(f"This is a vision model. Downloading {repo}/{projector} ...")
+    download.download(repo, projector, out=target, on_progress=download.stderr_progress)
+    print(f"Saved {target}")
 
 
 def cmd_ctx(args: argparse.Namespace) -> int:

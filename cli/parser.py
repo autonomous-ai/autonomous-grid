@@ -243,12 +243,22 @@ def _add_engines(sub) -> None:
     tuning = join.add_argument_group("Built-in tuning (--serve)")
     tuning.add_argument("--endpoint-port", "--llama-port", type=int, default=8081)
     tuning.add_argument("--heartbeat-interval", type=float, default=15.0)
-    tuning.add_argument("--ctx-size", type=int, default=None)
+    tuning.add_argument("--ctx-size", type=int, default=None, metavar="N",
+                        help="Pin the context window to N tokens. Left unset, the engine measures "
+                             "free memory at load and takes the largest window that fits — pinning "
+                             "turns that off, so an N this machine cannot hold fails to start "
+                             "instead of shrinking. N=0 is not 'unset': it demands the model's "
+                             "full trained window and spills weights into system RAM to get it.")
     tuning.add_argument("--n-predict", type=int, default=None)
     tuning.add_argument("--parallel", type=int, default=None)
-    tuning.add_argument("--flash-attn", default=None)
+    tuning.add_argument("--flash-attn", default=None, metavar="on|off|auto",
+                        help="Left unset, the engine probes the backend and falls back on its own.")
     tuning.add_argument("--temp", type=float, default=None)
     tuning.add_argument("--reasoning-budget", type=int, default=None)
+    tuning.add_argument("--mmproj", default=None, metavar="FILE",
+                        help="Override the multimodal projector, naming a FILE in ~/.grid/models. "
+                             "Not normally needed: `grid pull` fetches a vision model's projector "
+                             "with it, and `--serve` finds it and enables vision on its own.")
 
     media = join.add_argument_group("Media")
     media.add_argument("--comfyui-port", type=int, default=8188)

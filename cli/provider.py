@@ -424,6 +424,7 @@ def _spawn_engine(
         "n_predict": getattr(args, "n_predict", None),
         "parallel": getattr(args, "parallel", None),
         "flash_attn": getattr(args, "flash_attn", None),
+        "mmproj": getattr(args, "mmproj", None),
         "temp": getattr(args, "temp", None),
         "reasoning_budget": getattr(args, "reasoning_budget", None),
         # API media engine (`--api <kind>`): the vendor gateway this engine bridges to. The KEY is
@@ -716,6 +717,7 @@ def run_engine_from_record(grid_id: str, engine_id: str) -> int:
         n_predict=record.get("n_predict"),
         parallel=record.get("parallel"),
         flash_attn=record.get("flash_attn"),
+        mmproj=record.get("mmproj"),
         temp=record.get("temp"),
         reasoning_budget=record.get("reasoning_budget"),
         api_kind=record.get("api_kind"),
@@ -773,6 +775,7 @@ def _run_engine(args: SimpleNamespace) -> int:
                 n_predict=args.n_predict,
                 parallel=args.parallel,
                 flash_attn=args.flash_attn,
+                mmproj=getattr(args, "mmproj", None),
                 temp=args.temp,
                 reasoning_budget=args.reasoning_budget,
                 alias=text_advertised_models[0],
@@ -808,7 +811,15 @@ def _run_engine(args: SimpleNamespace) -> int:
             "media_url": media_url,
             "name": args.name,
             "pricing": {},
-            "capabilities": _media_capabilities(advertised_models) if args.enable_media else {},
+            "capabilities": _merge_capabilities(
+                # `--at` names an engine somewhere on the network; a built-in one was just spawned
+                # here, so probe it over loopback rather than the address we advertise outward.
+                _text_capabilities(
+                    text_advertised_models, upstream,
+                    args.endpoint_url or f"http://127.0.0.1:{args.endpoint_port}/v1",
+                ) if text_advertised_models else {},
+                _media_capabilities(advertised_models) if args.enable_media else {},
+            ),
             "load": {"active_tasks": 0},
             "upstream": upstream,
         }
@@ -975,6 +986,42 @@ def _prepare_media_engine(args: SimpleNamespace) -> dict[str, Any]:
         media_port=args.media_port,
         advertise_host=args.advertise_host,
     )
+
+
+def _text_capabilities(advertised: list[str], upstream: dict[str, str], llm_url: str) -> dict[str, Any]:
+    """Probe this box's text models and describe what they can actually do.
+
+    Local mode used to advertise ``{}`` for every text engine, so a local grid knew a model's NAME
+    and nothing else — serve a vision model and the grid still called it text-only. The probe is
+    the same one the remote path runs; nothing here is remote-specific, it is just HTTP against the
+    engine that was launched a moment ago.
+
+    Probed by the name the engine answers to and keyed by the advertised one, matching the remote
+    path: with ``--advertise-as`` those differ, and asking an engine about a name it does not know
+    returns nothing. Best-effort — a probe failure costs the description, never the join.
+    """
+    from remote import probe
+
+    models: dict[str, Any] = {}
+    for name in advertised:
+        try:
+            env = probe.capabilities(llm_url, upstream.get(name, name), advertise_as=name)
+        except httpx.HTTPError:
+            continue
+        models.update((env or {}).get("models") or {})
+    return {"schema_version": 1, "models": models} if models else {}
+
+
+def _merge_capabilities(*envelopes: dict[str, Any]) -> dict[str, Any]:
+    """Fold several ``{schema_version, models}`` envelopes into one, or ``{}`` if all are empty.
+
+    An engine can serve text and media at once, and the relay wants a single envelope whose model
+    keys match the advertised list exactly — a missing key costs the whole registration.
+    """
+    models: dict[str, Any] = {}
+    for envelope in envelopes:
+        models.update((envelope or {}).get("models") or {})
+    return {"schema_version": 1, "models": models} if models else {}
 
 
 def _media_capabilities(models: list[str]) -> dict[str, Any]:
