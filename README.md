@@ -44,9 +44,35 @@ your own network, and it keeps working if we disappear. From outside your networ
 curl -fsSL https://grid.autonomous.ai/install.sh | bash
 ```
 
-You get `grid` (and the `agrid` alias) on your PATH — a self-contained binary on Linux, or a
-[uv](https://docs.astral.sh/uv/)-managed install on macOS. Pin a release with `GRID_VERSION=0.1.0`.
-Contributors can instead clone and `uv tool install -e . --force`.
+That gives you a command called `grid`. Check it worked before going on:
+
+```bash
+grid --version
+# grid 0.3.23
+```
+
+If you get "command not found", close the terminal and open a new one, then try again.
+
+<details>
+<summary>Installing a specific version, or from source</summary>
+
+Pin a release by setting `GRID_VERSION` before installing:
+
+```bash
+GRID_VERSION=0.3.23 curl -fsSL https://grid.autonomous.ai/install.sh | bash
+```
+
+Working on Grid itself? Clone the repository and install it in editable mode with
+[uv](https://docs.astral.sh/uv/) instead:
+
+```bash
+uv tool install -e . --force
+```
+
+`agrid` is installed as a second name for the same command, for machines where something else
+already answers to `grid`.
+
+</details>
 
 ### What you are about to build
 
