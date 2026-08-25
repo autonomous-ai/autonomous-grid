@@ -32,8 +32,13 @@ def cmd_up(args: argparse.Namespace) -> int:
             advertise_host=args.advertise_host,
         )
     runtime.start_grid(cfg)
+    url = runtime.grid_url(cfg)
     print(f"grid={cfg['name']}")
-    print(f"grid_url={runtime.grid_url(cfg)}")
+    print(f"grid_url={url}")
+    # The grid is up either way; this only decides whether the address we just printed is one
+    # anything can dial. Catching it here turns a silent dead end into a fixable sentence.
+    if not runtime.advertised_address_works(url):
+        print(runtime.unreachable_address_hint(cfg, url))
     return 0
 
 

@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import urlparse
 
 import httpx
 
@@ -43,6 +44,46 @@ def detect_local_ip() -> str:
 def make_local_url(port: int, advertise_host: str | None = None) -> str:
     host = (advertise_host or detect_local_ip()).strip()
     return f"http://{host}:{int(port)}"
+
+
+def advertised_address_works(url: str, timeout: float = 3.0) -> bool:
+    """Can anything actually open a connection to the address we are about to hand out?
+
+    ``detect_local_ip`` asks the routing table which interface reaches the internet, which is the
+    right guess on an ordinary network and the wrong one on a machine holding a VPN: the interface
+    that reaches the internet is not the interface other computers reach *you* on. The symptom is
+    brutal for a newcomer — the grid is running perfectly, every command fails with "Server
+    disconnected without sending a response", and nothing points at the address as the culprit.
+
+    A real HTTP request, not a bare TCP connect: measured on a VPN'd machine, the TCP handshake
+    SUCCEEDS and the connection is then dropped without a reply — which is the whole reason the
+    error a user sees is "Server disconnected without sending a response". A connect-only probe
+    reports that address as healthy. Any HTTP status at all counts as reachable; we care that
+    something answered, not what it said.
+    """
+    parsed = urlparse(url if "//" in url else f"http://{url}")
+    if not parsed.hostname or not parsed.port:
+        return True  # nothing to check — do not invent a warning
+    try:
+        httpx.get(f"{parsed.scheme}://{parsed.hostname}:{parsed.port}/", timeout=timeout)
+        return True
+    except httpx.HTTPError:
+        return False
+
+
+def unreachable_address_hint(cfg: dict[str, Any], url: str) -> str:
+    """What to tell someone whose grid is up but whose advertised address does not answer."""
+    return (
+        f"\nWarning: this grid is running, but nothing can reach it at {url}.\n"
+        "That address belongs to an interface on this machine (often a VPN) that does not accept\n"
+        "connections back. The grid itself is fine — the address it is advertising is not.\n"
+        "\n"
+        "Give it an address that works, then re-run this command:\n"
+        f"  grid down {cfg['name']}\n"
+        f"  grid up {cfg['name']} --advertise-host <this machine's LAN IP>\n"
+        "\n"
+        "Use 127.0.0.1 to try everything on this one computer first."
+    )
 
 
 def normalize_url(value: str) -> str:
