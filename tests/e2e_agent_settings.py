@@ -116,7 +116,13 @@ def live(tmp_path, monkeypatch):
     # deep enough (157 characters here) that every command the agent runs dies with `E2BIG`
     # (see `task_sandbox.WORKSPACE_PATH_WARNING_CHARS`). A task whose agent cannot run a command
     # still *looks* confined, which is the one way this module could go quietly wrong.
-    root = Path("/private/tmp") / f"grid-e2e-{uuid.uuid4().hex[:8]}"
+    # ⚠️ `/tmp` then `.resolve()`, NEVER `/private/tmp` directly — `conftest.short_task_root`
+    # states the rule and this module was breaking it. `/private` exists only on macOS, so the
+    # literal made every test here a `FileNotFoundError` on Linux, which is the operating
+    # system the fleet runs; conftest already paid 125 errors to learn it once. `resolve()`
+    # gives the identical `/private/tmp/…` on macOS and leaves `/tmp/…` on Linux, so both are
+    # short and both are already their own realpath (the issue-06 trap).
+    root = Path("/tmp").resolve() / f"grid-e2e-{uuid.uuid4().hex[:8]}"
     monkeypatch.setenv("GRID_TASK_ROOT", str(root))
     monkeypatch.setenv("GRID_TASK_TIMEOUT_SECONDS", "300")
     monkeypatch.delenv("GRID_TASK_PERMISSION_MODE", raising=False)
