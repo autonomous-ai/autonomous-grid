@@ -14,6 +14,7 @@ while the `cli` package is still initialising.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import os
 import signal
@@ -152,7 +153,110 @@ class _TaskServing(NamedTuple):
         return self.requested and self.problem is None
 
 
-def _decide_task_serving() -> _TaskServing:
+def _task_env_from_flags(args: argparse.Namespace) -> dict[str, str]:
+    """What `--tasks`/`--max-tasks`/`--tasks-root` change in the serve child's environment.
+
+    The flags SET the environment the child is handed rather than moving the reading into the run
+    record, and that is deliberate — `task_opt_in.serving_enabled`'s docstring records why the
+    opt-in is read at serve time. This adds a second way to set it, not a second place to read it.
+
+    **The flag wins over an exported variable**, which is the ordinary expectation and is said in
+    `--help` so nobody has to discover it. `--tasks` is the exception that proves nothing: there is
+    no `--no-tasks`, so it can only ever turn serving ON — and turning it on is the one thing that
+    must be a person typing it, never something inferred.
+    """
+    from remote import task_agent, task_opt_in
+
+    overrides: dict[str, str] = {}
+    if getattr(args, "tasks", None):
+        overrides[task_opt_in.SERVING_ENV] = "1"
+    count = getattr(args, "max_tasks", None)
+    if count is not None:
+        overrides[task_opt_in.WORKERS_ENV] = str(count)
+    root = getattr(args, "tasks_root", None)
+    if root is not None:
+        overrides[task_agent.WORKSPACE_ROOT_ENV] = str(root)
+    return overrides
+
+
+@contextlib.contextmanager
+def _as_the_child_will_see_it(overrides: dict[str, str]):
+    """Run a check under the environment the serve child is about to be handed.
+
+    The checks read `os.environ` because that is what the CHILD reads, so asking them about a
+    `--tasks-root` this process was never started with means putting the value where they look.
+    A scoped mutation with a `finally`, rather than threading every variable through every check:
+    the alternative is a second way to express the provider's configuration, and a second way to
+    express it is a second way for the two to disagree.
+    """
+    saved = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _task_state_of_the_child(overrides: dict[str, str] | None) -> dict[str, object]:
+    """What the child about to be spawned will decide about task serving, asked its own way.
+
+    Recorded on the run record so a LATER join can tell whether an opt-in it was handed will take
+    effect (issue 60). Read through `task_opt_in` rather than by inspecting `overrides`, so this
+    cannot drift from what the child itself concludes — the environment is the wire between the two
+    processes, and asking any other way is a second reading of it.
+    """
+    from remote import task_opt_in
+
+    with _as_the_child_will_see_it(overrides or {}):
+        return {"tasks": task_opt_in.serving_enabled(), "max_tasks": task_opt_in.worker_count()}
+
+
+def _task_serving_drift(live: list[dict[str, object]], desired: dict[str, object]) -> str | None:
+    """Why the task configuration this join was handed will not take effect, or `None` (issue 60).
+
+    Two paths turn `GRID_TASKS=1 grid join …` into nothing at all. The **no-op gate** declares a
+    join idempotent when no engine, model, display name, bundle or media changed — and the opt-in is
+    none of those, while the running child's environment was fixed when it was spawned. The
+    **hot reload** re-reads the run record, which cannot change a running process's environment
+    either. From outside, both are indistinguishable from "there is no work yet".
+
+    ⚠️ **Absent is UNKNOWN, never off.** Every record written before this issue carries no such key,
+    and reading a missing one as `False` would tell every provider already serving tasks that its
+    task serving is not on. Hence `isinstance(..., bool)` rather than `.get(...)` — and `bool` is
+    checked *before* `int` for the count, because `True` is an `int` and would otherwise read as one
+    worker.
+
+    Nothing respawns on the strength of this. A respawn stops the child, and the in-flight inference
+    requests that would drop are the operator's call, not this function's.
+    """
+    recorded = _identity_field(live, "tasks")
+    if not isinstance(recorded, bool):
+        return None
+    if recorded != desired["tasks"]:
+        return (
+            f"Task serving is {'on' if recorded else 'off'} for the engine already serving this "
+            f"grid, and it is read once at startup — so this join cannot turn it "
+            f"{'off' if recorded else 'on'}. Apply it with `grid join --respawn`."
+        )
+    if not desired["tasks"]:
+        return None  # both off: the worker count decides nothing at all
+    running = _identity_field(live, "max_tasks")
+    if isinstance(running, bool) or not isinstance(running, int):
+        return None
+    if running != desired["max_tasks"]:
+        return (
+            f"The engine already serving this grid runs {running} task(s) at once, not "
+            f"{desired['max_tasks']}; that count is read once at startup too. Apply it with "
+            f"`grid join --respawn`."
+        )
+    return None
+
+
+def _decide_task_serving(*, may_make_the_root: bool = False) -> _TaskServing:
     """Ask, in the parent, whether the child about to be spawned could actually run a task.
 
     Every one of these answers exists already — and until this ran, `run_task` was the only place
@@ -181,6 +285,11 @@ def _decide_task_serving() -> _TaskServing:
     from remote import task_agent
 
     try:
+        # ⚠️ Only `--tasks` may CREATE a directory, and only the default one. An operator who named
+        # a root — by flag or by variable — named a path they own, and issue 62's stricter rules are
+        # for the default nobody chose (`ensure_default_workspace_root` says why).
+        if may_make_the_root and not (os.getenv(task_agent.WORKSPACE_ROOT_ENV) or "").strip():
+            task_agent.ensure_default_workspace_root()
         task_agent.preflight_before_serving()
     except (Exception, SystemExit) as exc:  # noqa: BLE001 — inference must survive any of them
         return _TaskServing(requested=True, problem=str(exc) or exc.__class__.__name__)
@@ -269,7 +378,11 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # a second ago must still be serving it after a task check that failed — so this may not run
     # from inside the block that has already terminated the prior child on its way to finding out.
     # It is also the last point where nothing has been written: a pure read, then the mutation.
-    task_serving = _decide_task_serving()
+    # The flags first, so every check below asks about the configuration the child will actually
+    # get rather than the one this shell happens to export (issue 61).
+    task_flags = _task_env_from_flags(args)
+    with _as_the_child_will_see_it(task_flags):
+        task_serving = _decide_task_serving(may_make_the_root=bool(getattr(args, "tasks", None)))
     if task_serving.problem:
         print(
             f"Task serving is off for this join: {task_serving.problem}\n"
@@ -277,8 +390,13 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     # Withheld from the CHILD, never from this process: the opt-in travels in the environment the
-    # parent hands over, and the child reads it once at startup.
-    engine_env = _task_serving_override(task_serving)
+    # parent hands over, and the child reads it once at startup. The withholding is applied LAST so
+    # it outranks `--tasks` — a provider that cannot run a task may not be told to claim one by a
+    # flag, however explicitly it was typed.
+    engine_env = {**task_flags, **(_task_serving_override(task_serving) or {})} or None
+    # What a child spawned now WOULD conclude — recorded when one is spawned, and compared against
+    # the live record when one is not (issue 60).
+    task_state = _task_state_of_the_child(engine_env)
 
     # Remote has ONE identity per grid (the token pins the relay node_id), so `grid join` is additive:
     # merge this join's engines into whatever is already serving, then respawn the single detached engine.
@@ -340,6 +458,11 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
                     print(adrift.detail, file=sys.stderr)
                 return 0
             print(f"Already serving on {label}; nothing to append.")
+            # Said HERE rather than folded into the gate above: a task-configuration change is not a
+            # reason to restart a serving provider behind the operator's back (issue 60).
+            drift = _task_serving_drift(live, task_state)
+            if drift:
+                print(drift, file=sys.stderr)
             # The serve process records a hot-reload that failed AFTER the CLI reported success (the
             # SIGHUP is fire-and-forget) — surface it here, or the no-op compounds the false success.
             stale = _identity_field(live, "last_reload_error")
@@ -364,6 +487,10 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # advertised, and the reload pins the advertised capacity to the actual live pool anyway).
         if getattr(args, "max_concurrency", None) is None and base:
             record["max_concurrency"] = _identity_field(base, "max_concurrency")
+        # What the child will actually conclude, not what was asked for — issue 58 withholds the
+        # opt-in from a provider that cannot run a task, and recording the request would make the
+        # next join read that as task serving being on.
+        record.update(task_state)
         # Zero-drop when we can: SIGHUP the live singleton to hot-reload the union in place — an appended
         # API engine reloads too now that its bearer is re-read from the key store (issue 05). Fall back to
         # stop-respawn for a first join, a legacy/pre-handler process, a launch, a media change, a
@@ -378,6 +505,12 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         reloaded = (not rotated_live) and (not respawn) and _hot_reloadable(live, merged_specs, record)
         if reloaded:
             reloaded = _hot_reload_identity(network_id, record, live)  # False if it fell back to a respawn
+            if reloaded:
+                # A reload re-reads the RECORD; it cannot hand a running process a new environment,
+                # so a task-configuration change goes the same way as on the no-op path (issue 60).
+                drift = _task_serving_drift(live, task_state)
+                if drift:
+                    print(drift, file=sys.stderr)
         else:
             # stops prior process(es) then respawns; aborts on failure
             _respawn_identity(network_id, record, live, env_overrides=engine_env)
@@ -1298,6 +1431,7 @@ def _build_record(
         "n_predict": getattr(args, "n_predict", None),
         "parallel": getattr(args, "parallel", None),
         "flash_attn": getattr(args, "flash_attn", None),
+        "mmproj": getattr(args, "mmproj", None),
         "temp": getattr(args, "temp", None),
         "reasoning_budget": getattr(args, "reasoning_budget", None),
         "started_at": runtime.utc_now(),

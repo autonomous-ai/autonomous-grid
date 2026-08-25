@@ -136,10 +136,28 @@ correlate replies. Publishing keeps one direction and one reader.
 - Providers gain a second claim loop and a supervisor process. Task capacity is configured
   **per provider** and is not `max_concurrency`: the real ceiling is the rate limit of the provider's
   own Claude subscription, shared by every child it spawns.
-- Every provider must run tasks at an **identical absolute path** (`/var/grid/projects/<project_id>/
+- ~~Every provider must run tasks at an **identical absolute path** (`/var/grid/projects/<project_id>/
   workspace`). Claude Code derives a session's transcript directory from the working directory
   (`~/.claude/projects/<abs-cwd with / → ->/`), so a provider using a different prefix cannot
-  `--resume` a session another one started.
+  `--resume` a session another one started.~~
+  **AMENDED 2026-08-24 (issue 62): providers do NOT have to agree on the path.** The rule was true
+  of the design it described, and **issue 06 replaced that design** in this same ADR — the
+  transcript now lives inside the git worktree (`.grid/agent/<member_key>/`) and travels in the
+  ordinary result commit, and `link_transcript` plants Claude Code's per-cwd symlink at whatever
+  name *this* provider's own workspace flattens to, pointing at what arrived through git. Every
+  provider computes its own name and reaches the same conversation.
+  **What measured it**: issue 35's measurement 5 exists to put exactly this question — the
+  transcript is pushed to `refs/grid/agent/<id>`, fetched into a second bare repository,
+  materialized into a workspace **at a different absolute path**, and resumed there; *"the different
+  path is the whole point"* (`tests/measure_non_dev/agent_tier.py`). It resumed, compacted, with the
+  token planted before the compaction coming back.
+  **What replaces it**: three constraints, all local to one provider — the flattened name must stay
+  under `task_agent.TRANSCRIPT_NAME_MAX_CHARS`; the root must be outside `$HOME` and `GRID_HOME`, or
+  the sandbox refuses it; and the provider must be able to write there. The default is therefore
+  per-platform (`/var/grid` on Linux, `/Users/Shared/grid` on macOS, where `/var` is root-owned and
+  a provider without `sudo` fails every task on it).
+  Recorded as an amendment rather than a deletion: the record of *why it stopped being true* is what
+  stops it coming back.
 - `CLAUDE_CONFIG_DIR` stays **fixed per provider** and holds the provider's own credential. Per-user
   config directories are not a rejected preference — they are **measured to be broken**: pointing the
   variable at a fresh directory yields `Not logged in · Please run /login` even on macOS, where the

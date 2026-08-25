@@ -16,15 +16,23 @@ from pathlib import Path
 import httpx
 
 from shared import paths
-from shared.system import arch, gpu
+from shared.system import arch
 
 
 @dataclass(frozen=True)
-class TarballPin:
+class LinuxBuild:
+    """A pinned official llama.cpp release build for Linux.
+
+    There is no CUDA entry here, and that is not an omission: upstream publishes CUDA binaries for
+    **Windows only** (`llama-*-bin-win-cuda-12.4-x64.zip` and friends). Every Linux asset in a
+    llama.cpp release is CPU, Vulkan, ROCm, SYCL or OpenVINO. CUDA on Linux has to be compiled, which
+    is what `--from-source` does. Vulkan runs on NVIDIA cards perfectly well and needs no toolchain,
+    so it is what an NVIDIA box gets when the operator has not asked to build.
+    """
+
     label: str
     url: str
     sha256: str
-    supports_sm: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -39,6 +47,7 @@ class MacosBuild:
 
 
 LLAMA_RELEASE = "b10369"
+_RELEASE_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_RELEASE}"
 
 MACOS_BUILDS: dict[str, MacosBuild] = {
     "arm64": MacosBuild(
@@ -54,55 +63,57 @@ MACOS_BUILDS: dict[str, MacosBuild] = {
 }
 
 
-TARBALLS: tuple[TarballPin, ...] = (
-    TarballPin(
-        label="cuda-12.4-ampere-ada",
-        url="https://github.com/ggml-org/llama.cpp/releases/download/PLACEHOLDER/llama-cuda12.4.zip",
-        sha256="PLACEHOLDER",
-        supports_sm=("sm_86", "sm_89"),
+def _linux_asset(kind: str, machine: str) -> str:
+    suffix = "x64" if machine == "x86_64" else "arm64"
+    infix = "vulkan-" if kind == "vulkan" else ""
+    return f"llama-{LLAMA_RELEASE}-bin-ubuntu-{infix}{suffix}.tar.gz"
+
+
+LINUX_BUILDS: dict[tuple[str, str], LinuxBuild] = {
+    ("vulkan", "x86_64"): LinuxBuild(
+        label="linux-vulkan-x64",
+        url=f"{_RELEASE_BASE}/{_linux_asset('vulkan', 'x86_64')}",
+        sha256="baa1deb5adda0baf72fc9d213d657b8388997d0e20b1a0e8bea48ff91b5cad00",
     ),
-    TarballPin(
-        label="cuda-12.8-blackwell",
-        url="https://github.com/ggml-org/llama.cpp/releases/download/PLACEHOLDER/llama-cuda12.8.zip",
-        sha256="PLACEHOLDER",
-        supports_sm=("sm_120",),
+    ("vulkan", "aarch64"): LinuxBuild(
+        label="linux-vulkan-arm64",
+        url=f"{_RELEASE_BASE}/{_linux_asset('vulkan', 'aarch64')}",
+        sha256="12f09eb4dc7df11940deda07329bf6b0bb643bf5aad323b8af778689528187f4",
     ),
-)
+    ("cpu", "x86_64"): LinuxBuild(
+        label="linux-cpu-x64",
+        url=f"{_RELEASE_BASE}/{_linux_asset('cpu', 'x86_64')}",
+        sha256="675a266f6cc8a8c7b85dc431a2472e372d0ff3741b7f4eb153dc786dff3964d1",
+    ),
+    ("cpu", "aarch64"): LinuxBuild(
+        label="linux-cpu-arm64",
+        url=f"{_RELEASE_BASE}/{_linux_asset('cpu', 'aarch64')}",
+        sha256="7a806180a5136358b76cc654eebf98efb6c7d6b0f6879a55e69697d944bd91f1",
+    ),
+}
 
 
-def pick_tarball(gpus: list[gpu.GpuInfo]) -> TarballPin | None:
-    if not gpus:
-        return None
-    required = {item.compute_cap_sm for item in gpus}
-    for tarball in TARBALLS:
-        if required.issubset(set(tarball.supports_sm)):
-            return tarball
-    return None
-
-
-def install_pinned(tarball: TarballPin) -> Path:
-    if tarball.sha256 == "PLACEHOLDER" or "PLACEHOLDER" in tarball.url:
+def pick_linux_build(kind: str, machine: str) -> LinuxBuild:
+    """The official Linux build for this backend and architecture."""
+    build = LINUX_BUILDS.get((kind, machine))
+    if not build:
         raise SystemExit(
-            f"Pinned tarball {tarball.label!r} has placeholder URL/sha. Fill in real values "
-            "in engine/installer.py before running "
-            "`grid engine install llama.cpp`, or pass --from-source."
+            f"No prebuilt llama.cpp for Linux {machine!r} ({kind}). "
+            "Re-run with --from-source to build it here."
         )
+    return build
+
+
+def install_linux_prebuilt(kind: str) -> Path:
+    """Install llama.cpp on Linux from the project's official release tarball."""
     paths.ensure_all()
+    build = pick_linux_build(kind, arch.normalized_machine())
     with tempfile.TemporaryDirectory(prefix="grid-engine-") as tmpdir:
-        tmp = Path(tmpdir)
-        extracted = fetch_and_extract(tarball.label, tarball.url, tarball.sha256, tmp)
-        found = _locate_llama_server(extracted)
-        if not found:
-            raise SystemExit(f"Extracted archive did not contain llama-server: {tarball.label}")
-        target = paths.llama_server_bin()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists() or target.is_symlink():
-            if target.is_dir():
-                raise SystemExit(f"Cannot install llama-server because {target} is a directory.")
-            target.unlink()
-        shutil.copy2(found, target)
-        target.chmod(0o755)
-        return target
+        extracted = fetch_and_extract(build.label, build.url, build.sha256, Path(tmpdir))
+        server = _locate_llama_server(extracted)
+        if not server:
+            raise SystemExit(f"Extracted archive did not contain llama-server: {build.label}")
+        return _install_prefix(server.parent)
 
 
 def pick_macos_build(machine: str) -> MacosBuild:
@@ -135,15 +146,18 @@ def install_macos_prebuilt() -> Path:
 
 def _install_prefix(source: Path) -> Path:
     """Place `llama-server` and the shared libraries it loads into their own directory, then point
-    `~/.grid/bin/llama-server` at it. The binary resolves its libraries via `@loader_path`, so they
-    must sit beside it — copying the binary alone yields one that cannot start."""
+    `~/.grid/bin/llama-server` at it. The binary resolves its libraries relatively — `@loader_path`
+    on macOS, `$ORIGIN` on Linux — so they must sit beside it; copying the binary alone yields one
+    that cannot start."""
     prefix = paths.llama_prefix_dir()
     if prefix.exists():
         shutil.rmtree(prefix)
     prefix.mkdir(parents=True, exist_ok=True)
 
     shutil.copy2(source / "llama-server", prefix / "llama-server")
-    for lib in source.glob("*.dylib"):
+    # `.so*`, not `.so`: Linux releases ship versioned sonames (`libggml-base.so.0`) that the
+    # binary loads by their full name, so a bare `*.so` glob installs an engine that cannot start.
+    for lib in [*source.glob("*.dylib"), *source.glob("*.so*")]:
         target = prefix / lib.name
         # Keep the release's versioned aliases as links; following them would copy each library
         # several times over.
@@ -172,11 +186,16 @@ def _link_bin(source: Path) -> Path:
 def install_from_source(target_sm: str) -> Path:
     paths.ensure_all()
     require_toolchain()
+    sm_digits = target_sm.removeprefix("sm_")
+    require_cuda_arch(sm_digits)
     src = _ensure_llama_cpp_source()
     build = src / "build"
     build.mkdir(parents=True, exist_ok=True)
-    sm_digits = target_sm.removeprefix("sm_")
     print(f"Configuring CUDA build for CMAKE_CUDA_ARCHITECTURES={sm_digits} ...")
+    # No -DCMAKE_BUILD_TYPE: llama.cpp's own CMakeLists already forces Release when the caller
+    # leaves it unset. And a plain `120` is correct — llama.cpp rewrites any `12X` to the
+    # architecture-specific `12Xa` itself, because Blackwell's FP4 tensor-core instructions are
+    # not forwards compatible.
     subprocess.check_call(
         [
             "cmake",
@@ -188,19 +207,8 @@ def install_from_source(target_sm: str) -> Path:
             f"-DCMAKE_CUDA_ARCHITECTURES={sm_digits}",
         ]
     )
-    subprocess.check_call(["cmake", "--build", str(build), "--target", "llama-server", "-j"])
-    candidates = list(build.rglob("llama-server"))
-    if not candidates:
-        raise SystemExit("Build completed but llama-server binary was not found.")
-    target = paths.llama_server_bin()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() or target.is_symlink():
-        if target.is_dir():
-            raise SystemExit(f"Cannot install llama-server because {target} is a directory.")
-        target.unlink()
-    shutil.copy2(candidates[0], target)
-    target.chmod(0o755)
-    return target
+    _build_target(build)
+    return _install_prefix(_built_server(build).parent)
 
 
 def install_metal_from_source() -> Path:
@@ -221,37 +229,111 @@ def install_metal_from_source() -> Path:
             "-DCMAKE_BUILD_TYPE=Release",
         ]
     )
-    subprocess.check_call(["cmake", "--build", str(build), "--target", "llama-server", "--config", "Release", "-j"])
-    candidates = list(build.rglob("llama-server"))
-    if not candidates:
+    _build_target(build)
+    return _install_prefix(_built_server(build).parent)
+
+
+def _build_target(build: Path, target: str = "llama-server") -> None:
+    """Compile one target, with the job count BOUNDED.
+
+    A bare `-j` is passed straight through to make, which reads it as "unlimited jobs". A CUDA
+    build is hundreds of nvcc invocations that each want a GB or more, so unlimited means the
+    machine runs itself out of memory partway through a long build. Leave one core for the rest
+    of the system.
+    """
+    jobs = max(1, (os.cpu_count() or 2) - 1)
+    subprocess.check_call(
+        ["cmake", "--build", str(build), "--target", target, "--config", "Release", "-j", str(jobs)]
+    )
+
+
+def _built_server(build: Path) -> Path:
+    """The freshly built `llama-server`, preferring the canonical output directory.
+
+    llama.cpp sets `CMAKE_RUNTIME_OUTPUT_DIRECTORY` to `<build>/bin`, so that is where the binary
+    and the shared libraries it needs land together. A bare `rglob` can also match copies left
+    elsewhere in the tree and returns them in filesystem order, so picking the first result was
+    a coin flip between the real output and a stale one.
+    """
+    canonical = build / "bin" / "llama-server"
+    if canonical.is_file():
+        return canonical
+    found = sorted(build.rglob("llama-server"))
+    if not found:
         raise SystemExit("Build completed but llama-server binary was not found.")
-    target = paths.llama_server_bin()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() or target.is_symlink():
-        if target.is_dir():
-            raise SystemExit(f"Cannot install llama-server because {target} is a directory.")
-        target.unlink()
-    shutil.copy2(candidates[0], target)
-    target.chmod(0o755)
-    return target
+    return found[0]
+
+
+BUILD_TOOLS = ("cmake", "g++", "nvcc", "git")
+
+
+def _nvcc_architectures() -> set[str]:
+    """What this CUDA toolkit can compile for, as ``{"compute_50", ...}``; empty if unknowable."""
+    try:
+        out = subprocess.run(
+            ["nvcc", "--list-gpu-arch"], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {line.strip() for line in (out.stdout or "").splitlines() if line.strip().startswith("compute_")}
+
+
+def cuda_build_readiness(sm_digits: str) -> tuple[bool, str]:
+    """Can this machine compile the CUDA engine for [sm_digits], and if not, what is in the way.
+
+    One prober, two callers, so the answer cannot differ between them: `--from-source` raises this
+    as an error before doing any work, and the plain install prints it as guidance. The whole point
+    is that nobody has to run `nvcc --list-gpu-arch` by hand to find out where they stand.
+
+    Returns ``(ready, message)``. When not ready the message is a complete, actionable paragraph.
+    """
+    missing = [tool for tool in BUILD_TOOLS if shutil.which(tool) is None]
+    if missing:
+        return False, (
+            f"CUDA needs {', '.join(missing)}, which this machine does not have.\n"
+            f"    {_toolchain_hint()}"
+        )
+    listed = _nvcc_architectures()
+    # An empty list means nvcc would not tell us — say nothing rather than block a build that may
+    # be perfectly fine, and let the compiler have the final word.
+    if listed and f"compute_{sm_digits}" not in listed:
+        newest = max(listed, key=lambda a: int(a.removeprefix("compute_").rstrip("af") or 0))
+        return False, (
+            f"This CUDA toolkit cannot build for compute_{sm_digits} — the newest it supports is "
+            f"{newest}. RTX 50-series needs CUDA 12.8 or newer; install a current toolkit from "
+            "NVIDIA rather than your distro's default package."
+        )
+    return True, ""
+
+
+def require_cuda_arch(sm_digits: str) -> None:
+    """Refuse to start a long build this machine cannot finish."""
+    ready, message = cuda_build_readiness(sm_digits)
+    if not ready:
+        raise SystemExit(message)
 
 
 def is_macos() -> bool:
     return platform.system() == "Darwin"
 
 
-def require_toolchain() -> None:
-    missing = [tool for tool in ("cmake", "g++", "nvcc", "git") if shutil.which(tool) is None]
-    if not missing:
-        return
+def _toolchain_hint() -> str:
+    """The install command for this distro's build tools."""
     distro = _detect_distro()
     if distro == "debian":
-        hint = "sudo apt update && sudo apt install -y build-essential cmake git nvidia-cuda-toolkit"
-    elif distro == "rhel":
-        hint = "sudo dnf install -y @development-tools cmake git cuda-toolkit"
-    else:
-        hint = "Install gcc/g++, cmake, git, and the CUDA toolkit via your distro's package manager."
-    raise SystemExit(f"Missing required build tools: {', '.join(missing)}.\nInstall them with:\n  {hint}")
+        return "sudo apt update && sudo apt install -y build-essential cmake git nvidia-cuda-toolkit"
+    if distro == "rhel":
+        return "sudo dnf install -y @development-tools cmake git cuda-toolkit"
+    return "Install gcc/g++, cmake, git, and the CUDA toolkit via your distro's package manager."
+
+
+def require_toolchain() -> None:
+    missing = [tool for tool in BUILD_TOOLS if shutil.which(tool) is None]
+    if not missing:
+        return
+    raise SystemExit(
+        f"Missing required build tools: {', '.join(missing)}.\nInstall them with:\n  {_toolchain_hint()}"
+    )
 
 
 def require_metal_toolchain() -> None:
@@ -336,12 +418,39 @@ def _locate_llama_server(root: Path) -> Path | None:
 
 
 
+_LLAMA_REPO = "https://github.com/ggml-org/llama.cpp"
+
+
 def _ensure_llama_cpp_source() -> Path:
+    """A checkout of llama.cpp at exactly the release Grid pins everywhere else.
+
+    Two bugs used to live here. It cloned the default branch, so `--from-source` built whatever
+    master happened to be that day while the prebuilt path installed a pinned, checksummed
+    release — one command, two versions. And an existing directory was returned untouched, so a
+    second run silently rebuilt a checkout that could be months old.
+    """
     src = paths.home() / "src" / "llama.cpp"
     src.parent.mkdir(parents=True, exist_ok=True)
-    if not src.exists():
-        print(f"Cloning llama.cpp into {src} ...")
-        subprocess.check_call(["git", "clone", "--depth", "1", "https://github.com/ggml-org/llama.cpp", str(src)])
+    if not (src / ".git").is_dir():
+        if src.exists():
+            shutil.rmtree(src)
+        print(f"Cloning llama.cpp {LLAMA_RELEASE} into {src} ...")
+        subprocess.check_call(
+            ["git", "clone", "--depth", "1", "--branch", LLAMA_RELEASE, _LLAMA_REPO, str(src)]
+        )
+        return src
+
+    print(f"Updating {src} to {LLAMA_RELEASE} ...")
+    try:
+        subprocess.check_call(
+            ["git", "-C", str(src), "fetch", "--depth", "1", "origin", "tag", LLAMA_RELEASE]
+        )
+        subprocess.check_call(["git", "-C", str(src), "checkout", "--force", LLAMA_RELEASE])
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            f"Could not move {src} to {LLAMA_RELEASE} ({exc}). Delete that directory and re-run "
+            "to get a clean checkout."
+        ) from exc
     return src
 
 

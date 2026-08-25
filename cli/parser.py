@@ -54,6 +54,24 @@ from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 from .stt import cmd_stt_transcribe
 
 
+def _positive_task_count(raw: str) -> int:
+    """`--max-tasks`, refused rather than defaulted when it is not a positive whole number.
+
+    ⚠️ **Deliberately NOT `GRID_MAX_TASKS`'s rule, and the difference is the point.** That variable
+    falls back to 1 and says so, because refusing would take task serving down for the life of a
+    running process — a far worse answer than running with the default. A flag is a different
+    situation: the operator is at the terminal, they typed it a second ago, and being told costs
+    them one retry. `argparse` turns this into exit 2, which is "ask again" rather than "done".
+    """
+    try:
+        count = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a whole number of tasks") from None
+    if count < 1:
+        raise argparse.ArgumentTypeError(f"{raw!r} must be at least 1 task")
+    return count
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="grid",
@@ -225,12 +243,22 @@ def _add_engines(sub) -> None:
     tuning = join.add_argument_group("Built-in tuning (--serve)")
     tuning.add_argument("--endpoint-port", "--llama-port", type=int, default=8081)
     tuning.add_argument("--heartbeat-interval", type=float, default=15.0)
-    tuning.add_argument("--ctx-size", type=int, default=None)
+    tuning.add_argument("--ctx-size", type=int, default=None, metavar="N",
+                        help="Pin the context window to N tokens. Left unset, the engine measures "
+                             "free memory at load and takes the largest window that fits — pinning "
+                             "turns that off, so an N this machine cannot hold fails to start "
+                             "instead of shrinking. N=0 is not 'unset': it demands the model's "
+                             "full trained window and spills weights into system RAM to get it.")
     tuning.add_argument("--n-predict", type=int, default=None)
     tuning.add_argument("--parallel", type=int, default=None)
-    tuning.add_argument("--flash-attn", default=None)
+    tuning.add_argument("--flash-attn", default=None, metavar="on|off|auto",
+                        help="Left unset, the engine probes the backend and falls back on its own.")
     tuning.add_argument("--temp", type=float, default=None)
     tuning.add_argument("--reasoning-budget", type=int, default=None)
+    tuning.add_argument("--mmproj", default=None, metavar="FILE",
+                        help="Override the multimodal projector, naming a FILE in ~/.grid/models. "
+                             "Not normally needed: `grid pull` fetches a vision model's projector "
+                             "with it, and `--serve` finds it and enables vision on its own.")
 
     media = join.add_argument_group("Media")
     media.add_argument("--comfyui-port", type=int, default=8188)
@@ -278,6 +306,19 @@ def _add_engines(sub) -> None:
     remote_only.add_argument("--respawn", action="store_true", default=None,
                              help="Stop the engine already serving this grid and start a fresh one, "
                                   "instead of no-opping an identical re-join (remote only).")
+    # Task serving (ADR 0032). Remote-only for the same structural reason as `--max-concurrency`:
+    # a task is claimed from the relay, and local mode has no relay. `default=None` throughout, per
+    # the group's comment above — `--tasks` in particular, because a `store_true` defaulting to
+    # False would make `_reject_remote_only_flags` refuse every LOCAL join.
+    remote_only.add_argument("--tasks", action="store_true", default=None,
+                             help="Also claim distributed tasks for this grid, spending this box's "
+                                  "own Claude subscription (remote only). Off unless you ask.")
+    remote_only.add_argument("--max-tasks", type=_positive_task_count, default=None, metavar="N",
+                             help="How many tasks this provider runs at once (default 1). "
+                                  "Wins over GRID_MAX_TASKS.")
+    remote_only.add_argument("--tasks-root", default=None, metavar="PATH",
+                             help="Where task workspaces live. Keep it SHORT and outside your home "
+                                  "directory. Wins over GRID_TASK_ROOT.")
     join.set_defaults(handler=cmd_join)
 
     leave = sub.add_parser("leave", help="Stop and unregister engines from a grid")

@@ -11,6 +11,7 @@ import shlex
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 import tarfile
 import threading
@@ -35,7 +36,7 @@ from shared.agent import codex_installer
 from shared.agent import installer as agent_installer
 from shared.engine import comfyui, installer, launcher
 from shared.system import arch
-from shared.models import api_catalog, catalog, download, media_bundles
+from shared.models import api_catalog, catalog, download, gguf, media_bundles
 from local import media_server
 from local.server import create_app
 from shared.system import detect
@@ -3235,6 +3236,207 @@ def test_launcher_start_llm_adds_alias_flag(monkeypatch, tmp_path):
         "--alias",
         "your-model",
     ]
+
+
+def _launch_argv(monkeypatch, tmp_path, **kwargs):
+    """Spawn a model through `start_llm` with the process faked out, and hand back the argv."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    model_path = paths.models_dir() / "your-model.gguf"
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    model_path.write_bytes(b"model")
+    calls = {}
+
+    def fake_popen(cmd, **kw):
+        calls["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr(launcher, "llama_server_path", lambda: "/usr/local/bin/llama-server")
+    monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+    launcher.start_llm("your-model.gguf", port=8081, **kwargs)
+    return calls["cmd"]
+
+
+def test_start_llm_leaves_the_fit_flags_unset_by_default(monkeypatch, tmp_path):
+    """The launch must NOT name a context size, a flash-attn mode, or a jinja toggle.
+
+    llama.cpp fits the context to free device memory on its own, but only for arguments still
+    holding their default — naming one takes that dimension away from the fitter. The old launch
+    hardcoded `--ctx-size 128000` and so allocated a 128k KV cache for a 4k model.
+    """
+    cmd = _launch_argv(monkeypatch, tmp_path)
+    for flag in ("--ctx-size", "--flash-attn", "--jinja", "--mmproj"):
+        assert flag not in cmd, f"{flag} must stay unset so llama.cpp can fit the model itself"
+    # Still ours to impose: one slot, and never silently drop the head of a conversation.
+    assert "--parallel" in cmd and "--no-context-shift" in cmd
+
+
+def test_start_llm_passes_through_an_operator_override(monkeypatch, tmp_path):
+    cmd = _launch_argv(monkeypatch, tmp_path, ctx_size=32000, flash_attn="off")
+    assert cmd[cmd.index("--ctx-size") + 1] == "32000"
+    assert cmd[cmd.index("--flash-attn") + 1] == "off"
+
+
+def test_start_llm_pins_gpu_layers_only_on_unified_memory(monkeypatch, tmp_path):
+    """Apple Silicon must not let llama.cpp spill layers to "system memory" — it is the same pool."""
+    monkeypatch.setattr(launcher, "runtime_profile", lambda: launcher.APPLE_SILICON_RUNTIME)
+    cmd = _launch_argv(monkeypatch, tmp_path)
+    assert cmd[cmd.index("--n-gpu-layers") + 1] == "all"
+
+    monkeypatch.setattr(launcher, "runtime_profile", lambda: launcher.NVIDIA_RUNTIME)
+    # Discrete VRAM: spilling to real system RAM is a legitimate partial offload, so leave it alone.
+    assert "--n-gpu-layers" not in _launch_argv(monkeypatch, tmp_path)
+
+
+def test_start_llm_refuses_ctx_size_zero(monkeypatch, tmp_path):
+    """`-c 0` reads as "full trained window, do not reduce" — a swap-heavy mode that looks like unset."""
+    with pytest.raises(SystemExit, match="full trained context"):
+        _launch_argv(monkeypatch, tmp_path, ctx_size=0)
+
+
+def test_start_llm_refuses_a_missing_projector(monkeypatch, tmp_path):
+    with pytest.raises(SystemExit, match="Multimodal projector not found"):
+        _launch_argv(monkeypatch, tmp_path, mmproj="mmproj-BF16.gguf")
+
+
+def _cuda_ready(monkeypatch, arches):
+    """Pretend the build tools are installed and nvcc reports [arches]."""
+    from shared.engine import installer
+
+    monkeypatch.setattr(installer.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(installer, "_nvcc_architectures", lambda: set(arches))
+    return installer
+
+
+def test_cuda_readiness_names_the_missing_tools(monkeypatch):
+    from shared.engine import installer
+
+    monkeypatch.setattr(installer.shutil, "which", lambda tool: None)
+    ready, message = installer.cuda_build_readiness("120")
+    assert ready is False
+    assert "cmake" in message and "nvcc" in message
+
+
+def test_cuda_readiness_rejects_a_toolkit_too_old_for_the_card(monkeypatch):
+    """The whole point: say so BEFORE the clone, not `nvcc fatal` ten minutes into a build."""
+    installer = _cuda_ready(monkeypatch, ["compute_75", "compute_86", "compute_89"])
+    ready, message = installer.cuda_build_readiness("120")
+    assert ready is False
+    assert "compute_120" in message and "compute_89" in message
+
+    with pytest.raises(SystemExit, match="compute_120"):
+        installer.require_cuda_arch("120")
+
+
+def test_cuda_readiness_accepts_a_current_toolkit(monkeypatch):
+    installer = _cuda_ready(monkeypatch, ["compute_89", "compute_120"])
+    assert installer.cuda_build_readiness("120") == (True, "")
+    installer.require_cuda_arch("120")  # must not raise
+
+
+def test_cuda_readiness_does_not_block_when_nvcc_stays_silent(monkeypatch):
+    """An unreadable nvcc must not veto a build that would have worked — let the compiler decide."""
+    installer = _cuda_ready(monkeypatch, [])
+    ready, _ = installer.cuda_build_readiness("120")
+    assert ready is True
+
+
+def _write_gguf(path, kv):
+    """Write a minimal GGUF carrying [kv] as `{key: (value_type, value)}`. Enough for the readers."""
+    blob = b""
+    for key, (vtype, value) in kv.items():
+        blob += struct.pack("<Q", len(key)) + key.encode() + struct.pack("<I", vtype)
+        if vtype == 8:  # string
+            blob += struct.pack("<Q", len(value)) + value.encode()
+        elif vtype == 7:  # bool
+            blob += struct.pack("<?", value)
+        else:  # uint32
+            blob += struct.pack("<I", value)
+    path.write_bytes(
+        b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", 0) + struct.pack("<Q", len(kv)) + blob
+    )
+
+
+def test_projector_beside_pairs_by_sidecar_name(tmp_path):
+    """Two vision models share a flat directory, so the projector must be found by name, not scan."""
+    model = tmp_path / "Qwen3.6-VL-UD-IQ3_S.gguf"
+    _write_gguf(model, {"general.architecture": (8, "qwen3vl")})
+    # The dotted stem is the trap: `with_suffix` would read `.6-VL-UD-IQ3_S` as the suffix.
+    projector = tmp_path / "Qwen3.6-VL-UD-IQ3_S.mmproj.gguf"
+    _write_gguf(projector, {"clip.has_vision_encoder": (7, True)})
+
+    assert gguf.projector_beside(model) == projector
+
+
+def test_projector_beside_ignores_a_file_that_is_not_a_projector(tmp_path):
+    """The sidecar name is our own convention — the header is what actually decides."""
+    model = tmp_path / "text-only.gguf"
+    _write_gguf(model, {"general.architecture": (8, "llama")})
+    impostor = tmp_path / "text-only.mmproj.gguf"
+    _write_gguf(impostor, {"general.architecture": (8, "llama")})
+
+    assert gguf.projector_beside(model) is None
+
+
+def test_projector_beside_returns_none_for_a_text_model(tmp_path):
+    model = tmp_path / "text-only.gguf"
+    _write_gguf(model, {"general.architecture": (8, "llama")})
+    assert gguf.projector_beside(model) is None
+
+
+def test_start_llm_enables_vision_without_being_asked(monkeypatch, tmp_path):
+    """`grid join --serve <vision model>` must serve vision with no extra flag.
+
+    Whether a model can see is a fact about the files on this disk, not about what the operator
+    remembered to type — so the launcher looks, rather than waiting to be told.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    paths.models_dir().mkdir(parents=True, exist_ok=True)
+    _write_gguf(paths.models_dir() / "your-model.mmproj.gguf", {"clip.has_vision_encoder": (7, True)})
+
+    cmd = _launch_argv(monkeypatch, tmp_path)
+    assert cmd[cmd.index("--mmproj") + 1] == str(paths.models_dir() / "your-model.mmproj.gguf")
+
+
+def test_find_projector_prefers_f16_and_tolerates_a_dead_api(monkeypatch):
+    siblings = [{"rfilename": n} for n in
+                ("model-Q4_K_M.gguf", "mmproj-F32.gguf", "mmproj-BF16.gguf", "mmproj-F16.gguf")]
+
+    monkeypatch.setattr(
+        download.httpx, "get",
+        lambda *a, **k: SimpleNamespace(status_code=200, json=lambda: {"siblings": siblings}),
+    )
+    assert download.find_projector("unsloth/whatever-GGUF") == "mmproj-F16.gguf"
+
+    # A rate-limited or offline API costs the projector, never the model the user asked for.
+    def boom(*a, **k):
+        raise download.httpx.ConnectError("no network")
+
+    monkeypatch.setattr(download.httpx, "get", boom)
+    assert download.find_projector("unsloth/whatever-GGUF") is None
+
+
+def test_find_projector_returns_none_for_a_text_only_repo(monkeypatch):
+    siblings = [{"rfilename": "model-Q4_K_M.gguf"}, {"rfilename": "README.md"}]
+    monkeypatch.setattr(
+        download.httpx, "get",
+        lambda *a, **k: SimpleNamespace(status_code=200, json=lambda: {"siblings": siblings}),
+    )
+    assert download.find_projector("unsloth/text-GGUF") is None
+
+
+def test_start_llm_serves_vision_when_a_projector_is_named(monkeypatch, tmp_path):
+    """A vision GGUF is text-only until its projector is loaded, so `--mmproj` is the whole switch.
+
+    Without it llama-server reports `modalities.vision: false` on /props and the grid advertises the
+    model as text-only — correctly, but the operator has no way to say otherwise.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    projector = paths.models_dir() / "mmproj-F16.gguf"
+    projector.parent.mkdir(parents=True, exist_ok=True)
+    projector.write_bytes(b"projector")
+
+    cmd = _launch_argv(monkeypatch, tmp_path, mmproj="mmproj-F16.gguf")
+    assert cmd[cmd.index("--mmproj") + 1] == str(projector)
 
 
 def test_run_engine_launches_local_llama_server_by_default(monkeypatch, tmp_path):
@@ -38097,3 +38299,457 @@ def test_the_task_check_runs_before_the_join_stops_or_spawns_anything(monkeypatc
         f"the join acted before it asked whether this provider can run a task: {order}")
     assert "spawned" in order, "the join never spawned, so this proves nothing about the order"
     assert spawned is not None
+
+
+def test_the_join_runs_the_REAL_check_not_a_stand_in(monkeypatch, tmp_path, capsys):
+    """The seam every other test in this group mocks away.
+
+    ⚠️ The four tests above patch `preflight_before_serving`, and its own unit tests patch
+    `preflight` and `resolve_binary` — so `cmd_remote_join` → `preflight_before_serving` →
+    `preflight` had **never executed as one chain**. Mocking on both sides of a seam is how a
+    contract comes to be verified by nothing, and this repository has paid for that before.
+
+    Nothing here is patched but the grid and the spawn. The refusal is reached through
+    `GRID_TASK_PERMISSION_MODE`, deliberately: it is the FIRST thing `preflight()` checks, it needs
+    no subprocess and no Claude Code on the box, so this test asserts the same thing on a developer's
+    Mac and on a Linux CI runner that has no agent installed at all.
+    """
+    from remote import task_sandbox
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.delenv(task_sandbox.SANDBOX_ENV, raising=False)  # sandbox on: the mode is refused
+    monkeypatch.setenv("GRID_TASK_PERMISSION_MODE", "bypassPermissions")
+
+    assert cli.main(["join", "--serve", "m"]) == 0, "a task misconfiguration failed the whole join"
+
+    err = capsys.readouterr().err
+    assert "GRID_TASK_SANDBOX" in err, (
+        f"the real check's own sentence did not reach the operator's terminal: {err!r}")
+    assert "respawn" in err, f"the refusal does not say how to retry it: {err!r}"
+    assert cli.provider._read_records("n1")["remote"]["models"] == ["m"], "inference did not join"
+    assert not _the_child_would_claim_tasks(spawned), (
+        "the child was spawned still claiming tasks this provider cannot run")
+
+
+# --- issue 61: `grid join --tasks` is the surface of task serving ---------------------------------
+
+
+def _child_task_env(spawned: dict) -> dict[str, str]:
+    """The three task variables the child was actually handed, whatever set them."""
+    from remote import task_agent, task_opt_in
+
+    env = _child_env(spawned)
+    return {k: env.get(k) for k in
+            (task_opt_in.SERVING_ENV, task_opt_in.WORKERS_ENV, task_agent.WORKSPACE_ROOT_ENV)}
+
+
+def test_join_help_says_this_provider_can_serve_tasks(capsys):
+    """Task serving was configured entirely through the environment, and `grid join --help` had no
+    word about it — a provider could not discover the feature from the CLI that has it."""
+    from cli.parser import build_parser
+
+    parser = build_parser()
+    joins = [a for a in parser._subparsers._group_actions[0].choices.items() if a[0] == "join"]
+    assert joins, "no `join` subparser"
+    text = joins[0][1].format_help()
+
+    assert "--tasks" in text, "`grid join --help` still says nothing about task serving"
+    assert "--tasks-root" in text and "--max-tasks" in text
+
+
+def test_tasks_flag_alone_starts_a_provider_that_claims_tasks(monkeypatch, tmp_path):
+    """No environment variable set anywhere — the flag is the whole opt-in."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.delenv("GRID_TASKS", raising=False)
+    monkeypatch.delenv("GRID_TASK_ROOT", raising=False)
+    # ⚠️ The default root is a REAL path (`/Users/Shared/grid`, `/var/grid`), and `--tasks` creates
+    # it. Pointed at tmp_path so this test does not write to the developer's machine — and does not
+    # pass on macOS while failing on a Linux runner that cannot write `/var`.
+    monkeypatch.setattr(task_agent, "DEFAULT_WORKSPACE_ROOT", str(tmp_path / "default-root"))
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(["join", "--serve", "m", "--tasks"]) == 0
+
+    assert _the_child_would_claim_tasks(spawned), "the flag did not reach the child"
+
+
+def test_the_task_flags_reach_the_child(monkeypatch, tmp_path):
+    """`--max-tasks` sizes the pool and `--tasks-root` places the workspaces; both are read by the
+    CHILD from its environment, so this asserts what the child was handed."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+    root = tmp_path / "elsewhere"
+
+    assert cli.main(["join", "--serve", "m", "--tasks",
+                     "--max-tasks", "3", "--tasks-root", str(root)]) == 0
+
+    env = _child_task_env(spawned)
+    assert env["GRID_MAX_TASKS"] == "3"
+    assert env["GRID_TASK_ROOT"] == str(root)
+
+
+def test_the_environment_still_works_with_no_flag(monkeypatch, tmp_path):
+    """Providers are running on these variables today; a rollout may not move them."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setenv("GRID_MAX_TASKS", "2")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+    assert _the_child_would_claim_tasks(spawned)
+    assert _child_task_env(spawned)["GRID_MAX_TASKS"] == "2"
+
+
+@pytest.mark.parametrize("variable, flag, flag_value, expected", [
+    ("GRID_MAX_TASKS", "--max-tasks", "5", "5"),
+    ("GRID_TASK_ROOT", "--tasks-root", "/Users/Shared/from-the-flag", "/Users/Shared/from-the-flag"),
+])
+def test_the_flag_wins_over_the_environment(
+        monkeypatch, tmp_path, variable, flag, flag_value, expected):
+    """Stated in `--help` as well as tested: an operator who passes a flag AND has an old variable
+    exported in a shell profile must not have to work out which one is live."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv(variable, "/from/the/environment" if flag == "--tasks-root" else "9")
+    if variable != "GRID_TASK_ROOT":
+        monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "named"))  # never the real default
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(["join", "--serve", "m", "--tasks", flag, flag_value]) == 0
+
+    assert _child_task_env(spawned)[variable] == expected
+
+
+@pytest.mark.parametrize("bad, because", [
+    ("0", "at least 1"),
+    ("-1", "at least 1"),
+    ("three", "not a whole number"),
+])
+def test_a_bad_max_tasks_is_refused_in_front_of_the_operator(monkeypatch, tmp_path, capsys, bad, because):
+    """⚠️ **Deliberately NOT `GRID_MAX_TASKS`'s rule.** That variable falls back and says so,
+    because refusing would take task serving down for the life of a running process. A flag is a
+    different situation: the operator is at the terminal, they just typed it, and a typo they are
+    told about costs one retry. `argparse` exits 2, which is "ask again" rather than "done"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["join", "--serve", "m", "--tasks", "--max-tasks", bad])
+
+    assert excinfo.value.code == 2, "a typo was accepted, or refused as though the join had run"
+    err = capsys.readouterr().err
+    assert "--max-tasks" in err
+    # ⚠️ The REASON, not just the flag name. Before the flag existed this assertion passed on
+    # argparse's "unrecognized arguments: --max-tasks" — a test green because its subject was
+    # missing is the shape this suite has been caught by before.
+    assert because in err, f"refused for the wrong reason: {err!r}"
+
+
+def test_no_other_flag_turns_task_serving_on(monkeypatch, tmp_path):
+    """⚠️ Opt-in is not a convenience: a task loop spends the operator's own agent subscription, so
+    nothing in this feature may turn it on for them. `--tasks` is a person typing it."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.delenv("GRID_TASKS", raising=False)
+
+    assert cli.main(["join", "--serve", "m", "--max-tasks", "4",
+                     "--tasks-root", str(tmp_path / "r"), "--respawn"]) == 0
+
+    assert not _the_child_would_claim_tasks(spawned), (
+        "a flag other than --tasks turned task serving on")
+
+
+def test_tasks_flag_runs_the_preflight(monkeypatch, tmp_path, capsys):
+    """The flag is a second door onto task serving, and issue 58's check guards the first. A door
+    that skips the guard is the failure this repository has recorded more than once."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.delenv("GRID_TASKS", raising=False)
+    monkeypatch.delenv("GRID_TASK_ROOT", raising=False)
+    # ⚠️ The default root is a REAL path (`/Users/Shared/grid`, `/var/grid`), and `--tasks` creates
+    # it. Pointed at tmp_path so this test does not write to the developer's machine — and does not
+    # pass on macOS while failing on a Linux runner that cannot write `/var`.
+    monkeypatch.setattr(task_agent, "DEFAULT_WORKSPACE_ROOT", str(tmp_path / "default-root"))
+    monkeypatch.setattr(task_agent, "preflight_before_serving",
+                        _raise(RuntimeError("Claude Code isn't installed on this provider")))
+
+    assert cli.main(["join", "--serve", "m", "--tasks"]) == 0
+
+    assert "isn't installed" in capsys.readouterr().err
+    assert not _the_child_would_claim_tasks(spawned)
+
+
+@pytest.mark.parametrize("flag, extra", [
+    ("--tasks", []),
+    ("--max-tasks", ["4"]),
+    ("--tasks-root", ["/Users/Shared/x"]),
+])
+def test_the_task_flags_are_remote_only(monkeypatch, tmp_path, flag, extra):
+    """The task plane is the relay's; local mode has no equivalent of its poll loop. Refused the way
+    every other remote-only join flag is.
+
+    ⚠️ This is also what pins `default=None` on all three. `provider._reject_remote_only_flags`
+    decides "was this flag used" with `is not None`, so a `store_true` defaulting to False would
+    refuse EVERY local `grid join` — the group's own comment says so, and this parametrised row for
+    `--tasks` is what would catch it.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_grid_config(name="home", port=8090)
+    args = cli.build_parser().parse_args(["join", "home", "--serve", "m", flag, *extra])
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_join(args)
+
+    assert flag in str(exc.value) and "remote" in str(exc.value).lower()
+
+
+def test_a_plain_local_join_is_not_refused_by_the_task_flags(monkeypatch, tmp_path):
+    """The other half of the pair above, and the one that fails if `--tasks` ever defaults to False:
+    a local join that names no task flag must reach its own error, not the remote-only one."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_grid_config(name="home", port=8090)
+    args = cli.build_parser().parse_args(["join", "home", "--serve", "m"])
+
+    assert getattr(args, "tasks", None) is None, "--tasks defaults to False, which refuses every local join"
+
+
+@pytest.mark.parametrize("env_root_ok, flag_root_ok, tasks_on", [
+    (False, True, True),    # the flag rescues a root the shell exported wrongly
+    (True, False, False),   # and it can break one the shell had right — the flag is what is checked
+])
+def test_the_preflight_checks_the_root_the_FLAG_names(
+        monkeypatch, tmp_path, capsys, env_root_ok, flag_root_ok, tasks_on):
+    """⚠️ The reason `_as_the_child_will_see_it` exists at all.
+
+    The checks read `os.environ`, because that is what the CHILD reads. A `--tasks-root` this
+    process was never started with therefore reaches them only if the parent puts it where they
+    look — otherwise `grid join --tasks --tasks-root <good>` is refused over a stale variable in a
+    shell profile, and `--tasks-root <bad>` sails through on a good one. Both directions, because
+    only the pair shows that the FLAG is what was consulted.
+
+    `preflight` and `resolve_binary` are stubbed so this needs no Claude Code on the box; the
+    workspace-root check is the real one, and it is the whole subject here.
+    """
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+    # ⚠️ Issue 59's probe is Linux-only, so a test that skipped this passes on a Mac and fails on a
+    # Linux runner, where `bwrap` and `socat` really are absent.
+    monkeypatch.setattr(task_agent.shutil, "which", lambda name: f"/usr/bin/{name}")
+    denied = tmp_path / "denied"
+    denied.mkdir(mode=0o500)
+    good, bad = tmp_path / "fine" / "root", denied / "root"
+    monkeypatch.setenv("GRID_TASK_ROOT", str(good if env_root_ok else bad))
+
+    assert cli.main(["join", "--serve", "m", "--tasks",
+                     "--tasks-root", str(good if flag_root_ok else bad)]) == 0
+
+    assert _the_child_would_claim_tasks(spawned) is tasks_on, (
+        f"the check consulted the environment's root, not the flag's: {capsys.readouterr().err!r}")
+
+
+# --- issue 60: turning task serving on must not be a silent no-op ---------------------------------
+
+
+_LIVE_ENGINE = [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}]
+
+
+def _rejoin_identically():
+    """The idempotent re-join: same engine, same model, same display name — the no-op gate's case."""
+    return ["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]
+
+
+def test_turning_task_serving_on_over_a_live_identity_says_it_will_not_take(
+        monkeypatch, tmp_path, capsys):
+    """The shape nothing reported. Adding the opt-in changes no engine, model, name, bundle or
+    media, so the join is declared idempotent — and the running child's environment was fixed when
+    it was spawned, so task serving never turns on. From outside that is indistinguishable from
+    "there is no work yet"."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=_LIVE_ENGINE, tasks=False)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(_rejoin_identically()) == 0
+
+    err = capsys.readouterr().err
+    assert "respawn" in err, f"the operator is not told how to make it take: {err!r}"
+    assert "cmd" not in spawned, "the join respawned implicitly"
+    # ⚠️ Signal **0** is `os.kill(pid, 0)`, the liveness probe the no-op gate makes — not a reload.
+    # Asserting on an empty signal list instead reads a healthy no-op as a hot reload.
+    assert [s for _, s in spawned["signals"] if s != 0] == [], "the join reloaded implicitly"
+
+
+def test_a_join_that_respawns_records_what_the_child_was_spawned_with(monkeypatch, tmp_path):
+    """The recorded value is the CHILD's, so the comparison above has something true to read."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+    assert cli.provider._read_records("n1")["remote"]["tasks"] is True
+    assert _the_child_would_claim_tasks(spawned)
+
+
+def test_the_record_says_what_the_child_got_not_what_was_asked_for(monkeypatch, tmp_path):
+    """⚠️ Issue 58 spawns the child with the opt-in WITHHELD when preflight fails. Recording the
+    request rather than the outcome would report task serving as on for a provider deliberately
+    told not to claim — and the next join would then read that lie as the truth."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(task_agent, "preflight_before_serving",
+                        _raise(RuntimeError("Claude Code isn't installed on this provider")))
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+    assert cli.provider._read_records("n1")["remote"]["tasks"] is False
+    assert not _the_child_would_claim_tasks(spawned)
+
+
+@pytest.mark.parametrize("opt_in", ["1", None])
+def test_a_record_from_before_this_issue_makes_no_claim_either_way(
+        monkeypatch, tmp_path, capsys, opt_in):
+    """⚠️ Absent means UNKNOWN, never off. Every record written before this issue carries no such
+    key, and reading a missing key as `False` would tell every provider already serving tasks that
+    its task serving is not on — which for most of them is a lie. The same mistake five entries in
+    the lockstep register exist to record."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=_LIVE_ENGINE)  # no `tasks` key at all
+    _mock_remote_spawn(monkeypatch)
+    if opt_in is None:
+        monkeypatch.delenv("GRID_TASKS", raising=False)
+    else:
+        monkeypatch.setenv("GRID_TASKS", opt_in)
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(_rejoin_identically()) == 0
+
+    assert "respawn" not in capsys.readouterr().err, (
+        "a record that says nothing was read as saying the opt-in is off")
+
+
+def test_the_worker_count_drift_is_reported_too(monkeypatch, tmp_path, capsys):
+    """`GRID_MAX_TASKS=4` against a live identity is exactly as inert as the opt-in, and answering
+    only half of that would leave the obvious next report to somebody else."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=_LIVE_ENGINE, tasks=True, max_tasks=1)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setenv("GRID_MAX_TASKS", "4")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(_rejoin_identically()) == 0
+
+    err = capsys.readouterr().err
+    assert "respawn" in err and "4" in err, f"the worker count change is not reported: {err!r}"
+
+
+def test_a_live_identity_already_serving_tasks_is_not_nagged(monkeypatch, tmp_path, capsys):
+    """The positive control. A note that appeared on every idempotent re-join would be furniture
+    within a day, and the tests above would all still pass."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=_LIVE_ENGINE, tasks=True, max_tasks=1)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.delenv("GRID_MAX_TASKS", raising=False)
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(_rejoin_identically()) == 0
+
+    assert "respawn" not in capsys.readouterr().err
+
+
+def test_the_hot_reload_path_says_it_too(monkeypatch, tmp_path, capsys):
+    """The second silent path, and the less obvious one. A join that DOES change the union may
+    SIGHUP the live child instead of respawning — zero dropped requests, which is the point — but a
+    reload re-reads the run RECORD. It cannot hand a running process a new environment, and the
+    opt-in is read from the environment once at startup."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=_LIVE_ENGINE, tasks=False)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    # A NEW model on the same engine: the union changed, so this is not the no-op gate — and it is
+    # hot-reloadable, so no child is spawned and no environment is handed over.
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "-m", "mistral",
+                     "--name", "mybox"]) == 0
+
+    assert "cmd" not in spawned, "this went down the respawn path, so it proves nothing about reload"
+    assert [s for _, s in spawned["signals"] if s != 0], "no reload signal was sent"
+    assert "respawn" in capsys.readouterr().err, "a reload that cannot apply the opt-in said nothing"
+
+
+@pytest.mark.parametrize("how", ["flag", "variable"])
+def test_a_root_the_operator_NAMED_is_not_judged_by_the_defaults_rules(
+        monkeypatch, tmp_path, capsys, how):
+    """⚠️ Issue 62's strict rules exist because **nobody chose** the default. A path a person named
+    is their business — the line `ensure_workspace` has always drawn — so a world-readable one they
+    pointed at is used, not refused.
+
+    Without this the feature would refuse the setups it was written to serve: an operator who
+    already runs `/srv/grid` at 0755 would be told to `chmod` a directory they configured on purpose.
+    """
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    named = tmp_path / "named"
+    named.mkdir()
+    named.chmod(0o755)  # readable by everyone, and deliberately so
+    # The real default would be created if the named root were ignored — this is what proves it is not.
+    monkeypatch.setattr(task_agent, "DEFAULT_WORKSPACE_ROOT", str(tmp_path / "never-made"))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+    # ⚠️ Issue 59's probe is Linux-only, so a test that skipped this passes on a Mac and fails on a
+    # Linux runner, where `bwrap` and `socat` really are absent.
+    monkeypatch.setattr(task_agent.shutil, "which", lambda name: f"/usr/bin/{name}")
+    argv = ["join", "--serve", "m", "--tasks"]
+    if how == "flag":
+        monkeypatch.delenv("GRID_TASK_ROOT", raising=False)
+        argv += ["--tasks-root", str(named)]
+    else:
+        monkeypatch.setenv("GRID_TASK_ROOT", str(named))
+
+    assert cli.main(argv) == 0
+
+    assert _the_child_would_claim_tasks(spawned), (
+        f"a root the operator named was judged by the default's rules: {capsys.readouterr().err!r}")
+    assert not (tmp_path / "never-made").exists(), "the default root was made despite a named one"

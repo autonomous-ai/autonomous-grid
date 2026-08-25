@@ -559,6 +559,7 @@ def _bring_up_one(
         n_predict=record.get("n_predict"),
         parallel=record.get("parallel"),
         flash_attn=record.get("flash_attn"),
+        mmproj=record.get("mmproj"),
         temp=record.get("temp"),
         reasoning_budget=record.get("reasoning_budget"),
         alias=advertised[0],
