@@ -113,8 +113,6 @@ failing partway through a build.
 
 **On Linux with no GPU** the same command installs the CPU build and says so.
 
-**Linux with no GPU** — same command, you get the CPU build.
-
 Now pull a model. `grid catalog` lists what the catalog ships, filtered to your hardware — or pull
 any GGUF on Hugging Face with `<hf-repo>:<file>`.
 
