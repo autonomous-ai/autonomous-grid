@@ -62,16 +62,96 @@ grid up
 
 ### 2 · Add a computer
 
-Nothing installed on it yet? Grid ships an inference engine:
+A model needs an **inference engine** to run it — Grid does not run models itself. Bring one you
+already have, or install the one Grid ships (llama.cpp).
+
+You do not have to work out which build suits your hardware. Run this and it tells you what it
+found, what it installed, and whether anything faster is available to you:
 
 ```bash
-grid engine install llama.cpp                     # Metal on macOS, CUDA on Linux NVIDIA
-grid pull qwen36-35b-a3b-mtp                      # `grid catalog`, or any GGUF: <hf-repo>:<file>
-grid join http://192.168.1.25:8090 --serve qwen36-35b-a3b-mtp --name mac-studio
+grid engine install llama.cpp
 ```
 
+**On macOS** it downloads an official, SHA-256-verified release. Metal, no Homebrew, no admin
+rights, nothing else to decide:
+
+```
+Installed llama-server -> ~/.grid/bin/llama-server
+```
+
+**On Linux with an NVIDIA GPU** it reads your cards first, then installs the Vulkan build — real
+GPU inference on those same cards, without the multi-gigabyte CUDA toolkit:
+
+```
+Detected GPUs: sm_120, sm_120
+Installed llama-server -> ~/.grid/bin/llama-server
+
+This is the Vulkan build — it runs on your NVIDIA GPUs with no CUDA toolkit.
+CUDA is faster, and this machine can build it:
+    grid engine install llama.cpp --from-source
+```
+
+That last line is a live answer about *your* machine, not a generic suggestion. llama.cpp publishes
+no prebuilt CUDA for Linux, so CUDA has to be compiled here — and compiling is only worth starting
+if it can finish. Grid checks your toolchain and says so. When it can't, you get the reason instead
+of the offer:
+
+```
+CUDA would be faster, but not from this machine yet:
+  This CUDA toolkit cannot build for compute_120 — the newest it supports is compute_89.
+  RTX 50-series needs CUDA 12.8 or newer; install a current toolkit from NVIDIA rather
+  than your distro's default package.
+```
+
+So the choice in front of you is:
+
+| | you get | costs you | pick it when |
+|---|---|---|---|
+| **Vulkan** (default) | GPU inference now | one download | you want to be running today |
+| **CUDA** `--from-source` | the fastest backend | CUDA toolkit + a long compile | the box is a permanent node |
+
+`--from-source` runs the same check before it clones anything, so it refuses up front rather than
+failing partway through a build.
+
+**On Linux with no GPU** the same command installs the CPU build and says so.
+
+**Linux with no GPU** — same command, you get the CPU build.
+
+Now pull a model. `grid catalog` lists what the catalog ships, filtered to your hardware — or pull
+any GGUF on Hugging Face with `<hf-repo>:<file>`.
+
+```bash
+# Apple Silicon, 32 GB unified memory or more
+grid pull qwen36-35b-a3b-mtp
+# Saved ~/.grid/models/Qwen3.6-35B-A3B-UD-IQ3_S.gguf
+
+# NVIDIA, 24 GB VRAM or more
+grid pull qwen36-27b-mtp
+# Saved ~/.grid/models/Qwen3.6-27B-UD-Q5_K_XL.gguf
+```
+
+**`grid pull` takes a catalog label; `--serve` takes the filename on disk** — the one `pull` just
+printed, which `grid catalog` reprints any time under **Local models:**. `--advertise-as` hands the
+grid back a short name to ask for:
+
+```bash
+grid join http://192.168.1.25:8090 \
+    --serve Qwen3.6-35B-A3B-UD-IQ3_S.gguf \
+    --advertise-as qwen36-35b-a3b-mtp \
+    --name mac-studio
+
+# NVIDIA: --serve Qwen3.6-27B-UD-Q5_K_XL.gguf --advertise-as qwen36-27b-mtp --name gpu-box
+```
+
+The built-in engine sizes itself to the machine: at load it measures free memory and takes the
+largest context that fits, capped by what the model was trained for. Pin it with `--ctx-size N` when
+you need an exact window — that turns the automatic fit off, so an `N` this machine cannot hold
+fails to start rather than quietly shrinking. `--n-predict`, `--parallel`, `--temp`, `--flash-attn`,
+`--reasoning-budget` and `--endpoint-port` are there too — `grid join --help` and
+[docs/cli.md](docs/cli.md) have the full set.
+
 **Already running Ollama, vLLM or LM Studio?** Point Grid at it instead. `--at` is its address on
-your network.
+your network, and `-m` is the model that machine already serves.
 
 ```bash
 grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1 -m qwen3-coder --name gpu-4090
@@ -82,12 +162,15 @@ Repeat for each computer.
 ### 3 · Ask it something
 
 ```bash
-grid chat -m qwen3-coder "write a haiku about local GPUs"
+grid chat -m qwen36-35b-a3b-mtp "write a haiku about local GPUs"
 grid models --verbose
-# MODEL        ENGINE      WHERE
-# qwen3-coder  gpu-4090    http://192.168.1.20:8000/v1
-# gemma4-31b   mac-studio  http://192.168.1.10:8080/v1
+# MODEL               ENGINE      WHERE
+# qwen36-35b-a3b-mtp  mac-studio  http://192.168.1.10:8081/v1
+# qwen3-coder         gpu-4090    http://192.168.1.20:8000/v1
 ```
+
+The first name is the one you gave `--advertise-as`; the second is the model the 4090 was already
+serving behind Ollama.
 
 ### 4 · Point your apps at it
 
@@ -107,14 +190,14 @@ Add Grid as a provider in `~/.openclaw/openclaw.json`
 
 ```json
 {
-  "agents": { "defaults": { "model": { "primary": "grid/qwen3-coder" } } },
+  "agents": { "defaults": { "model": { "primary": "grid/qwen36-35b-a3b-mtp" } } },
   "models": {
     "providers": {
       "grid": {
         "baseUrl": "http://192.168.1.25:8090/v1",
         "apiKey": "local-grid",
         "api": "openai-completions",
-        "models": [{ "id": "qwen3-coder", "name": "Qwen3 Coder (via Grid)" }]
+        "models": [{ "id": "qwen36-35b-a3b-mtp", "name": "Qwen3.6 35B (via Grid)" }]
       }
     }
   }
@@ -132,7 +215,7 @@ Set the endpoint in `~/.hermes/config.yaml`
 ```yaml
 model:
   provider: custom
-  default: qwen3-coder
+  default: qwen36-35b-a3b-mtp
   base_url: http://192.168.1.25:8090/v1
 ```
 
@@ -152,7 +235,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://192.168.1.25:8090/v1", api_key="local-grid")
 client.chat.completions.create(
-    model="qwen3-coder",                # routed to the 4090 computer automatically
+    model="qwen36-35b-a3b-mtp",         # routed to the Mac Studio automatically
     messages=[{"role": "user", "content": "hello"}],
 )
 ```
@@ -201,9 +284,10 @@ one of the two it ships: `llama.cpp` for text, ComfyUI for media. Both work the 
 — only the grid you join differs (a remote name, or a local `grid_url`).
 
 ```bash
-grid engine install llama.cpp           # the text engine
+grid engine install llama.cpp           # the text engine — add --from-source for CUDA on Linux
 grid pull qwen36-35b-a3b-mtp            # a text MODEL — see `grid catalog`, or any HF GGUF
-grid join <grid> --serve qwen36-35b-a3b-mtp
+grid join <grid> --serve Qwen3.6-35B-A3B-UD-IQ3_S.gguf --advertise-as qwen36-35b-a3b-mtp
+                                        # --serve takes the FILENAME `grid pull` saved
 
 grid engine install comfyui             # the media engine
 grid engine pull image_generation       # a media BUNDLE — also image_editing, i2v
