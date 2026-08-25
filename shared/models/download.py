@@ -39,6 +39,46 @@ def local_path(quantized_file: str) -> Path:
     return paths.models_dir() / Path(quantized_file).name
 
 
+# Preference order for a repo that ships several projector precisions. BF16 and F16 are the same
+# size and either works; F32 is double for no practical gain, so it is the last resort rather than
+# whichever happens to sort first.
+_PROJECTOR_PREFERENCE = ("mmproj-f16", "mmproj-bf16", "mmproj")
+
+
+def find_projector(repo: str, timeout: float = 15.0) -> str | None:
+    """The name of the multimodal projector in [repo], or ``None`` if it ships none.
+
+    Vision models on Hugging Face put the projector in the SAME repo as the weights (unsloth's
+    `gemma-3-4b-it-GGUF` carries `mmproj-BF16.gguf`, `mmproj-F16.gguf` and `mmproj-F32.gguf`
+    beside every quant), which is the same pairing llama.cpp's own `--mmproj-auto` relies on for
+    `-hf`. Best-effort by design: this runs inside `grid pull`, and a rate-limited or offline API
+    must cost the user a projector, never the model they actually asked for.
+    """
+    try:
+        resp = httpx.get(f"{HF_BASE}/api/models/{repo}", timeout=timeout, follow_redirects=True)
+        if resp.status_code != 200:
+            return None
+        siblings = resp.json().get("siblings")
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return None
+    if not isinstance(siblings, list):
+        return None
+    names = [
+        s["rfilename"]
+        for s in siblings
+        if isinstance(s, dict)
+        and isinstance(s.get("rfilename"), str)
+        and s["rfilename"].endswith(".gguf")
+        and "mmproj" in s["rfilename"].lower()
+        and "/" not in s["rfilename"]  # top-level only; never a file from a nested variant dir
+    ]
+    for wanted in _PROJECTOR_PREFERENCE:
+        for name in sorted(names):
+            if name.lower().startswith(wanted):
+                return name
+    return None
+
+
 def download(repo: str, quantized_file: str, *, out: Path | None = None, on_progress=None) -> Path:
     target = out or local_path(quantized_file)
     part = target.with_suffix(target.suffix + ".part")

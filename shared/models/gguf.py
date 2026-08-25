@@ -48,6 +48,27 @@ def _read_value(f, vtype: int):
     raise ValueError(f"unknown gguf value type {vtype}")
 
 
+def _iter_kv(path: str | Path):
+    """Yield every ``(key, value)`` in a GGUF's header, or nothing at all if it isn't readable.
+
+    Every reader below walks the same header the same way; sharing the walk keeps them from
+    drifting on the parts that are easy to get subtly wrong (the version gate, array skipping).
+    Array values are yielded as ``None`` — their bytes are consumed, but no reader wants them.
+    """
+    with open(path, "rb") as f:
+        if f.read(4) != b"GGUF":
+            return
+        (version,) = struct.unpack("<I", f.read(4))
+        if version < 2:  # v1 used 32-bit lengths; not emitted by modern tooling
+            return
+        struct.unpack("<Q", f.read(8))  # tensor count (unused)
+        (kv_count,) = struct.unpack("<Q", f.read(8))
+        for _ in range(kv_count):
+            key = _read_str(f)
+            (vtype,) = struct.unpack("<I", f.read(4))
+            yield key, _read_value(f, vtype)
+
+
 def read_context_length(path: str | Path) -> int | None:
     """Return the model's trained context length, or ``None`` if unreadable.
 
@@ -55,31 +76,37 @@ def read_context_length(path: str | Path) -> int | None:
     the metadata.
     """
     try:
-        with open(path, "rb") as f:
-            if f.read(4) != b"GGUF":
-                return None
-            (version,) = struct.unpack("<I", f.read(4))
-            if version < 2:  # v1 used 32-bit lengths; not emitted by modern tooling
-                return None
-            struct.unpack("<Q", f.read(8))  # tensor count (unused)
-            (kv_count,) = struct.unpack("<Q", f.read(8))
+        arch: str | None = None
+        ctx: dict[str, int] = {}
+        for key, val in _iter_kv(path):
+            if key == "general.architecture":
+                arch = val
+            elif key.endswith(".context_length"):
+                ctx[key] = int(val)
 
-            arch: str | None = None
-            ctx: dict[str, int] = {}
-            for _ in range(kv_count):
-                key = _read_str(f)
-                (vtype,) = struct.unpack("<I", f.read(4))
-                val = _read_value(f, vtype)
-                if key == "general.architecture":
-                    arch = val
-                elif key.endswith(".context_length"):
-                    ctx[key] = int(val)
-
-            if arch and f"{arch}.context_length" in ctx:
-                return ctx[f"{arch}.context_length"]
-            return next(iter(ctx.values())) if ctx else None
+        if arch and f"{arch}.context_length" in ctx:
+            return ctx[f"{arch}.context_length"]
+        return next(iter(ctx.values())) if ctx else None
     except Exception:
         return None
+
+
+def is_projector(path: str | Path) -> bool:
+    """True when the file is a multimodal projector (an ``mmproj``), not a language model.
+
+    Read from the file's own header, because the name proves nothing: every vision repo on Hugging
+    Face ships its projector as some spelling of ``mmproj-F16.gguf``, so the name is neither unique
+    across models nor guaranteed on any one of them. ``clip.has_vision_encoder`` /
+    ``clip.has_audio_encoder`` are what llama.cpp itself keys on. Unreadable or malformed → False;
+    a caller must never hand llama-server a ``--mmproj`` it is not sure about.
+    """
+    try:
+        for key, val in _iter_kv(path):
+            if key in ("clip.has_vision_encoder", "clip.has_audio_encoder") and val:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def has_mtp_head(path: str | Path) -> bool:
@@ -91,21 +118,33 @@ def has_mtp_head(path: str | Path) -> bool:
     malformed file returns False; callers should not add MTP flags on doubt.
     """
     try:
-        with open(path, "rb") as f:
-            if f.read(4) != b"GGUF":
-                return False
-            (version,) = struct.unpack("<I", f.read(4))
-            if version < 2:
-                return False
-            struct.unpack("<Q", f.read(8))  # tensor count (unused)
-            (kv_count,) = struct.unpack("<Q", f.read(8))
-
-            for _ in range(kv_count):
-                key = _read_str(f)
-                (vtype,) = struct.unpack("<I", f.read(4))
-                val = _read_value(f, vtype)
-                if key.endswith(".nextn_predict_layers"):
-                    return bool(val)
-            return False
+        for key, val in _iter_kv(path):
+            if key.endswith(".nextn_predict_layers"):
+                return bool(val)
+        return False
     except Exception:
         return False
+
+
+PROJECTOR_SUFFIX = ".mmproj.gguf"
+
+
+def projector_beside(model_path: str | Path) -> Path | None:
+    """The projector paired with this model file, or ``None`` for a text-only model.
+
+    Pairing is by NAME, not by scanning the directory: `grid pull` saves a repo's projector as
+    ``<model-stem>.mmproj.gguf`` beside the model precisely so this lookup can be exact. A
+    directory scan cannot work — models live in one flat folder and every vision repo names its
+    projector the same handful of ways, so two vision models would each match the other's file.
+
+    The header is still checked before returning: the sidecar name is our own convention, and a
+    file that does not declare a vision or audio encoder must never reach ``--mmproj``.
+    """
+    model_path = Path(model_path)
+    # Built by hand, not `with_suffix`: model names carry dots inside the stem
+    # (`Qwen3.6-35B-A3B-UD-IQ3_S.gguf`), and `with_suffix` would treat `.6-35B-A3B-UD-IQ3_S`
+    # as the suffix and eat most of the name.
+    candidate = model_path.parent / (model_path.stem + PROJECTOR_SUFFIX)
+    if candidate.is_file() and is_projector(candidate):
+        return candidate
+    return None
