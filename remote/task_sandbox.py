@@ -419,12 +419,24 @@ def _refuse_a_path_inside_a_denied_tree(what: str, path: str, denied: list[str],
     inside = _denied_ancestor(path, denied)
     if inside is None:
         return
+    # ⚠️ **The example is THIS platform's, and it is read rather than restated.** It used to name
+    # both — *"/Users/Shared/gnd on macOS, or /var/grid on Linux"* — so an operator on Linux read a
+    # macOS path first, in the one sentence they are being asked to act on. Measured on the dev VM
+    # while closing ND-01's Linux arm.
+    #
+    # A LOCAL import, for the reason `preflight` takes its `task_root` as an argument: this module
+    # must not import `task_agent` at module scope, because that one imports this one. At call time
+    # it is already initialised, and reading `default_workspace_root()` is what keeps this from
+    # becoming a THIRD copy of a value that has moved once already (issue 62 took macOS off
+    # `/var/grid`) and would go stale in silence.
+    from remote import task_agent
+
     raise raise_as(
         f"{what} {path} is inside {inside}, which the agent sandbox denies. The sandbox itself "
         f"would re-allow the workspace, but the permission layer that governs the Write tool has "
         f"no allow that beats a deny — so the agent would silently lose Write, work around it, and "
         f"still report success. Point {WORKSPACE_ROOT_HINT} at a directory outside {inside} "
-        f"(for example /Users/Shared/gnd on macOS, or /var/grid on Linux).")
+        f"(for example {task_agent.default_workspace_root()}).")
 
 
 _WARNED_ABOUT: set[str] = set()
