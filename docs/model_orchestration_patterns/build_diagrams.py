@@ -67,7 +67,10 @@ class Diagram:
               sub=None, note=None):
         row = self._row if row is None else row
         stage = self._stage if stage is None else stage
-        w = w or node_w(label)
+        # A split dot is an 18px circle, not an invisible 100px node. Keeping
+        # the default node width made every fan's arrows stop 41px away from
+        # the visible dot even when verify() reported a clean diagram.
+        w = w or (18 if kind == "dot" else node_w(label))
         self.nodes[nid] = dict(label=label, kind=kind, row=row, stage=stage,
                                w=w, sub=sub, note=note)
         return nid
@@ -578,20 +581,22 @@ def adversarial():
     return d
 
 def strategy():
-    d = Diagram("Strategy — each request chooses a pattern")
+    d = Diagram("Strategy — compile a compatible orchestration plan")
     d.place("job", "job", "terminal", row=1, stage=0)
-    d.place("ch", "choose plan", "decide", row=1, stage=1)
-    d.place("l1", "1 model", "work", row=0, stage=2)
-    d.place("l2", "N models", "work", row=1, stage=2)
-    d.place("l3", "debate", "work", row=2, stage=2)
-    d.place("ans", "answer", "terminal", row=1, stage=3)
-    d.edge("job", "ch", "each request")
-    d.edge("ch", "l1", "cost × speed × needs", lp=(490, 74))
-    d.edge("ch", "l2")
-    d.edge("ch", "l3")
-    d.edge("l1", "ans")
-    d.edge("l2", "ans")
-    d.edge("l3", "ans")
+    d.place("compile", "compile plan", "decide", row=1, stage=1)
+    d.place("graph", "typed graph", "decide", row=1, stage=2,
+            sub="guards · budget · topology", w=410,
+            note="population · pool · verify")
+    d.place("run", "execute", "work", row=1, stage=3)
+    d.place("answer", "answer", "terminal", row=0, stage=4)
+    d.place("refuse", "refuse", "terminal", row=1, stage=4)
+    d.place("escalate", "escalate", "terminal", row=2, stage=4)
+    d.edge("job", "compile", "request × live state")
+    d.edge("compile", "graph", "validate types + order")
+    d.edge("graph", "run", "policy_round")
+    d.edge("run", "answer")
+    d.edge("run", "refuse")
+    d.edge("run", "escalate")
     return d
 
 def brute():
@@ -982,7 +987,7 @@ INDEX_ROWS = [
     ("Fan-Out", "same prompt, N answers, a vote"),
     ("Master / Slave", "a planner splits the job"),
     ("Adversarial", "two careful reads, a judge"),
-    ("Strategy", "each request chooses a pattern"),
+    ("Strategy", "compile compatible stages into one plan"),
     ("Brute-Force", "many approaches, keep the best"),
     ("Ensemble", "same prompt, keep the average"),
     ("Verifier Gate", "one draft, a check, retry on fail"),

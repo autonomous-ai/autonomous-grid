@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3466 568" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
+  <title id="t">Boundary-Compiled Graph — compile egress before compute</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="3466" height="568" fill="#fff"/>
+  <text x="372" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">data class</text>
+  <text x="385" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">allowed sinks</text>
+  <text x="854" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">eligible</text>
+  <text x="1440" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">exact graph</text>
+  <text x="1906" y="148" text-anchor="middle" fill="#2b2b29" font-size="23">inside policy</text>
+  <text x="1916" y="266" text-anchor="middle" fill="#2b2b29" font-size="23">proposed egress</text>
+  <text x="2424" y="310" text-anchor="middle" fill="#2b2b29" font-size="23">allowed</text>
+  <text x="3066" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">manifested</text>
+  <path d="M 264 210 C 372 210, 372 210, 480 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 290 328 C 385 328, 385 210, 480 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 776 210 C 854 210, 854 210, 932 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1312 210 C 1440 210, 1440 210, 1569 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1831 210 C 1906 210, 1906 92, 1980 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1831 210 C 1916 210, 1916 328, 2000 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2340 92 C 2782 92, 2782 92, 3224 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2320 328 C 2424 328, 2424 328, 2528 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2908 328 C 3066 328, 3066 92, 3224 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2320 328 C 2454 328, 2454 446, 2588 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="36" y="177" width="229" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="150" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">labeled job</text>
+  <rect x="10" y="295" width="280" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="150" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">boundary policy</text>
+  <rect x="480" y="177" width="296" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="628" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">constrain graph</text>
+  <rect x="932" y="177" width="380" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1122" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">resolved components</text>
+  <text x="1122" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">F1 models · tools · sinks</text>
+  <rect x="1569" y="177" width="262" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1700" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">bind manifest</text>
+  <rect x="1980" y="59" width="360" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2160" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">approved local graph</text>
+  <rect x="2000" y="295" width="320" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="2160" y="338" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">redact + authorize</text>
+  <rect x="2528" y="295" width="380" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2718" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">visible external edge</text>
+  <rect x="3224" y="59" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="3296" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <rect x="2588" y="413" width="260" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="2718" y="456" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">defer / refuse</text>
+</svg>
