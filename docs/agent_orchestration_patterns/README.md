@@ -1,13 +1,14 @@
 # Local AI Orchestration Patterns — the agent layer
 
-The second half of the catalog. The
-[model layer](../model_orchestration_patterns/README.md) routes and combines
-*local inference*; this one routes and combines **agents** — harness
-frameworks running as workers. Where the model layer asks *how many samples
-does a request deserve, and how are they pooled*, the agent layer asks *which
-agent gets the task — and how do agents sharing one box stay honest about
-what they touch*. Read the model layer first; it is the foundation every
-entry here runs on, and the cross-references are numbered by its catalog.
+The second half of the catalog. The model-layer landing page separates
+[local substrate patterns](../model_orchestration_patterns/README.md) from the
+[portable numbered topologies](../model_orchestration_patterns/portable_patterns.md);
+this catalog routes and combines **agents** — harness frameworks running as
+workers. Where the portable model layer asks *how many samples does a request
+deserve, and how are they pooled*, the agent layer asks *which agent gets the
+task — and how do agents sharing one box stay honest about what they touch*.
+Read the local substrate page first; `#number` cross-references point to the
+portable research catalog.
 
 **What changes when the worker is an agent.** The model-layer patterns treat
 a worker as a stateless read: sample in, answer out, discard. An **agent** is
@@ -1279,10 +1280,11 @@ multi-agent system.
 
 ---
 
-**Related catalog.** The model layer
-[../model_orchestration_patterns/README.md](../model_orchestration_patterns/README.md)
-is the foundation this one runs on; its entries are the `#` references used
-here.
+**Related catalogs.** The
+[local substrate layer](../model_orchestration_patterns/README.md) binds work
+to operator-owned hardware. The
+[portable model catalog](../model_orchestration_patterns/portable_patterns.md)
+contains the numbered `#` references used here.
 
 **Read with.** [`agents.md`](agents.md) — the agent-layer execution
 companion in this directory (the session/seat model these seven patterns run

@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1456 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
-  <title id="t">Condorcet Pairwise Pooling — head-to-head beats plurality</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2220 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
+  <title id="t">Model Artifact Contract — route to a build, not a name</title>
   <defs>
     <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
@@ -12,29 +12,29 @@
     <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
-  <rect width="1456" height="450" fill="#fff"/>
-  <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">3+ camps</text>
-  <text x="1132" y="190" text-anchor="middle" fill="#2b2b29" font-size="15">Condorcet, not plurality</text>
-  <path d="M 120 210 C 240 210, 240 210, 359 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 377 210 C 444 210, 444 92, 512 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 377 210 C 444 210, 444 210, 512 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 377 210 C 444 210, 444 328, 512 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 656 92 C 747 92, 747 210, 838 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 656 210 C 747 210, 747 210, 838 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 656 328 C 747 328, 747 210, 838 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1016 210 C 1132 210, 1132 210, 1248 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect width="2220" height="450" fill="#fff"/>
+  <text x="166" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">role</text>
+  <text x="619" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">contract id</text>
+  <text x="1130" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">admit</text>
+  <text x="1154" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">candidate fails</text>
+  <path d="M 120 210 C 166 210, 166 210, 212 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 524 210 C 619 210, 619 210, 714 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1044 210 C 1130 210, 1130 92, 1216 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1044 210 C 1150 210, 1150 328, 1256 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1596 92 C 1720 92, 1720 210, 1844 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1556 328 C 1700 328, 1700 210, 1844 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
-  <circle cx="368" cy="210" r="9" fill="#2b2b29"/>
-  <rect x="512" y="59" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="584" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">answer</text>
-  <rect x="512" y="177" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="584" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">answer</text>
-  <rect x="512" y="295" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="584" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">answer</text>
-  <rect x="838" y="177" width="178" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="927" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">pairwise</text>
-  <text x="927" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">beats every rival</text>
-  <rect x="1248" y="177" width="111" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1303" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">best</text>
+  <rect x="212" y="177" width="313" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="368" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">resolve contract</text>
+  <rect x="714" y="177" width="330" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="879" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">provenance + eval</text>
+  <rect x="1216" y="59" width="380" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1406" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">exact build</text>
+  <text x="1406" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">weights · quant · runtime</text>
+  <rect x="1256" y="295" width="300" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1406" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">re-admit fallback</text>
+  <text x="1406" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">otherwise refuse</text>
+  <rect x="1844" y="177" width="280" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1984" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer / refuse</text>
 </svg>

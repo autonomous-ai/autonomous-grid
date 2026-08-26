@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1504 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1422 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
   <title id="t">Adversarial — two careful reads, a judge</title>
   <defs>
     <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
@@ -12,24 +12,23 @@
     <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
-  <rect width="1504" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Adversarial — two careful reads, a judge</text>
+  <rect width="1422" height="450" fill="#fff"/>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">careful disagreement</text>
-  <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 418 210 C 506 210, 506 328, 594 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 738 92 C 842 92, 842 210, 945 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 738 328 C 842 328, 842 210, 945 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1073 210 C 1168 210, 1168 210, 1262 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 120 210 C 240 210, 240 210, 359 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 377 210 C 444 210, 444 92, 512 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 377 210 C 444 210, 444 328, 512 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 656 92 C 760 92, 760 210, 863 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 656 328 C 760 328, 760 210, 863 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 991 210 C 1086 210, 1086 210, 1180 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
   <circle cx="368" cy="210" r="9" fill="#2b2b29"/>
-  <rect x="594" y="59" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="666" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read A</text>
-  <rect x="594" y="295" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="666" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read B</text>
-  <rect x="945" y="177" width="128" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="1009" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">judge</text>
-  <rect x="1262" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1335" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <rect x="512" y="59" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="584" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read A</text>
+  <rect x="512" y="295" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="584" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read B</text>
+  <rect x="863" y="177" width="128" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="927" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">judge</text>
+  <rect x="1180" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1253" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 </svg>
