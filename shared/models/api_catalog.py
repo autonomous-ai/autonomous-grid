@@ -143,6 +143,46 @@ DOGGI_WHITELIST: tuple[ApiModelEntry, ...] = (
     ),
 )
 
+OPENROUTER_LAST_VERIFIED = "2026-08-26"
+
+# The service-kind key. Named here beside the whitelist so the CLI and the tests spell it once.
+OPENROUTER_KIND = "openrouter"
+
+# The two models a hosted grid's first provider serves. Unlike every other kind here, the credential
+# is NOT the vendor's — `openrouter` reaches OpenRouter through the control plane's own passthrough
+# (`--at <control-plane>/v1/grid/internal/openrouter`), which holds the real `OPENROUTER_API_KEY` and
+# never hands it out. What the provider stores is the passthrough's own token, so a provider box that
+# is compromised cannot spend the operator's vendor account anywhere but through that one route.
+#
+# `base_url` is deliberately None: there is no fixed vendor endpoint for this kind, because the
+# endpoint is whichever control plane this box belongs to. `--at` is therefore required, and the join
+# refuses without it rather than defaulting to a URL that would send the passthrough token straight
+# to OpenRouter.
+#
+# The capability rows are the vendor's published ones. They are hand-copied under the same
+# `last_verified` discipline as every other kind — the passthrough forwards `GET /models`, so a
+# retired id fails the join loudly, but the capability flags themselves are not read back from it.
+OPENROUTER_WHITELIST: tuple[ApiModelEntry, ...] = (
+    ApiModelEntry(
+        vendor_name="deepseek/deepseek-v4-flash-0731",
+        context_window=163_840,
+        supports_tools=True,
+        supports_vision=False,
+        supports_json_mode=True,
+        supports_structured_outputs=True,
+        notes="Fast general-purpose model; the default for a hosted grid's first provider.",
+    ),
+    ApiModelEntry(
+        vendor_name="qwen/qwen3.8-27b",
+        context_window=131_072,
+        supports_tools=True,
+        supports_vision=False,
+        supports_json_mode=True,
+        supports_structured_outputs=False,
+        notes="Mid-size general-purpose model; the second seat on a hosted grid's first provider.",
+    ),
+)
+
 # The seat's backend (ADR 0015). Verified live on 2026-07-15 (spike 01, `.scratch/codex-subs/facts.md`).
 CODEX_LAST_VERIFIED = "2026-07-15"
 
@@ -435,6 +475,24 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         credential="none",
         flat_rate=True,
         local_seat_port=8098,
+    ),
+    OPENROUTER_KIND: ApiWhitelist(
+        last_verified=OPENROUTER_LAST_VERIFIED,
+        # None on purpose — see OPENROUTER_WHITELIST. The endpoint is the control plane's
+        # passthrough, which differs per deployment, so `--at` is required.
+        base_url=None,
+        # The passthrough's own token, NOT an OpenRouter key. Named so an operator standing a
+        # provider up by hand exports the same variable the control plane hands its own.
+        env_var="GRID_OPENROUTER_PROXY_TOKEN",
+        entries=OPENROUTER_WHITELIST,
+        # The passthrough forwards `GET /models`, so the join's key check and the whitelist ∩
+        # visible filter both work unchanged — that is what makes a retired vendor id a loud
+        # refusal at join time instead of a 404 on the first real request.
+        supports_model_listing=True,
+        # Chat only. Left at the default rather than spelled out to make the point that this kind
+        # adds no lockstep row: grid-src's `provider_supports` reads `chat/completions` for a kind
+        # it has never heard of, which is the fail-closed answer we want.
+        endpoints=("chat/completions",),
     ),
     "doggi": ApiWhitelist(
         last_verified=DOGGI_LAST_VERIFIED,
