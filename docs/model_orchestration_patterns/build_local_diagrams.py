@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Build focused local-abundance, local-substrate, and foundation figures.
 
-The drawing primitives and palette come from build_diagrams.py so the concise
-catalog and the portable research archive remain one visual family. Individual
-figures contain no visible title; the README heading is their caption.
+The drawing primitives and palette come from build_diagrams.py so the local
+mechanics and orchestration research references remain one visual family.
+Individual figures contain no visible title; the Markdown heading is their
+caption.
 """
 from __future__ import annotations
 

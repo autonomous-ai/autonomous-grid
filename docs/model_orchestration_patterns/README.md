@@ -1,897 +1,484 @@
-# Local AI Orchestration Patterns — spend owned compute, control owned state
+# Local-First AI Orchestration Patterns
 
-Local AI changes orchestration in **two** different ways. First, owned
-inference has no marginal API-token invoice and asks no vendor quota or rate
-limit for each additional attempt. Repeated search, independent checking, and
-bounded retry can become normal quality policy instead of exceptional spend.
-Second, the operator controls the inference substrate itself: exact artifacts,
-accelerator memory, KV cache, idle time, power and thermal state, network
-boundary, and physical failure domains.
+Local-first patterns are orchestration ideas shaped around an AI runtime you
+own. **Local-first means the owned path is the default**; a remote service may
+remain as an explicit, policy-approved fallback. A pattern does not have to be
+impossible in the cloud. It belongs here when local inference makes the move
+practical to repeat, able to keep data inside an owned boundary, available
+offline, or aware of models, memory, idle time, and power the operator controls.
 
-This catalog keeps a small, quality-first set from both families:
+Tokens generated on that local path have **no API meter**, but they still
+consume time, memory, and energy. The local path has no vendor-controlled quota
+or rate limit, but the box has real throughput limits. That tension—unmetered
+inference on finite owned hardware—is the center of this catalog.
 
-- **Local-abundance patterns** spend unmetered-but-bounded inference to buy
-  quality. Their graph can run in the cloud, but metering and provider control
-  change its useful operating point.
-- **Local-substrate patterns** depend on physical or lifecycle state hidden by
-  a black-box model API.
+## What local changes
 
-Local tokens are **free of the API meter, not free of physics**. Seats, VRAM,
-memory bandwidth, electricity, heat, wall-clock, wear, and foreground queue
-delay remain finite. A local serving stack also has throughput and concurrency
-limits even though it has no vendor-controlled rate limit.
+| Local advantage | What it makes natural |
+|---|---|
+| **No marginal API bill** | try, compare, verify, and retry more than once |
+| **No vendor quota** | choose effort from the problem, not an account allowance |
+| **No mandatory network hop** | stream locally and run tight model/tool loops without WAN jitter |
+| **Owned data boundary** | keep sensitive context on-device when the whole dependency path stays local |
+| **Offline continuity** | keep useful behavior when the network, vendor, or account is unavailable |
+| **Owned idle time** | evaluate, cache, learn, and improve while the machine would otherwise wait |
+| **Owned models and hardware** | pin exact builds and reason about residency, memory, energy, and failure |
 
-## The line between portable and local
+## Start with seven
 
-[Anthropic's production-oriented catalog](https://www.anthropic.com/engineering/building-effective-agents)
-already describes routing, prompt chaining, parallel sectioning and voting,
-orchestrator-workers, and evaluator-optimizer loops. Those topologies remain
-useful whether their workers are local processes or hosted API calls. But
-**cloud-capable does not mean architecturally equivalent under metering and
-provider control**.
+These are the shortest path into the catalog. Together they expose the local
+advantages that a cloud-only catalog usually treats as unavailable or hidden.
 
-This catalog uses two tests:
+| Pattern | Local-first reason to reach for it |
+|---|---|
+| [**Brute Force**](#brute-force) | try many approaches without a per-attempt API bill or provider quota |
+| [**Check and Retry**](#check-and-retry) | make verification and repair ordinary control flow |
+| [**Idle Worker**](#idle-worker) | turn otherwise-unused owned cycles into useful background work |
+| [**Fit the Box**](#fit-the-box) | choose a workflow from real memory, not an abstract model menu |
+| [**Local Cascade**](#local-cascade) | keep the owned path first and make remote use an explicit decision |
+| [**Data Stays Put**](#data-stays-put) | move inference to private data instead of centralizing the data |
+| [**Offline Island**](#offline-island) | preserve a complete useful path with no network or vendor account |
 
-> **Abundance test:** keep the topology, but restore a metered,
-> provider-controlled call for every attempt. If that materially shrinks the
-> intended sample count, retry depth, redundancy, or duty cycle—and repeated
-> inference is the mechanism rather than an incidental optimization—the
-> pattern is **local-abundance**.
+## How to read a pattern
 
-> **Substrate test:** replace every local inference worker with a black-box
-> hosted API. If required decision state disappears—artifact identity,
-> residency, owned idle time, energy, temperature, or physical placement—the
-> pattern is **local-substrate**.
+Each pattern follows one rule: **one problem, one move, one clear local-first
+advantage, and one tradeoff**. The small shape is the pattern. Algorithms,
+thresholds, ledgers, and implementation protocols belong in the linked deep
+references.
 
-If neither the mechanism nor its declared operating policy changes materially,
-the pattern remains portable-only. Here `local` means **operator-controlled
-inference**, not a latitude and longitude. A private rack or rented bare
-accelerator can qualify; a black-box API cannot expose the same substrate.
-
-Every main-catalog pattern must therefore:
-
-1. pass the abundance test or the substrate test and state which;
-2. own a distinct, recurring force rather than rename an existing workflow;
-3. name its scarce local resources and bounded admission or stop policy;
-4. provide an explicit safe exit—`answer / defer / refuse`, or
-   `promote / retain / checkpoint / abort`; and
-5. state what evidence would show that its extra complexity is not worthwhile.
-
-Agreement between models is never presented as proof. Consequential output
-needs an independent oracle or tool check; otherwise the catalog labels
-agreement only as a weaker consistency signal.
-
-```text
-request + consequence ──► reasoning topology ──► desired quality spend ──┐
-quality evidence + stop rule ─────────────────────────────────────────────┤
-artifacts + residency + boundary + host state ──► feasible placement ────┤
-                                                                         ▼
-                                                run / degrade / defer / refuse
-```
-
-The reasoning topology says what to try. The abundance policy decides how
-many attempts or checks are justified. The substrate policy decides which
-exact artifacts can run, where, and for how long. Together they produce one
-bounded physical plan.
-
-## The focused set
-
-### Three local-abundance patterns
-
-| ID | Pattern | The local move | Honest stop |
-|---|---|---|---|
-| A1 | **Brute-Force Search** | try genuinely different approaches because attempt N adds no API bill or vendor quota event | one objective oracle passes a result, or the fixed budget expires |
-| A2 | **Bounded Verify-and-Repair** | make failed checks ordinary control flow and use their evidence in another attempt | release only a passing result; otherwise defer, refuse, or escalate at K/deadline |
-| A3 | **Diverse Council** | spend several independent full-context reads when no cheap truth oracle exists | answer on adequate evidence; disclose uncertainty or abstain on a split |
-
-### Three local-substrate patterns
-
-| ID | Pattern | Local state it owns | The move |
-|---|---|---|---|
-| L1 | **Resident-Set Planner** | loaded weights, KV footprint, free seats, load/evict cost | compile the logical graph into what actually fits in memory |
-| L2 | **Verified Night Shift** | owned idle cycles, checkpoints, verified local outcomes | improve the box while it sleeps, promote only on proof |
-| L3 | **Energy Envelope** | power, battery, temperature, acoustics, time-of-use | spend joules and thermal headroom, not imaginary free tokens |
-
-### Two supporting foundations
-
-| ID | Foundation | Operator-controlled state | Why it is a foundation |
-|---|---|---|---|
-| F1 | **Model Artifact Contract** | weights, tokenizer, template, quantization, adapter, runtime | immutable deployment and version pinning also exist in cloud systems |
-| F2 | **Boundary-Compiled Graph** | data labels, graph sinks, egress policy and manifest | information-flow compilation and enforcement are portable security mechanisms |
-
-![The three local-substrate patterns and two supporting foundations](images/local_index.svg)
-
-In every figure, coral pills are external entries or exits, green boxes are
-owned state or work, and purple boxes are decisions. The labels carry the same
-meaning without color.
-
-A-patterns are not claimed as topologies a cloud system cannot execute. Their
-claim is that owned inference changes the viable operating point enough to
-change the default architecture. L-patterns make the stronger claim that API
-substitution removes state required by the mechanism. F1 and F2 support both
-families without satisfying either claim on their own.
-
-All six patterns are **proposals in the pattern incubator**, not claims of
-universal best practice. Their underlying mechanisms have established
-lineages, but these exact local-AI formulations still need direct
-implementations, measurements, and at least three independently documented
-successful uses before promotion to mature patterns.
-
-## Why use a pattern catalog
-
-The durable contribution of the Gang of Four was not a large list. It was a
-shared vocabulary for recurring design pressure, written so context,
-collaboration, consequences, and tradeoffs could be inspected and composed.
-The authors' original paper describes patterns as named, reusable
-micro-architectures that preserve design experience—not prescriptions that
-make a system correct merely by being named
-([Gamma et al., 1993](https://doi.org/10.1007/3-540-47910-4_21)).
-
-Every pattern entry therefore states which local force it exploits, whether
-its topology is portable, what changes at the local operating point, when it
-applies, how participants collaborate, what it costs, how it stops, and what
-evidence would falsify its value. A clever analogy without recurring uses and
-falsifiable measurements stays a refinement, not a new pattern.
-
-## How to compose them
-
-The patterns and foundations do not form one mandatory pipeline. They make a
-few small recipes:
-
-- **Quality spend:** choose A1 when different search paths can be judged by one
-  objective oracle. Choose A2 when a failed check supplies useful repair
-  evidence. Choose A3 when no cheap truth oracle exists but independent reads
-  can expose ambiguity. A1 may feed its best near-pass into A2; A3 must never
-  replace A1's objective selector with a popularity vote.
-
-- **Foreground service:** F2 first emits boundary constraints. F1 resolves exact
-  model roles, while an ordinary deployment registry resolves tool, telemetry,
-  storage, and backup components. F2 then signs that concrete closure with its
-  contract ids, executable/config digests, and sinks. The chosen A-pattern
-  declares desired width or retry depth. L1 contributes feasible residency
-  candidates and L3 contributes energy constraints to one physical-plan
-  coordinator. Only that coordinator selects the bounded plan, atomically
-  acquires its versioned joint lease, and revalidates it immediately before
-  dispatch.
-- **Verified improvement:** L2 borrows only capacity left by L1 and L3, obeys
-  F2, and emits an immutable staged result. A model build becomes a new F1
-  candidate only after an independent validator accepts that exact digest; a
-  failed result changes nothing.
-- **Offline continuity:** the Sovereign Island recipe combines F2's local-only
-  graph, F1's pinned artifacts, L1's loadability proof, and ordinary
-  offline-first freshness and outbox mechanics.
-
-Host state can change after planning, so the physical plan is not immutable.
-The **decision record** is append-only: for one `round_id`, its compile event
-records graph/policy hashes, artifact contracts, inventory version, leases,
-telemetry bucket, and chosen degradation; its terminal event records actual
-egress. Exactly one act gate may commit a side effect.
-
-```python
-def bind_physical_plan(graph, request, resources):
-    snapshot = resources.snapshot()  # memory + energy, one unified version
-    plans = resident_candidates(graph, request, snapshot)  # L1
-    envelope, plans = energy_filter(request, plans, snapshot)  # L3
-    plan = best_verified(plans)
-    if not plan:
-        return defer_or_refuse(request)
-    lease = resources.try_reserve(plan, expected_version=snapshot.version)
-    if not lease or not lease.revalidate():
-        return defer("physical state changed")
-    return monitor_hard_limits(plan.bind(lease), envelope)
-```
+| Need | Patterns |
+|---|---|
+| **Choose and spend** | Best Fit · Recipe Router · Adaptive Effort · Risk Ladder · Routing Memory |
+| **Search and compare** | Brute Force · Check and Retry · Vote · Challenge · Diversity Gate · Tiebreaker · Ensemble · Blind Estimate |
+| **Divide and reuse** | Split Work · Pipeline · Answer Cache |
+| **Learn and trust** | Shadow Model · Model Audition · Night Shift |
+| **Own the box** | Pinned Model · Fit the Box · Keep It Warm · Idle Worker · Power Budget · Straggler Backup · Circuit Breaker |
+| **Stay sovereign** | Local Cascade · Data Stays Put · Privacy Boundary · Offline Island · Private Memory |
 
 ---
 
-## A1. Brute-Force Search — try many ways, prove one winner
+## Choose and spend
 
-![Brute-Force Search — one goal fans into distinct approaches, then one objective selector keeps a verified winner](images/brute.svg)
+### Best Fit
 
-**Plain English.** Do not ask one model attempt to be right. Give the same goal
-to several isolated attempts, make them search in meaningfully different ways,
-run the same external test over every result, and keep exactly one winner.
+*Use the smallest local model that can do the job.*
 
-**Why local-abundance.** The fan shape is portable, but its normal operating
-point changes locally. Attempt N creates no Nth API invoice, consumes no vendor
-allowance, and needs no provider admission. The operator can choose N from the
-quality curve and the box's deadline, seat-time, watts, heat, and foreground
-load. On one GPU the attempts may be serial; local means unmetered by an API,
-not magically parallel.
+`request → choose one model → answer`
 
-**Use it when.** Constructing is hard but checking is cheap and objective:
-patches with tests, structured output with a schema, schedules with constraints,
-solver witnesses, counterexamples, or generated artifacts with measurable
-acceptance criteria. Do not use it when “best” is only another model's taste.
+**Problem.** Sending every request to the largest model wastes memory, power,
+and time. **Move.** Classify the job and choose one adequate model. **Local-first.**
+The router can see which owned models are loaded and fast on this box.
+**Tradeoff.** A hard request misclassified as easy silently gets a weak answer.
 
-**Contract.** Every attempt receives the same goal and acceptance contract but
-a different seed, decomposition, heuristic, evidence slice, or model family.
-Attempts are read-only, run under a fixed `N + deadline + resource` budget, and
-cannot see or anchor one another. One deterministic or externally grounded
-oracle tests them all. Only the selected result may cross the idempotent act
-gate.
+### Recipe Router
 
-**Failure and safe exit.** N copies of one approach are pretend breadth. A weak
-oracle selects the best test-gamer, and side-effecting workers can act N times.
-If no candidate passes, the result is `defer / refuse / escalate`—never “ship
-the least bad attempt.”
+*Choose the workflow before the work begins.*
 
-**Measure.** Compare against `N=1`: passing-result rate, marginal gain per
-attempt, realized output diversity, wall-clock, joules, model swaps, and
-foreground queue delay. Shrink or retire the fan when additional attempts stop
-buying verified wins.
+`request → one named recipe → run`
 
-**Evidence status.** Proposal. Generate-and-test, randomized restarts, and
-best-of-N have strong portable lineage; Grid has not yet published the local
-quality-versus-physical-cost curve required to promote this formulation.
+**Problem.** One workflow cannot serve quick questions, risky decisions, and
+large jobs equally well. **Move.** Classify the request and select one known
+pattern or small recipe before execution. **Local-first.** With no API meter,
+multi-pass recipes become normal choices rather than separately purchased
+calls. **Tradeoff.** A bad classification chooses a cheap recipe for a
+deceptively hard request.
 
-**Example.** Six read-only patch attempts try a minimal edit, call-path
-decomposition, invariant-first reasoning, and seeded restarts. The same tests
-and patch-size tie-break judge all six. Five attempts disappear; one passing
-diff may commit once. The deeper portable lineage is cataloged as
-[Brute-Force #6](portable_patterns.md#6-brute-force--many-approaches-keep-the-best).
+### Adaptive Effort
 
----
+*Start small; spend more only while uncertainty remains.*
 
-## A2. Bounded Verify-and-Repair — make failure useful
+`one attempt → still uncertain? → add effort → stop`
 
-![Bounded Verify-and-Repair — a draft is checked, repaired from failure evidence, or stopped at its bound](images/local_verify.svg)
+**Problem.** A fixed number of attempts either wastes easy work or under-serves
+hard work. **Move.** Begin with a small budget and expand only when a real check
+says uncertainty remains. **Local-first.** Extra attempts consume owned capacity,
+not another API purchase or provider allowance. **Tradeoff.** A poor confidence
+signal stops too early or turns “free tokens” into runaway local work.
 
-**Plain English.** Produce one draft, check it with a real verifier, feed the
-failure evidence into a changed repair attempt, and repeat only while the
-declared budget remains. Release a result only after it passes.
+### Risk Ladder
 
-**Why local-abundance.** A failed generation can become ordinary control flow:
-another repair cycle adds no API invoice or vendor quota event. It still spends
-local seat-time, wall-clock, energy, and queue capacity, so both an attempt cap
-and a deadline are part of the pattern—not optional tuning.
+*Raise the proof bar as the cost of being wrong rises.*
 
-**Use it when.** The check is cheaper and more reliable than generation and
-returns actionable evidence: compiler errors, failing tests, linter findings,
-schema violations, citation mismatches, calculator results, or constraints.
-When retries cannot learn from the failure, use A1's independent search instead.
+`consequence ↑ → attempts + checks + evidence ↑`
 
-**Contract.** The verifier is deterministic or tool-grounded wherever
-possible, is independent of the generator's confidence, and names what it
-checked. Each repair receives concrete failure evidence and must change the
-attempt. The loop stops at `K`, the deadline, an energy/thermal limit, or
-foreground preemption—whichever comes first.
+**Problem.** A reversible suggestion and an irreversible action should not
+receive the same scrutiny. **Move.** Map consequence classes to increasing
+evidence and verification budgets. **Local-first.** With no marginal API
+charge, deeper checking can be reserved for high-risk work. **Tradeoff.** A
+stale or incorrect risk label gives dangerous work the cheap path.
 
-**Failure and safe exit.** A rubber-stamp verifier creates confident failure;
-an incomplete check trains the generator to exploit the check; identical
-retries repeat one mistake. Exhaustion produces `defer / refuse / escalate`.
-The last failed draft never becomes the answer merely because the budget ran
-out.
+### Routing Memory
 
-**Measure.** Compare pass rate and end-to-end latency against one-shot and A1
-baselines. Record attempts-to-pass, repeated-error rate, false accepts on
-held-out bad drafts, joules, deadline exits, and foreground interference.
+*Remember which route works for each kind of job.*
 
-**Evidence status.** Proposal. Generator-verifier loops are established; the
-bounded local policy and its foreground/energy effects still need a measured
-Grid implementation.
+`verified outcome → update route history → next choice`
 
-**Example.** A local model writes a configuration change; a schema validator
-rejects one field and returns the exact path. The next attempt repairs that
-field. If validation still fails after three tries or the time box closes, the
-system returns the failure report instead of an unvalidated config. The
-portable ancestor is [Verifier Gate #8](portable_patterns.md#8-verifier-gate--one-draft-a-check-retry-on-fail).
+**Problem.** The best route varies by workload and changes over time. **Move.**
+Record verified outcomes by workload and prefer routes that worked before.
+**Local-first.** A stable owned model roster makes private route history
+reusable. **Tradeoff.** Bad labels or drift can lock routing onto the wrong
+choice.
 
 ---
 
-## A3. Diverse Council — buy independent reads, not extra confidence theater
+## Search and compare
 
-![Diverse Council — deliberately different reads are compared, then supported claims answer while a material split is adjudicated or abstains](images/local_council.svg)
+### Brute Force
 
-**Plain English.** When no cheap truth oracle exists, ask a small set of
-genuinely different readers to inspect the same consequential problem. Compare
-their claims and evidence. Agreement may raise confidence; disagreement is a
-signal to investigate, disclose uncertainty, or stop—not a nuisance to vote
-away.
+*Try many ways; keep the one that proves itself.*
 
-**Why local-abundance.** Several full-context reads and an adjudication pass can
-be routine without paying for every voice or consuming a vendor allowance.
-Private context can also remain inside the owned boundary. The budget still
-binds on seats, model swaps, time, power, heat, and the cost of delaying other
-local work.
+`goal → many approaches → objective test → one winner`
 
-**Use it when.** The answer matters, ambiguity is real, and no objective check
-can settle it cheaply: design review, risk discovery, interpretation, or a
-classification whose edge cases need independent readings. If a truth oracle
-does exist, prefer A1 or A2.
+**Problem.** One attempt can miss even when success is easy to recognize.
+**Move.** Generate genuinely different candidates, apply the same objective
+test, and return only the winner. **Local-first.** Breadth adds no per-attempt
+API bill or claim on a provider allowance. **Tradeoff.** Cloned attempts add no
+coverage, and a weak test selects the candidate that games the test best.
 
-**Contract.** Diversity is constructed, not assumed: use meaningfully different
-model families, evidence partitions, or roles such as proposal, counterexample,
-and risk review. The comparison tracks claims back to evidence and reports the
-independence actually obtained. Majority is a consistency signal, never proof.
+### Check and Retry
 
-**Failure and safe exit.** Sibling quantizations or differently worded prompts
-can share one blind spot. A judge model may share it too. Insufficient diversity
-or unresolved material disagreement leads to a deterministic tool, an
-independent adjudicator, a human, or `abstain / defer`; it never forces a winner
-just to terminate.
+*Turn failed checks into the next repair attempt.*
 
-**Measure.** Compare against one strong read: novel defects found, externally
-confirmed corrections, disagreement resolution, calibration, false consensus,
-latency, swaps, and joules. Remove a council lane that adds correlated volume
-without independent evidence.
+`draft → check → repair ↺  |  pass → answer`
 
-**Evidence status.** Proposal. Multi-read review and adversarial critique have
-portable lineage, but this council's independence contract and abstention policy
-need direct evaluation; agreement alone is not validating evidence.
+**Problem.** A plausible draft may contain an error a cheap tool can identify.
+**Move.** Check, return concrete failure evidence, and retry within a fixed
+limit. **Local-first.** Retries become ordinary control flow instead of new API
+purchases. **Tradeoff.** A bad checker rubber-stamps errors; an unbounded loop
+burns the machine.
 
-**Example.** Three local readers review a migration: one checks invariants, one
-hunts counterexamples, and one maps operational rollback risk. Shared,
-source-grounded conclusions may answer with disclosed confidence. A material
-split goes to tests or a human. This pattern deliberately narrows the portable
-[Fan-Out](portable_patterns.md#2-fan-out--same-prompt-n-answers-a-vote) and
-[Adversarial](portable_patterns.md#4-adversarial--two-careful-reads-a-judge)
-ancestors: it does not equate a vote with truth.
+### Vote
 
----
+*Ask independent workers a discrete question; use a majority or abstain.*
 
-## F1. Model Artifact Contract — route to a build, not a name
+`discrete question → independent answers → majority or abstain`
 
-![Model Artifact Contract — resolve an alias to an immutable artifact, admit it, then run or fall back](images/local_artifact.svg)
+**Problem.** One model answer gives no signal about its own stability.
+**Move.** Collect independent answers and use a majority as a confidence signal.
+**Local-first.** Redundant reads can consume spare local capacity without a
+per-read invoice or vendor rate limit. **Tradeoff.** Correlated models can agree
+on the same wrong answer; consensus is not proof.
 
-**Intent.** Make the routable unit an evaluated serving tuple:
-`{weights digest, tokenizer, template, quantization, adapters, runtime/kernels,
-generation profile, tool schema, hardware/driver compatibility, source,
-license}`. Trust, evaluation history, caches, and rollback bind to that tuple,
-not to an alias such as `qwen` or `latest`.
+### Challenge
 
-**Forces.** Friendly names make routing and upgrades easy, but local conversion,
-quantization, templates, adapters, kernels, sampler defaults, and context policy
-can all change behavior independently. Exact identity improves reproducibility
-at the cost of storage, qualification work, and slower upgrades.
+*Give every important answer a skeptic.*
 
-**Local role.** Version pinning also exists in cloud APIs, so this is a
-foundation rather than a local-substrate pattern. Local ownership makes the
-contract unusually complete: the operator can atomically retain the bits,
-generation profile, and runtime that a hosted provider normally hides. A BYO
-artifact endpoint may preserve that control; a black-box API does not.
+`answer → independent challenge → resolve or abstain`
 
-**Applicability.** Use it for every served local model, especially when
-quantizations, adapters, templates, or runtimes change independently. Avoid a
-false sense of precision: a digest proves artifact identity, not quality or
-safety; admission still needs evaluation and provenance checks.
+**Problem.** A single model rarely notices its own assumptions. **Move.** Have a
+different reader attack the answer, then resolve the concrete disagreement in
+one or a few bounded rounds. **Local-first.** Extra critique rounds add no
+marginal API bill. **Tradeoff.** The answer, skeptic, and judge may share one
+blind spot and manufacture confidence.
 
-**Invariant.** No evaluated outcome, trust label, cache entry, or response may
-refer only to a floating alias. Every execution reports one exact contract id.
+### Diversity Gate
 
-**Structure.** Request role → purple `resolve contract` → purple
-`provenance + eval` gate → green exact build → answer. A failed candidate
-causes the last trusted contract to be re-admitted for this request or refuses.
+*Admit only answers that add a genuinely different path.*
 
-**Mechanics.** The registry stores immutable contracts and a mutable alias that
-points to one admitted version. Admission verifies hashes, provenance and
-license policy, tokenizer/template/runtime compatibility, the generation
-profile, hardware support, and a held-out task pack. Promotion is an atomic
-alias change. A fallback is not automatically safe merely because it was once
-trusted: it must be re-admitted against the current request, boundary,
-hardware, residency, and deadline.
+`candidates → diversity gate → non-duplicate set`
 
-```python
-def resolve_model(role, registry, request):
-    choices = (registry.resolve(role), registry.last_trusted(role))
-    for contract in choices:
-        if contract and admission_gate.allows(contract, request):
-            return contract
-    return refuse("no currently admissible serving contract")
-```
+**Problem.** Repeating one prompt often produces the appearance of breadth
+without new evidence. **Move.** Admit a candidate only when it adds a distinct
+model family or evidence path. **Local-first.** An owned roster makes model
+lineage visible to the gate. **Tradeoff.** A shallow similarity test may mistake
+cosmetic differences for independence.
 
-**Observe.** Record the resolved contract id, alias revision, evaluation-pack
-revision, fallback/rollback count, compatibility rejects, and quality/latency
-delta between candidate and incumbent.
+### Tiebreaker
 
-**Consequences.** Replays and regressions become explainable, upgrades become
-reversible, and a Q4 conversion cannot inherit a full-precision build's trust.
-The costs are artifact storage, an admission suite, registry durability, and
-operational friction when an operator would prefer `latest` to mean “whatever
-appeared today.”
+*When a vote splits, add new evidence—not more of the same.*
 
-**Failure and safe degradation.** The dangerous failure is silent retargeting:
-an alias changes weights, tokenizer, template, or adapter while retaining old
-trust. Quarantine the candidate, keep the last admitted contract, or refuse.
-Never silently substitute an unmeasured artifact.
+`split vote → tool or different judge → decide or abstain`
 
-**Mechanism lineage.** Content-addressed deployment and progressive delivery
-supply the identity/rollback lineage. Local model conversion makes the need
-concrete: llama.cpp documents quantized files as separately produced artifacts
-and warns that requantization can reduce quality
-([llama.cpp quantization](https://github.com/ggml-org/llama.cpp/blob/master/tools/quantize/README.md)).
+**Problem.** A simple vote can crown a weak answer when workers form several
+conflicting camps. **Move.** Compare the finalists with an objective tool or a
+genuinely different judge. **Local-first.** Extra ranking passes are viable
+without API charges. **Tradeoff.** A supposedly independent adjudicator may
+share the same prior and only add confidence.
 
-**Worked example.** In a conforming implementation, `qwen38-27b-mtp` resolves
-to build A of
-[Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), including Grid's exact
-digest, quantization, template, runtime, and generation profile. Build B uses a
-new quantization and fails the held-out tool-calling floor, so the alias remains
-on A. The failed build never inherits A's cache or trust labels.
+### Ensemble
 
-**Evidence status.** Proposal with partial primitives. Grid fingerprints
-evaluated adapter bytes in [`train/evaluate.py`](../../train/evaluate.py),
-keeps deploy rollbacks in [`train/deploy.py`](../../train/deploy.py), and hashes
-runtime downloads in
-[`shared/engine/installer.py`](../../shared/engine/installer.py). Its
-[`shared/models/catalog.py`](../../shared/models/catalog.py) is not yet a
-full-tuple registry. No three independent direct uses are documented here.
-**Related:** F2 constrains where a contract may run; L1 and L3 decide whether it
-can run now; L2 may produce a candidate contract.
+*Combine several numeric estimates with one robust rule.*
+
+`numeric estimates → median → result`
+
+**Problem.** One estimate is noisy, while a plain average can preserve shared
+bias. **Move.** Aggregate independent estimates with one declared robust rule.
+**Local-first.** Repeated estimates carry no per-sample API bill. **Tradeoff.**
+Correlated models still produce a precise-looking wrong number.
+
+### Blind Estimate
+
+*Estimate alone before seeing the group.*
+
+`private estimates → reveal summary → one revision`
+
+**Problem.** Early confident answers anchor later estimates. **Move.** Collect
+independent estimates, reveal only the summary, and allow one revision.
+**Local-first.** Several blind rounds add no per-round API bill. **Tradeoff.**
+The group can converge tightly around a shared wrong assumption.
 
 ---
 
-## L1. Resident-Set Planner — compile the graph into real memory
+## Divide and reuse
 
-![Resident-Set Planner — combine a logical graph with live memory state, then reuse, load under budget, or degrade](images/local_resident.svg)
+### Split Work
 
-**Intent.** Choose the co-resident weights and KV working set before realizing
-a fan, pipeline, or single call. Cold loads, evictions, context growth, and
-serial swaps are explicit tasks; “call model” is never assumed to be free or
-parallel.
+*Break one large job into named parts and give each part a specialist.*
 
-**Forces.** Stronger or more diverse models can improve an answer, but weights,
-adapters, runtime buffers, and KV cache compete for finite memory. Moving a
-small request to warm weights is cheap; loading or evicting a model is slow and
-can destroy another session's locality.
+`job → parts → specialists → merge`
 
-**Why local-substrate.** An elastic API hides its placement, memory pressure,
-load/evict state, and seat leases. Substitution therefore removes the state and
-actions this planner controls.
+**Problem.** One model may be poor at a task that contains several different
+kinds of work. **Move.** Split by responsibility, run suitable specialists, and
+merge their outputs. **Local-first.** Several small owned models can specialize
+without per-stage API charges. **Tradeoff.** A bad split creates missing context
+or incompatible pieces.
 
-**Applicability.** Use it on every finite local accelerator and across a home
-grid. It matters most when several approved models do not co-reside. On a
-single permanently loaded model it collapses to a cheap invariant check.
+### Pipeline
 
-**Invariant.** For every node, `weights + runtime + adapters + worst-case KV +
-safety margin <= usable memory`. Execution holds a versioned lease for that
-capacity; a diagram may claim parallel lanes only when distinct seats are
-actually leased.
+*Pass work through a fixed sequence of transformations.*
 
-**Structure.** Portable graph + live inventory → purple `plan resident set` →
-green warm lanes, budgeted cold-load lanes, or an admitted degradation; coral
-`queue / refuse` is the non-execution exit. Candidate lanes converge on the
-shared purple physical-plan coordinator; L1 itself does not reserve or run.
+`input → stage A → stage B → stage C → output`
 
-**Mechanics.** Each heartbeat reports the exact F1 contract ids resident on a
-node, free seats, usable memory, KV budget, active contexts, measured load/evict
-time, physical-domain labels, inventory version, and lease expiry. The planner
-compares:
+**Problem.** Some jobs have a natural order that one giant prompt obscures.
+**Move.** Give every stage one responsibility and an explicit handoff.
+**Local-first.** A fully local chain adds no per-stage API charge. **Tradeoff.**
+An early error contaminates everything downstream unless stages validate
+inputs.
 
-`network + queue + prefill` versus `load + eviction + restore + generation`.
+### Answer Cache
 
-It prefers moving the request to an already resident compatible build. A cold
-load is a scheduled state transition with a deadline, an eviction victim, and
-a per-node cold-load budget—not an invisible side effect. The planner and L3
-contribute constraints to the shared physical-plan coordinator; L1 never
-reserves on its own. Repeated A→B→A swaps inside one request are a compile
-error. Follow-up turns may lease a warm KV/session entry, bounded by tenant,
-memory, and expiry.
+*Reuse a verified answer until its source changes.*
 
-```python
-def resident_candidates(graph, request, snapshot):
-    plans = resident_planner.propose(graph, snapshot)
-    admitted = [p for p in plans
-                if p.fits_memory_with_margin()
-                and p.meets(request.deadline)]
-    return admitted + preevaluated_degradation_candidates(graph, request)
-```
+`request → content fingerprint → cached answer or compute`
 
-**Observe.** Report resident reuse, cold-load and eviction counts, bytes by
-weights/KV/runtime, queue and load latency, lease conflicts, OOM escapes,
-serialized lanes, and physical-domain labels. Keep physical availability
-separate from model-family diversity.
-
-**Consequences.** Warm latency improves and diagrams stop lying about parallel
-workers on one GPU. The tradeoff is that the fastest resident build may be
-weaker than a cold alternative, and state becomes volatile: stale inventory can
-still produce an OOM or a thundering herd of loads.
-
-**Failure and safe degradation.** Stale heartbeats, hidden KV growth, a lease
-race, or an eviction loop make the plan invalid. Cancel before acting, re-read
-inventory, and choose only a pre-evaluated degradation plan above the request's
-quality floor: reduce optional fan width, use an admitted resident contract,
-serialize if the deadline permits, queue, or refuse. Never silently truncate
-required evidence or describe serial swaps as parallel confidence.
-
-**Mechanism lineage.** Model servers already expose pieces of this state. vLLM
-configures KV-cache capacity and memory behavior explicitly
-([vLLM cache configuration](https://docs.vllm.ai/en/latest/api/vllm/config/cache/));
-Grid's draft protocol states the corresponding placement inversion: move the
-task to the node holding the resident model
-([AI MapReduce](../draft/protocol.md)).
-
-**Worked example.** A Mac Studio keeps Qwen3.8-27B resident while a
-high-memory grid node keeps
-[DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash), whose
-official card lists 284B total / 13B activated parameters. The planner moves
-each prompt to the node already holding the required contract; it does not
-pretend that Flash is a casual laptop swap or load both models for every fan.
-
-**Evidence status.** Proposal with partial model-aware dispatch. Grid's
-[`local/server.py`](../../local/server.py) routes toward a registered engine
-serving the model with low active load, and
-[`remote/serve.py`](../../remote/serve.py) reports model/load/memory state. It
-does not yet report exact resident contracts or KV/load/evict costs, acquire
-leases, or compile graphs. **Related:** F1 supplies contract sizes and
-compatibility, L3 co-admits the plan, and physical failure-domain placement
-refines this planner without changing portable pooling semantics.
+**Problem.** The same expensive question recurs under slightly different
+wording. **Move.** Store a verified result under a key made from the request's
+meaning and source version. **Local-first.** The verified result remains
+available on-device. **Tradeoff.** A stale key or weak verifier turns one wrong
+answer into a persistent shared answer.
 
 ---
 
-## F2. Boundary-Compiled Graph — reject illegal paths before compute
+## Learn and trust
 
-![Boundary-Compiled Graph — a boundary compiler admits local edges and gates every external edge](images/local_boundary.svg)
+### Shadow Model
 
-**Intent.** Label the request and compile the whole plan—advisor, model,
-embedding, verifier, tool, telemetry, cache, update check, and backup—inside the
-operator's permitted boundary. Any external edge requires an explicit policy,
-declassification, or human decision.
+*Let a new model observe real work before it receives live traffic.*
 
-**Forces.** More tools and remote fallbacks increase capability, while each
-embedding, verifier, crash report, update check, or backup adds a possible data
-path. A human may authorize optional disclosure, but consent cannot override a
-prohibited residency or legal rule.
+`new model → shadow traffic → evidence rule → live work or reject`
 
-**Local role.** Information-flow control is portable, so this is a foundation.
-Its local formulation compiles and enforces an **all-local executable cut**
-across an operator-owned model/tool/telemetry graph. Hosted inference becomes a
-manifested external edge; policy may authorize it or force `defer / refuse`,
-but the compiler itself survives the substitution.
+**Problem.** Benchmarks alone do not prove a new model is safe for the owner's
+real workload. **Move.** Run it read-only beside the current model and promote
+only under a predeclared evidence rule. **Local-first.** Continuous shadow
+inference has no per-call API bill. **Tradeoff.** Agreement with a wrong current
+model is mistaken for skill.
 
-**Applicability.** Use it whenever locality is motivated by privacy, data
-residency, offline work, or control of training data. The boundary may be one
-device, a trusted LAN, or a named hybrid policy; it must never be inferred from
-the word `local`.
+### Model Audition
 
-**Invariant.** Every actual network, tool, telemetry, storage, and backup sink
-is a subset of the signed egress manifest. Undeclared sinks are denied at the
-runtime/OS boundary, not merely discouraged in a component declaration.
+*Test a candidate on a private offline task pack before real traffic.*
 
-**Structure.** Labeled request → purple `compile boundary` → green approved
-local graph. A proposed external edge reaches a separate purple
-`redact + authorize` gate, then either a visibly external lane or
-`defer / refuse`.
+`candidate model → offline test pack → assign role or reject`
 
-**Mechanics.** A first pass constrains eligible component classes and sinks. F1
-resolves exact model artifacts/runtimes; a deployment registry resolves every
-non-model executable and configuration. A second pass propagates labels across
-that concrete closure and signs a manifest bound to F1 contract ids,
-executable/config digests, and sinks; it never mutates edges while iterating.
-Deny-by-default network and process controls enforce the manifest. The
-execution envelope reports actual sinks, redactions, and policy authorization.
-Automatic “use cloud if local fails” is forbidden unless policy permits that
-data class and the requester authorizes the optional disclosure.
+**Problem.** A newly downloaded model's strengths, compression effects, and
+tool behavior are unknown. **Move.** Audition it against tasks and failure cases
+that resemble real use. **Local-first.** Private representative benchmarks can
+run entirely on the owned box. **Tradeoff.** A stale or gameable test pack stops
+predicting production behavior.
 
-```python
-def compile_boundary(logical_graph, data_class, policy,
-                     model_registry, component_registry):
-    constraints = policy.constrain(logical_graph, data_class)
-    graph = resolve_concrete_graph(
-        constraints, model_registry, component_registry
-    )
-    compiled = Graph()
-    for edge in graph.topological_edges():
-        labels = propagate_labels(edge, data_class, compiled)
-        if policy.allows(labels, edge.sink, edge.fields):
-            compiled.add(edge, labels)
-        else:
-            replacement = policy.local_substitute(edge, labels)
-            if not replacement or not policy.allows(
-                labels, replacement.sink, replacement.fields
-            ):
-                return defer_or_refuse(edge, labels)
-            compiled.add(replacement, labels)
-    manifest = compiled.signed_egress_manifest()
-    sandbox.enforce(compiled, manifest)
-    return compiled, manifest
-```
+### Night Shift
 
-**Observe.** Persist the graph and policy hashes, manifest, actual socket/DNS/
-tool/storage events, denied and substituted edges, redacted fields, and the
-authorization behind every allowed external edge.
+*Stage improvements away from live state; promote only what proves better.*
 
-**Consequences.** Privacy becomes testable end-to-end and hybrid escalation is
-honest. The cost is lost capability when no approved local substitute exists,
-plus policy maintenance for tools and telemetry that change over time.
+`staged change → independent proof → promote or discard`
 
-**Failure and safe degradation.** The classic failure is hidden egress from an
-apparently local workflow. Disable the optional component, substitute an
-on-device implementation, redact and ask permission, defer, or refuse. Never
-silently fall back to a vendor.
-
-**Mechanism lineage.** Information-flow control, data-loss prevention, and
-zero-trust policy compilation supply the lineage. The local contribution is to
-treat inference, embeddings, evaluators, tools, telemetry, and backups as one
-compiled graph rather than granting privacy because its first model is local.
-
-**Worked example.** A private contract analysis may use Qwen3.8-27B,
-a local embedding model, a local text extractor, and an encrypted LAN snapshot.
-A DeepSeek-V4-Flash node is eligible only if it sits inside the request's
-approved boundary; a hosted endpoint with the same model name is a different
-edge and requires an explicit egress decision.
-
-**Evidence status.** Proposal with adjacent controls. Grid has per-task egress
-allowlists in [`remote/task_sandbox.py`](../../remote/task_sandbox.py), but no
-data-label propagation, signed graph manifest, or end-to-end sink audit.
-[ADR 0019](../adr/0019-rl-training-plane.md) also records an unauthenticated
-local endpoint-redirection risk that must be closed before this claim is
-credible. **Related:** F1 identifies allowed
-builds; L1 places them; Sovereign Island is this foundation's local-only
-compilation mode plus offline mechanics.
+**Problem.** An improving system must not rewrite live state while it serves.
+**Move.** Stage changes away from the live path and promote only after an
+independent proof. **Local-first.** Owned idle cycles make repeated improvement
+runs practical. **Tradeoff.** A builder that verifies its own work can promote
+its own mistakes.
 
 ---
 
-## L2. Verified Night Shift — improve the box while it sleeps
+## Own the box
 
-![Verified Night Shift — idle capacity runs bounded typed work, verification gates promotion, foreground preempts](images/local_night.svg)
+### Pinned Model
 
-**Intent.** Convert owned idle cycles into **typed staged improvements** such as
-an evaluated model build, adapter, retrieval index, or verified eval pack. Work
-runs in bounded, preemptible units. The validator is read-only; only a separate,
-trusted promotion participant may change a live pointer.
+*Route to an exact model build, not a floating name.*
 
-**Forces.** Unused hardware can improve future quality or latency, but
-background work competes with foreground responsiveness, heat, energy, storage
-wear, and the same resident weights. Promotion creates lasting risk, so the
-builder cannot certify its own result.
+`role → exact build → run`
 
-**Why local-substrate.** The operator owns the idle interval and the staged result.
-A cloud API customer neither owns unused provider accelerators nor controls the
-provider's model or index lifecycle. Removing the local machine deletes both
-the schedulable resource and the promotable artifact.
+**Problem.** Compression, template, adapter, and runtime changes can alter
+behavior while the model name stays the same. **Move.** Bind trust and routing
+to one immutable build bundle. **Local-first.** The operator controls and can
+retain the exact runtime artifacts. **Tradeoff.** Pinning consumes storage and
+qualification effort; identity alone does not prove quality.
 
-**Applicability.** Use it for always-on hardware with measurable idle, thermal,
-and power headroom. Avoid it for non-checkpointable jobs on an interactive
-single-seat box, or when “improvement” is labeled only by the same model that
-will learn from it.
+### Fit the Box
 
-**Invariant.** Every job declares `{artifact type, resource envelope, maximum
-drain time, checkpoint semantics, staging target}`. Trusted artifact-type
-policy—not the builder or job—selects the read-only validator and authorized
-promoter. Foreground arrival or a hard host limit always wins within the
-declared drain bound; an incomplete result cannot become live.
+*Choose a version of the recipe that actually fits in live memory.*
 
-**Structure.** Typed improvement backlog → purple `idle eligible?` → green
-bounded quantum → green immutable staged artifact → purple type-specific
-validator → atomic promotion of that same digest. A live arrival requests
-preemption; failed or incomplete work returns to the backlog without touching
-production.
+`recipe + free memory → run | shrink | wait`
 
-**Mechanics.** A foreground-aware scheduler starts one finite quantum per safe
-window. Eligibility requires no live work, host-idle signal, L1/L3 leases,
-resident-set compatibility, and a measured cancellation bound. A live-arrival
-watcher stops new decode/training work immediately and waits only to the next
-declared safe boundary; unsupported checkpoints are discarded. Captured
-examples need a real label: correction, accepted outcome, deterministic tool
-result, or approved external teacher—not self-agreement. Each result remains in
-staging until trusted type policy's held-out or deterministic validator passes;
-the promoter accepts only that validator's receipt for the same staged digest.
+**Problem.** A recipe may name models that do not fit in memory together.
+**Move.** Before running, choose only a model combination that fits current
+memory; otherwise shrink the recipe or wait. **Local-first.** The router can see
+the box's real free memory. **Tradeoff.** Shrinking may reduce quality, while
+waiting adds latency.
 
-```python
-def night_shift(backlog, host, foreground, trust_policy):
-    job = backlog.next_typed()
-    if not job:
-        return retain("no eligible staged work")
-    validator, promoter = trust_policy.for_artifact_type(job.artifact_type)
-    lease = host.try_idle_lease(job.resource_envelope, job.max_drain)
-    if not lease:
-        return retain("no safe idle window")
-    result = run_quantum(
-        job,
-        lease,
-        cancel_when=(foreground.arrives, host.hard_limit_reached),
-        drain_timeout=job.max_drain,
-    )
-    if not result.complete:
-        return job.checkpoint_or_abort(result)
-    staged = job.stage(result)
-    receipt = validator.check_read_only(staged)
-    if not receipt.accepted:
-        return retain("independent validation failed")
-    return promoter.promote_atomically(staged.digest, receipt)
-```
+### Keep It Warm
 
-**Observe.** Measure eligible idle time, useful completed work, cancelled and
-discarded work, maximum drain latency, foreground latency delta, joules,
-validator pass rate, promotions, rollbacks, and artifact type.
+*Keep the models you use most already loaded.*
 
-**Consequences.** The same purchased machine gets better or faster between
-interactive requests without a per-token bill or vendor allowance. Electricity,
-heat, SSD writes, and wear are real; saturated machines may make no background
-progress, which is a valid outcome.
+`measured demand + memory → warm models; load others on demand`
 
-**Failure and safe degradation.** Background load can steal the resident set,
-miss a cancellation bound, train on its own errors, or promote a partial
-artifact. Request cancellation immediately, discard uncommitted partials, keep
-the last trusted contract, and report that the night produced no promotion.
-“Nothing changed” is success when the evidence gate did not clear.
+**Problem.** Loaded models compete for finite memory, and swaps are slow.
+**Move.** Keep a measured hot set resident and change it when demand changes.
+**Local-first.** Residency is real state the owner can observe and control.
+**Tradeoff.** The wrong hot set monopolizes memory and makes rare but important
+work wait.
 
-**Mechanism lineage.** Preemptible batch work, staged promotion, and held-out
-evaluation are established mechanisms. Grid's experimental training plane
-already specifies an `idle → train → prove → ship-only-on-pass` nightly cycle
-and host-priority gates
-([ADR 0019](../adr/0019-rl-training-plane.md)).
+### Idle Worker
 
-**Worked example.** Overnight, the box evaluates a newly converted
-Qwen3.8-27B contract against the incumbent on a frozen held-out pack. The job
-can checkpoint between cases and must yield within its measured drain bound.
-If quality stays above the registered floor and latency improves, the staged
-build becomes an F1 candidate; otherwise the morning state is unchanged.
+*Use idle compute, but yield immediately to live work.*
 
-**Evidence status.** Proposal with one narrower Grid implementation:
-[`train/nightly.py`](../../train/nightly.py) checks mains/idle once, trains one
-adapter, evaluates held-out work, and deploys only on pass. It does not yet
-implement the typed job protocol, live foreground preemption, thermal stop, or
-measured drain bound proposed here. **Related:** L1 and L3 supply its leases, F2
-its boundary, and F1 its model promotion target.
+`idle? → bounded background work → checkpoint / yield`
+
+**Problem.** Evaluation, indexing, and learning are valuable but should not
+hurt interactive use. **Move.** Run them in small, preemptible quanta only when
+the device is idle. **Local-first.** The operator owns otherwise-wasted cycles
+and can improve the system offline overnight. **Tradeoff.** Work that cannot
+checkpoint or preempt turns “background” into foreground latency.
+
+### Power Budget
+
+*Keep AI work inside a power and heat ceiling.*
+
+`job + device limit → run | reduce | defer`
+
+**Problem.** Sustained local inference can drain a battery, heat a room, or
+throttle the device. **Move.** Reduce or pause work when a declared device limit
+is reached. **Local-first.** The machine owner controls the relevant power and
+temperature signals. **Tradeoff.** Bad calibration either harms the device
+experience or refuses useful work unnecessarily.
+
+### Straggler Backup
+
+*Duplicate only the parallel lane that is unusually late.*
+
+`slow lane → backup elsewhere → first valid result wins`
+
+**Problem.** One slow model or node can delay the whole parallel job. **Move.**
+Start a backup only after the lane crosses its measured latency threshold.
+**Local-first.** Owned spare nodes can absorb speculative work without a second
+API charge. **Tradeoff.** A bad threshold duplicates normal work and can create
+a backup storm.
+
+### Circuit Breaker
+
+*Stop routing to a model that keeps failing.*
+
+`repeated failures → stop routing → fallback → probe`
+
+**Problem.** Repeated model failures can trap every request in the same broken
+route. **Move.** Stop routing after a threshold, use a safe fallback, and probe
+before reopening. **Local-first.** Runtime health is visible and controllable at
+the owned router. **Tradeoff.** A temporary slowdown can trip the breaker, and
+the fallback may share the same failure.
 
 ---
 
-## L3. Energy Envelope — spend joules, not tokens
+## Stay sovereign
 
-![Energy Envelope — host telemetry and request consequence set a physical compute envelope](images/local_energy.svg)
+### Local Cascade
 
-**Intent.** Compile inference under an operator-defined power, battery,
-temperature, acoustic, UPS-reserve, and time-of-use envelope. Quality spend is
-admitted in physical units and wall-clock, not justified by “free tokens.”
+*Try the owned path first; cross the boundary only on purpose.*
 
-**Forces.** More samples, context, and concurrency may improve an answer, but a
-home machine shares a room, circuit, battery, cooling system, UPS, and owner.
-Sustained generation can throttle the device or make it unpleasant to use;
-over-conservative limits can refuse valuable work.
+`request → local attempt → enough? answer | explicit gate → remote`
 
-**Why local-substrate.** A hosted API hides the serving host's power, battery,
-temperature, fan, and UPS state and gives the caller no authority over them.
-Substitution therefore removes both the governor's sensors and actuators.
+**Problem.** An automatic remote fallback silently turns local-first into
+cloud-by-default. **Move.** Start locally and escalate remotely only through an
+explicit policy decision. **Local-first.** The owned path has no API meter and
+remains normal.
+**Tradeoff.** A weak local attempt adds delay, while a loose gate makes the
+local-first promise meaningless.
 
-**Applicability.** Use it on laptops, workstations, and always-on home servers;
-it is load-bearing for Night Shift. Avoid using temperature as a proxy for
-answer importance: request consequence and host headroom are different inputs.
+### Data Stays Put
 
-**Invariant.** No plan starts unless a calibrated upper-confidence cost,
-including load, execution, cancellation/drain, and checkpoint reserve, fits the
-current envelope and its quality stays above the request's registered floor.
-Hard limits remain continuously monitored during execution.
+*Move inference to private data; return only the minimum result.*
 
-**Structure.** Request consequence + power/temperature/battery/activity signals
-→ purple `admit envelope` → candidate physical plans → shared coordinator →
-green monitored execution. Runtime branches to `answer` or
-`defer / refuse` on a foreground hard limit, while measured cost updates the
-next calibration. When L2 is the caller, it converts the same cancellation into
-its background-only `checkpoint / abort` exit.
+`query → data-owning node → derived result`
 
-**Mechanics.** Policy declares hard limits (battery reserve, temperature,
-acoustics, UPS floor) and soft budgets (joules or seat-ms per class). L3 filters
-L1's pre-evaluated candidates; the shared physical-plan coordinator alone
-chooses and reserves one. Each cost model is keyed by
-artifact, generation profile, hardware/driver, context, concurrency, initial
-temperature, and ambient bucket, with an uncertainty margin. A runtime governor
-continuously enforces hard limits. Hysteresis and minimum cooldown prevent
-oscillation. Unknown or stale sensors take a declared safe default; they never
-mean infinite headroom.
+**Problem.** Centralizing raw personal or organizational data creates a larger
+privacy and security boundary. **Move.** Run inference where the data lives and
+return only the derived result needed upstream.
+**Local-first.** Raw data stays on its original device or LAN node. **Tradeoff.**
+Data may be fragmented or its device unavailable, and even a derived result can
+reveal sensitive facts.
 
-```python
-def energy_filter(request, plans, snapshot):
-    envelope = policy.envelope(request.consequence, snapshot)
-    eligible = [p for p in plans
-                if p.quality_floor >= request.quality_floor
-                and calibrated_upper_cost(p, snapshot).fits(envelope)]
-    return envelope, eligible
-```
+### Privacy Boundary
 
-**Observe.** Record joules, peak/starting temperature, throttling, fan/acoustic
-band, battery/UPS delta, ambient and model-key bucket, prediction error,
-cooldowns, hard-limit stops, and quality-preserving degradations.
+*Keep sensitive work local; make every external crossing explicit.*
 
-**Consequences.** The router can run all day without monopolizing the owner's
-machine, and performance claims include the physical cost. Measurement and
-calibration are hardware-specific; a plan learned on an RTX workstation does
-not transfer automatically to Apple silicon.
+`sensitive data → stay local; external use → policy gate`
 
-**Failure and safe degradation.** Bad sensors, changing ambient conditions, or
-a controller without hysteresis create thermal thrash. Stop or checkpoint
-background work first, then choose a pre-evaluated lower-cost plan above the
-quality floor, cool down, defer, or refuse. Do not silently cut required context
-or swap to an unmeasured low-bit build merely because the fan is hot.
+**Problem.** A hidden advisor, tool, log, or fallback can leak the very context
+local AI was meant to protect. **Move.** Label data and require an explicit
+policy decision or consent before any external use. **Local-first.** Models,
+tools, monitoring, and storage can all remain inside the owned boundary.
+**Tradeoff.** An unclassified dependency silently defeats the guarantee.
 
-**Mechanism lineage.** OS power management, real-time admission control, and
-thermal governors supply the lineage. Grid's current
-[`hostsignals.py`](../../train/hostsignals.py) measures mains/battery and
-keyboard idle, while [`shared/system/gpu.py`](../../shared/system/gpu.py)
-reports GPU power, temperature, and memory. [ADR
-0019](../adr/0019-rl-training-plane.md) explicitly leaves thermal-aware
-placement to phase 2.
+### Offline Island
 
-**Worked example.** During quiet hours the workstation permits a
-longer Qwen3.8 reasoning budget. When a laptop moves to battery or crosses its
-thermal band, it stops Night Shift, preserves the interactive resident model,
-and declines a multi-model fan rather than heating and swapping through it.
+*Keep a complete useful path that requires no network or vendor account.*
 
-**Evidence status.** Proposal with telemetry and two coarse Night Shift
-admission signals, but no calibrated inference envelope or continuous thermal
-governor. **Related:** L1 co-compiles the physical plan; L2 may use only its
-leftover envelope.
+`network absent → pinned models + local tools + local data → continue`
+
+**Problem.** “Local” is not offline if authentication, retrieval, monitoring, or
+fallback still depends on the cloud. **Move.** Pin the full dependency path and
+degrade honestly when fresh external data is unavailable. **Local-first.** The
+system remains useful through outages, travel, or vendor loss. **Tradeoff.**
+Cached knowledge gets stale, and queued side effects need careful replay.
+
+### Private Memory
+
+*Keep long-lived memory local and reveal only the slice a worker needs.*
+
+`private history → scoped retrieval → minimum context → model`
+
+**Problem.** A useful assistant needs memory, but a global transcript creates
+privacy leaks and cross-task contamination. **Move.** Store memory locally,
+scope it by person and purpose, and retrieve the minimum relevant slice.
+**Local-first.** Personal history can remain owned and absent from vendor
+retention when the selected path stays local. **Tradeoff.** Stale, poisoned, or
+wrongly scoped memory can quietly distort every later answer.
 
 ---
 
-## Two useful compositions, not two more patterns
+## Three small recipes
 
-Quality improves when the catalog refuses to mint a name for every useful
-combination.
+- **Reliable patch:** Brute Force proposes several read-only fixes; Check and
+  Retry uses tests to repair a near-pass; Pinned Model records which exact build
+  produced the result.
+- **Private assistant:** Data Stays Put keeps raw files at their source;
+  Private Memory supplies only relevant history; Privacy Boundary and Local
+  Cascade gate external use; Offline Island preserves a useful path without
+  the network.
+- **Quiet home grid:** Keep It Warm protects interactive latency; Idle Worker
+  uses spare cycles; Power Budget limits heat; Circuit Breaker contains a bad
+  model or host.
 
-**Sovereign Island** is a recipe: F2 compiles from a dependency-capability
-vector (LAN, DNS, vendor APIs, auth, relays, update source) and freezes the full
-concrete manifest for the attempt. F1 pins its model contracts, L1 proves those
-models are loadable, and ordinary capability probes verify the non-model
-executables and data are locally available. Add offline-first freshness labels
-and a durable outbox. An effect's intent enters the WAL before the response is
-acknowledged; replay is at-least-once, revalidates current preconditions, relies
-on sink idempotency, and marks committed only after confirmation. A full or
-unavailable WAL refuses side effects. It does not need another pattern because
-no new local-AI collaboration appears. Legal request exits remain `answer with
-disclosed freshness / defer / refuse`; cloud fallback is never silent.
+## Deep references
 
-**Failure-domain placement** is an L1 refinement applied to a portable fan.
-Inventory labels each worker by host, accelerator, switch/network path,
-storage, and power group. Requirements are stated per failure type or cut set
-(`host >= 2`, while `power = 1` is disclosed), never as one “effective quorum.”
-Model family, training lineage, prompt, and runtime are separate common-mode
-quality axes; the portable graph still decides how results are pooled. Three
-processes on one GPU provide one physical domain, and a consequence that
-requires two hosts must defer or refuse when only one exists.
+- [Pattern lineage](pattern_lineage.md) records where every idea in the earlier
+  27-pattern research set went.
+- [Research reference](portable_patterns.md) keeps the detailed algorithms,
+  refinements, examples, code, and generated diagrams.
+- [Archived six-pattern engineering reference](six_pattern_reference.md)
+  preserves the detailed artifact, residency, boundary, idle-work, energy, and
+  physical-plan contracts from the earlier proposal.
+- [Agent orchestration patterns](../agent_orchestration_patterns/README.md)
+  cover sessions that hold credentials, use tools, and act on the world.
 
----
-
-## Three honest home profiles
-
-Hardware figures are illustrative. Quantization, context length, KV cache,
-runtime overhead, and co-residency determine the real capacity; measure it.
-
-| Profile | Abundance patterns | Substrate and foundations | Honest limit |
-|---|---|---|---|
-| **One laptop / one seat** | A1 and A2 run serially under a short deadline; A3 only if genuine diversity is available | F1 + L1; F2 for boundary-sensitive work; L3 under sustained load | an N-way fan is N turns on one seat, not N-way parallelism |
-| **One workstation / two resident lanes** | A1 and A2 as measured; A3 when the two reads are actually decorrelated | F1 + L1; F2 and L3 when their forces apply; short L2 after its drain bound is measured | two lanes on one host still share power and failure domains |
-| **Home grid / independent hosts** | A1–A3 with width and depth calibrated from outcomes | apply L1–L3 where their forces recur; add F1/F2 as needed | report model-lineage, host, network, storage, and power independence separately |
-
-## What remains portable-only
-
-Local execution alone does not promote every workflow into this focused
-catalog. Plain one-model routing, fixed pipelines, generic planner-worker
-graphs, ordinary caches and breakers, and undisciplined “ask more models” all
-remain portable when local deployment changes only a constant factor.
-
-Fan-out, best-of-N, and evaluator loops are also portable as bare graph shapes.
-A1–A3 are narrower contracts: they declare the additional spend that owned
-inference makes viable, the evidence used to select or stop, the physical
-budget consumed, and an honest failure exit. More samples without diversity or
-verification are merely more correlated guesses.
-
-The [research archive](portable_patterns.md) retains the broader survey—routing,
-pipelines, planners, voting, debate, ensembles, caches, resilience controls,
-and learning policies—without putting every useful idea on equal footing with
-the focused six.
-
-## Admission and review rule
-
-A proposed local mechanism begins in the incubator. Give it a stable
-**A-number** when it passes the abundance test, or an **L-number** when it
-passes the substrate test. In either case it must:
-
-1. own a distinct recurring force and collaboration;
-2. name bounded local resources and safe degradation;
-3. provide an implementable baseline; and
-4. state a falsifiable quality-versus-cost measurement plan.
-
-An A-pattern must compare against `N=1` and report quality gain per additional
-attempt alongside wall-clock, queue delay, energy, and memory pressure. An
-L-pattern must name the operator-controlled state its mechanism requires and
-show how black-box API substitution removes that state.
-
-Promote a proposal to **Candidate** only after one measured implementation.
-Promote it to **Established** only after at least three independent, documented
-successful uses that instantiate the same forces and collaboration. Imported
-analogies count as lineage, not direct uses.
-
-Model names are examples, checked on 2026-08-25, not architectural roles.
-Diagrams use generic roles; the examples map those roles to current artifacts.
-The catalog is living design guidance, not a library or a claim that all six
-patterns are shipped in Grid today.
+These names are working design vocabulary, not claims that every pattern is
+already implemented in Grid. A pattern earns its keep when the simple move
+recurs and its local-first advantage survives measurement.

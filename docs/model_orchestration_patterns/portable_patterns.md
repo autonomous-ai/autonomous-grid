@@ -1,10 +1,11 @@
-# Portable orchestration research catalog — model layer
+# Deep orchestration research reference — model layer
 
-> **Research archive.** These twenty-seven entries are portable orchestration
-> topologies, pooling rules, and transferred control ideas. They are retained
-> for design provenance, not presented as the small set of patterns unique to
-> owning local models and hardware. Start with the focused local
-> [`README.md`](README.md).
+> **Deep reference.** These are the original twenty-seven orchestration
+> topologies, pooling rules, and transferred control ideas behind the concise
+> [local-first catalog](README.md). A pattern does not have to be impossible in
+> the cloud: local ownership may make it repeatable, private, offline, or aware
+> of physical state. The [lineage map](pattern_lineage.md) shows how every entry
+> was simplified or merged.
 
 A catalog of ways to route and combine local inference. Built for **Grid**
 ([github.com/autonomous-ai/autonomous-grid](https://github.com/autonomous-ai/autonomous-grid)),
@@ -12,9 +13,11 @@ the local router where the economics that make remote routers an *assignment
 problem* stop holding: local inference has no marginal API token bill, but it
 consumes finite seat-time, memory bandwidth, electricity, and wall-clock.
 
-This is the **model-layer** half of the catalog — the shape of routing and
-combining *local inference*: how many samples a request deserves and how the
-samples are pooled into an answer. It pairs with
+This deep reference covers the original **model-layer** research: routing and
+combining inference, especially how many samples a request deserves and how
+the samples are pooled into an answer. The concise catalog also covers concerns
+that only become visible when the operator owns the runtime—model residency,
+idle capacity, power, offline operation, and data boundaries. It pairs with
 [`agent_orchestration_patterns/README.md`](../agent_orchestration_patterns/README.md),
 the **agent-layer** half — orchestrating *harness
 frameworks as workers* (act-gates, session lifecycles, harness routing, and a
@@ -3171,11 +3174,12 @@ certified” while still enforcing physical limits.
 
 ## Putting them together
 
-Twenty-seven portable entries, one idea: **reasoning graphs trade additional
+Twenty-seven research entries, one idea: **reasoning graphs trade additional
 compute and latency for different failure behavior.** Mate-in-One spends once;
 other graphs may spend more when evaluation shows the risk justifies it. The
-focused local catalog identifies which graphs have a materially different
-operating point under owned inference and decides whether they fit the machine.
+concise local-first catalog gives these ideas simple structural homes and adds
+the owned-runtime and sovereignty patterns that this research set did not try
+to cover.
 
 This is the model layer — it makes the *answer* reliable. When the "worker"
 is a harness session that can hold context and act on the world, the routing
