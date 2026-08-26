@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml calls this so a release is gated on the SAME suite a PR is, rather than on
+  # a human remembering to watch it. It runs in parallel with the Nuitka binaries there, which
+  # take ~10 min, so the whole gate is free in wall-clock terms.
+  workflow_call:
 
 jobs:
   lint:

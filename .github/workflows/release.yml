@@ -11,12 +11,34 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Warms the ccache on the DEFAULT branch, which is the only way a release can inherit one.
+  # An Actions cache is scoped to the ref that wrote it, and a release only ever runs on a
+  # fresh `refs/tags/vX.Y.Z` — so a tag run can never restore the PREVIOUS tag's cache. What
+  # it can restore is the default branch's, which nothing else here would ever write, since
+  # the binaries are built on no other trigger.
+  #
+  # Measured 2026-08-26 (runs 32933722202 cold / 32934676605 warm): x86_64 12m27s -> 4m00s,
+  # arm64 11m01s -> 4m16s, 590 of 591 C files served from ccache. A scheduled run publishes
+  # nothing: all three release steps are gated on `github.event_name == 'push'`.
+  schedule:
+    - cron: "0 3 * * 1"
   workflow_dispatch: {}   # allow manual runs for dry-tests (no release is created)
 
 permissions:
   contents: write   # create the release + upload assets
 
 jobs:
+  # The same suite ci.yml runs on every PR. A tag push does NOT trigger ci.yml (`on: push:
+  # branches: [main]`, and a tag is not a branch), so before this the release path ran no
+  # tests whatsoever and only a human watching CI stood between a red main and a published
+  # release. `release: needs:` below makes it fail-closed instead.
+  #
+  # It costs nothing in wall clock: ~4 min of jobs running alongside binaries that take ~10.
+  tests:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   binaries:
     name: ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -31,14 +53,51 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install patchelf (Linux standalone needs it)
+      # ccache is not on the GitHub image, and Nuitka says so itself, twice per build:
+      # "You are not using ccache, re-compilation of identical code will be slower than
+      # necessary." Nuitka's Scons backend picks it up off PATH with no flag of its own.
+      #
+      # CCACHE_DIR is NOT optional. Nuitka stores its ccache under its OWN cache directory
+      # (~/.cache/Nuitka/ccache on Linux) unless the variable is already set — see
+      # nuitka/build/SconsCaching.py: `if "CCACHE_DIR" not in os.environ`. Measured on the
+      # dry run of this change (run 32932548044, 2026-08-26): without it Nuitka compiled all
+      # 590 C files through ccache, yet actions/cache watched an empty ~/.cache/ccache and
+      # logged "Path Validation Error … hence no cache is being saved", `ccache -s` reported
+      # 0.0 GiB, and the repo gained no cache entry at all.
+      # It goes through $GITHUB_ENV so the build step and the stats step below cannot drift
+      # onto two different directories; a job-level `env:` cannot do it because $HOME is not
+      # expanded there.
+      - name: Install patchelf (Linux standalone needs it) + ccache
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y patchelf
+        run: |
+          sudo apt-get update && sudo apt-get install -y patchelf ccache
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+      # Measured on v0.3.23: of a 9m24s x86_64 build, 5m32s is gcc compiling the 591 C files
+      # Nuitka generates. Most of those are the frozen dependencies (pydantic, fastapi,
+      # uvicorn, starlette, httpx, stdlib), which are byte-identical between patch releases —
+      # so a warm cache skips them. The key is per-arch: x86_64 and arm64 objects never mix.
+      # `github.sha` in the key means every run writes a fresh entry; restore-keys takes the
+      # newest prefix match, which is what makes the cache roll forward instead of going stale.
+      - name: Restore the C compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ matrix.os }}-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.os }}-${{ matrix.arch }}-
       - name: Build standalone binary
+        env:
+          # Capped well under GitHub's 10 GB per-repo cache budget, and small enough that
+          # saving it costs seconds rather than eating the time the cache just saved.
+          CCACHE_MAXSIZE: 500M
         run: |
           chmod +x packaging/build_binary.sh
           GRID_BUILD_PYTHON="$(command -v python3.12)" packaging/build_binary.sh
           mv dist/grid "grid-${{ matrix.os }}-${{ matrix.arch }}"
+      # The hit rate is the whole justification for the cache above, so print it rather than
+      # assume it. A run showing ~0 hits means the cache is not working and the step should go.
+      - name: ccache statistics
+        if: always() && runner.os == 'Linux'
+        run: ccache -s
       - uses: actions/upload-artifact@v4
         with:
           name: grid-${{ matrix.os }}-${{ matrix.arch }}
@@ -46,7 +105,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: binaries
+    needs: [binaries, tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,6 +119,26 @@ jobs:
           python-version: "3.12"
       - name: Build universal wheel
         run: uv build --wheel
+      # v0.1.1 shipped a wheel that printed the wrong version. pyproject.toml is the only
+      # place the number lives (shared/_version.py reads it back from package metadata), so
+      # comparing the built wheel's filename to the tag is the whole check — and it belongs
+      # here rather than on the maintainer's laptop because it gates the publish: `needs:`
+      # means nothing has shipped when this exits 1, and re-tagging is free.
+      #
+      # ref_name through env, not `${{ }}` inside run: — same reason as the notes step below.
+      - name: Tag must match the wheel's version
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          built="$(basename dist/grid-*-py3-none-any.whl)"
+          built="${built#grid-}"; built="${built%-py3-none-any.whl}"
+          if [ "v$built" != "$REF_NAME" ]; then
+            echo "::error::tag is $REF_NAME but the wheel is $built."
+            echo "::error::Set pyproject.toml's version to ${REF_NAME#v}, or re-tag to match."
+            exit 1
+          fi
+          echo "tag $REF_NAME matches wheel $built"
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
