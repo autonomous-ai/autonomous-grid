@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build focused local-abundance, local-substrate, and foundation figures.
+"""Build the local-first catalog overview and focused engineering figures.
 
 The drawing primitives and palette come from build_diagrams.py so the local
 mechanics and orchestration research references remain one visual family.
@@ -205,6 +205,48 @@ def energy_envelope():
     return d
 
 
+def local_first_overview():
+    """Show how owned inference leads to the seven entry-point patterns."""
+    d = Diagram(
+        "Owned local inference exposes three levers and seven entry patterns",
+        m_l=220,
+    )
+    d.place("runtime", "owned local runtime", "terminal", row=3, stage=0,
+            w=380)
+    # Reserve fan-out clearance for the wide category nodes. Diagram.visual_w
+    # still attaches edges to the rendered 18px circle.
+    d.place("fan", "", "dot", row=3, stage=1, w=140)
+
+    d.place("abundance", "inference abundance", "decide", row=0, stage=2,
+            sub="no API meter · no vendor quota", w=470)
+    d.place("brute", "Brute Force", "work", row=0, stage=3, w=290)
+    d.place("repair", "Check and Retry", "work", row=1, stage=3, w=330)
+
+    d.place("substrate", "owned substrate", "decide", row=3, stage=2,
+            sub="idle cycles · visible memory", w=430)
+    d.place("idle", "Idle Worker", "work", row=2, stage=3, w=280)
+    d.place("fit", "Fit the Box", "work", row=3, stage=3, w=280)
+
+    d.place("sovereign", "sovereign path", "decide", row=5, stage=2,
+            sub="local default · private data · offline", w=560)
+    d.place("cascade", "Local Cascade", "work", row=4, stage=3, w=310)
+    d.place("data", "Data Stays Put", "work", row=5, stage=3, w=330)
+    d.place("offline", "Offline Island", "work", row=6, stage=3, w=310)
+
+    d.edge("runtime", "fan")
+    d.edge("fan", "abundance")
+    d.edge("fan", "substrate")
+    d.edge("fan", "sovereign")
+    d.edge("abundance", "brute")
+    d.edge("abundance", "repair")
+    d.edge("substrate", "idle")
+    d.edge("substrate", "fit")
+    d.edge("sovereign", "cascade")
+    d.edge("sovereign", "data")
+    d.edge("sovereign", "offline")
+    return d
+
+
 def local_overview():
     d = Diagram("Three local-substrate patterns with two operator-control foundations",
                 m_l=190)
@@ -250,6 +292,7 @@ def local_overview():
 
 
 BUILDERS = {
+    "local_first_overview": local_first_overview,
     "local_verify": verify_and_repair,
     "local_council": diverse_council,
     "local_artifact": artifact_contract,

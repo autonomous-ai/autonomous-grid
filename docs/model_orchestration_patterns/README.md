@@ -29,6 +29,9 @@ inference on finite owned hardware—is the center of this catalog.
 These are the shortest path into the catalog. Together they expose the local
 advantages that a cloud-only catalog usually treats as unavailable or hidden.
 
+![Owned local inference exposes inference abundance, an owned substrate, and a
+sovereign path; these lead to the seven entry patterns.](images/local_first_overview.svg)
+
 | Pattern | Local-first reason to reach for it |
 |---|---|
 | [**Brute Force**](#brute-force) | try many approaches without a per-attempt API bill or provider quota |

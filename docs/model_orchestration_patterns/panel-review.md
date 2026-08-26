@@ -641,3 +641,19 @@ inside broader cards.
 Problem, Move, Local-first, and Tradeoff field. Original research entries
 1–27 are all present in the lineage map. Local links resolve, all 33 Python
 examples still parse, and both diagram generators remain green.
+
+---
+
+## Round 43 — restore the visible catalog diagram
+
+**Critique.** The concise landing page retained generated figures in the
+`images/` directory but embedded no overview, so GitHub rendered the catalog as
+text only.
+
+**Change.** Added a generated overview immediately above the seven-pattern
+on-ramp. It traces one owned local runtime through three local levers—inference
+abundance, owned substrate, and a sovereign path—to the seven entry patterns.
+
+**Verification.** The generator's geometry and collision checks pass, the SVG
+parses as XML, its accessible title describes the relationship, and the README
+image target resolves.

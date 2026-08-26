@@ -113,8 +113,11 @@ class Diagram:
     def cy(self, nid): return self._y[self.nodes[nid]["row"]]
     def top(self, nid): return self.cy(nid) - H / 2
     def bottom(self, nid): return self.cy(nid) + H / 2
-    def xl(self, nid): return self.cx(nid) - self.w(nid) / 2
-    def xr(self, nid): return self.cx(nid) + self.w(nid) / 2
+    def visual_w(self, nid):
+        """Rendered width; a dot may reserve more layout width than it draws."""
+        return 18 if self.nodes[nid]["kind"] == "dot" else self.w(nid)
+    def xl(self, nid): return self.cx(nid) - self.visual_w(nid) / 2
+    def xr(self, nid): return self.cx(nid) + self.visual_w(nid) / 2
 
     # --- render -------------------------------------------------------------
     def render(self):
