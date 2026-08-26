@@ -47,7 +47,9 @@ sovereign path; these lead to the seven entry patterns.](images/local_first_over
 Each pattern follows one rule: **one problem, one move, one clear local-first
 advantage, and one tradeoff**. The small shape is the pattern. Algorithms,
 thresholds, ledgers, and implementation protocols belong in the linked deep
-references.
+references. Every diagram uses one visual language: coral pills are entries or
+exits, green boxes are work or owned state, purple boxes are decisions, and a
+dashed arrow is a retry, feedback, or later return.
 
 | Need | Patterns |
 |---|---|
@@ -66,7 +68,7 @@ references.
 
 *Use the smallest local model that can do the job.*
 
-`request → choose one model → answer`
+![Best Fit structure: request, choose one model, then answer.](images/catalog_best_fit.svg)
 
 **Problem.** Sending every request to the largest model wastes memory, power,
 and time. **Move.** Classify the job and choose one adequate model. **Local-first.**
@@ -77,7 +79,7 @@ The router can see which owned models are loaded and fast on this box.
 
 *Choose the workflow before the work begins.*
 
-`request → one named recipe → run`
+![Recipe Router structure: request, choose one named recipe, then run it.](images/catalog_recipe_router.svg)
 
 **Problem.** One workflow cannot serve quick questions, risky decisions, and
 large jobs equally well. **Move.** Classify the request and select one known
@@ -90,7 +92,7 @@ deceptively hard request.
 
 *Start small; spend more only while uncertainty remains.*
 
-`one attempt → still uncertain? → add effort → stop`
+![Adaptive Effort structure: start with one attempt, add effort while uncertainty remains, then stop.](images/catalog_adaptive_effort.svg)
 
 **Problem.** A fixed number of attempts either wastes easy work or under-serves
 hard work. **Move.** Begin with a small budget and expand only when a real check
@@ -102,7 +104,7 @@ signal stops too early or turns “free tokens” into runaway local work.
 
 *Raise the proof bar as the cost of being wrong rises.*
 
-`consequence ↑ → attempts + checks + evidence ↑`
+![Risk Ladder structure: higher consequences receive more attempts, checks, and evidence.](images/catalog_risk_ladder.svg)
 
 **Problem.** A reversible suggestion and an irreversible action should not
 receive the same scrutiny. **Move.** Map consequence classes to increasing
@@ -114,7 +116,7 @@ stale or incorrect risk label gives dangerous work the cheap path.
 
 *Remember which route works for each kind of job.*
 
-`verified outcome → update route history → next choice`
+![Routing Memory structure: verified outcomes update history used by the next route choice.](images/catalog_routing_memory.svg)
 
 **Problem.** The best route varies by workload and changes over time. **Move.**
 Record verified outcomes by workload and prefer routes that worked before.
@@ -130,7 +132,7 @@ choice.
 
 *Try many ways; keep the one that proves itself.*
 
-`goal → many approaches → objective test → one winner`
+![Brute Force structure: try many approaches, apply one objective test, and keep one winner.](images/catalog_brute_force.svg)
 
 **Problem.** One attempt can miss even when success is easy to recognize.
 **Move.** Generate genuinely different candidates, apply the same objective
@@ -142,7 +144,7 @@ coverage, and a weak test selects the candidate that games the test best.
 
 *Turn failed checks into the next repair attempt.*
 
-`draft → check → repair ↺  |  pass → answer`
+![Check and Retry structure: check a draft, repair failures within a bound, and release only a passing answer.](images/catalog_check_and_retry.svg)
 
 **Problem.** A plausible draft may contain an error a cheap tool can identify.
 **Move.** Check, return concrete failure evidence, and retry within a fixed
@@ -154,7 +156,7 @@ burns the machine.
 
 *Ask independent workers a discrete question; use a majority or abstain.*
 
-`discrete question → independent answers → majority or abstain`
+![Vote structure: ask independent workers a discrete question, then use a majority or abstain.](images/catalog_vote.svg)
 
 **Problem.** One model answer gives no signal about its own stability.
 **Move.** Collect independent answers and use a majority as a confidence signal.
@@ -166,7 +168,7 @@ on the same wrong answer; consensus is not proof.
 
 *Give every important answer a skeptic.*
 
-`answer → independent challenge → resolve or abstain`
+![Challenge structure: give an answer to an independent skeptic, then resolve the objections or abstain.](images/catalog_challenge.svg)
 
 **Problem.** A single model rarely notices its own assumptions. **Move.** Have a
 different reader attack the answer, then resolve the concrete disagreement in
@@ -178,7 +180,7 @@ blind spot and manufacture confidence.
 
 *Admit only answers that add a genuinely different path.*
 
-`candidates → diversity gate → non-duplicate set`
+![Diversity Gate structure: admit only candidates that add a distinct model family or evidence path.](images/catalog_diversity_gate.svg)
 
 **Problem.** Repeating one prompt often produces the appearance of breadth
 without new evidence. **Move.** Admit a candidate only when it adds a distinct
@@ -190,7 +192,7 @@ cosmetic differences for independence.
 
 *When a vote splits, add new evidence—not more of the same.*
 
-`split vote → tool or different judge → decide or abstain`
+![Tiebreaker structure: when a vote splits, add a tool or different judge, then decide or abstain.](images/catalog_tiebreaker.svg)
 
 **Problem.** A simple vote can crown a weak answer when workers form several
 conflicting camps. **Move.** Compare the finalists with an objective tool or a
@@ -202,7 +204,7 @@ share the same prior and only add confidence.
 
 *Combine several numeric estimates with one robust rule.*
 
-`numeric estimates → median → result`
+![Ensemble structure: combine several numeric estimates with a robust rule such as the median.](images/catalog_ensemble.svg)
 
 **Problem.** One estimate is noisy, while a plain average can preserve shared
 bias. **Move.** Aggregate independent estimates with one declared robust rule.
@@ -213,7 +215,7 @@ Correlated models still produce a precise-looking wrong number.
 
 *Estimate alone before seeing the group.*
 
-`private estimates → reveal summary → one revision`
+![Blind Estimate structure: estimate privately, reveal a summary, then allow one revision.](images/catalog_blind_estimate.svg)
 
 **Problem.** Early confident answers anchor later estimates. **Move.** Collect
 independent estimates, reveal only the summary, and allow one revision.
@@ -228,7 +230,7 @@ The group can converge tightly around a shared wrong assumption.
 
 *Break one large job into named parts and give each part a specialist.*
 
-`job → parts → specialists → merge`
+![Split Work structure: divide a large job into named parts, assign specialists, then merge the pieces.](images/catalog_split_work.svg)
 
 **Problem.** One model may be poor at a task that contains several different
 kinds of work. **Move.** Split by responsibility, run suitable specialists, and
@@ -240,7 +242,7 @@ or incompatible pieces.
 
 *Pass work through a fixed sequence of transformations.*
 
-`input → stage A → stage B → stage C → output`
+![Pipeline structure: pass an input through a fixed sequence of explicit stages.](images/catalog_pipeline.svg)
 
 **Problem.** Some jobs have a natural order that one giant prompt obscures.
 **Move.** Give every stage one responsibility and an explicit handoff.
@@ -252,7 +254,7 @@ inputs.
 
 *Reuse a verified answer until its source changes.*
 
-`request → content fingerprint → cached answer or compute`
+![Answer Cache structure: fingerprint a request, reuse a verified hit, or compute and store a miss.](images/catalog_answer_cache.svg)
 
 **Problem.** The same expensive question recurs under slightly different
 wording. **Move.** Store a verified result under a key made from the request's
@@ -268,7 +270,7 @@ answer into a persistent shared answer.
 
 *Let a new model observe real work before it receives live traffic.*
 
-`new model → shadow traffic → evidence rule → live work or reject`
+![Shadow Model structure: run a candidate beside live traffic and promote or reject it by a declared evidence rule.](images/catalog_shadow_model.svg)
 
 **Problem.** Benchmarks alone do not prove a new model is safe for the owner's
 real workload. **Move.** Run it read-only beside the current model and promote
@@ -280,7 +282,7 @@ model is mistaken for skill.
 
 *Test a candidate on a private offline task pack before real traffic.*
 
-`candidate model → offline test pack → assign role or reject`
+![Model Audition structure: test a candidate on a private offline task pack, then assign a role or reject it.](images/catalog_model_audition.svg)
 
 **Problem.** A newly downloaded model's strengths, compression effects, and
 tool behavior are unknown. **Move.** Audition it against tasks and failure cases
@@ -292,7 +294,7 @@ predicting production behavior.
 
 *Stage improvements away from live state; promote only what proves better.*
 
-`staged change → independent proof → promote or discard`
+![Night Shift structure: stage a change away from live state, prove it independently, then promote or discard it.](images/catalog_night_shift.svg)
 
 **Problem.** An improving system must not rewrite live state while it serves.
 **Move.** Stage changes away from the live path and promote only after an
@@ -308,7 +310,7 @@ its own mistakes.
 
 *Route to an exact model build, not a floating name.*
 
-`role → exact build → run`
+![Pinned Model structure: bind a role to one exact model build before running it.](images/catalog_pinned_model.svg)
 
 **Problem.** Compression, template, adapter, and runtime changes can alter
 behavior while the model name stays the same. **Move.** Bind trust and routing
@@ -320,7 +322,7 @@ qualification effort; identity alone does not prove quality.
 
 *Choose a version of the recipe that actually fits in live memory.*
 
-`recipe + free memory → run | shrink | wait`
+![Fit the Box structure: compare a recipe with free memory, then run, shrink, or wait.](images/catalog_fit_the_box.svg)
 
 **Problem.** A recipe may name models that do not fit in memory together.
 **Move.** Before running, choose only a model combination that fits current
@@ -332,7 +334,7 @@ waiting adds latency.
 
 *Keep the models you use most already loaded.*
 
-`measured demand + memory → warm models; load others on demand`
+![Keep It Warm structure: use measured demand and memory to keep a hot set resident and load other models on demand.](images/catalog_keep_it_warm.svg)
 
 **Problem.** Loaded models compete for finite memory, and swaps are slow.
 **Move.** Keep a measured hot set resident and change it when demand changes.
@@ -344,7 +346,7 @@ work wait.
 
 *Use idle compute, but yield immediately to live work.*
 
-`idle? → bounded background work → checkpoint / yield`
+![Idle Worker structure: run bounded background work only while idle, then checkpoint or yield to live work.](images/catalog_idle_worker.svg)
 
 **Problem.** Evaluation, indexing, and learning are valuable but should not
 hurt interactive use. **Move.** Run them in small, preemptible quanta only when
@@ -356,7 +358,7 @@ checkpoint or preempt turns “background” into foreground latency.
 
 *Keep AI work inside a power and heat ceiling.*
 
-`job + device limit → run | reduce | defer`
+![Power Budget structure: compare a job with device limits, then run, reduce, or defer it.](images/catalog_power_budget.svg)
 
 **Problem.** Sustained local inference can drain a battery, heat a room, or
 throttle the device. **Move.** Reduce or pause work when a declared device limit
@@ -368,7 +370,7 @@ experience or refuses useful work unnecessarily.
 
 *Duplicate only the parallel lane that is unusually late.*
 
-`slow lane → backup elsewhere → first valid result wins`
+![Straggler Backup structure: duplicate only an overdue lane and keep the first valid result.](images/catalog_straggler_backup.svg)
 
 **Problem.** One slow model or node can delay the whole parallel job. **Move.**
 Start a backup only after the lane crosses its measured latency threshold.
@@ -380,7 +382,7 @@ a backup storm.
 
 *Stop routing to a model that keeps failing.*
 
-`repeated failures → stop routing → fallback → probe`
+![Circuit Breaker structure: repeated failures stop routing, trigger a fallback, and require a successful probe before reopening.](images/catalog_circuit_breaker.svg)
 
 **Problem.** Repeated model failures can trap every request in the same broken
 route. **Move.** Stop routing after a threshold, use a safe fallback, and probe
@@ -396,7 +398,7 @@ the fallback may share the same failure.
 
 *Try the owned path first; cross the boundary only on purpose.*
 
-`request → local attempt → enough? answer | explicit gate → remote`
+![Local Cascade structure: try locally first and cross to a remote path only through an explicit policy gate.](images/catalog_local_cascade.svg)
 
 **Problem.** An automatic remote fallback silently turns local-first into
 cloud-by-default. **Move.** Start locally and escalate remotely only through an
@@ -409,7 +411,7 @@ local-first promise meaningless.
 
 *Move inference to private data; return only the minimum result.*
 
-`query → data-owning node → derived result`
+![Data Stays Put structure: send a query to the data-owning node and return only a derived result.](images/catalog_data_stays_put.svg)
 
 **Problem.** Centralizing raw personal or organizational data creates a larger
 privacy and security boundary. **Move.** Run inference where the data lives and
@@ -422,7 +424,7 @@ reveal sensitive facts.
 
 *Keep sensitive work local; make every external crossing explicit.*
 
-`sensitive data → stay local; external use → policy gate`
+![Privacy Boundary structure: keep sensitive data local and require a policy gate for every external use.](images/catalog_privacy_boundary.svg)
 
 **Problem.** A hidden advisor, tool, log, or fallback can leak the very context
 local AI was meant to protect. **Move.** Label data and require an explicit
@@ -434,7 +436,7 @@ tools, monitoring, and storage can all remain inside the owned boundary.
 
 *Keep a complete useful path that requires no network or vendor account.*
 
-`network absent → pinned models + local tools + local data → continue`
+![Offline Island structure: when the network is absent, use pinned models, local tools, and local data to continue.](images/catalog_offline_island.svg)
 
 **Problem.** “Local” is not offline if authentication, retrieval, monitoring, or
 fallback still depends on the cloud. **Move.** Pin the full dependency path and
@@ -446,7 +448,7 @@ Cached knowledge gets stale, and queued side effects need careful replay.
 
 *Keep long-lived memory local and reveal only the slice a worker needs.*
 
-`private history → scoped retrieval → minimum context → model`
+![Private Memory structure: scope local history by person and purpose and give the model only the minimum relevant context.](images/catalog_private_memory.svg)
 
 **Problem.** A useful assistant needs memory, but a global transcript creates
 privacy leaks and cross-task contamination. **Move.** Store memory locally,

@@ -657,3 +657,22 @@ abundance, owned substrate, and a sovereign path—to the seven entry patterns.
 **Verification.** The generator's geometry and collision checks pass, the SVG
 parses as XML, its accessible title describes the relationship, and the README
 image target resolves.
+
+---
+
+## Round 44 — give every pattern its own diagram
+
+**Critique.** The overview explained the seven-pattern on-ramp, but each of the
+31 cards still used only an inline text shape. Readers could not scan or compare
+the full catalog through the project's visual grammar.
+
+**Change.** Replaced every text-only shape with a generated card-level diagram.
+The figures use current names and deliberately show only the card's structural
+move; implementation-specific diagrams remain in the research references. The
+main page now also defines the shared entry/work/decision/feedback legend.
+
+**Verification.** The catalog generator enforces exactly 31 named builders.
+All 31 geometry checks pass; the README contains exactly one matching image for
+every pattern heading; every SVG parses, has an accessible current-pattern
+title, and is reproducible from its builder. A composite visual review checked
+the complete set for readable labels, connected edges, and semantic drift.
