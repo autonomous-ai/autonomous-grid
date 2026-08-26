@@ -1,5 +1,10 @@
 # Local AI Orchestration Patterns — the agent layer
 
+> **Canonical guide:** [Building Effective Local AI Agents: Design
+> Patterns](../local_ai_agent_patterns/README.md) now unifies model reasoning,
+> agent execution, owned-runtime, and sovereignty patterns in one reader
+> journey. This page remains the detailed agent-orchestration reference.
+
 The second half of the catalog. The model-layer landing page presents the
 [concise local-first patterns](../model_orchestration_patterns/README.md), while
 the [research reference](../model_orchestration_patterns/portable_patterns.md)

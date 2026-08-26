@@ -1,5 +1,10 @@
 # Local-First AI Orchestration Patterns
 
+> **Canonical guide:** [Building Effective Local AI Agents: Design
+> Patterns](../local_ai_agent_patterns/README.md) now unifies model reasoning,
+> agent execution, owned-runtime, and sovereignty patterns in one reader
+> journey. This page remains the detailed model-orchestration reference.
+
 Local-first patterns are orchestration ideas shaped around an AI runtime you
 own. **Local-first means the owned path is the default**; a remote service may
 remain as an explicit, policy-approved fallback. A pattern does not have to be

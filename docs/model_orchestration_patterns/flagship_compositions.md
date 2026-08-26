@@ -1,5 +1,10 @@
 # Flagship local-AI compositions
 
+> These capability recipes now sit beneath the canonical pattern language,
+> [Building Effective Local AI Agents: Design
+> Patterns](../local_ai_agent_patterns/README.md). This page remains the
+> composition-focused reference.
+
 Individual patterns name reusable moves. Compositions turn those moves into
 capabilities a user can see: search until evidence proves a result, reason over
 fresh private context, improve a live system from measured outcomes, or keep a
