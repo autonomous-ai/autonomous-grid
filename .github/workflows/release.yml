@@ -11,6 +11,17 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Warms the ccache on the DEFAULT branch, which is the only way a release can inherit one.
+  # An Actions cache is scoped to the ref that wrote it, and a release only ever runs on a
+  # fresh `refs/tags/vX.Y.Z` — so a tag run can never restore the PREVIOUS tag's cache. What
+  # it can restore is the default branch's, which nothing else here would ever write, since
+  # the binaries are built on no other trigger.
+  #
+  # Measured 2026-08-26 (runs 32933722202 cold / 32934676605 warm): x86_64 12m27s -> 4m00s,
+  # arm64 11m01s -> 4m16s, 590 of 591 C files served from ccache. A scheduled run publishes
+  # nothing: all three release steps are gated on `github.event_name == 'push'`.
+  schedule:
+    - cron: "0 3 * * 1"
   workflow_dispatch: {}   # allow manual runs for dry-tests (no release is created)
 
 permissions:
