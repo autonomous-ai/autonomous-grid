@@ -45,9 +45,22 @@ jobs:
       # ccache is not on the GitHub image, and Nuitka says so itself, twice per build:
       # "You are not using ccache, re-compilation of identical code will be slower than
       # necessary." Nuitka's Scons backend picks it up off PATH with no flag of its own.
+      #
+      # CCACHE_DIR is NOT optional. Nuitka stores its ccache under its OWN cache directory
+      # (~/.cache/Nuitka/ccache on Linux) unless the variable is already set — see
+      # nuitka/build/SconsCaching.py: `if "CCACHE_DIR" not in os.environ`. Measured on the
+      # dry run of this change (run 32932548044, 2026-08-26): without it Nuitka compiled all
+      # 590 C files through ccache, yet actions/cache watched an empty ~/.cache/ccache and
+      # logged "Path Validation Error … hence no cache is being saved", `ccache -s` reported
+      # 0.0 GiB, and the repo gained no cache entry at all.
+      # It goes through $GITHUB_ENV so the build step and the stats step below cannot drift
+      # onto two different directories; a job-level `env:` cannot do it because $HOME is not
+      # expanded there.
       - name: Install patchelf (Linux standalone needs it) + ccache
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y patchelf ccache
+        run: |
+          sudo apt-get update && sudo apt-get install -y patchelf ccache
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
       # Measured on v0.3.23: of a 9m24s x86_64 build, 5m32s is gcc compiling the 591 C files
       # Nuitka generates. Most of those are the frozen dependencies (pydantic, fastapi,
       # uvicorn, starlette, httpx, stdlib), which are byte-identical between patch releases —
