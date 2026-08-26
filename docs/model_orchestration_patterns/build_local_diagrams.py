@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build three local-native patterns, two foundation figures, and an overview.
+"""Build focused local-abundance, local-substrate, and foundation figures.
 
 The drawing primitives and palette come from build_diagrams.py so the concise
 catalog and the portable research archive remain one visual family. Individual
@@ -12,6 +12,62 @@ from build_diagrams import Diagram
 
 
 OUT = os.path.join(os.path.dirname(__file__), "images")
+
+
+def verify_and_repair():
+    d = Diagram("Bounded Verify-and-Repair — make failure useful", m_l=150)
+    d.place("job", "job", "terminal", row=1, stage=0)
+    d.place("draft", "draft / repair", "work", row=1, stage=1,
+            sub="attempt ≤ K", w=300)
+    d.place("check", "independent check", "decide", row=1, stage=2,
+            sub="tool · test · schema", w=350)
+    d.place("answer", "verified answer", "terminal", row=0, stage=3,
+            w=310)
+    d.place("stop", "defer / refuse", "terminal", row=2, stage=3,
+            w=280)
+    d.edge("job", "draft", "budget")
+    d.edge("draft", "check")
+    d.edge("check", "answer", "pass")
+    d.edge("check", "draft", "failure evidence: repair", dashed=True,
+           below=54)
+    d.edge("check", "stop", "K / deadline / limit")
+    return d
+
+
+def diverse_council():
+    d = Diagram("Diverse Council — compare independent evidence, not votes",
+                m_l=180)
+    d.place("job", "consequential job", "terminal", row=1, stage=0,
+            w=320)
+    d.place("fan", "", "dot", row=1, stage=1)
+    d.place("evidence", "evidence read", "work", row=0, stage=2,
+            sub="different family", w=300)
+    d.place("counter", "counter-read", "work", row=1, stage=2,
+            sub="opposing role", w=300)
+    d.place("risk", "risk read", "work", row=2, stage=2,
+            sub="separate evidence", w=300)
+    d.place("compare", "compare claims", "decide", row=1, stage=3,
+            note="agreement is a signal, not proof", w=310)
+    d.place("answer", "qualified answer", "terminal", row=0, stage=4,
+            w=310)
+    d.place("adjudicate", "independent adjudication", "work", row=1,
+            stage=4, w=480)
+    d.place("abstain", "abstain / defer", "terminal", row=2, stage=4,
+            w=300)
+    d.place("resolved", "answer / refuse", "terminal", row=1, stage=5,
+            w=300)
+    d.edge("job", "fan")
+    d.edge("fan", "evidence", "diverse reads")
+    d.edge("fan", "counter")
+    d.edge("fan", "risk")
+    d.edge("evidence", "compare")
+    d.edge("counter", "compare")
+    d.edge("risk", "compare")
+    d.edge("compare", "answer", "supported")
+    d.edge("compare", "adjudicate", "split")
+    d.edge("compare", "abstain", "not diverse")
+    d.edge("adjudicate", "resolved")
+    return d
 
 
 def artifact_contract():
@@ -149,7 +205,7 @@ def energy_envelope():
 
 
 def local_overview():
-    d = Diagram("Three local-native patterns with two operator-control foundations",
+    d = Diagram("Three local-substrate patterns with two operator-control foundations",
                 m_l=190)
     d.place("policy", "boundary policy", "work", row=0, stage=0, w=280)
     d.place("request", "portable graph", "terminal", row=1, stage=0, w=280)
@@ -193,6 +249,8 @@ def local_overview():
 
 
 BUILDERS = {
+    "local_verify": verify_and_repair,
+    "local_council": diverse_council,
     "local_artifact": artifact_contract,
     "local_resident": resident_set,
     "local_boundary": boundary_compiled_graph,

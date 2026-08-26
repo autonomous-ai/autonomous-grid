@@ -3,7 +3,7 @@
 > **Research archive.** These twenty-seven entries are portable orchestration
 > topologies, pooling rules, and transferred control ideas. They are retained
 > for design provenance, not presented as the small set of patterns unique to
-> owning local models and hardware. Start with the local-only
+> owning local models and hardware. Start with the focused local
 > [`README.md`](README.md).
 
 A catalog of ways to route and combine local inference. Built for **Grid**
@@ -334,9 +334,9 @@ beats greedy decoding, and the vote is more than a quorum — it is a confidence
 signal. The one condition on the whole claim is *independent*: unanimity is
 only evidence conditional on the samples being decorrelated, so "unanimous
 cheap answers are trustworthy" is true only across genuinely different reads,
-not across N runs of the same prior. Remote routers can't afford the
-redundancy; a local router can, and it converts "is this answer trustworthy?"
-from a guess into a measurement.
+not across N runs of the same prior. Metered routers often cap this redundancy
+because every read consumes money or provider allowance; a local router may
+spend more of its owned capacity and turn disagreement into a measured signal.
 
 **Applicability.** Spare compute exists, the answer is worth checking, and
 you can field genuinely different reads. Avoid it when you cannot — three
@@ -353,10 +353,11 @@ have. They run in parallel and return to a vote node that is strictly the
 *decision* plane (purple). Ties are not a failure; they are the signal that
 ignites the expand branch.
 
-**Consequences.** The redundancy is the product — three answers where remote
-would buy one. Cost is three answers' tokens you never paid for. The risk
-is slow consensus: three models agreeing is great, three models each with a
-plausible but different answer burns the win and falls to expand.
+**Consequences.** The redundancy is the product — three answers where a
+metered policy might buy one. There is no marginal API-token invoice, but the
+three reads still consume seat-time, memory bandwidth, electricity, heat, and
+queueing budget. The risk is slow consensus: three models agreeing is useful,
+while three plausible but different answers burn the win and fall to expand.
 
 **Known Uses.** Self-consistency decoding: sample N completions of the same prompt and majority-vote the answer (Wang et al., 2022) — the canonical Fan-Out on the token level, and it is exactly how 'think harder' is spent in local math/code loops.
 
@@ -654,9 +655,10 @@ when quality is subjective or no external evaluator exists: "best" then means
 "most persuasive to another model," and N samples only amplify that bias.
 
 **Structure.** Terminal → fan → three visible green attempts (`direct`,
-`decompose`, `search`) → purple `test + select` → terminal. Three is only the
-diagram's readable stand-in for N. The fan communicates independent search;
-the single purple join communicates one deterministic decision and one result.
+`decompose`, `search`) → purple `test + select` → `verified answer` or
+`defer / refuse`. Three is only the diagram's readable stand-in for N. The fan
+communicates independent search; the single purple join communicates one
+deterministic decision and at most one result.
 
 **Mechanics.** Every attempt receives the same goal and acceptance contract but
 a distinct search policy. Attempts do not coordinate, see one another's drafts,
@@ -804,17 +806,17 @@ def ensemble(request, workers, trim=0.2):
 ![Verifier Gate — one draft passes a check, a dashed loop retries on fail](images/verify.svg)
 
 **Intent.** Run one draft, *verify* it, and let a failing check loop the work
-back for another try. This is generator + verifier, and the loop is what
-makes it local-native.
+back for another try. This is generator + verifier; repeated repair is a
+portable topology whose practical depth changes under local abundance.
 
 **Also Known As.** the verifier; the retry gate
 
 **Motivation.** The cleanest split of *doing* from *checking*: generate freely,
-then spend cheap, deterministic verification on the output. Its real power is
-one local allows: you can afford to *retry on a failed check*, because a
-failed check costs nothing extra. Remote routers retry sparingly (each retry
-is paid); local can treat "the verifier said no" as a signal to loop, not a
-rare emergency.
+then spend cheap, deterministic verification on the output. Local execution
+can treat "the verifier said no" as ordinary control flow: another attempt
+creates no new API invoice or vendor-quota event. It still consumes local
+seat-time, wall-clock, energy, heat, and queue capacity, so the loop remains
+strictly bounded.
 
 **Applicability.** Checking is far cheaper than getting it wrong — one
 draft, a cheap deterministic check, retry on fail. Avoid it when the check
@@ -2137,10 +2139,9 @@ certifies one request.
 #13's tuning, #12's covariance) draws a conclusion from observed outcomes — and
 "there is no API token bill" tempts the router to trust a *lucky streak of three*. A
 streak of three is how an unlucky day turns into a mistaken promotion that the
-router then defends with faith not data. The one thing local gives us that a
-cloud router can't is the ability to *actually accumulate enough evidence
-before declaring a winner* — #22 is what tells the learner how much "enough"
-is, and forbids it to front-run.
+router then defends with faith not data. Owned inference can make a much larger
+evidence budget routine without consuming a provider allowance—#22 tells the
+learner how much "enough" is and forbids it to front-run.
 
 **Applicability.** A runner-up looks good on a lucky streak and repeated peeks
 could turn noise into a promotion. Avoid it when outcomes cannot be paired or
@@ -3159,14 +3160,12 @@ shipped wrong — #20's breaker trips the class and escalates to a stronger,
 differently-trained arm instead of spending more on the same tails that just
 failed.
 
-**Why this is local.** On hosted models this exact request bills per token and
-caps per minute, so the router would rather Mate-in-One it and eat the risk
-than pay for N drafts plus a correlation-weighted vote plus a semantic cache.
-On the user's own box the fan of four, the divergence arm, the probe, and the
-cache spend seats, wall-clock, power, and wear—so the router is *allowed* to
-spend N and certify by fact. That is the entire difference the two levers make:
-remote forces "as little as possible, once"; local buys "as much as the risk
-deserves, pooled and certified."
+**Why this is locally abundant.** Hosted execution purchases and obtains
+provider admission for every draft, vote, and probe, which pressures the
+policy toward a smaller N. On the user's own box the fan of four, the divergence
+arm, the probe, and the cache instead spend seats, wall-clock, power, and wear.
+Owned inference can therefore budget “as much as the risk deserves, pooled and
+certified” while still enforcing physical limits.
 
 ---
 
@@ -3175,7 +3174,8 @@ deserves, pooled and certified."
 Twenty-seven portable entries, one idea: **reasoning graphs trade additional
 compute and latency for different failure behavior.** Mate-in-One spends once;
 other graphs may spend more when evaluation shows the risk justifies it. The
-local-native catalog decides whether any such graph fits the owned machine.
+focused local catalog identifies which graphs have a materially different
+operating point under owned inference and decides whether they fit the machine.
 
 This is the model layer — it makes the *answer* reliable. When the "worker"
 is a harness session that can hold context and act on the world, the routing

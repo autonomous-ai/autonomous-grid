@@ -608,7 +608,8 @@ def brute():
     d.place("c", "search + test", "work", row=2, stage=2, sub="counterexample", w=270)
     d.place("best", "test + select", "decide", row=1, stage=3,
             note="one deterministic gate")
-    d.place("ans", "answer", "terminal", row=1, stage=4)
+    d.place("ans", "verified answer", "terminal", row=0, stage=4, w=300)
+    d.place("stop", "defer / refuse", "terminal", row=2, stage=4, w=280)
     d.edge("job", "dot", "same goal")
     d.edge("dot", "a")
     d.edge("dot", "b")
@@ -617,6 +618,7 @@ def brute():
     d.edge("b", "best")
     d.edge("c", "best")
     d.edge("best", "ans", "one verified winner")
+    d.edge("best", "stop", "none pass")
     return d
 
 def verify():

@@ -1,63 +1,90 @@
-# Local AI Orchestration Patterns — the sovereign model layer
+# Local AI Orchestration Patterns — spend owned compute, control owned state
 
-Local AI is not distinguished by calling models more often. Cloud systems can
-route, chain, fan out, vote, delegate, critique, and retry too. Local AI becomes
-architecturally different when the application operator owns the inference
-substrate: the exact model artifacts, accelerator memory, KV cache, machine
-idle time, power and thermal envelope, network boundary, and physical failure
-domains.
+Local AI changes orchestration in **two** different ways. First, owned
+inference has no marginal API-token invoice and asks no vendor quota or rate
+limit for each additional attempt. Repeated search, independent checking, and
+bounded retry can become normal quality policy instead of exceptional spend.
+Second, the operator controls the inference substrate itself: exact artifacts,
+accelerator memory, KV cache, idle time, power and thermal state, network
+boundary, and physical failure domains.
 
-This catalog offers **three local-native pattern proposals** for that layer,
-plus two supporting foundations. They are deliberately few. Generic reasoning
-workflows remain useful, but they live in the
-[portable research catalog](portable_patterns.md) and are not claimed as
-uniquely local.
+This catalog keeps a small, quality-first set from both families:
+
+- **Local-abundance patterns** spend unmetered-but-bounded inference to buy
+  quality. Their graph can run in the cloud, but metering and provider control
+  change its useful operating point.
+- **Local-substrate patterns** depend on physical or lifecycle state hidden by
+  a black-box model API.
+
+Local tokens are **free of the API meter, not free of physics**. Seats, VRAM,
+memory bandwidth, electricity, heat, wall-clock, wear, and foreground queue
+delay remain finite. A local serving stack also has throughput and concurrency
+limits even though it has no vendor-controlled rate limit.
 
 ## The line between portable and local
 
 [Anthropic's production-oriented catalog](https://www.anthropic.com/engineering/building-effective-agents)
 already describes routing, prompt chaining, parallel sectioning and voting,
-orchestrator-workers, and evaluator-optimizer loops. Those patterns keep the
-same intent and structure whether their workers are local processes or hosted
-API calls.
+orchestrator-workers, and evaluator-optimizer loops. Those topologies remain
+useful whether their workers are local processes or hosted API calls. But
+**cloud-capable does not mean architecturally equivalent under metering and
+provider control**.
 
-The test used here is stricter:
+This catalog uses two tests:
 
-> **API-substitution test:** replace every local inference worker with an
-> elastic hosted API. If the decision state and mechanism survive, the pattern
-> is portable. If the substitution removes the state that makes the decision,
-> the pattern is local-native.
+> **Abundance test:** keep the topology, but restore a metered,
+> provider-controlled call for every attempt. If that materially shrinks the
+> intended sample count, retry depth, redundancy, or duty cycle—and repeated
+> inference is the mechanism rather than an incidental optimization—the
+> pattern is **local-abundance**.
 
-Here `local` means **operator-controlled inference substrate**, not a latitude
-and longitude. A private rack or rented bare accelerator can instantiate some
-of these patterns; a black-box model API cannot. The differentiator is control
-of the artifacts and physical runtime, not whether the machine sits under a
-desk.
+> **Substrate test:** replace every local inference worker with a black-box
+> hosted API. If required decision state disappears—artifact identity,
+> residency, owned idle time, energy, temperature, or physical placement—the
+> pattern is **local-substrate**.
 
-A local-native pattern must therefore satisfy all four conditions:
+If neither the mechanism nor its declared operating policy changes materially,
+the pattern remains portable-only. Here `local` means **operator-controlled
+inference**, not a latitude and longitude. A private rack or rented bare
+accelerator can qualify; a black-box API cannot expose the same substrate.
 
-1. it consumes state a hosted API caller normally cannot own or inspect;
-2. it changes placement, admission, or lifecycle—not merely the prompt graph;
-3. it names costs in artifacts, bytes, seat-time, joules, temperature,
-   connectivity, or egress rather than pretending local tokens are free; and
-4. it has an explicit safe exit: `answer / defer / refuse` on the request plane,
-   or `promote / retain / checkpoint / abort` for background work.
+Every main-catalog pattern must therefore:
 
-Local AI orchestration has two layers:
+1. pass the abundance test or the substrate test and state which;
+2. own a distinct, recurring force rather than rename an existing workflow;
+3. name its scarce local resources and bounded admission or stop policy;
+4. provide an explicit safe exit—`answer / defer / refuse`, or
+   `promote / retain / checkpoint / abort`; and
+5. state what evidence would show that its extra complexity is not worthwhile.
+
+Agreement between models is never presented as proof. Consequential output
+needs an independent oracle or tool check; otherwise the catalog labels
+agreement only as a weaker consistency signal.
 
 ```text
-request + consequence ─────► portable reasoning graph ──┐
-                                                        ├─► physical local plan
-artifacts + residency + boundary + host state ──────────┘          │
-                                                                   ▼
-                                                        answer / defer / refuse
+request + consequence ──► reasoning topology ──► desired quality spend ──┐
+quality evidence + stop rule ─────────────────────────────────────────────┤
+artifacts + residency + boundary + host state ──► feasible placement ────┤
+                                                                         ▼
+                                                run / degrade / defer / refuse
 ```
 
-The portable graph says *what reasoning should happen*. The local plan binds
-that graph to exact artifacts and machines, decides whether it fits now, and
-states what happens when it does not.
+The reasoning topology says what to try. The abundance policy decides how
+many attempts or checks are justified. The substrate policy decides which
+exact artifacts can run, where, and for how long. Together they produce one
+bounded physical plan.
 
-## The three local-native proposals
+## The focused set
+
+### Three local-abundance patterns
+
+| ID | Pattern | The local move | Honest stop |
+|---|---|---|---|
+| A1 | **Brute-Force Search** | try genuinely different approaches because attempt N adds no API bill or vendor quota event | one objective oracle passes a result, or the fixed budget expires |
+| A2 | **Bounded Verify-and-Repair** | make failed checks ordinary control flow and use their evidence in another attempt | release only a passing result; otherwise defer, refuse, or escalate at K/deadline |
+| A3 | **Diverse Council** | spend several independent full-context reads when no cheap truth oracle exists | answer on adequate evidence; disclose uncertainty or abstain on a split |
+
+### Three local-substrate patterns
 
 | ID | Pattern | Local state it owns | The move |
 |---|---|---|---|
@@ -65,30 +92,30 @@ states what happens when it does not.
 | L2 | **Verified Night Shift** | owned idle cycles, checkpoints, verified local outcomes | improve the box while it sleeps, promote only on proof |
 | L3 | **Energy Envelope** | power, battery, temperature, acoustics, time-of-use | spend joules and thermal headroom, not imaginary free tokens |
 
-## Two supporting foundations
+### Two supporting foundations
 
-| ID | Foundation | Operator-controlled state | Why it is not counted as local-native |
+| ID | Foundation | Operator-controlled state | Why it is a foundation |
 |---|---|---|---|
 | F1 | **Model Artifact Contract** | weights, tokenizer, template, quantization, adapter, runtime | immutable deployment and version pinning also exist in cloud systems |
 | F2 | **Boundary-Compiled Graph** | data labels, graph sinks, egress policy and manifest | information-flow compilation and enforcement are portable security mechanisms |
 
-![The three local-native patterns and two supporting foundations](images/local_index.svg)
+![The three local-substrate patterns and two supporting foundations](images/local_index.svg)
 
 In every figure, coral pills are external entries or exits, green boxes are
 owned state or work, and purple boxes are decisions. The labels carry the same
 meaning without color.
 
-Only L1–L3 are claimed as local-native proposals. F1 and F2 stay visible because
-they make local control auditable, but their generic mechanisms survive API
-substitution and therefore fail the uniqueness test. This is a deliberate
-quality cut, not a claim that foundations matter less.
+A-patterns are not claimed as topologies a cloud system cannot execute. Their
+claim is that owned inference changes the viable operating point enough to
+change the default architecture. L-patterns make the stronger claim that API
+substitution removes state required by the mechanism. F1 and F2 support both
+families without satisfying either claim on their own.
 
-All three patterns are **proposals in the pattern incubator**, not claims of
-universal best practice. Their underlying mechanisms have established lineages
-in serving systems, operating systems, distributed systems, and progressive
-delivery; the exact local-AI formulations still need direct implementations,
-measurements, and at least three independently documented successful uses
-before promotion to a mature pattern.
+All six patterns are **proposals in the pattern incubator**, not claims of
+universal best practice. Their underlying mechanisms have established
+lineages, but these exact local-AI formulations still need direct
+implementations, measurements, and at least three independently documented
+successful uses before promotion to mature patterns.
 
 ## Why use a pattern catalog
 
@@ -100,25 +127,32 @@ micro-architectures that preserve design experience—not prescriptions that
 make a system correct merely by being named
 ([Gamma et al., 1993](https://doi.org/10.1007/3-540-47910-4_21)).
 
-Every pattern entry therefore answers the same questions: what local state makes
-it possible, why API substitution destroys the mechanism, when it applies,
-how participants collaborate, what it costs, how it fails and degrades, what a
-conforming build would look like, what Grid actually ships, and how strong its
-evidence is. A clever analogy without recurring uses and falsifiable
-measurements stays a refinement, not a new pattern.
+Every pattern entry therefore states which local force it exploits, whether
+its topology is portable, what changes at the local operating point, when it
+applies, how participants collaborate, what it costs, how it stops, and what
+evidence would falsify its value. A clever analogy without recurring uses and
+falsifiable measurements stays a refinement, not a new pattern.
 
 ## How to compose them
 
-The patterns and foundations do not form one mandatory pipeline. They make
-three small recipes:
+The patterns and foundations do not form one mandatory pipeline. They make a
+few small recipes:
+
+- **Quality spend:** choose A1 when different search paths can be judged by one
+  objective oracle. Choose A2 when a failed check supplies useful repair
+  evidence. Choose A3 when no cheap truth oracle exists but independent reads
+  can expose ambiguity. A1 may feed its best near-pass into A2; A3 must never
+  replace A1's objective selector with a popularity vote.
 
 - **Foreground service:** F2 first emits boundary constraints. F1 resolves exact
   model roles, while an ordinary deployment registry resolves tool, telemetry,
   storage, and backup components. F2 then signs that concrete closure with its
-  contract ids, executable/config digests, and sinks. L1 contributes residency
+  contract ids, executable/config digests, and sinks. The chosen A-pattern
+  declares desired width or retry depth. L1 contributes feasible residency
   candidates and L3 contributes energy constraints to one physical-plan
-  coordinator. Only that coordinator selects a plan, atomically acquires its
-  versioned joint lease, and revalidates it immediately before dispatch.
+  coordinator. Only that coordinator selects the bounded plan, atomically
+  acquires its versioned joint lease, and revalidates it immediately before
+  dispatch.
 - **Verified improvement:** L2 borrows only capacity left by L1 and L3, obeys
   F2, and emits an immutable staged result. A model build becomes a new F1
   candidate only after an independent validator accepts that exact digest; a
@@ -149,6 +183,152 @@ def bind_physical_plan(graph, request, resources):
 
 ---
 
+## A1. Brute-Force Search — try many ways, prove one winner
+
+![Brute-Force Search — one goal fans into distinct approaches, then one objective selector keeps a verified winner](images/brute.svg)
+
+**Plain English.** Do not ask one model attempt to be right. Give the same goal
+to several isolated attempts, make them search in meaningfully different ways,
+run the same external test over every result, and keep exactly one winner.
+
+**Why local-abundance.** The fan shape is portable, but its normal operating
+point changes locally. Attempt N creates no Nth API invoice, consumes no vendor
+allowance, and needs no provider admission. The operator can choose N from the
+quality curve and the box's deadline, seat-time, watts, heat, and foreground
+load. On one GPU the attempts may be serial; local means unmetered by an API,
+not magically parallel.
+
+**Use it when.** Constructing is hard but checking is cheap and objective:
+patches with tests, structured output with a schema, schedules with constraints,
+solver witnesses, counterexamples, or generated artifacts with measurable
+acceptance criteria. Do not use it when “best” is only another model's taste.
+
+**Contract.** Every attempt receives the same goal and acceptance contract but
+a different seed, decomposition, heuristic, evidence slice, or model family.
+Attempts are read-only, run under a fixed `N + deadline + resource` budget, and
+cannot see or anchor one another. One deterministic or externally grounded
+oracle tests them all. Only the selected result may cross the idempotent act
+gate.
+
+**Failure and safe exit.** N copies of one approach are pretend breadth. A weak
+oracle selects the best test-gamer, and side-effecting workers can act N times.
+If no candidate passes, the result is `defer / refuse / escalate`—never “ship
+the least bad attempt.”
+
+**Measure.** Compare against `N=1`: passing-result rate, marginal gain per
+attempt, realized output diversity, wall-clock, joules, model swaps, and
+foreground queue delay. Shrink or retire the fan when additional attempts stop
+buying verified wins.
+
+**Evidence status.** Proposal. Generate-and-test, randomized restarts, and
+best-of-N have strong portable lineage; Grid has not yet published the local
+quality-versus-physical-cost curve required to promote this formulation.
+
+**Example.** Six read-only patch attempts try a minimal edit, call-path
+decomposition, invariant-first reasoning, and seeded restarts. The same tests
+and patch-size tie-break judge all six. Five attempts disappear; one passing
+diff may commit once. The deeper portable lineage is cataloged as
+[Brute-Force #6](portable_patterns.md#6-brute-force--many-approaches-keep-the-best).
+
+---
+
+## A2. Bounded Verify-and-Repair — make failure useful
+
+![Bounded Verify-and-Repair — a draft is checked, repaired from failure evidence, or stopped at its bound](images/local_verify.svg)
+
+**Plain English.** Produce one draft, check it with a real verifier, feed the
+failure evidence into a changed repair attempt, and repeat only while the
+declared budget remains. Release a result only after it passes.
+
+**Why local-abundance.** A failed generation can become ordinary control flow:
+another repair cycle adds no API invoice or vendor quota event. It still spends
+local seat-time, wall-clock, energy, and queue capacity, so both an attempt cap
+and a deadline are part of the pattern—not optional tuning.
+
+**Use it when.** The check is cheaper and more reliable than generation and
+returns actionable evidence: compiler errors, failing tests, linter findings,
+schema violations, citation mismatches, calculator results, or constraints.
+When retries cannot learn from the failure, use A1's independent search instead.
+
+**Contract.** The verifier is deterministic or tool-grounded wherever
+possible, is independent of the generator's confidence, and names what it
+checked. Each repair receives concrete failure evidence and must change the
+attempt. The loop stops at `K`, the deadline, an energy/thermal limit, or
+foreground preemption—whichever comes first.
+
+**Failure and safe exit.** A rubber-stamp verifier creates confident failure;
+an incomplete check trains the generator to exploit the check; identical
+retries repeat one mistake. Exhaustion produces `defer / refuse / escalate`.
+The last failed draft never becomes the answer merely because the budget ran
+out.
+
+**Measure.** Compare pass rate and end-to-end latency against one-shot and A1
+baselines. Record attempts-to-pass, repeated-error rate, false accepts on
+held-out bad drafts, joules, deadline exits, and foreground interference.
+
+**Evidence status.** Proposal. Generator-verifier loops are established; the
+bounded local policy and its foreground/energy effects still need a measured
+Grid implementation.
+
+**Example.** A local model writes a configuration change; a schema validator
+rejects one field and returns the exact path. The next attempt repairs that
+field. If validation still fails after three tries or the time box closes, the
+system returns the failure report instead of an unvalidated config. The
+portable ancestor is [Verifier Gate #8](portable_patterns.md#8-verifier-gate--one-draft-a-check-retry-on-fail).
+
+---
+
+## A3. Diverse Council — buy independent reads, not extra confidence theater
+
+![Diverse Council — deliberately different reads are compared, then supported claims answer while a material split is adjudicated or abstains](images/local_council.svg)
+
+**Plain English.** When no cheap truth oracle exists, ask a small set of
+genuinely different readers to inspect the same consequential problem. Compare
+their claims and evidence. Agreement may raise confidence; disagreement is a
+signal to investigate, disclose uncertainty, or stop—not a nuisance to vote
+away.
+
+**Why local-abundance.** Several full-context reads and an adjudication pass can
+be routine without paying for every voice or consuming a vendor allowance.
+Private context can also remain inside the owned boundary. The budget still
+binds on seats, model swaps, time, power, heat, and the cost of delaying other
+local work.
+
+**Use it when.** The answer matters, ambiguity is real, and no objective check
+can settle it cheaply: design review, risk discovery, interpretation, or a
+classification whose edge cases need independent readings. If a truth oracle
+does exist, prefer A1 or A2.
+
+**Contract.** Diversity is constructed, not assumed: use meaningfully different
+model families, evidence partitions, or roles such as proposal, counterexample,
+and risk review. The comparison tracks claims back to evidence and reports the
+independence actually obtained. Majority is a consistency signal, never proof.
+
+**Failure and safe exit.** Sibling quantizations or differently worded prompts
+can share one blind spot. A judge model may share it too. Insufficient diversity
+or unresolved material disagreement leads to a deterministic tool, an
+independent adjudicator, a human, or `abstain / defer`; it never forces a winner
+just to terminate.
+
+**Measure.** Compare against one strong read: novel defects found, externally
+confirmed corrections, disagreement resolution, calibration, false consensus,
+latency, swaps, and joules. Remove a council lane that adds correlated volume
+without independent evidence.
+
+**Evidence status.** Proposal. Multi-read review and adversarial critique have
+portable lineage, but this council's independence contract and abstention policy
+need direct evaluation; agreement alone is not validating evidence.
+
+**Example.** Three local readers review a migration: one checks invariants, one
+hunts counterexamples, and one maps operational rollback risk. Shared,
+source-grounded conclusions may answer with disclosed confidence. A material
+split goes to tests or a human. This pattern deliberately narrows the portable
+[Fan-Out](portable_patterns.md#2-fan-out--same-prompt-n-answers-a-vote) and
+[Adversarial](portable_patterns.md#4-adversarial--two-careful-reads-a-judge)
+ancestors: it does not equate a vote with truth.
+
+---
+
 ## F1. Model Artifact Contract — route to a build, not a name
 
 ![Model Artifact Contract — resolve an alias to an immutable artifact, admit it, then run or fall back](images/local_artifact.svg)
@@ -165,7 +345,7 @@ can all change behavior independently. Exact identity improves reproducibility
 at the cost of storage, qualification work, and slower upgrades.
 
 **Local role.** Version pinning also exists in cloud APIs, so this is a
-foundation rather than a local-native pattern. Local ownership makes the
+foundation rather than a local-substrate pattern. Local ownership makes the
 contract unusually complete: the operator can atomically retain the bits,
 generation profile, and runtime that a hosted provider normally hides. A BYO
 artifact endpoint may preserve that control; a black-box API does not.
@@ -253,7 +433,7 @@ adapters, runtime buffers, and KV cache compete for finite memory. Moving a
 small request to warm weights is cheap; loading or evicting a model is slow and
 can destroy another session's locality.
 
-**Why local-native.** An elastic API hides its placement, memory pressure,
+**Why local-substrate.** An elastic API hides its placement, memory pressure,
 load/evict state, and seat leases. Substitution therefore removes the state and
 actions this planner controls.
 
@@ -454,7 +634,7 @@ background work competes with foreground responsiveness, heat, energy, storage
 wear, and the same resident weights. Promotion creates lasting risk, so the
 builder cannot certify its own result.
 
-**Why local-native.** The operator owns the idle interval and the staged result.
+**Why local-substrate.** The operator owns the idle interval and the staged result.
 A cloud API customer neither owns unused provider accelerators nor controls the
 provider's model or index lifecycle. Removing the local machine deletes both
 the schedulable resource and the promotable artifact.
@@ -559,7 +739,7 @@ home machine shares a room, circuit, battery, cooling system, UPS, and owner.
 Sustained generation can throttle the device or make it unpleasant to use;
 over-conservative limits can refuse valuable work.
 
-**Why local-native.** A hosted API hides the serving host's power, battery,
+**Why local-substrate.** A hosted API hides the serving host's power, battery,
 temperature, fan, and UPS state and gives the caller no authority over them.
 Substitution therefore removes both the governor's sensors and actuators.
 
@@ -666,38 +846,45 @@ requires two hosts must defer or refuse when only one exists.
 Hardware figures are illustrative. Quantization, context length, KV cache,
 runtime overhead, and co-residency determine the real capacity; measure it.
 
-| Profile | Likely applicable | Add only after measurement | Honest limit |
+| Profile | Abundance patterns | Substrate and foundations | Honest limit |
 |---|---|---|---|
-| **One laptop / one seat** | F1 + L1; F2 for boundary-sensitive work; L3 under sustained load | a short L2 job only when its drain bound is measured | one physical domain; a fan is serial unless another seat exists |
-| **One workstation / two resident lanes** | F1 + L1; F2 and L3 when their stated forces apply | typed L2 work after foreground impact is measured | one host/power group is not high availability |
-| **Home grid / independent hosts** | apply only L1–L3 where their forces recur; add F1/F2 as needed | Sovereign Island and failure-domain placement | report host, network, storage, and power guarantees separately |
+| **One laptop / one seat** | A1 and A2 run serially under a short deadline; A3 only if genuine diversity is available | F1 + L1; F2 for boundary-sensitive work; L3 under sustained load | an N-way fan is N turns on one seat, not N-way parallelism |
+| **One workstation / two resident lanes** | A1 and A2 as measured; A3 when the two reads are actually decorrelated | F1 + L1; F2 and L3 when their forces apply; short L2 after its drain bound is measured | two lanes on one host still share power and failure domains |
+| **Home grid / independent hosts** | A1–A3 with width and depth calibrated from outcomes | apply L1–L3 where their forces recur; add F1/F2 as needed | report model-lineage, host, network, storage, and power independence separately |
 
-## What is not a local-native pattern
+## What remains portable-only
 
-These remain valuable, but belong to the portable reasoning layer:
+Local execution alone does not promote every workflow into this focused
+catalog. Plain one-model routing, fixed pipelines, generic planner-worker
+graphs, ordinary caches and breakers, and undisciplined “ask more models” all
+remain portable when local deployment changes only a constant factor.
 
-- route one request to one specialist;
-- prompt chaining and fixed pipelines;
-- parallel sectioning, fan-out, voting, and best-of-N;
-- orchestrator-workers and planner/specialists;
-- evaluator-optimizer, critique, verifier, and debate loops;
-- caches, circuit breakers, canaries, sequential tests, and bandit policies.
+Fan-out, best-of-N, and evaluator loops are also portable as bare graph shapes.
+A1–A3 are narrower contracts: they declare the additional spend that owned
+inference makes viable, the evidence used to select or stop, the physical
+budget consumed, and an honest failure exit. More samples without diversity or
+verification are merely more correlated guesses.
 
-Local deployment changes their viable sample count, latency, privacy, and
-placement. It does not make their topology new. The
-[research archive](portable_patterns.md) retains the deeper survey and its
-worked diagrams without putting those ideas on equal footing with the three
-local-native proposals.
+The [research archive](portable_patterns.md) retains the broader survey—routing,
+pipelines, planners, voting, debate, ensembles, caches, resilience controls,
+and learning policies—without putting every useful idea on equal footing with
+the focused six.
 
 ## Admission and review rule
 
-A proposed local mechanism begins in the incubator. Give it a stable L-number
-only if:
+A proposed local mechanism begins in the incubator. Give it a stable
+**A-number** when it passes the abundance test, or an **L-number** when it
+passes the substrate test. In either case it must:
 
-1. it passes the API-substitution test;
-2. no existing proposal already owns the force;
-3. it names the local state consumed and the safe degradation;
-4. it names an implementable baseline and a falsifiable measurement plan.
+1. own a distinct recurring force and collaboration;
+2. name bounded local resources and safe degradation;
+3. provide an implementable baseline; and
+4. state a falsifiable quality-versus-cost measurement plan.
+
+An A-pattern must compare against `N=1` and report quality gain per additional
+attempt alongside wall-clock, queue delay, energy, and memory pressure. An
+L-pattern must name the operator-controlled state its mechanism requires and
+show how black-box API substitution removes that state.
 
 Promote a proposal to **Candidate** only after one measured implementation.
 Promote it to **Established** only after at least three independent, documented
@@ -706,5 +893,5 @@ analogies count as lineage, not direct uses.
 
 Model names are examples, checked on 2026-08-25, not architectural roles.
 Diagrams use generic roles; the examples map those roles to current artifacts.
-The catalog is living design guidance, not a library or a claim that all three
+The catalog is living design guidance, not a library or a claim that all six
 patterns are shipped in Grid today.

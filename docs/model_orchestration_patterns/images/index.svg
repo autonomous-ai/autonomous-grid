@@ -224,9 +224,10 @@
     <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
-  <rect width="1682" height="450" fill="#fff"/>
+  <rect width="1758" height="450" fill="#fff"/>
   <text x="240" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">same goal</text>
-  <text x="1312" y="191" text-anchor="middle" fill="#2b2b29" font-size="21">one verified winner</text>
+  <text x="1273" y="148" text-anchor="middle" fill="#2b2b29" font-size="23">one verified winner</text>
+  <text x="1278" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">none pass</text>
   <path d="M 120 210 C 240 210, 240 210, 359 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 377 210 C 413 210, 413 92, 449 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 377 210 C 413 210, 413 210, 449 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -234,7 +235,8 @@
   <path d="M 719 92 C 820 92, 820 210, 921 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 719 210 C 820 210, 820 210, 921 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 719 328 C 820 328, 820 210, 921 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1183 210 C 1312 210, 1312 210, 1440 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1183 210 C 1273 210, 1273 92, 1362 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1183 210 C 1278 210, 1278 328, 1372 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
   <circle cx="368" cy="210" r="9" fill="#2b2b29"/>
@@ -250,8 +252,10 @@
   <rect x="921" y="177" width="262" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
   <text x="1052" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">test + select</text>
   <text x="1052" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">one deterministic gate</text>
-  <rect x="1440" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1512" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <rect x="1362" y="59" width="300" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1512" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">verified answer</text>
+  <rect x="1372" y="295" width="280" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1512" y="338" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">defer / refuse</text>
 
 </g>
 <text x="40" y="3655" fill="#2b2b29" font-size="28" font-weight="700">Ensemble</text>
