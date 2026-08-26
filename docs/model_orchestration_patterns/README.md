@@ -53,6 +53,23 @@ must say so. “It has no token bill” is not enough by itself; the pattern mus
 name the operating policy that changes, the scarce local resource that replaces
 the invoice, and the stop or admission rule that keeps abundance honest.
 
+## See the patterns work together
+
+Patterns become visible capabilities when their contracts compose. The
+[flagship local-AI compositions](flagship_compositions.md) are the shortest
+path from this vocabulary to four demonstrations:
+
+| Composition | What owned inference makes visible |
+|---|---|
+| [**Verified Search Engine**](flagship_compositions.md#verified-search-engine) | try many distinct approaches and return one objectively proven result |
+| [**Live Decision Loop**](flagship_compositions.md#live-decision-loop) | reason over fresh private operational context at meaningful decision points |
+| [**Measured Optimization Loop**](flagship_compositions.md#measured-optimization-loop) | generate variants continuously and promote only improvements established by outcomes |
+| [**Private Offline Copilot**](flagship_compositions.md#private-offline-copilot) | keep a complete private workflow useful without a network or vendor account |
+
+These are reference architectures, not four extra primitive patterns. Each
+one combines boundary, evidence, logical, physical, act, and learning
+contracts from the catalog below.
+
 ## Start with seven
 
 These are the shortest path into the catalog. Together they expose the local
@@ -7266,7 +7283,9 @@ an explicit field-level gate.
 ## Composing a local multi-AI team
 
 Patterns compose in layers; they are not interchangeable boxes in an arbitrary
-chain. A trustworthy team normally settles six contracts in this order:
+chain. The [flagship compositions](flagship_compositions.md) show four complete
+capability-level recipes. A trustworthy team normally settles six contracts in
+this order:
 
 1. **Boundary contract.** What data, tools, logs, models, and fallbacks may cross
    which owned boundary?
@@ -7342,6 +7361,8 @@ contracts that make the composition honest.
 
 ## Deep references
 
+- [Flagship local-AI compositions](flagship_compositions.md) combine the
+  catalog into four public demonstrations with contracts and measurements.
 - [Pattern lineage](pattern_lineage.md) records where every idea in the earlier
   27-pattern research set went.
 - [Research reference](portable_patterns.md) keeps the detailed algorithms,

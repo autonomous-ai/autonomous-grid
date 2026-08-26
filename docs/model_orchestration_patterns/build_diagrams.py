@@ -47,13 +47,14 @@ def esc(s):
 
 # --- the layout --------------------------------------------------------------
 class Diagram:
-    def __init__(self, title=None, m_l=None):
+    def __init__(self, title=None, m_l=None, stage_gap=None):
         self.nodes = {}
         self.edges = []
         self._stage = 0
         self._row = 0
         self.title = title
         self.m_l = M_L if m_l is None else m_l   # left margin (widen if a stage-0 node is wide)
+        self.stage_gap = STAGE if stage_gap is None else stage_gap
 
     def next(self, stage=None, row=None):
         """Advance cursor; returns (stage,row)."""
@@ -90,7 +91,7 @@ class Diagram:
         x, cx = {}, self.m_l
         for st in stages:
             x[st] = cx
-            cx += stage_w[st] + STAGE
+            cx += stage_w[st] + self.stage_gap
         rows = sorted({n["row"] for n in ns.values()})
         y, cy = {}, M_T
         for r in rows:

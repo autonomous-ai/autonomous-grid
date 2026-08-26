@@ -708,3 +708,32 @@ no remaining P0, P1, or P2 issue.
 
 **Open item.** Improve the catalog next by publishing measured local
 implementations for Candidate patterns, not by adding more names.
+
+## Round 46 — expose four flagship compositions
+
+**Critique.** The catalog described 31 reusable moves and one private-code
+composition, but its public entry path still asked readers to infer the most
+powerful local capabilities from individual cards. In particular, continuous
+reasoning over fresh operational data and outcome-gated website optimization
+were present only as ingredients across several patterns.
+
+**Change.** Added `flagship_compositions.md` with four capability-level
+reference architectures: Verified Search Engine, Live Decision Loop, Measured
+Optimization Loop, and Private Offline Copilot. Each composition names its
+local-first operating-point change, pattern stack, invariants, mechanics,
+honest degradation, demonstration, and evidence required. The live loop sizes
+from admitted decision points instead of raw events or DAU alone. The
+optimization loop preserves the key separation that models propose candidates
+while a registered experiment and one promotion gate judge outcomes. The main
+catalog now links to these compositions near its entrance and from its existing
+composition section; they are explicitly examples, not four new primitives.
+
+Added four generated SVGs using the catalog renderer. The base diagram accepts
+an optional per-figure stage gap so capability-level flows remain legible at
+GitHub width without changing any existing diagram's geometry.
+
+**Verification.** All four composition geometry checks pass; the 31 existing
+catalog diagrams still pass and regenerate unchanged; every new SVG parses,
+has an accessible title, and visually preserves the shared terminal/work/
+decision grammar. Python compilation and `git diff --check` pass. Candidate
+status remains unchanged: measured implementations are still the next step.
