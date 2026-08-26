@@ -7,7 +7,7 @@ visible pattern heading.
 """
 from __future__ import annotations
 
-from build_diagrams import Diagram
+from catalog_diagram import Diagram
 
 
 def best_fit():

@@ -13,8 +13,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1914" height="450" fill="#fff"/>
-  <text x="1470" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">distinct</text>
-  <text x="1465" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">same path</text>
   <path d="M 336 210 C 431 210, 431 92, 526 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 336 210 C 448 210, 448 210, 560 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 336 210 C 435 210, 435 328, 534 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -23,6 +21,10 @@
   <path d="M 847 328 C 963 328, 963 210, 1079 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 1358 210 C 1470 210, 1470 92, 1581 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 1358 210 C 1465 210, 1465 328, 1573 328" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <rect class="edge-label-bg" x="1408" y="111" width="122" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1470" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">distinct</text>
+  <rect class="edge-label-bg" x="1397" y="229" width="136" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1465" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">same path</text>
   <rect x="24" y="177" width="313" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="180" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">candidate stream</text>
   <rect x="526" y="59" width="330" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>

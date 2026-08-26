@@ -13,11 +13,13 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1628" height="450" fill="#fff"/>
-  <text x="488" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">local read</text>
-  <text x="1115" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">minimum result only</text>
   <path d="M 284 92 C 429 92, 429 210, 574 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 402 328 C 488 328, 488 210, 574 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 988 210 C 1121 210, 1121 92, 1253 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect class="edge-label-bg" x="413" y="229" width="150" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="488" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">local read</text>
+  <rect class="edge-label-bg" x="978" y="111" width="274" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1115" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">minimum result only</text>
   <rect x="156" y="59" width="128" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="220" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">query</text>
   <rect x="38" y="295" width="363" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>

@@ -13,15 +13,19 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1588" height="450" fill="#fff"/>
-  <text x="330" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">attempt</text>
-  <text x="1138" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">pass</text>
-  <text x="384" y="397" text-anchor="end" fill="#2b2b29" font-size="23">failure evidence</text>
-  <text x="1142" y="266" text-anchor="middle" fill="#2b2b29" font-size="23">limit / unsafe</text>
   <path d="M 261 210 C 330 210, 330 210, 400 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 679 210 C 816 210, 816 210, 953 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 1081 210 C 1138 210, 1138 92, 1195 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 1081 210 C 1247 210, 1247 415, 1164 415 C 234 415, 234 210, 400 210" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
   <path d="M 1081 210 C 1142 210, 1142 328, 1203 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect class="edge-label-bg" x="276" y="170" width="109" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="330" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">attempt</text>
+  <rect class="edge-label-bg" x="1104" y="111" width="67" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1138" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">pass</text>
+  <rect class="edge-label-bg" x="153" y="375" width="233" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="384" y="397" text-anchor="end" fill="#2b2b29" font-size="23">failure evidence</text>
+  <rect class="edge-label-bg" x="1039" y="244" width="205" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1142" y="266" text-anchor="middle" fill="#2b2b29" font-size="23">limit / unsafe</text>
   <rect x="99" y="177" width="162" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="180" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">request</text>
   <rect x="400" y="177" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>

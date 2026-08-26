@@ -13,15 +13,19 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1746" height="450" fill="#fff"/>
-  <text x="845" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">yes</text>
-  <text x="1118" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">busy</text>
-  <text x="1318" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">quantum ends</text>
-  <text x="1323" y="148" text-anchor="middle" fill="#2b2b29" font-size="23">live arrival: yield</text>
   <path d="M 353 328 C 507 328, 507 210, 660 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 788 210 C 845 210, 845 210, 902 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 788 210 C 1118 210, 1118 92, 1447 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 1198 210 C 1318 210, 1318 328, 1438 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 1198 210 C 1323 210, 1323 92, 1447 92" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <rect class="edge-label-bg" x="819" y="170" width="53" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="845" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">yes</text>
+  <rect class="edge-label-bg" x="1084" y="111" width="67" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1118" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">busy</text>
+  <rect class="edge-label-bg" x="1230" y="229" width="178" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1318" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">quantum ends</text>
+  <rect class="edge-label-bg" x="1186" y="126" width="274" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1323" y="148" text-anchor="middle" fill="#2b2b29" font-size="23">live arrival: yield</text>
   <rect x="7" y="295" width="346" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="180" y="338" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">background backlog</text>
   <rect x="660" y="177" width="128" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>

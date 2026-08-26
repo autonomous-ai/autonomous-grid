@@ -13,12 +13,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1806" height="450" fill="#fff"/>
-  <text x="398" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">serves</text>
-  <text x="420" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">read-only shadow</text>
-  <text x="854" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">baseline</text>
-  <text x="828" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">observed evidence</text>
-  <text x="1297" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">pass</text>
-  <text x="1344" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">fail</text>
   <path d="M 303 210 C 398 210, 398 92, 492 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 303 210 C 414 210, 414 328, 526 328" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
   <path d="M 755 92 C 1092 92, 1092 92, 1430 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -26,6 +20,18 @@
   <path d="M 721 328 C 837 328, 837 210, 953 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 1215 210 C 1297 210, 1297 210, 1380 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 1215 210 C 1344 210, 1344 328, 1472 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect class="edge-label-bg" x="350" y="111" width="95" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="398" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">serves</text>
+  <rect class="edge-label-bg" x="304" y="229" width="233" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="420" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">read-only shadow</text>
+  <rect class="edge-label-bg" x="793" y="111" width="122" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="854" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">baseline</text>
+  <rect class="edge-label-bg" x="705" y="229" width="247" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="828" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">observed evidence</text>
+  <rect class="edge-label-bg" x="1264" y="170" width="67" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1297" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">pass</text>
+  <rect class="edge-label-bg" x="1310" y="229" width="67" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1344" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">fail</text>
   <rect x="57" y="177" width="246" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="180" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">live traffic</text>
   <rect x="492" y="59" width="262" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>

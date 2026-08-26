@@ -676,3 +676,35 @@ All 31 geometry checks pass; the README contains exactly one matching image for
 every pattern heading; every SVG parses, has an accessible current-pattern
 title, and is reproducible from its builder. A composite visual review checked
 the complete set for readable labels, connected edges, and semantic drift.
+
+## Round 45 — turn the catalog into a local-first pattern language
+
+**Critique.** The 31 card diagrams existed, but captions could sit directly on
+arrow strokes at GitHub width, and the short cards no longer carried enough of
+a classic pattern's context, forces, contract, failure mode, or consequences to
+guide a real multi-model design. Portable workflow topology was also too easy
+to mistake for the reason a pattern belongs in a local-first catalog.
+
+**Change.** Added a catalog rendering layer that paints every arrow first and
+then places each caption on an opaque padded field before drawing nodes. The
+verifier now rejects small, clipped, node-overlapping, or mutually overlapping
+caption fields. Recast every entry in one 20-section classic format, including
+an explicit Local-First Differential, invariant, safe exit, evidence status,
+worked local example, sample code, and related-pattern links. Added the three
+admission tests—abundance, owned substrate, and sovereignty—a generative
+selection order, conservative maturity rubric, catalog map, and composed local
+team examples. Portable lineage remains visible; unmeasured local contracts
+are labeled Candidate instead of borrowing maturity from their ancestors.
+
+**Verification.** The README has 31 pattern headings, 31 unique diagram links,
+31 existing generated SVGs, 620 ordered pattern sections, and 31
+syntax-checked Python sketches. Diagram generation passes 31/31, is
+byte-for-byte deterministic, and produces valid XML with 31 accessible titles;
+all 56 arrow captions have matching opaque fields and pass the GitHub-width
+size and collision checks. A complete visual contact-sheet review found no
+unreadable label or semantic blocker. Full-document rendering, local links,
+Markdown whitespace, and an independent technical/epistemic review pass with
+no remaining P0, P1, or P2 issue.
+
+**Open item.** Improve the catalog next by publishing measured local
+implementations for Candidate patterns, not by adding more names.

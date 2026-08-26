@@ -1,6 +1,6 @@
 """Catalog diagrams for trust, owned-runtime, and sovereignty patterns."""
 
-from build_diagrams import Diagram
+from catalog_diagram import Diagram
 
 
 def shadow_model():

@@ -13,16 +13,21 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1864" height="450" fill="#fff"/>
-  <text x="368" y="148" text-anchor="middle" fill="#2b2b29" font-size="23">tool available</text>
-  <text x="364" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">otherwise</text>
-  <text x="824" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">evidence</text>
-  <text x="829" y="266" text-anchor="middle" fill="#2b2b29" font-size="23">independent read</text>
-  <text x="1352" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">clear / tied</text>
   <path d="M 286 210 C 368 210, 368 92, 450 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 286 210 C 364 210, 364 328, 442 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 730 92 C 824 92, 824 210, 919 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 738 328 C 829 328, 829 210, 919 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 1249 210 C 1352 210, 1352 210, 1455 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect class="edge-label-bg" x="266" y="126" width="205" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="368" y="148" text-anchor="middle" fill="#2b2b29" font-size="23">tool available</text>
+  <rect class="edge-label-bg" x="296" y="229" width="136" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="364" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">otherwise</text>
+  <rect class="edge-label-bg" x="763" y="111" width="122" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="824" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">evidence</text>
+  <rect class="edge-label-bg" x="712" y="244" width="233" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="829" y="266" text-anchor="middle" fill="#2b2b29" font-size="23">independent read</text>
+  <rect class="edge-label-bg" x="1263" y="170" width="178" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1352" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">clear / tied</text>
   <rect x="74" y="177" width="212" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="180" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">split vote</text>
   <rect x="450" y="59" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>

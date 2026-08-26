@@ -13,7 +13,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1862" height="450" fill="#fff"/>
-  <text x="509" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">estimate independently</text>
   <path d="M 336 210 C 509 210, 509 210, 682 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 700 210 C 759 210, 759 92, 818 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 700 210 C 759 210, 759 210, 818 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -22,6 +21,8 @@
   <path d="M 996 210 C 1103 210, 1103 210, 1211 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 996 328 C 1103 328, 1103 210, 1211 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 1356 210 C 1421 210, 1421 210, 1486 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect class="edge-label-bg" x="351" y="170" width="316" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="509" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">estimate independently</text>
   <rect x="24" y="177" width="313" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="180" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">numeric question</text>
   <circle cx="691" cy="210" r="9" fill="#2b2b29"/>
