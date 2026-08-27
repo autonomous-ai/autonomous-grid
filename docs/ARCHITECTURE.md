@@ -271,7 +271,7 @@ of `__engine`. That subprocess (`remote/serve.py:run_remote_engine_from_record`)
      *detectable* ("sign in again") rather than a silent zombie; shutdown drains a mid-flight
      exchange before the process dies.
    - **Seat-safe default.** A codex-containing union pins the poll-worker default to **1** — a
-     flat-rate seat is never hammered eight-wide by default; explicit `--max-concurrency` wins.
+     flat-rate seat is never hammered four-wide by default; explicit `--max-concurrency` wins.
      Every forwarded job **spends the seat's own monthly Codex allowance**, and the join's free
      probe (the vendor's model listing) refuses up front when Cloudflare challenges the machine's
      egress IP — a datacenter/VPS address typically cannot serve a seat, and finding out at join
