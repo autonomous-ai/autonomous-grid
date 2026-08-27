@@ -188,17 +188,15 @@ ground. Already know which file you want? Name it in full after a `:` and there 
 grid pull unsloth/gemma-3-4b-it-GGUF:gemma-3-4b-it-Q8_0.gguf
 ```
 
-Those are the only two ways: **the repo alone** and pick from the list, or **the repo plus the
-exact filename**. Half of a filename (`:Q8_0`) is refused rather than guessed at — it matches
-`gemma-3-4b-it-Q8_0.gguf` and `gemma-3-4b-it-UD-Q8_0.gguf` equally well, and neither is a choice
-you made.
+Two ways, then: **the repo alone** to pick from the list, or **the repo plus a full filename**
+to go straight there. Copy the filename from the list above, or from the repo's **Files and
+versions** tab on huggingface.co.
 
 - `--advertise-as` gives the grid a short name again, so apps ask for something readable instead of
   a filename.
 - Vision models need a second file. `grid pull` fetches it automatically and `--serve` finds it —
   nothing extra to type. It says `Supports vision.` when it does, and then `grid chat --image
-  <path>` sends a picture with your question. PNG, JPEG, BMP and GIF; a WebP is refused, because
-  the engine has no decoder for one and would answer about an image it never received.
+  <path>` sends a picture with your question. Send a PNG, JPEG, BMP or GIF.
 
 ### Three ways to join a computer
 
@@ -511,11 +509,11 @@ grid join <grid-name> --api codex
 ```
 
 - No API key — the CLI signs into your ChatGPT account by browser OAuth (`--no-browser` for headless).
-- It probes the seat and your egress IP before advertising anything. Datacenter and VPS addresses
-  are typically refused, so serve from a residential connection.
-- `codex:*` models serve the Responses API for external Codex apps. Point one at your grid with
-  `grid info --env` ([how](docs/cli.md#pointing-a-codex-app-at-your-grid-using-codex-models));
-  `grid chat` refuses them with the same guidance.
+- It probes the seat and your egress IP before advertising anything, so serve from a residential
+  connection.
+- `codex:*` models serve the Responses API. Point a Codex app at your grid with `grid info --env`
+  ([how](docs/cli.md#pointing-a-codex-app-at-your-grid-using-codex-models)) — that is the client
+  for them, and `grid chat` says so if you reach for it.
 - Jobs spend the seat's own monthly allowance.
 
 Walkthrough: [docs/codex-quickstart.md](docs/codex-quickstart.md).
@@ -595,8 +593,9 @@ grid train ui
 - The grid samples rollouts across its nodes; one machine holds the trainer.
 - The LoRA adapter it produces goes back to the serving nodes under a stable name, where `auto`
   keeps routing to it.
-- API nodes (`--api openai`, `--api codex`) cannot serve rollouts. Vendors return neither the token
-  ids they sampled nor their logprobs, and you cannot own an improvement to a model you rent.
+- Rollouts run on your own hardware: training needs the token ids and logprobs a node sampled,
+  which is something a machine you own reports and a rented API does not. API nodes serve
+  inference on the same grid.
 - In a hybrid grid that becomes the useful loop: `auto` sends what the local model can't do yet to
   a frontier node, those tasks are what tonight's run consumes, and the frontier share shrinks as
   the local model catches up.
