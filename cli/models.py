@@ -25,6 +25,9 @@ def cmd_catalog(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         print(json.dumps([
             {
+                # First, and named for what it is: the argument `grid pull` takes. A consumer
+                # reading this file should never have to reassemble it from the two below.
+                "pull_spec": catalog.pull_spec(entry),
                 "hf_repo": entry.hf_repo,
                 "file": entry.quantized_file,
                 "min_vram_gb": entry.min_vram_gb,

@@ -71,10 +71,30 @@ def target_label(target: str) -> str:
     return target
 
 
+def pull_spec(entry: CatalogEntry) -> str:
+    """The exact argument `grid pull` takes for [entry] — `<repo>:<file>`, nothing invented.
+
+    A short nickname used to live here instead, and `grid pull` accepted it. It was dropped
+    because a name that exists only inside Grid reads like a real model id and is not one. What
+    replaces it is the spec itself: still one whitespace-free token a caller can hand straight to
+    `grid pull`, but every character of it is checkable against Hugging Face.
+    """
+    return f"{entry.hf_repo}:{entry.quantized_file}"
+
+
 def format_catalog_entry(entry: CatalogEntry) -> str:
+    """One catalog row: the pull spec, then the same repo and file as a browsable path.
+
+    Two columns, and the repetition is deliberate rather than sloppy. The first is a command
+    argument (`repo:file`); the second is the path you would open on huggingface.co (`repo/file`).
+    One colon apart, but only one of them works in each place — and the desktop app reads this
+    exact shape positionally (`docs/CLI_Integration_Contract.md`), taking the first token as what
+    to pull and the second as what to show. Changing the column count breaks it silently: dropping
+    the first made its parser read `(Apple` as the repo (measured, not feared).
+    """
     target = "" if entry.target == TARGET_ANY else f"{target_label(entry.target)}, "
     return (
-        f"  {entry.hf_repo}/{entry.quantized_file} "
+        f"  {pull_spec(entry)}  {entry.hf_repo}/{entry.quantized_file} "
         f"({target}min {entry.min_vram_gb} GB, {entry.kind})"
     )
 
