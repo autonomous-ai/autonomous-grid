@@ -95,6 +95,9 @@ grid models
 
 # Ask it something — the <model-name> you chose above
 grid chat -m "<model-name>" "write a haiku about local GPUs"
+
+# Ask about a picture — only if the model reads images, which `grid pull` says
+grid chat -m "<model-name>" --image "<image-path>" "what is in this image?"
 ```
 
 **Step 4 — point your apps at it.** Anything that speaks the OpenAI API:
@@ -193,7 +196,9 @@ you made.
 - `--advertise-as` gives the grid a short name again, so apps ask for something readable instead of
   a filename.
 - Vision models need a second file. `grid pull` fetches it automatically and `--serve` finds it —
-  nothing extra to type.
+  nothing extra to type. It says `Supports vision.` when it does, and then `grid chat --image
+  <path>` sends a picture with your question. PNG, JPEG, BMP and GIF; a WebP is refused, because
+  the engine has no decoder for one and would answer about an image it never received.
 
 ### Three ways to join a computer
 
@@ -396,7 +401,7 @@ client.chat.completions.create(
 | `grid catalog` | models available to pull, and models already here |
 | `grid pull` | download a model |
 | `grid models` | what the grid can answer right now |
-| `grid chat` | send one message |
+| `grid chat` | send one message, `--image <path>` to send a picture with it |
 | `grid info` | the address and key for apps |
 | `grid ls` / `grid use` | list grids, pick the active one |
 | `grid mode` | switch between local and remote |
