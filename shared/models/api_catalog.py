@@ -58,6 +58,23 @@ class ApiWhitelist:
     # loopback server on this default port. Also what makes the kind joinable in local mode. Each
     # seat needs a DIFFERENT default so two seats can run on one box without colliding.
     local_seat_port: int | None = None
+    # Whether a person can join with this kind at all. False for a kind the GRID stands up on a
+    # member's behalf, holding a credential the member never sees — only `openrouter` today.
+    #
+    # ONE field because two surfaces turn on the same fact and must not drift apart:
+    #
+    #   * `joinable_kinds` — what `--api` offers when somebody names a kind that doesn't exist. A
+    #     kind nobody can join is not an answer to "which did you mean?".
+    #   * `advertised_name` — a joinable kind's models are namespaced `<kind>:<vendor>`; this one's
+    #     are advertised BARE. The prefix would print the name of a supplier the member has no
+    #     relationship with on every surface carrying a model id: the picker, `GET /v1/models`, and
+    #     the client config they copy out of the app — which must carry the wire id verbatim and so
+    #     cannot be relabelled by any display layer.
+    #
+    # Bare ids are safe *because* of the first fact and not otherwise: a bare id can collide with a
+    # hardware engine's model name, and only a kind whose model set the grid itself chooses can
+    # promise it doesn't.
+    member_joinable: bool = True
 
 # Verified against https://platform.openai.com/docs/models (which 301-redirects to
 # https://developers.openai.com/api/docs/models) on 2026-07-08.
@@ -517,10 +534,24 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         # visible filter both work unchanged — that is what makes a retired vendor id a loud
         # refusal at join time instead of a 404 on the first real request.
         supports_model_listing=True,
-        # Chat only. Left at the default rather than spelled out to make the point that this kind
-        # adds no lockstep row: grid-src's `provider_supports` reads `chat/completions` for a kind
-        # it has never heard of, which is the fail-closed answer we want.
-        endpoints=("chat/completions",),
+        # BOTH dialects. The vendor serves a Responses route beside its chat one (probed
+        # 2026-08-27: `POST /api/v1/responses` answers 401 — the route exists and wants a key —
+        # where an invented path answers a 404 HTML page), and the control plane's passthrough
+        # mounts a `responses` half beside its `chat/completions` one. Chat alone is what made a
+        # hosted grid answer *no* to Codex: the relay folds `advertises_responses` from the
+        # per-model `endpoints` capability, so a grid whose only provider was this one told the app
+        # it served no dialect Codex speaks.
+        #
+        # ⚠️ This is a LOCKSTEP row, and it did not used to be one. `responses` here means the
+        # provider will POST `{--at}/responses`; absent on the passthrough that is a bare 404 on
+        # every Codex turn. **Roll the control plane out BEFORE this provider release.** The
+        # opposite order is free: a passthrough serving a route nobody asks for costs nothing.
+        endpoints=("chat/completions", "responses"),
+        # Nobody joins with this kind: the grid stands the provider up itself, on a passthrough
+        # token no member holds. So it is absent from `joinable_kinds` and its models are
+        # advertised BARE — `deepseek/deepseek-v4-flash-0731`, never `openrouter:deepseek/…`. See
+        # `ApiWhitelist.member_joinable` for why the two are one field.
+        member_joinable=False,
     ),
     "doggi": ApiWhitelist(
         last_verified=DOGGI_LAST_VERIFIED,
@@ -533,7 +564,23 @@ WHITELISTS: dict[str, ApiWhitelist] = {
 
 
 def supported_kinds() -> tuple[str, ...]:
+    """Every kind this build knows, joinable or not — the set `--api` VALIDATES against.
+
+    Deliberately the whole table: narrowing this is how `--api openrouter` would start being
+    refused for the one caller that has a token for it. What a person is OFFERED is
+    `joinable_kinds`, and the two are different questions.
+    """
     return tuple(sorted(WHITELISTS))
+
+
+def joinable_kinds() -> tuple[str, ...]:
+    """The kinds a person can name on `--api` — what an unknown-kind refusal lists.
+
+    See `ApiWhitelist.member_joinable`: a kind the grid stands up on a member's behalf is not an
+    answer to "which did you mean?", and naming it there tells every member who mistypes a flag
+    which upstream service their grid buys from.
+    """
+    return tuple(sorted(k for k, w in WHITELISTS.items() if w.member_joinable))
 
 
 def advertised_name(kind: str, entry: ApiModelEntry) -> str:
@@ -544,7 +591,16 @@ def advertised_name(kind: str, entry: ApiModelEntry) -> str:
     prefix. Nothing in its catalog changes that (`tool_mode`, `use_responses_lite` and
     `multi_agent_version` were all patched in its own cache, still 0), so the prefix is the only
     thing that keeps those models usable at all.
+
+    A kind whose row sets ``member_joinable=False`` is advertised BARE, and that is the one case
+    where the reasoning above does not apply: nothing on the far end recognises the id, and the
+    prefix's only remaining effect is to name the upstream service to every member of every grid.
+    An unknown kind namespaces — the fail-safe direction, since a bare id can collide with a
+    hardware engine's model name while a namespaced one cannot.
     """
+    whitelist = WHITELISTS.get(kind)
+    if whitelist is not None and not whitelist.member_joinable:
+        return entry.vendor_name
     return f"{kind}:{entry.vendor_name}"
 
 
@@ -660,7 +716,10 @@ def _discovered_codex_cli_entries() -> tuple[ApiModelEntry, ...]:
 def find_advertised(kind: str, advertised: str) -> ApiModelEntry | None:
     """The whitelist entry advertised under ``advertised`` (e.g. ``openai:gpt-5.5``), or None.
 
-    Only the namespaced form resolves — a bare vendor name is not an advertised name.
+    Only this kind's OWN advertised spelling resolves: the namespaced form for a namespaced kind,
+    the bare vendor name for one whose row sets ``namespaced=False``. It compares what
+    ``advertised_name`` produces rather than re-deriving the shape, so the two cannot disagree —
+    and a bare vendor name is still not an advertised name for a namespaced kind.
     """
     whitelist = WHITELISTS.get(kind)
     if whitelist is None:
