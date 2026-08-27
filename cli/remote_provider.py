@@ -1081,12 +1081,7 @@ def _engine_union(records: list[dict[str, object]]) -> list[dict[str, object]]:
         specs = record.get("engines")
         if not specs and (record.get("endpoint_url") or record.get("models")):
             specs = [_flat_spec(record)]
-        # Tagged here, not carried on the stored spec itself: `meta_name` is the RECORD's display
-        # name (one per identity), and every engine flattened from the same record shares it — so
-        # `match_engine`'s node-name tier (shared.run_records) can find it without every spec
-        # producer remembering to stamp it individually.
-        tagged = [dict(spec, meta_name=record.get("meta_name")) for spec in (specs or [])]
-        union, _ = _merge_engines(union, tagged)
+        union, _ = _merge_engines(union, specs or [])
     return union
 
 
@@ -2023,7 +2018,7 @@ def _leave_one_engine(
     survivors = [rec for rec in records.values() if run_records.record_alive(rec)]
     survivors = survivors or list(records.values())
     union = _engine_union(survivors)
-    to_drop = _drop_spec(union, args.engine, label)
+    to_drop = _drop_spec(union, args.engine, label, _identity_field(survivors, "meta_name"))
     if not to_drop:
         raise SystemExit(
             f"No engine {args.engine!r} on {label} (match by endpoint URL, a served model, or a URL "
@@ -2076,9 +2071,28 @@ def _engines_summary(union: list[dict[str, object]]) -> str:
 
 
 def _drop_spec(
-    union: list[dict[str, object]], selector: str, label: str
+    union: list[dict[str, object]], selector: str, label: str, meta_name: object = None
 ) -> list[dict[str, object]]:
-    """The spec(s) to remove for ``selector`` — exact endpoint_url → engine_label → served model → URL
-    substring — via the shared matcher (`shared.run_records.match_engine`). Remote engines are keyed by
-    URL/label, so no exact-id short-circuit here (that's the local caller's job)."""
-    return run_records.match_engine(union, selector, label=label, summary=_engines_summary(union))
+    """The spec(s) to remove for ``selector`` — exact endpoint_url → engine_label → the identity's
+    ``--name`` → served model → URL substring — via the shared matcher
+    (`shared.run_records.match_engine`). Remote engines are keyed by URL/label, so no exact-id
+    short-circuit here (that's the local caller's job).
+
+    ``meta_name`` is stamped onto each spec for the duration of the match and taken straight back
+    off. It belongs to the RECORD, not to any one engine, and `union` is what the caller writes to
+    disk as ``record["engines"]`` — so a tag left behind is persisted onto some specs and not
+    others, and goes stale the first time the operator re-joins under a different ``--name``. The
+    matcher needs it on the spec; nothing else does, and nothing after this line should see it.
+    """
+    if meta_name:
+        for spec in union:
+            spec["meta_name"] = meta_name
+    try:
+        return run_records.match_engine(
+            union, selector, label=label, summary=_engines_summary(union)
+        )
+    finally:
+        # `finally`, not a trailing line: `match_engine` raises SystemExit on an ambiguous
+        # selector, and an exception must not leave the tag behind either.
+        for spec in union:
+            spec.pop("meta_name", None)
