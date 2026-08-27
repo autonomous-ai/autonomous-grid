@@ -1,14 +1,21 @@
 # Local AI Orchestration Patterns — the agent layer
 
-The second half of the catalog. The model-layer landing page separates
-[local substrate patterns](../model_orchestration_patterns/README.md) from the
-[portable numbered topologies](../model_orchestration_patterns/portable_patterns.md);
-this catalog routes and combines **agents** — harness frameworks running as
-workers. Where the portable model layer asks *how many samples does a request
-deserve, and how are they pooled*, the agent layer asks *which agent gets the
-task — and how do agents sharing one box stay honest about what they touch*.
-Read the local substrate page first; `#number` cross-references point to the
-portable research catalog.
+> **Canonical guide:** [Building Effective Local AI Agents: Design
+> Patterns](../local_ai_agent_patterns/README.md) now unifies model reasoning,
+> agent execution, owned-runtime, and sovereignty patterns in one reader
+> journey. This page remains the detailed agent-orchestration reference.
+
+The second half of the catalog. The model-layer landing page presents the
+[concise local-first patterns](../model_orchestration_patterns/README.md), while
+the [research reference](../model_orchestration_patterns/portable_patterns.md)
+retains the original numbered topologies. This catalog routes and combines
+**agents** — harness frameworks running as workers. Where the model layer asks
+*which inference graph runs, how effort is spent and pooled, and how the graph
+fits the owned runtime*, the agent layer asks *which agent gets the task — and
+how do agents sharing one box stay honest about what they touch*.
+Read the local-first page first. Within this document an unqualified `#number`
+refers to an agent pattern; an explicitly labeled `model #number` refers to the
+original numbered model [research reference](../model_orchestration_patterns/portable_patterns.md).
 
 **What changes when the worker is an agent.** The model-layer patterns treat
 a worker as a stateless read: sample in, answer out, discard. An **agent** is
@@ -18,11 +25,12 @@ and able to do things that *persist*: write files, run code, call an API, send
 a message, mutate state that outlives the request. That changes the
 economics in exactly three ways:
 
-1. **The scarce thing is the seat, not the tokens.** A model read is free
-   locally; an agent session occupies a seat (a resident, VRAM-backed model +
-   harness runtime) for its whole lifetime. Fan-out in the model layer is N
-   reads; fan-out in the agent layer is N sessions, and N sessions that can
-   *act* is N executions the box has to pay for in wall-clock and in risk.
+1. **The scarce thing is the seat, not the tokens.** A local model read incurs
+   no per-call API charge; an agent session occupies a seat (a resident,
+   VRAM-backed model + harness runtime) for its whole lifetime. Fan-out in the
+   model layer is N reads; fan-out in the agent layer is N sessions, and N
+   sessions that can *act* is N executions the box has to pay for in wall-clock
+   and in risk.
 2. **Side effects are the risk surface, not the answer.** A wrong model read
    costs tokens. A wrong agent write costs you a file, an API call, a sent
    message. The agent layer's whole discipline is that *only one worker may
@@ -1267,24 +1275,22 @@ cold-starting. Every event — the fan dispatch, the review, the `git push`, the
 certification — appends to the one ledger (#7), so a wiped consumer box loses
 a day, not the audit of what the fleet touched.
 
-**Why this is local.** On hosted Claude/OpenAI/Codex this exact system is
-billable per token and capped per minute, so the fan stays small, the
-cross-vendor reviewers cost real money, and a long red-team pass is priced
-like a premium feature. On the user's own RTX 6000 Ada (48 GB) / RTX 5090
-(32 GB) / Mac (32 GB unified) / B300 server (288 GB), tokens are free, there
-is no RPM ceiling, and inference rounds-trips in milliseconds on the same
-board the sessions live on. The only real costs left — the ones every pattern
-above exists to manage — are the scarce seat and the risk of an agent *acting*
-on the world. Fan it wide, write once, certify by fact: that is the local
-multi-agent system.
+**Why this is local-first.** Hosted execution may meter every draft, review,
+and red-team pass and place them behind provider quotas and network round trips.
+On an owned RTX 6000 Ada (48 GB) / RTX 5090 (32 GB) / Mac (32 GB unified) /
+B300 server (288 GB), those passes incur no marginal external API bill or
+vendor quota, and sensitive work can stay on the owned path. Physical
+throughput, memory, wall-clock, power, and heat remain finite, alongside the
+risk of an agent *acting* on the world. Fan within those bounds, write once,
+certify by fact: that is the local-first multi-agent system.
 
 ---
 
 **Related catalogs.** The
-[local substrate layer](../model_orchestration_patterns/README.md) binds work
-to operator-owned hardware. The
-[portable model catalog](../model_orchestration_patterns/portable_patterns.md)
-contains the numbered `#` references used here.
+[local-first model catalog](../model_orchestration_patterns/README.md) gives the
+simple pattern vocabulary. The
+[model research reference](../model_orchestration_patterns/portable_patterns.md)
+contains the original numbered `#` references and deeper mechanics.
 
 **Read with.** [`agents.md`](agents.md) — the agent-layer execution
 companion in this directory (the session/seat model these seven patterns run

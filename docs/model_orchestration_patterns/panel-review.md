@@ -189,7 +189,7 @@ duplicate headings.
 - **Cross-repo provenance (open item 1).** Confirmed `ROUTER.md` and
   `router-execution.md` live in the sibling research doc at
   `autonomous-org/projects/grid-orchestration/`; `agents.md` exists nowhere.
-  The bare `[agents.md](agents.md)` link (which 404'd locally) became plain
+  The bare `agents.md` link (which 404'd locally) became plain
   text, and a front-matter note now states where the companions live and that
   `agents.md` is the not-yet-published agent-layer half. No dangling git link
   remains.
@@ -604,3 +604,136 @@ pattern's own `Intent`/`Mechanics` content.
 No factual drift found; ten cited `#N` all resolve to catalog-correct
 patterns. The narrative is consistent with the actual pattern content. Logged
 as verified; no edit needed.
+
+---
+
+## Round 42 — make the main catalog simple and local-first
+
+**Critique.** The six-pattern landing page had become 897 lines of admission
+tests, contracts, measurement plans, and physical-plan machinery. The original
+27-pattern reference had useful ideas, but several statistical implementations
+were presented at the same level as structural patterns. The catalog was
+optimizing its classification rules instead of making each pattern memorable.
+
+**Change.** Rebuilt the main page around a Rule of One: one short name, one
+problem, one move, one primary local-first advantage, one tradeoff, and one
+one-line shape. “Local-first” is now a benefit, not an exclusivity test: a
+cloud-compatible pattern belongs when owned inference makes it practical to
+repeat, private, offline, idle-powered, or aware of operator-controlled models
+and hardware.
+
+A seven-pattern on-ramp now leads with the clearest local levers—unmetered
+breadth and repair, owned idle cycles, physical memory, local-default routing,
+data locality, and offline continuity—before the complete catalog.
+
+The main catalog contains 31 patterns, grouped by the reader's need.
+Academic mechanisms were retained as refinements of simpler patterns—for
+example Markowitz weighting under Ensemble, PID under Adaptive Effort, CVaR
+under Risk Ladder, and Thompson sampling under Routing Memory. The previous
+focused engineering catalog moved intact to `six_pattern_reference.md`; the
+original 27 research entries remain in `portable_patterns.md`.
+`pattern_lineage.md` accounts for every merge and rename. Local Cascade, Data
+Stays Put, and Private Memory are the new local-first patterns added by this
+round; Fit the Box and Night Shift preserve useful mechanisms that were hidden
+inside broader cards.
+
+**Verification.** All 31 cards are 52–84 words and each has exactly one
+Problem, Move, Local-first, and Tradeoff field. Original research entries
+1–27 are all present in the lineage map. Local links resolve, all 33 Python
+examples still parse, and both diagram generators remain green.
+
+---
+
+## Round 43 — restore the visible catalog diagram
+
+**Critique.** The concise landing page retained generated figures in the
+`images/` directory but embedded no overview, so GitHub rendered the catalog as
+text only.
+
+**Change.** Added a generated overview immediately above the seven-pattern
+on-ramp. It traces one owned local runtime through three local levers—inference
+abundance, owned substrate, and a sovereign path—to the seven entry patterns.
+
+**Verification.** The generator's geometry and collision checks pass, the SVG
+parses as XML, its accessible title describes the relationship, and the README
+image target resolves.
+
+---
+
+## Round 44 — give every pattern its own diagram
+
+**Critique.** The overview explained the seven-pattern on-ramp, but each of the
+31 cards still used only an inline text shape. Readers could not scan or compare
+the full catalog through the project's visual grammar.
+
+**Change.** Replaced every text-only shape with a generated card-level diagram.
+The figures use current names and deliberately show only the card's structural
+move; implementation-specific diagrams remain in the research references. The
+main page now also defines the shared entry/work/decision/feedback legend.
+
+**Verification.** The catalog generator enforces exactly 31 named builders.
+All 31 geometry checks pass; the README contains exactly one matching image for
+every pattern heading; every SVG parses, has an accessible current-pattern
+title, and is reproducible from its builder. A composite visual review checked
+the complete set for readable labels, connected edges, and semantic drift.
+
+## Round 45 — turn the catalog into a local-first pattern language
+
+**Critique.** The 31 card diagrams existed, but captions could sit directly on
+arrow strokes at GitHub width, and the short cards no longer carried enough of
+a classic pattern's context, forces, contract, failure mode, or consequences to
+guide a real multi-model design. Portable workflow topology was also too easy
+to mistake for the reason a pattern belongs in a local-first catalog.
+
+**Change.** Added a catalog rendering layer that paints every arrow first and
+then places each caption on an opaque padded field before drawing nodes. The
+verifier now rejects small, clipped, node-overlapping, or mutually overlapping
+caption fields. Recast every entry in one 20-section classic format, including
+an explicit Local-First Differential, invariant, safe exit, evidence status,
+worked local example, sample code, and related-pattern links. Added the three
+admission tests—abundance, owned substrate, and sovereignty—a generative
+selection order, conservative maturity rubric, catalog map, and composed local
+team examples. Portable lineage remains visible; unmeasured local contracts
+are labeled Candidate instead of borrowing maturity from their ancestors.
+
+**Verification.** The README has 31 pattern headings, 31 unique diagram links,
+31 existing generated SVGs, 620 ordered pattern sections, and 31
+syntax-checked Python sketches. Diagram generation passes 31/31, is
+byte-for-byte deterministic, and produces valid XML with 31 accessible titles;
+all 56 arrow captions have matching opaque fields and pass the GitHub-width
+size and collision checks. A complete visual contact-sheet review found no
+unreadable label or semantic blocker. Full-document rendering, local links,
+Markdown whitespace, and an independent technical/epistemic review pass with
+no remaining P0, P1, or P2 issue.
+
+**Open item.** Improve the catalog next by publishing measured local
+implementations for Candidate patterns, not by adding more names.
+
+## Round 46 — expose four flagship compositions
+
+**Critique.** The catalog described 31 reusable moves and one private-code
+composition, but its public entry path still asked readers to infer the most
+powerful local capabilities from individual cards. In particular, continuous
+reasoning over fresh operational data and outcome-gated website optimization
+were present only as ingredients across several patterns.
+
+**Change.** Added `flagship_compositions.md` with four capability-level
+reference architectures: Verified Search Engine, Live Decision Loop, Measured
+Optimization Loop, and Private Offline Copilot. Each composition names its
+local-first operating-point change, pattern stack, invariants, mechanics,
+honest degradation, demonstration, and evidence required. The live loop sizes
+from admitted decision points instead of raw events or DAU alone. The
+optimization loop preserves the key separation that models propose candidates
+while a registered experiment and one promotion gate judge outcomes. The main
+catalog now links to these compositions near its entrance and from its existing
+composition section; they are explicitly examples, not four new primitives.
+
+Added four generated SVGs using the catalog renderer. The base diagram accepts
+an optional per-figure stage gap so capability-level flows remain legible at
+GitHub width without changing any existing diagram's geometry.
+
+**Verification.** All four composition geometry checks pass; the 31 existing
+catalog diagrams still pass and regenerate unchanged; every new SVG parses,
+has an accessible title, and visually preserves the shared terminal/work/
+decision grammar. Python compilation and `git diff --check` pass. Candidate
+status remains unchanged: measured implementations are still the next step.
