@@ -422,7 +422,7 @@ The `grid join` flag set is the union of both modes, gated by mode:
   sign-in's paste flow for headless boxes; inert elsewhere, with a note), and `--max-concurrency`
   (how many requests this engine serves at once; the provider runs one poll worker per slot —
   default 1, or 8 when the identity serves only API engines, pinned back to **1** when any of
-  them is a `codex` seat: a flat-rate subscription is never hammered eight-wide by default).
+  them is a `codex` seat: a flat-rate subscription is never hammered four-wide by default).
   Match it to the engine's own batch width — llama.cpp `--parallel`, vLLM `max_num_seqs` — or the
   extra slots queue behind a batch that was never widened to take them. Finally, `--respawn` (stop
   the engine already serving this grid and start a fresh one — see below).

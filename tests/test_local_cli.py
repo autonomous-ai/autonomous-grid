@@ -15455,7 +15455,7 @@ def test_effective_max_concurrency_default_rules():
 
     api = {"endpoint_url": "https://api.openai.com/v1", "models": ["openai:gpt-5.5"], "api_kind": "openai"}
     hw = {"endpoint_url": "http://h:11434/v1", "models": ["llama3"]}
-    assert run_records.effective_max_concurrency({"engines": [api]}) == 8
+    assert run_records.effective_max_concurrency({"engines": [api]}) == 4
     assert run_records.effective_max_concurrency({"engines": [api, hw]}) == 1
     assert run_records.effective_max_concurrency({"engines": [hw]}) == 1
     assert run_records.effective_max_concurrency({"engines": [api], "media": True}) == 1
@@ -15467,7 +15467,7 @@ def test_effective_max_concurrency_default_rules():
 
 def test_effective_max_concurrency_codex_union_pins_one():
     """ADR 0015 D-f: a codex seat is flat-rate — ANY codex engine in the union pins the default
-    to 1, overriding the API-only 8 (a seat must not be hammered eight-wide by default). An
+    to 1, overriding the API-only 4 (a seat must not be hammered four-wide by default). An
     explicit --max-concurrency still wins: the operator asked. Lives in the ONE shared
     derivation, so the CLI's reload-vs-respawn gate and serve startup cannot desync on it."""
     from shared import run_records
@@ -15482,7 +15482,7 @@ def test_effective_max_concurrency_codex_union_pins_one():
     assert run_records.effective_max_concurrency({"engines": [openai_spec, codex]}) == 1
     assert run_records.effective_max_concurrency({"engines": [codex, hw]}) == 1
     assert run_records.effective_max_concurrency({"engines": [codex], "max_concurrency": 4}) == 4
-    assert run_records.effective_max_concurrency({"engines": [openai_spec]}) == 8  # openai-only keeps 8
+    assert run_records.effective_max_concurrency({"engines": [openai_spec]}) == 4  # openai-only keeps the API default
 
 
 def test_remote_engine_codex_union_defaults_to_one_worker(monkeypatch, tmp_path):
@@ -15663,10 +15663,14 @@ def test_remote_engine_codex_vendor_rank_comes_from_the_recorded_caps(monkeypatc
     assert not any("codex:a" in line for line in caps_warnings)  # a recorded model is not flagged
 
 
-def test_remote_engine_api_only_defaults_to_eight_workers(monkeypatch, tmp_path):
-    """An identity whose union is API-only defaults to 8 poll workers, advertised AND held by the
-    live state (the pool is sized from it) — several consumers must not queue behind one worker
-    while the vendor sits idle. An explicit --max-concurrency still wins."""
+def test_remote_engine_api_only_defaults_to_the_api_worker_count(monkeypatch, tmp_path):
+    """An identity whose union is API-only defaults to `API_ONLY_DEFAULT_CONCURRENCY` poll workers,
+    advertised AND held by the live state (the pool is sized from it) — several consumers must not
+    queue behind one worker while the vendor sits idle. An explicit --max-concurrency still wins.
+
+    Asserted against the constant rather than a literal: the name and the number used to be written
+    out here, and when the default moved 8 -> 4 the test failed for the right reason but the test
+    NAME went on claiming eight, which is the half a grep does not catch."""
     from remote import api_keys, relay, serve
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
@@ -15691,8 +15695,9 @@ def test_remote_engine_api_only_defaults_to_eight_workers(monkeypatch, tmp_path)
     monkeypatch.setattr(serve, "_poll_loop", fake_poll)
 
     assert serve.run_remote_engine_from_record("n1", "remote") == 0
-    assert seen["max_concurrency"] == 8          # advertised to the relay
-    assert state_seen["max_concurrency"] == 8    # ... and sizing the real pool
+    expected = serve.run_records.API_ONLY_DEFAULT_CONCURRENCY
+    assert seen["max_concurrency"] == expected          # advertised to the relay
+    assert state_seen["max_concurrency"] == expected    # ... and sizing the real pool
 
     # Explicit flag wins over the API-only default.
     record = {**record, "max_concurrency": 3}

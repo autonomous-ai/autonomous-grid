@@ -51,7 +51,7 @@ class ApiWhitelist:
     credential: str = "key"
     # A flat-rate subscription seat: one operator's personal allowance, so the default poll-worker
     # count is pinned to 1 rather than the API-engine default of 8 (ADR 0015 D-f). Draining a
-    # personal allowance eight-wide by default is the harm; it is a property of being flat-rate,
+    # personal allowance four-wide by default is the harm; it is a property of being flat-rate,
     # not of being codex.
     flat_rate: bool = False
     # Non-None => this kind's "engine" is a LOCAL process on this box (a CLI seat), served behind a
@@ -490,7 +490,7 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         # `/chat/completions` and `/messages`), so both dialects are advertised here.
         endpoints=("chat/completions", "messages"),
         credential="none",   # the `claude` CLI authenticates itself; the grid holds nothing
-        flat_rate=True,      # a personal subscription — never polled eight-wide by default
+        flat_rate=True,      # a personal subscription — never polled four-wide by default
         local_seat_port=8099,
     ),
     "codex-cli": ApiWhitelist(
