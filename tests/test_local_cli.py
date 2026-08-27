@@ -886,7 +886,13 @@ def test_api_whitelist_integrity():
             if whitelist.supports_model_listing and kind != api_catalog.CODEX_KIND:
                 assert entry.context_window > 0
             assert entry.context_window >= 0
-            assert api_catalog.advertised_name(kind, entry) == f"{kind}:{entry.vendor_name}"
+            # Namespaced for every kind a person can join; BARE for a kind the grid stands up
+            # itself. Keyed on the row's own flag rather than on the kind's name, so a second
+            # grid-run kind inherits the rule instead of tripping this assertion.
+            expected = (
+                f"{kind}:{entry.vendor_name}" if whitelist.member_joinable else entry.vendor_name
+            )
+            assert api_catalog.advertised_name(kind, entry) == expected
         date.fromisoformat(whitelist.last_verified)  # dated, ISO format
         # APIs with base_url=None require --at (e.g. Doggi); others must have a valid HTTPS URL.
         if whitelist.base_url is not None:
@@ -1135,26 +1141,110 @@ def test_openrouter_has_no_base_url_so_the_join_cannot_reach_the_vendor_directly
 
 
 def test_openrouter_vendor_names_survive_the_advertised_name_round_trip():
-    """`serve.py` recovers the upstream id with `advertised_model.partition(":")[2]`, so a vendor
-    id containing its own colon (ollama's `qwen3:8b` shape) would be truncated at that colon and
-    forwarded as a model the vendor has never heard of — a 404 on the first real request, long
-    after the join reported success. Slashes are fine and already precedented (`Wan-AI/…`); colons
-    are not.
+    """`serve.py` recovers the upstream id with `advertised_model.partition(":")[2] or advertised`,
+    so a vendor id containing its own colon (ollama's `qwen3:8b` shape) would be truncated at that
+    colon and forwarded as a model the vendor has never heard of — a 404 on the first real request,
+    long after the join reported success. Slashes are fine and already precedented (`Wan-AI/…`);
+    colons are not.
+
+    ⚠️ The colon ban got MORE load-bearing when this kind went bare, not less. Namespaced, the
+    `partition` split at the kind's own colon and a vendor colon merely truncated the tail; bare,
+    the split lands INSIDE the vendor name and the recovered id is its tail alone.
     """
     for entry in api_catalog.entries_for("openrouter"):
         advertised = api_catalog.advertised_name("openrouter", entry)
         assert ":" not in entry.vendor_name, f"{entry.vendor_name} would be truncated by serve.py"
-        assert advertised.partition(":")[2] == entry.vendor_name
+        # serve.py's own expression, verbatim — the thing that must round-trip.
+        assert (advertised.partition(":")[2] or advertised) == entry.vendor_name
+        assert api_catalog.find_advertised("openrouter", advertised) is entry
 
 
-def test_openrouter_is_chat_only_so_an_unknown_kind_fails_closed_on_the_relay():
-    """Chat-only, and therefore adding no lockstep row. grid-src's `provider_supports` answers
-    `chat/completions` for a kind it has never heard of, so this kind needs no hand-duplicated half
-    there — but only while the tuple stays exactly this. Declaring `responses` here would make the
-    relay and the CLI disagree in silence until a Responses request reached a seat that 400s it.
+def test_openrouter_models_are_advertised_bare():
+    """No `openrouter:` prefix on the wire, and this is the ONLY place that can be true.
+
+    The id reaches a member in three forms no display layer can rewrite: `GET /v1/models`, the
+    Hermes/OpenClaw/Codex config the app hands them to paste, and the relay's own routing. Hiding
+    the vendor's name in the app alone would leave it in all three.
     """
-    assert api_catalog.WHITELISTS["openrouter"].endpoints == ("chat/completions",)
+    advertised = [
+        api_catalog.advertised_name("openrouter", entry)
+        for entry in api_catalog.entries_for("openrouter")
+    ]
+    assert advertised == ["deepseek/deepseek-v4-flash-0731", "qwen/qwen3.8-27b"]
+    assert not any(name.startswith("openrouter") for name in advertised)
+
+
+def test_openrouter_is_not_offered_as_a_kind_anyone_can_join():
+    """Absent from every surface that NAMES the kinds, present in the one that validates them.
+
+    A member who mistypes `--api` gets the list of kinds they could have meant, and this one is not
+    among them; the control plane's own `grid join --api openrouter` still resolves, because the
+    membership test stayed the whole table.
+    """
+    assert "openrouter" in api_catalog.supported_kinds()
+    assert "openrouter" not in api_catalog.joinable_kinds()
+    assert set(api_catalog.joinable_kinds()) < set(api_catalog.supported_kinds())
+    # Every other kind is joinable — this is a one-row exception, not a new default.
+    assert set(api_catalog.supported_kinds()) - set(api_catalog.joinable_kinds()) == {"openrouter"}
+
+
+def test_catalog_refuses_a_grid_run_kind_without_confirming_it_exists(capsys):
+    """`grid catalog --api openrouter` reads as an unknown kind — the same refusal a typo gets.
+
+    A refusal of its own ("that kind isn't yours to join") would confirm the kind exists, which is
+    the one thing the flag is for. The listed alternatives must not name it either.
+    """
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_catalog(argparse.Namespace(api="openrouter", json=False))
+
+    message = str(exc.value)
+    assert "Unknown API kind 'openrouter'" in message
+    # The message names the kind the caller typed — that is their own word back. What must never
+    # appear is the kind in the SUPPORTED list, where the app would be volunteering it.
+    assert "Supported:" in message
+    assert "openrouter" not in message.split("Supported:", 1)[1]
+
+
+def test_the_join_still_accepts_the_kind_the_control_plane_starts():
+    """The narrowing must not reach VALIDATION — this is the property the whole change rests on.
+
+    `grid join --api openrouter` is what the control plane runs for every grid it creates. Made to
+    read `joinable_kinds` too, the refusal above would take every hosted grid's provider with it and
+    the create path would report it as "not started" once per grid, forever.
+    """
+    from cli import remote_provider
+
+    args = argparse.Namespace(
+        api="openrouter", serve=None, advertise_as=None, media=None, bundles=None,
+    )
+    remote_provider._reject_api_conflicts(args)  # no SystemExit == accepted
+
+    with pytest.raises(SystemExit) as exc:
+        remote_provider._reject_api_conflicts(
+            argparse.Namespace(
+                api="not-a-kind", serve=None, advertise_as=None, media=None, bundles=None,
+            )
+        )
+    assert "openrouter" not in str(exc.value)
+
+
+def test_openrouter_serves_both_dialects_so_codex_runs_on_a_hosted_grid():
+    """The lockstep row this kind gained (2026-08-27).
+
+    Chat-only was what made the app tell a member *Codex is not available on this grid*: the relay
+    folds `advertises_responses` from the per-model `endpoints` capability, so a grid whose only
+    provider was this one advertised no dialect Codex speaks. The vendor serves a Responses route
+    (probed: `POST /api/v1/responses` → 401, an invented path → 404), and the control plane's
+    passthrough mounts a `responses` half beside its chat one.
+
+    ⚠️ **Roll the control plane out BEFORE this provider release** — `responses` here means the
+    provider will POST `{--at}/responses`, and against a passthrough without that route every Codex
+    turn is a bare 404. The other order costs nothing.
+    """
+    assert api_catalog.WHITELISTS["openrouter"].endpoints == ("chat/completions", "responses")
+    # Not responses-ONLY: `grid chat` must keep working against these models.
     assert api_catalog.responses_only_kind("openrouter:qwen/qwen3.8-27b") is None
+    assert api_catalog.responses_only_kind("qwen/qwen3.8-27b") is None
     assert api_catalog.kind_is_stream_only("openrouter") is False
 
 
