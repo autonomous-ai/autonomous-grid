@@ -87,10 +87,10 @@ def format_catalog_entry(entry: CatalogEntry) -> str:
 
     Two columns, and the repetition is deliberate rather than sloppy. The first is a command
     argument (`repo:file`); the second is the path you would open on huggingface.co (`repo/file`).
-    One colon apart, but only one of them works in each place — and the desktop app reads this
-    exact shape positionally (`docs/CLI_Integration_Contract.md`), taking the first token as what
-    to pull and the second as what to show. Changing the column count breaks it silently: dropping
-    the first made its parser read `(Apple` as the repo (measured, not feared).
+    One colon apart, but only one of them works in each place — and this row is parsed
+    POSITIONALLY by tools that read it, first token as what to pull and second as what to show.
+    Changing the column count breaks them silently rather than loudly: dropping the first column
+    made one parser read `(Apple` as the repository name (measured, not feared).
     """
     target = "" if entry.target == TARGET_ANY else f"{target_label(entry.target)}, "
     return (
