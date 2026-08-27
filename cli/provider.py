@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -18,6 +19,7 @@ import time
 import uuid
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -137,14 +139,21 @@ def cmd_join(args: argparse.Namespace) -> int:
         return _spawn_engine(cfg, args, endpoint_url=None, models=[], media=True)
 
     if args.models:
-        raise SystemExit("-m/--model names models for an engine; pair it with --at <url>, or use --serve <model>.")
+        raise SystemExit(
+            "-m/--model names what an engine serves, so it needs to know which engine.\n"
+            "  Point at one you already run:  grid join --at http://localhost:11434/v1 -m llama3\n"
+            "  Or start the built-in one:     grid join --serve my-model.gguf"
+        )
 
     # No engine spec: detect what is already running on this box.
     detected = _detect(advertise_host)
     if not detected:
         raise SystemExit(
-            "No running engine detected on this box. Point at one with "
-            "`grid join --at <url> -m <model>`, or start the built-in engine with `grid join --serve <model>`."
+            "Nothing on this computer is running a model yet.\n"
+            "  Install the built-in engine:   grid engine install llama.cpp\n"
+            "  then download a model:         grid catalog\n"
+            "  then serve it:                 grid join --serve <the file grid pull saved>\n"
+            "  Already run Ollama or vLLM?    grid join --at http://localhost:11434/v1 -m llama3"
         )
     if args.kind:
         detected = [engine for engine in detected if engine.label == args.kind]
@@ -157,7 +166,9 @@ def cmd_join(args: argparse.Namespace) -> int:
                 print("Nothing joined.")
                 return 0
         else:
-            raise SystemExit("Multiple engines detected; pass --all, --kind <kind>, or --at <url>.")
+            # The plan above already printed both commands with real values in them; repeating
+            # them here just made the reader read the same two lines twice.
+            raise SystemExit("More than one engine is running here, so pick one of the two above.")
 
     used: set[str] = set()
     rc = 0
@@ -469,6 +480,40 @@ def _spawn_engine(
     return 0
 
 
+def serves_vision(args) -> bool:
+    """Whether the model this join just started can read images.
+
+    Only ever true for a built-in `--serve` engine: an `--at` join points at somebody else's
+    server, whose modalities are its own to advertise, not ours to guess from a file we do not
+    have. Read through the same `projector_beside` the launcher uses to decide `--mmproj`, so the
+    hint and the engine can never disagree about whether vision is on.
+    """
+    serve = getattr(args, "serve", None)
+    if not serve:
+        return False
+    if getattr(args, "mmproj", None):
+        return True  # explicitly pointed at a projector, so vision is on by instruction
+    from shared.models import gguf
+
+    return gguf.projector_beside(paths.models_dir() / serve) is not None
+
+
+def chat_hints(model: str, vision: bool) -> list[str]:
+    """The `grid chat` line(s) to suggest for [model] — two when it can see, one when it cannot.
+
+    Shared by both modes' join reports so a vision model is offered `--image` identically whether
+    it joined a local grid or a remote one.
+    """
+    lines = [f'  grid chat -m {model} "hello"']
+    if vision:
+        # Only for a model that actually carries a projector: offering `--image` on a text-only
+        # model would advertise something the engine will not answer.
+        # A placeholder, not a plausible filename: `photo.jpg` reads as something to paste, and
+        # pasting it fails on a file nobody has. Quoted so a path with a space survives the shell.
+        lines.append(f'  grid chat -m {model} --image "<image-path>" "what is in this image?"')
+    return lines
+
+
 def _report_join(cfg, args, engine_id, models, endpoint_url, log_path, status) -> None:
     """Say whether the model is actually being served, in the words someone new would use.
 
@@ -485,24 +530,20 @@ def _report_join(cfg, args, engine_id, models, endpoint_url, log_path, status) -
     advertised = _advertised_text_models(list(models or []), list(getattr(args, "advertise_as", []) or []))
     served = advertised or list(models or [])
 
+    names = ", ".join(f"'{name}'" for name in served) or f"'{engine_id}'"
     if status == "starting":
-        print(f"\nEngine '{engine_id}' is starting — the model is still loading.")
-        print(f"  Watch it:   tail -f {log_path}")
-        print(f"  Check it:   grid models {cfg['name']}")
-        print(f"  Stop it:    grid leave {cfg['name']} --engine {engine_id}")
+        print(f"\n… Loading {names} — large models take a while.")
+        # Quoted: a grid name is freeform and can carry a space ("Hydrate Grid"), and this hint
+        # printed bare isn't actually copy-pasteable — argparse splits it into two positionals and
+        # rejects the second (grid-leave issue: exactly this line is what a reader hit).
+        print(f"\nNext:  grid models {shlex.quote(cfg['name'])}")
         return
 
-    print(f"\n✓ Serving on grid '{cfg['name']}'")
-    for name in served:
-        print(f"    {name}")
-    if endpoint_url:
-        print(f"  engine address   {endpoint_url}")
-    print(f"  this computer    {engine_id}")
-    print()
+    print(f"\n✓ Serving {names} on grid '{cfg['name']}'")
     if served:
-        print(f"  Try it:   grid chat -m {served[0]} \"hello\"")
-    print(f"  Stop it:  grid leave {cfg['name']} --engine {engine_id}")
-    print(f"  Log:      {log_path}")
+        print("\nNext:")
+        for line in chat_hints(served[0], serves_vision(args)):
+            print(line)
 
 
 def _await_engine_start(grid_url: str, node_id: str, proc, grace: float = 3.0) -> str:
@@ -627,6 +668,20 @@ def _stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> run_re
 # grid models
 # ---------------------------------------------------------------------------
 
+def print_models_hint(model: str) -> None:
+    """Suggest the chat command for [model] — to **stderr**, and only on a real terminal.
+
+    `grid models` is a data command: its stdout is a list somebody pipes into a loop, and a hint
+    printed there arrives as a phantom model name (measured: `grid models | while read m` handed a
+    script the blank line and `Next:  grid chat -m ... "hello"` as two extra "models"). stderr
+    keeps the list clean while a person still sees the hint; the tty check keeps it out of a
+    script's error log too, where it would be noise nobody reads.
+    """
+    if not sys.stdout.isatty():
+        return
+    print(f'\nNext:  grid chat -m {model} "hello"', file=sys.stderr)
+
+
 def cmd_models(args: argparse.Namespace) -> int:
     cfg = config.select_grid(getattr(args, "grid", None))
     engines = _discover(cfg)
@@ -647,20 +702,25 @@ def cmd_models(args: argparse.Namespace) -> int:
         print("(no live models — `grid join` an engine first)")
         return 0
 
+    seen: list[str] = []
+    for model, _, _ in rows:
+        if model not in seen:
+            seen.append(model)
+
     if args.verbose:
         width = max(len("MODEL"), *(len(model) for model, _, _ in rows))
         ewidth = max(len("ENGINE"), *(len(label) for _, label, _ in rows))
         print(f"{'MODEL':<{width}}  {'ENGINE':<{ewidth}}  WHERE")
         for model, label, where in rows:
             print(f"{model:<{width}}  {label:<{ewidth}}  {where}")
-        return 0
+    else:
+        for model in seen:
+            print(model)
 
-    seen: list[str] = []
-    for model, _, _ in rows:
-        if model not in seen:
-            seen.append(model)
-    for model in seen:
-        print(model)
+    # A model showing up here is exactly the moment `grid join`'s own "still loading" message
+    # (`_report_join`) could not yet promise — it only ever pointed back to this command. Close
+    # that loop here, with the real name that just appeared, not the one someone typed minutes ago.
+    print_models_hint(seen[0])
     return 0
 
 
@@ -761,6 +821,38 @@ def run_engine_from_record(grid_id: str, engine_id: str) -> int:
     return _run_engine(args)
 
 
+def _fixed_up_endpoint(endpoint_url: str, args: SimpleNamespace, grid_url: str) -> str:
+    """Fall back to a reachable address for a built-in engine's own endpoint, the same way
+    `cli/grid.py::_resolve_address` already does for the grid's address — one hop further
+    downstream, and much harder to notice.
+
+    `detect_local_ip` can name an interface (typically a VPN) nothing can dial back — including
+    the grid on this same box. When it names the *grid's* address, `grid start` prints a warning
+    at the moment it happens. When it names an *engine's* address instead, the join reports
+    success (llama-server really is listening — just not where it just told the grid to look),
+    and the failure only surfaces later as `grid chat` answering "Server disconnected without
+    sending a response", nowhere near the command that caused it.
+
+    Checked only once llama-server is confirmed listening (`wait_for_models` returned), so the
+    reachability test means something instead of probing a port nothing has bound yet.
+    """
+    if args.advertise_host is not None or runtime.advertised_address_works(endpoint_url):
+        return endpoint_url  # an explicit choice, or already proven reachable — leave it alone
+
+    # The grid itself reached over loopback means everything is one machine, and llama-server
+    # binds 0.0.0.0, so loopback always reaches it too.
+    if urlparse(grid_url).hostname in ("127.0.0.1", "localhost"):
+        fixed = runtime.engine_endpoint_url(None, args.endpoint_port, "127.0.0.1")
+    else:
+        candidates = runtime.lan_ip_candidates()
+        fixed = runtime.engine_endpoint_url(None, args.endpoint_port, candidates[0]) if candidates else endpoint_url
+
+    if fixed != endpoint_url:
+        print(f"{endpoint_url} was not reachable — advertising {fixed} instead.")
+        run_records.update_record(args.grid, args.name, endpoint_url=fixed)
+    return fixed
+
+
 def _run_engine(args: SimpleNamespace) -> int:
     cfg = config.select_grid(args.grid)
     grid_url = runtime.grid_url(cfg)
@@ -793,8 +885,31 @@ def _run_engine(args: SimpleNamespace) -> int:
             from shared.engine import launcher as launcher_mod
 
             launcher = launcher_mod
-            if launcher.is_port_in_use(args.endpoint_port):
-                raise SystemExit(f"Port {args.endpoint_port} already in use; aborting.")
+            if runtime.port_in_use(args.endpoint_port):
+                # Same fix as a busy `grid start` port: this runs in the detached child
+                # (`__engine`), so a hard abort here used to surface as "Engine ... exited
+                # before it registered. Port 8081 already in use; aborting." — a dead join with
+                # no way forward short of typing `--endpoint-port` and guessing a free number.
+                holder = runtime.port_holder(args.endpoint_port)
+                replacement = runtime.free_port_from(args.endpoint_port + 1)
+                if replacement is None:
+                    raise SystemExit(
+                        f"Port {args.endpoint_port} is already in use"
+                        f"{f' by {holder}' if holder else ''}, and no free port was found near it."
+                    )
+                print(
+                    f"Port {args.endpoint_port} is in use"
+                    f"{f' by {holder}' if holder else ''} — starting on {replacement} instead."
+                )
+                args.endpoint_port = replacement
+                endpoint_url = runtime.engine_endpoint_url(
+                    args.endpoint_url, args.endpoint_port, args.advertise_host
+                )
+                # The record on disk still names the old port — every later `grid engines` /
+                # `grid leave` read has to see the one actually running, not the one asked for.
+                run_records.update_record(
+                    args.grid, args.name, endpoint_port=replacement, endpoint_url=endpoint_url
+                )
             launcher.assert_supported_build()
             launched = launcher.start_llm(
                 args.models[0],
@@ -811,6 +926,7 @@ def _run_engine(args: SimpleNamespace) -> int:
             print(f"Spawned llama-server pid={launched.proc.pid}, log={launched.log}")
             launcher.wait_for_models(launched)
             print(f"llama-server is ready on :{args.endpoint_port}")
+            endpoint_url = _fixed_up_endpoint(endpoint_url, args, grid_url)
 
         advertised_models = list(text_advertised_models)
         # Map each advertised (possibly `--advertise-as` alias) text model to the name the engine
@@ -911,7 +1027,12 @@ def _print_plan(detected: list[Any]) -> None:
     for engine in detected:
         models = ",".join(engine.models) or ("comfyui" if engine.media else "(no models listed)")
         print(f"  {engine.label:<12} {engine.endpoint_url:<34} {models}")
-    print("\nJoin them:\n  grid join --all\n  grid join --kind <kind>")
+    # Name a kind that is actually on this screen. `--kind <kind>` asked the reader to invent a
+    # value the command had just finished discovering for them.
+    example = sorted({engine.label for engine in detected})[0]
+    print("\nJoin them:")
+    print("  grid join --all")
+    print(f"  grid join --kind {example}      # or any other kind listed above")
 
 
 def _interactive() -> bool:

@@ -105,6 +105,32 @@ def read_records(grid_id: str) -> dict[str, dict[str, Any]]:
     return records
 
 
+def own_model_case(grid_id: str, model: str) -> str:
+    """``model`` as THIS machine actually advertised it, if it case-insensitively matches one of
+    its own served models — never anyone else's, since this machine only ever knows its own true
+    case.
+
+    The relay's public overview lowercases every model id for display (`grid engines`/`grid
+    models`), so the exact string a reader copies from `grid models`' own output — and from this
+    CLI's own `Next:` hint — 404s ("No providers available for this model") when read back for a
+    model THIS machine is serving under mixed case (grid-leave issue: reproduced live serving
+    `Qwen3.5-2B-Q4_K_M`, listed back as `qwen3.5-2b-q4_k_m`, and rejected verbatim). Used both to
+    fix the display itself (`cli/remote_overview.py`) and, as a last-resort backstop, to fix a
+    model name right before a request that names it (`cli/remote_request.py`) — a local disk read,
+    not a network call, so it costs nothing when there is no mismatch to fix.
+    """
+    for record in read_records(grid_id).values():
+        # `advertise_as` first: that alias — not the record's top-level `models` (the raw filename,
+        # e.g. `Qwen3.5-2B-Q4_K_M.gguf`) — is what actually got registered as the servable model id
+        # (confirmed live: a filename-cased record still routed under its alias). `models` stays
+        # the fallback for an engine joined with no `--advertise-as`, where it IS the real id.
+        candidates = list(record.get("advertise_as") or []) + list(record.get("models") or [])
+        for served in candidates:
+            if served.lower() == model.lower():
+                return served
+    return model
+
+
 def known_grid_ids() -> tuple[str, ...]:
     """Every grid id with a run-record **directory** on this box, sorted.
 
@@ -189,7 +215,8 @@ def match_engine(
     hint: str = "pass the exact endpoint URL instead",
 ) -> list[dict[str, Any]]:
     """Engine spec(s) a `grid leave --engine <selector>` picks out of ``specs``, tried in order: exact
-    ``endpoint_url`` → exact ``engine_label`` → a served model → an ``endpoint_url`` substring. Each match
+    ``endpoint_url`` → exact ``engine_label`` → the ``--name`` given at join (``meta_name``, remote only —
+    what `grid engines` prints under NODE) → a served model → an ``endpoint_url`` substring. Each match
     must resolve to exactly ONE engine or it raises ``SystemExit`` (naming ``summary`` and ``hint``);
     returns ``[]`` on no match so the caller raises its own not-found. Returned dicts are the SAME objects
     passed in — identity is preserved for an ``id()``-based drop filter. An exact engine-*id* match is the
@@ -211,6 +238,16 @@ def match_engine(
     by_label = unique([s for s in specs if s.get("engine_label") == selector], "Label")
     if by_label:
         return by_label
+    # `--name` at join is what `grid engines` shows as NODE — the only thing a member typed
+    # themselves, so it is the first thing they try for `--engine` too (grid-leave issue: it
+    # silently never matched anything, since a remote identity keys engines by URL/label, not
+    # its own display name). Matching every spec under that name here is right, not partial:
+    # one identity's engines all share one `--name`, so a name selector always means "all of
+    # them" — a multi-engine identity surfaces that honestly via the `unique()` ambiguity error
+    # below, pointing at `--all` instead of silently guessing which one was meant.
+    by_node = unique([s for s in specs if s.get("meta_name") == selector], "Node")
+    if by_node:
+        return by_node
     by_model = unique([s for s in specs if selector in (s.get("models") or [])], "Model")
     if by_model:
         return by_model

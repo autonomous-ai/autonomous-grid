@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 from typing import Any
 
 from shared import shell, state
@@ -146,10 +147,14 @@ def resolve_relay_base(
             raise  # not the creator and no stored relay URL — surface the original error
         status = {}
     base = _grid_url(status, rec)
+    # `shlex.quote`: a grid name is freeform and can carry a space ("Hydrate Grid"), and an
+    # unquoted hint isn't actually copy-pasteable (grid-leave issue: `cli/grid.py`/`cli/provider.py`
+    # had the identical bug in their own `Next:` hints).
+    quoted_label = shlex.quote(label)
     if not base:
-        raise SystemExit(f"Grid {label} isn't up; run `grid up {label}` first.")
+        raise SystemExit(f"Grid {label} isn't up; run `grid start {quoted_label}` first.")
     if status.get("state") and status.get("state") != "running":
-        raise SystemExit(f"Grid {label} isn't up; run `grid up {label}` first.")
+        raise SystemExit(f"Grid {label} isn't up; run `grid start {quoted_label}` first.")
     return base, status
 
 
@@ -190,7 +195,7 @@ def cmd_remote_up(args: argparse.Namespace) -> int:
         status = control_plane.get_managed_network_status(session, network_id)
         return _print_up(rec.get("name") or name, _grid_url(status, rec))
     if name is None:  # nothing to start, and no name to create under
-        raise SystemExit("Name a grid to create: grid up <name> (or grid use <name> to pick one).")
+        raise SystemExit("Name a grid to create: grid start <name> (or grid use <name> to pick one).")
     resp = control_plane.create_managed_network(session, name, args.type or DEFAULT_NETWORK_TYPE)
     if not _valid_network_id(resp.get("network_id")):
         # A 200 with no usable id would otherwise persist a record that can't be acted on and
@@ -218,7 +223,7 @@ def cmd_remote_down(args: argparse.Namespace) -> int:
     network_id = _network_id(rec)
     label = rec.get("name") or network_id
     control_plane.stop_managed_network(session, network_id)
-    print(f"Grid {label} is down (grid up {label} brings it back).")
+    print(f"Grid {label} is down (grid start {shlex.quote(label)} brings it back).")
     return 0
 
 
@@ -235,7 +240,7 @@ def cmd_remote_ls(args: argparse.Namespace) -> int:
         ))
         return 0
     if not nets:
-        print("(no grids — run `grid up <name>` to bring one online)")
+        print("(no grids — run `grid start <name>` to bring one online)")
         return 0
     for net in nets:
         is_active = active and (net.get("network_id") == active or net.get("name") == active)

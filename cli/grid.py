@@ -4,14 +4,17 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
+import shutil
 import sys
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from local import config
 from local import runtime
-from shared import run_records, shell, state
+from shared import paths, run_records, shell, state
 from shared._version import __version__
 
 
@@ -27,19 +30,136 @@ def cmd_up(args: argparse.Namespace) -> int:
         _reject_foreign_grid(name)  # a known remote grid or an id-shaped arg → don't auto-create junk
         cfg = runtime.init_grid_config(
             name=name,
-            port=args.port,
-            host=args.host,
+            port=args.port if args.port is not None else runtime.DEFAULT_PORT,
+            host=args.host if args.host is not None else runtime.DEFAULT_HOST,
             advertise_host=args.advertise_host,
         )
+    else:
+        cfg, _ = _apply_up_overrides(cfg, args)
+    # Both paths, first run included — a busy port must never be something the reader has to
+    # resolve before they can get started.
+    cfg, _ = _resolve_port(cfg)
+    config.save_grid_config(cfg["grid_id"], cfg)
     runtime.start_grid(cfg)
-    url = runtime.grid_url(cfg)
-    print(f"grid={cfg['name']}")
-    print(f"grid_url={url}")
-    # The grid is up either way; this only decides whether the address we just printed is one
-    # anything can dial. Catching it here turns a silent dead end into a fixable sentence.
-    if not runtime.advertised_address_works(url):
-        print(runtime.unreachable_address_hint(cfg, url))
+    cfg, local_only = _resolve_address(cfg)
+    _report_up(cfg, local_only)
     return 0
+
+
+def _resolve_address(cfg: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Fall back to a working address instead of warning about a broken one.
+
+    ``detect_local_ip`` asks which interface reaches the internet, which on a machine holding a VPN
+    is not the interface anything reaches *back* on. The grid is bound to every interface and is
+    perfectly healthy; only the address it hands out is wrong, and the symptom is every later
+    command failing with "Server disconnected without sending a response".
+
+    Nothing needs restarting to fix it — the server already listens on 0.0.0.0, so pointing the
+    advertised URL at loopback makes it work on this machine immediately. That is a real
+    reduction in reach, so the caller says so — in three words, not a paragraph.
+    """
+    url = runtime.grid_url(cfg)
+    if runtime.advertised_address_works(url):
+        return cfg, False
+
+    loopback = runtime.make_local_url(cfg["port"], "127.0.0.1")
+    if not runtime.advertised_address_works(loopback):
+        return cfg, True
+
+    updated = dict(cfg)
+    updated["lan_signaling_url"] = loopback
+    config.save_grid_config(updated["grid_id"], updated)
+    return updated, True
+
+
+def _report_up(cfg: dict[str, Any], local_only: bool) -> None:
+    """Two facts and one command. Nothing else.
+
+    Everything worth explaining here — a port that moved, an address that had to fall back — has
+    already been *handled*, so narrating it only buries the one line the reader needs, which is
+    what to type next. The address printed is the truth; how it was arrived at is not their
+    problem. `local_only` is the single exception, because it changes what they can do next.
+    """
+    scope = "  (this computer only)" if local_only else ""
+    print(f"\n✓ Grid '{cfg['name']}' running — {runtime.grid_url(cfg)}{scope}")
+    print("\nNext:  grid engine install llama.cpp")
+    print("See:   grid info")
+
+
+def _resolve_port(cfg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Move to a free port rather than asking the reader to pick one.
+
+    `grid up` is the first command anyone runs, and a busy 8090 used to end the story there: an
+    error about a port they never chose, no clue what was holding it, and — until the flag was
+    honoured — no escape even by choosing another. A port conflict is not a decision anyone needs
+    to be consulted about; it just needs solving, out loud.
+
+    This applies to an explicit `--port` too. Being told "that one is taken, run it again with a
+    different number" is exactly the loop worth deleting — we name what is holding it and move on,
+    so the reader ends up running, not retrying.
+    """
+    port = int(cfg["port"])
+    if not runtime.port_in_use(port):
+        return cfg, None
+
+    holder = runtime.port_holder(port)
+    by = f" by {holder}" if holder else ""
+    replacement = runtime.free_port_from(port + 1)
+    if replacement is None:
+        raise SystemExit(
+            f"Port {port} is already in use{by}, and no free port was found near it.\n"
+            f"Name one yourself, for example:  grid start {cfg['name']} --port 9500"
+        )
+    updated = dict(cfg)
+    updated["port"] = replacement
+    updated["lan_signaling_url"] = runtime.make_local_url(replacement, _advertised_host(cfg))
+    return updated, f"Port {port} is in use{by} — starting on {replacement} instead."
+
+
+def _apply_up_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
+    """Let `--port` / `--host` / `--advertise-host` change a grid that already exists.
+
+    These used to be read only when creating a grid. Bringing an existing one up dropped them
+    silently, which produced the worst error text in the CLI: `grid up --port 8099` answering
+    "Port 8090 is already in use. Choose a different --port." — naming the stored port, telling
+    you to change a flag you had just changed, and doing it again for every port you tried.
+
+    A grid is down at this moment, so re-addressing it is safe; the URL it hands out is rebuilt
+    from whatever the new values are.
+    """
+    changes = {
+        key: value
+        for key, value in (
+            ("port", args.port),
+            ("host", args.host),
+            ("advertise_host", args.advertise_host),
+        )
+        if value is not None
+    }
+    if not changes:
+        return cfg, []
+
+    updated = dict(cfg)
+    if "port" in changes:
+        updated["port"] = int(changes["port"])
+    if "host" in changes:
+        updated["host"] = changes["host"]
+    # Rebuilt from the new port whether or not `--advertise-host` was given, since the URL carries
+    # the port too — otherwise a port change would leave the old one advertised.
+    updated["lan_signaling_url"] = runtime.make_local_url(
+        updated["port"], changes.get("advertise_host") or _advertised_host(cfg)
+    )
+    # Port is announced by the caller after the free-port check, so only host is reported here.
+    notes = [
+        f"host changed: {cfg.get('host')} -> {updated['host']}"
+    ] if "host" in changes and cfg.get("host") != updated["host"] else []
+    return updated, notes
+
+
+def _advertised_host(cfg: dict[str, Any]) -> str | None:
+    """The host previously handed out, so a port-only change keeps the address it was reached at."""
+    previous = urlparse(cfg.get("lan_signaling_url") or "").hostname
+    return previous or None
 
 
 def cmd_down(args: argparse.Namespace) -> int:
@@ -50,7 +170,11 @@ def cmd_down(args: argparse.Namespace) -> int:
     outcome = runtime.stop_grid(cfg)
     if not outcome.stopped():
         _refuse_false_stop(cfg, outcome)
-    print(f"Grid {cfg['name']} is down (config kept; `grid up {cfg['name']}` brings it back).")
+    print(f"\n✓ Grid '{cfg['name']}' stopped. Its setup is kept.")
+    # `shlex.quote` only — a grid name is freeform and can carry a space ("Hydrate Grid"), and a
+    # hint printed without quoting it isn't actually copy-pasteable (grid-leave issue: this exact
+    # `Next:` line, unquoted, is what argparse rejected as "unrecognized arguments").
+    print(f"\nNext:  grid start {shlex.quote(cfg['name'])}")
     return 0
 
 
@@ -75,9 +199,9 @@ def _refuse_false_stop(cfg: dict[str, Any], outcome: runtime.StopOutcome) -> Non
             else f"kill -9 {survivor}"
         )
         raise SystemExit(
-            f"grid down: could not stop the server for {cfg['name']} "
+            f"grid stop: could not stop the server for {cfg['name']} "
             f"({run_records.describe_survivor(outcome.teardown)}). It keeps serving this grid until "
-            f"it stops, and the recorded pid is kept so a retried `grid down` still reaches it "
+            f"it stops, and the recorded pid is kept so a retried `grid stop` still reaches it "
             f"(e.g. `{remedy}`)."
         )
 
@@ -87,9 +211,9 @@ def _refuse_false_stop(cfg: dict[str, Any], outcome: runtime.StopOutcome) -> Non
         # remedy has to start from the port instead.
         finder = f"netstat -ano | findstr :{port}" if windows else f"lsof -ti :{port}"
         raise SystemExit(
-            f"grid down: {cfg['name']} is still answering on port {port}, so this box is still "
+            f"grid stop: {cfg['name']} is still answering on port {port}, so this box is still "
             f"serving it — nothing was stopped that the config could prove was the grid's own "
-            f"server. Find what is listening with `{finder}`, then retry `grid down {cfg['name']}`."
+            f"server. Find what is listening with `{finder}`, then retry `grid stop {cfg['name']}`."
         )
 
     probe = runtime.probe_url(cfg)
@@ -101,10 +225,41 @@ def _refuse_false_stop(cfg: dict[str, Any], outcome: runtime.StopOutcome) -> Non
         else f"the config's port ({port!r}) is unusable, so there is nothing to check it with"
     )
     raise SystemExit(
-        f"grid down: could not confirm the server for {cfg['name']} stopped, and could not reach its "
+        f"grid stop: could not confirm the server for {cfg['name']} stopped, and could not reach its "
         f"port to find out — so nothing about this box was established. The recorded pid is kept for "
         f"a retry; {check}."
     )
+
+
+def cmd_delete(args: argparse.Namespace) -> int:
+    """Remove a grid's local config for good — `grid stop` only pauses it.
+
+    There was no way to make `grid ls` forget a grid short of deleting `~/.grid/grids/<id>` by
+    hand, which meant knowing that path exists at all. This is the missing other half of `create,
+    then throw away` — the flow `grid stop` deliberately does not cover, because config surviving a
+    stop is what lets `grid start <name>` bring it straight back.
+    """
+    cfg = config.select_grid(args.name)
+    if not cfg.get("managed_server", True):
+        raise SystemExit(
+            f"{cfg['name']!r} is a remote grid — nothing local to delete. "
+            f"`grid ls` only forgets it here; the grid itself lives on the account that owns it."
+        )
+    if not args.yes:
+        response = input(
+            f"Delete grid {cfg['name']!r} ({cfg['grid_id']})? This removes its local config and "
+            "cannot be undone. [y/N] "
+        ).strip().lower()
+        if response != "y":
+            print("Aborted.")
+            return 1
+
+    runtime.stop_grid(cfg)  # idempotent — a no-op if it was already down
+    shutil.rmtree(paths.grid_dir(cfg["grid_id"]), ignore_errors=True)
+    if state.get_active("local") in (cfg["name"], cfg["grid_id"]):
+        state.set_active("local", None)
+    print(f"Deleted grid {cfg['name']!r}.")
+    return 0
 
 
 def cmd_ls(args: argparse.Namespace) -> int:
@@ -121,7 +276,7 @@ def cmd_ls(args: argparse.Namespace) -> int:
         ], indent=2))
         return 0
     if not grids:
-        print("(no grids — run `grid up` to bring one online)")
+        print("(no grids — run `grid start` to bring one online)")
         return 0
     for cfg in grids:
         where = "local" if cfg.get("managed_server", True) else "remote"
@@ -183,7 +338,7 @@ def _overview_remote(as_json: bool) -> int:
         return 0
     print("mode: remote")
     print(f"active grid: {active}" if active else "active grid: (none)")
-    print("\nSign in with `grid login`, then manage your remote grids with `grid up`/`ls`/`info`, "
+    print("\nSign in with `grid login`, then manage your remote grids with `grid start`/`ls`/`info`, "
           "serve models with `grid join`, and use them with `grid chat -m <model> \"…\"`.")
     return 0
 
@@ -199,7 +354,7 @@ def _overview_local(as_json: bool) -> int:
             return 0
         print("mode: local\n")
         print("No grid yet.\n")
-        print("Start one:\n  grid up\n")
+        print("Start one:\n  grid start\n")
         print("Then join an engine:\n  grid join")
         return 0
 
@@ -222,7 +377,7 @@ def _overview_local(as_json: bool) -> int:
     print(f"Grid: {default['name']}")
     print(f"grid_url: {grid_url}")
     if not reachable:
-        print("status: unreachable — start it with `grid up`")
+        print("status: unreachable — start it with `grid start`")
     else:
         print(f"engines: {len(engines)} live")
         print(f"models: {', '.join(models) if models else '(none)'}")

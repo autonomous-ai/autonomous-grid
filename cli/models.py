@@ -25,7 +25,6 @@ def cmd_catalog(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         print(json.dumps([
             {
-                "label": entry.label,
                 "hf_repo": entry.hf_repo,
                 "file": entry.quantized_file,
                 "min_vram_gb": entry.min_vram_gb,
@@ -46,7 +45,9 @@ def cmd_catalog(args: argparse.Namespace) -> int:
     for entry in catalog.recommended_entries():
         print(catalog.format_catalog_entry(entry))
     print()
-    print("Also: `grid pull <hf-repo>:<file>` for any GGUF on Hugging Face.")
+    print("Any other GGUF on Hugging Face works too — search huggingface.co, then just pull the")
+    print("repository. It grabs Q4_K_M by default, or asks you to pick if there's more than one file:")
+    print("  grid pull unsloth/gemma-3-4b-it-GGUF")
     return 0
 
 
@@ -352,23 +353,67 @@ def _catalog_codex_json(
 
 
 def cmd_pull(args: argparse.Namespace) -> int:
-    from shared.models import catalog, download
+    from shared.models import download
 
-    entry = catalog.find(args.model)
-    if entry:
-        repo, filename = entry.hf_repo, entry.quantized_file
-        print(f"Resolved catalog label {entry.label!r} -> {repo}/{filename}")
+    repo, filename = download.parse_spec(args.model)
+    if filename is None:
+        # A bare repo — the only form that leaves the file unchosen. Show the repo's real file
+        # list and let the reader pick; `parse_spec` has already refused the half-way spelling
+        # (a partial quant like ':Q8_0') that would otherwise be resolved by guesswork here.
+        filename = _pick_file(repo)
+    existing = download.local_path(filename)
+    if existing.is_file():
+        # `download()` itself is safe to call again (it just returns `existing`), but printing
+        # "Downloading ..." for a file that never moves a byte would tell the reader something
+        # happened that did not.
+        print(f"Already have it: {existing}")
+        target = existing
     else:
-        repo, filename = download.parse_spec(args.model)
-    print(f"Downloading {repo}/{filename} ...")
-    target = download.download(repo, filename, on_progress=download.stderr_progress)
-    print(f"Saved {target}")
+        print(f"Downloading {repo}/{filename} ...")
+        target = download.download(repo, filename, on_progress=download.stderr_progress)
+        print(f"Saved {target}")
     _pull_projector(repo, target)
+    # Only `join` — a downloaded model is not yet on any grid, so `grid models` and `grid chat`
+    # would both come back empty. The rest of the path is suggested by `join` itself, once there
+    # is something for them to find.
+    alias = target.stem
+    print(f"\nNext:  grid join <grid-url> --serve {target.name} --advertise-as {alias} --name this-computer")
     return 0
 
 
-def _pull_projector(repo: str, model_path) -> None:
+def _pick_file(repo: str) -> str:
+    """Show every `.gguf` file in [repo] and let the reader choose, rather than silently
+    downloading a guess. No arrow-key menu — that needs a UI dependency this package does not
+    carry — a numbered list with `input()` gets the same outcome: see everything, pick one.
+
+    Falls straight to the suggested default with no prompt when there is nothing to choose
+    between, or when stdin/stdout are not a real terminal (a script piping `grid pull` must never
+    block waiting on a keypress that will never come).
+    """
+    from shared.models import download
+
+    default, names = download.resolve_file(repo)
+    if len(names) == 1 or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print(f"Picked {default!r} ({download.DEFAULT_QUANT})")
+        return default
+
+    print(f"{repo} ships {len(names)} files:")
+    for i, name in enumerate(names, 1):
+        marker = "  <- default" if name == default else ""
+        print(f"  {i}. {name}{marker}")
+    choice = input(f"Pick a number [1-{len(names)}], or press Enter for the default: ").strip()
+    if not choice:
+        return default
+    if choice.isdigit() and 1 <= int(choice) <= len(names):
+        return names[int(choice) - 1]
+    print(f"Not a valid choice — using the default {default!r}.")
+    return default
+
+
+def _pull_projector(repo: str, model_path) -> bool:
     """Fetch the repo's multimodal projector, if it has one, so vision needs no second command.
+    Returns whether this model can see, so the caller can offer `grid chat --image` to a model
+    that will actually answer it.
 
     Saved as ``<model-stem>.mmproj.gguf`` rather than under its own name: every vision repo calls
     its projector some spelling of ``mmproj-F16.gguf``, so keeping the original name would make two
@@ -379,14 +424,15 @@ def _pull_projector(repo: str, model_path) -> None:
 
     projector = download.find_projector(repo)
     if not projector:
-        return
+        return False
     target = model_path.parent / (model_path.stem + gguf.PROJECTOR_SUFFIX)
     if target.is_file():
         print(f"Vision projector already present: {target.name}")
-        return
-    print(f"This is a vision model. Downloading {repo}/{projector} ...")
+        return True
+    print(f"Supports vision. Downloading {repo}/{projector} ...")
     download.download(repo, projector, out=target, on_progress=download.stderr_progress)
     print(f"Saved {target}")
+    return True
 
 
 def cmd_ctx(args: argparse.Namespace) -> int:

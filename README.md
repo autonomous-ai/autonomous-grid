@@ -4,328 +4,325 @@
 
 ### Your AI intranet: network the computers you already own for inference and training.
 
+[![latest release](https://img.shields.io/github/v/release/autonomous-ai/autonomous-grid?label=version)](https://github.com/autonomous-ai/autonomous-grid/releases)
+
 [**Quickstart**](#quickstart) · [From anywhere](#working-from-anywhere) · [Inference](#inference) · [Training](#training-experimental) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
 https://github.com/user-attachments/assets/9573e961-423f-45ae-ada6-b7a8a361f188
 
 </div>
 
-An inference server serves whatever models fit on one machine. Grid puts every machine you have
-behind **one OpenAI-compatible endpoint**.
+**Grid** puts every computer you own behind one OpenAI-compatible endpoint, and sends each request
+to whichever one runs the right model. Local by default — no account, no relay, nothing to sign
+into.
 
-**Inference.** Each request routes to whichever computer runs the right model. Running one takes an
-inference engine — bring yours, or let Grid install one. Ollama, vLLM, LM Studio, MLX, llama.cpp and
-ComfyUI stay where they are; Grid does not replace them, it networks them.
+If you want a desktop app instead of a terminal, get it at [autonomous.ai/grid](https://www.autonomous.ai/grid).
+If your computers are in different places, start here then switch to [remote mode](#working-from-anywhere).
+If you already run Ollama, vLLM or LM Studio, keep them — Grid networks them, it does not replace them.
 
-**Training.** The same fleet teaches a small model your work, and the data, the attempts and the
-weights never leave your network. It belongs here because RL fine-tuning is roughly 75% sampling,
-sampling is inference, and inference is what a grid already does.
+## Install
 
-**Intranet** — the old word for a private network. An AI intranet is every computer you own,
-answering as one.
-
-**Local by default: no account, no relay, nothing to sign into.** Your apps point at a machine on
-your own network, and it keeps working if we disappear. From outside your network:
-[Working from anywhere](#working-from-anywhere).
-
-<img src="docs/home-grid.png" alt="Grid Desktop, OpenClaw, Hermes and your own app all draw from one local AI grid spanning every machine you own. The grid is a single box holding two halves — inference, and training marked experimental — beside a roll-up of what it adds up to: 5 nodes, 5 models, 424 GB of GPU memory. Underneath, the computers you already own join it, each keeping the engine it already runs: a MacBook Pro on MLX with 64 GB serving Qwen3-30B-A3B, a Mac Studio on MLX with 256 GB serving MiniMax-M2, a Mac mini on Ollama with 24 GB serving Gemma 3 12B, an RTX 6000 on vLLM with 48 GB serving Qwen3-32B, and an RTX 5090 on vLLM with 32 GB serving Gemma 3 27B." width="860">
-
-
----
-
-## Quickstart
-
-> [!TIP]
-> **Prefer an app?** Download it here: **[autonomous.ai/grid](https://www.autonomous.ai/grid)**.
-
-**Install** — on each computer (macOS / Linux):
+On every computer, macOS or Linux:
 
 ```bash
 curl -fsSL https://grid.autonomous.ai/install.sh | bash
 ```
 
-That gives you a command called `grid`. Check it worked before going on:
+That installs a command called `grid`. Check it with `grid --version`.
+
+> [!TIP]
+> "command not found" — open a new terminal and try again.
+
+---
+
+## Quickstart
+
+Two computers: one hosts the grid, the other runs a model for it. They can be the same computer —
+or more than two; add each one the same way. Follow these steps in order.
+
+**Step 1 — the computer that will host the grid.** It only routes requests, so it does not need a
+graphics card:
 
 ```bash
-grid --version
-# grid 0.3.23
+grid start
+```
+```
+✓ Grid 'home' running — http://192.168.1.25:8090
 ```
 
-If you get "command not found", close the terminal and open a new one, then try again.
+Copy that address — the other computers join at it, and your apps send every request to it.
+Lost it? `grid info` prints it again.
 
-<details>
-<summary>Installing a specific version, or from source</summary>
-
-Pin a release by setting `GRID_VERSION` before installing:
+**Step 2 — the computer that will run a model.** A different machine from step 1:
 
 ```bash
-GRID_VERSION=0.3.23 curl -fsSL https://grid.autonomous.ai/install.sh | bash
-```
-
-Working on Grid itself? Clone the repository and install it in editable mode with
-[uv](https://docs.astral.sh/uv/) instead:
-
-```bash
-uv tool install -e . --force
-```
-
-`agrid` is installed as a second name for the same command, for machines where something else
-already answers to `grid`.
-
-</details>
-
-### What you are about to build
-
-Say you own three computers and one of them has a good graphics card. Normally an AI model runs on
-one machine, and only that machine can use it.
-
-A **grid** puts a single address in front of all of them. Your apps send every request to that one
-address; the grid works out which computer has the right model and forwards it there. Add a
-computer and its models join the pool. Turn one off and the rest keep working.
-
-Three words appear throughout, and they mean exactly this:
-
-| | |
-|---|---|
-| **grid** | the single address your apps talk to. One computer hosts it. |
-| **engine** | the program that actually runs a model. Grid installs one for you. |
-| **model** | the AI itself — a file you download once, several gigabytes. |
-
-Four steps, and **each one says which computer to run it on** — that is the part that trips people
-up. Step 1 happens once, on one machine. Step 2 is repeated on every machine that will run a model.
-Remote mode changes [three commands](#working-from-anywhere).
-
-### 1 · Start a grid
-
-**Run on: one computer, once.** Pick whichever machine is usually left on — a Mac mini, a desktop,
-the box already sitting in the corner. It does **not** need a graphics card, because this machine is
-directing traffic, not running models.
-
-```bash
-grid up
-# grid=home
-# grid_url=http://192.168.1.25:8090
-```
-
-`grid up` starts a small program that keeps running in the background on this computer. That
-program *is* the grid: it listens on the address printed above, keeps track of which computers have
-joined, and passes each request to whichever one can answer it. Nothing is downloaded and no model
-runs yet — you have just opened the front door.
-
-**Copy that `grid_url` somewhere.** Every other computer needs it in step 2, and your apps need it
-in step 4. `home` is just a name; you can have more than one grid later.
-
-To stop it again: `grid down`. The setup is remembered, so `grid up` brings it straight back.
-
-> **If you see a warning that nothing can reach the address**, the grid is running fine — it simply
-> picked the wrong one of your machine's network addresses, which happens on computers running a
-> VPN. Follow the two commands the warning prints. To try everything on a single computer first,
-> use `grid up --advertise-host 127.0.0.1`.
-
-One more thing, only if you ever make a second grid: creating it does not switch you to it.
-`grid up research` builds a grid called *research*, but `grid info`, `grid models` and `grid chat`
-keep meaning the first one until you run `grid use research`. With a single grid — where most
-people stay — this never comes up.
-
-### 2 · Add a computer
-
-**Run on: every computer that will run a model** — including the one from step 1, if it has a GPU
-worth using. Repeat this whole step per machine.
-
-A model needs an **inference engine** to run it — Grid does not run models itself. Bring one you
-already have, or install the one Grid ships (llama.cpp).
-
-You do not have to work out which build suits your hardware. Run this and it tells you what it
-found, what it installed, and whether anything faster is available to you:
-
-```bash
+# Install the program that runs models on this computer
 grid engine install llama.cpp
+
+# Download a model — several gigabytes, once. A repo with more than one file lists
+# them and asks; press Enter to take the flagged default.
+grid pull unsloth/gemma-3-4b-it-GGUF
+```
+```
+Saved /Users/you/.grid/models/gemma-3-4b-it-Q4_K_M.gguf
+Supports vision. Downloading unsloth/gemma-3-4b-it-GGUF/mmproj-F16.gguf ...
+Saved /Users/you/.grid/models/gemma-3-4b-it-Q4_K_M.mmproj.gguf
 ```
 
-**On macOS** it downloads an official, SHA-256-verified release. Metal, no Homebrew, no admin
-rights, nothing else to decide:
+This one also reads images — `grid pull` fetched the second file it needs for that automatically.
 
-```
-Installed llama-server -> ~/.grid/bin/llama-server
-```
-
-**On Linux with an NVIDIA GPU** it reads your cards first, then installs the Vulkan build — real
-GPU inference on those same cards, without the multi-gigabyte CUDA toolkit:
-
-```
-Detected GPUs: sm_120, sm_120
-Installed llama-server -> ~/.grid/bin/llama-server
-
-This is the Vulkan build — it runs on your NVIDIA GPUs with no CUDA toolkit.
-CUDA is faster, and this machine can build it:
-    grid engine install llama.cpp --from-source
-```
-
-That last line is a live answer about *your* machine, not a generic suggestion. llama.cpp publishes
-no prebuilt CUDA for Linux, so CUDA has to be compiled here — and compiling is only worth starting
-if it can finish. Grid checks your toolchain and says so. When it can't, you get the reason instead
-of the offer:
-
-```
-CUDA would be faster, but not from this machine yet:
-  This CUDA toolkit cannot build for compute_120 — the newest it supports is compute_89.
-  RTX 50-series needs CUDA 12.8 or newer; install a current toolkit from NVIDIA rather
-  than your distro's default package.
-```
-
-So the choice in front of you is:
-
-| | you get | costs you | pick it when |
-|---|---|---|---|
-| **Vulkan** (default) | GPU inference now | one download | you want to be running today |
-| **CUDA** `--from-source` | the fastest backend | CUDA toolkit + a long compile | the box is a permanent node |
-
-`--from-source` runs the same check before it clones anything, so it refuses up front rather than
-failing partway through a build.
-
-**On Linux with no GPU** the same command installs the CPU build and says so.
-
-Next, download a model onto this computer. Grid keeps a short list of models it knows are worth
-running, each under a **short name** you can pass to `grid pull`:
+Now hand it to the grid. Four values, three of them yours to fill in:
 
 ```bash
-grid catalog
-# Grid can pull:
-#   qwen36-35b-a3b-mtp   unsloth/Qwen3.6-35B-A3B-MTP-GGUF/...  (Apple Silicon, min 32 GB, language)
-#   qwen36-27b-mtp       unsloth/Qwen3.6-27B-MTP-GGUF/...      (NVIDIA, min 24 GB, language)
+grid join <grid-url> \
+    --serve "<model-file>" \
+    --advertise-as "<model-name>" \
+    --name "<computer-name>"
 ```
 
-Pick the one matching this computer and pull it. This downloads several gigabytes:
+| | what to put there |
+|---|---|
+| `<grid-url>` | the address step 1 printed |
+| `<model-file>` | the filename `grid pull` just saved, ending `.gguf` |
+| `<model-name>` | what apps will ask for — anything short and readable |
+| `<computer-name>` | a label for this computer, so you can tell it apart later |
+
+**Step 3 — back on the computer hosting the grid:**
 
 ```bash
-grid pull qwen36-35b-a3b-mtp                       # Apple Silicon, 32 GB unified memory or more
-# Resolved catalog label 'qwen36-35b-a3b-mtp' -> unsloth/Qwen3.6-35B-A3B-MTP-GGUF/...
-# Saved /Users/you/.grid/models/Qwen3.6-35B-A3B-UD-IQ3_S.gguf
+# What the grid can answer right now
+grid models
 
-grid pull qwen36-27b-mtp                           # NVIDIA, 24 GB VRAM or more
-# Saved /home/you/.grid/models/Qwen3.6-27B-UD-Q5_K_XL.gguf
+# Ask it something — the <model-name> you chose above
+grid chat -m "<model-name>" "write a haiku about local GPUs"
 ```
 
-**Not in the catalog?** Models live on a site called Hugging Face, and any model there in the
-`.gguf` format works. Give the repository, a colon, then the exact filename inside it — both are
-visible on that model's "Files" tab:
-
-```bash
-grid pull unsloth/gemma-3-4b-it-GGUF:gemma-3-4b-it-Q4_K_M.gguf
-#         └──── the repository ────┘ └──── the file in it ────┘
-```
-
-**Models that can see pictures work too, and you do not have to do anything extra.** A model like
-that is shipped as two files — the model, plus a second one that handles images — and `grid pull`
-fetches both when it finds them:
-
-```bash
-grid pull ggml-org/SmolVLM-256M-Instruct-GGUF:SmolVLM-256M-Instruct-Q8_0.gguf
-# Saved ~/.grid/models/SmolVLM-256M-Instruct-Q8_0.gguf
-# This is a vision model. Downloading mmproj-SmolVLM-256M-Instruct-Q8_0.gguf ...
-# Saved ~/.grid/models/SmolVLM-256M-Instruct-Q8_0.mmproj.gguf
-```
-
-When you serve it in a moment, Grid spots that second file on its own and turns image support on —
-you will see `Vision: serving with projector …` — and tells the grid the model accepts pictures, so
-your apps can send them.
-
-Now hand that model to the grid. **The name you pull with and the name you serve with are
-different**, and this is the one place people get stuck: `grid pull` takes the short catalog name,
-while `--serve` takes the **filename that was saved** — the path printed on the `Saved` line above.
-`--advertise-as` then gives the grid a short name again, so your apps ask for something readable
-instead of a filename:
-
-```bash
-grid join http://192.168.1.25:8090 \
-    --serve Qwen3.6-35B-A3B-UD-IQ3_S.gguf \
-    --advertise-as qwen36-35b-a3b-mtp \
-    --name mac-studio
-```
-
-Reading that command left to right: join *the grid at this address* (the `grid_url` from step 1),
-start the engine on *this model file*, tell the grid to call it *qwen36-35b-a3b-mtp*, and list this
-computer as *mac-studio*.
-
-It waits until the model is genuinely loaded, then tells you so:
-
-```
-✓ Serving on grid 'home'
-    qwen36-35b-a3b-mtp
-  engine address   http://192.168.1.10:8081/v1
-  this computer    mac-studio
-
-  Try it:   grid chat -m qwen36-35b-a3b-mtp "hello"
-  Stop it:  grid leave home --engine mac-studio
-```
-
-Large models take a while to load. If it is still loading, you get a `tail -f` command to watch
-progress instead — and if it fails, the reason is printed right there, not buried in a file.
-
-On NVIDIA the only change is the filename:
-
-```bash
-    --serve Qwen3.6-27B-UD-Q5_K_XL.gguf --advertise-as qwen36-27b-mtp --name gpu-box
-```
-
-Forgotten the filename? `grid catalog` reprints every model on this machine under **Local models:**.
-
-The built-in engine sizes itself to the machine: at load it measures free memory and takes the
-largest context that fits, capped by what the model was trained for. Pin it with `--ctx-size N` when
-you need an exact window — that turns the automatic fit off, so an `N` this machine cannot hold
-fails to start rather than quietly shrinking. `--n-predict`, `--parallel`, `--temp`, `--flash-attn`,
-`--reasoning-budget` and `--endpoint-port` are there too — `grid join --help` and
-[docs/cli.md](docs/cli.md) have the full set.
-
-**Already running Ollama, vLLM or LM Studio?** Point Grid at it instead. `--at` is its address on
-your network, and `-m` is the model that machine already serves.
-
-```bash
-grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1 -m qwen3-coder --name gpu-4090
-```
-
-Repeat for each computer.
-
-### 3 · Ask it something
-
-**Run on: the computer from step 1.** That machine already knows the grid, so these commands need
-no arguments. From any *other* computer, name the grid by its URL — `grid models
-http://192.168.1.25:8090`, `grid chat --grid http://192.168.1.25:8090 ...` — otherwise you get
-`No grids yet. Run 'grid up' to bring one online.`, which means *this* machine has no grid
-configured, not that your grid is down.
-
-First see what the grid can actually serve right now — this answers "did step 2 work":
-
-```bash
-grid models --verbose
-# MODEL               ENGINE      WHERE
-# qwen36-35b-a3b-mtp  mac-studio  http://192.168.1.10:8081/v1
-# qwen3-coder         gpu-4090    http://192.168.1.20:8000/v1
-```
-
-One row per model the grid can reach. `MODEL` is the name to ask for — `qwen36-35b-a3b-mtp` is the
-one you set with `--advertise-as`, and `qwen3-coder` came from the Ollama machine, which was already
-serving it under that name. `ENGINE` is the `--name` you gave each computer. An empty list means no
-computer has joined yet; go back to step 2.
-
-Then ask it something, using a name from the `MODEL` column:
-
-```bash
-grid chat -m qwen36-35b-a3b-mtp "write a haiku about local GPUs"
-```
-
-### 4 · Point your apps at it
-
-**Run on: whichever computer your app runs on.** Your app talks to the grid the same way it talks
-to OpenAI — one base URL and a key — so anything that speaks the OpenAI API works unmodified.
-
-`grid info --env` prints those two values for whichever mode you are in:
+**Step 4 — point your apps at it.** Anything that speaks the OpenAI API:
 
 ```bash
 grid info --env
-# OPENAI_BASE_URL=http://192.168.1.25:8090/v1
-# OPENAI_API_KEY=local-grid
 ```
+```
+export OPENAI_BASE_URL='http://192.168.1.25:8090/v1'
+export OPENAI_API_KEY='local-grid'
+```
+
+That is the whole path. Done for now? See [Stopping, leaving, deleting](#stopping-leaving-deleting).
+The rest of this page explains the pieces.
+
+### What a grid is
+
+A model runs on one computer, and only that computer can use it.
+
+A **grid** is a single address standing in front of several computers. Send a request there and it
+goes to whichever computer holds the right model. Add a computer and its models join the pool; stop
+one and the rest keep working.
+
+- **grid** — the address apps send requests to. One computer hosts it.
+- **engine** — the program that runs a model. Grid installs one for you.
+- **model** — the AI itself. One file, several gigabytes, downloaded once.
+
+Every grid has two ways to refer to it, and commands take one or the other:
+
+| | what it looks like | what takes it |
+|---|---|---|
+| **grid name** | `home`, `research` | `grid start`, `grid stop`, `grid delete`, `grid use` |
+| **grid url** | `http://192.168.1.25:8090` | `grid join`, and your apps |
+
+`grid join` takes either. A third thing that looks similar but is not a grid at all: `--name` at
+join time labels **the computer** you are joining, not the grid.
+
+### Picking a model
+
+```bash
+grid catalog
+```
+```
+Grid can pull:
+  unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-IQ3_S.gguf (Apple Silicon, min 32 GB, language)
+  unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-UD-Q5_K_XL.gguf (NVIDIA, min 24 GB, language)
+```
+
+Copy a line, put a `:` before the filename, and pull it:
+
+```bash
+grid pull unsloth/Qwen3.6-35B-A3B-MTP-GGUF:Qwen3.6-35B-A3B-UD-IQ3_S.gguf
+```
+```
+Downloading unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-IQ3_S.gguf ...
+Saved /Users/you/.grid/models/Qwen3.6-35B-A3B-UD-IQ3_S.gguf
+```
+
+The path after `Saved` is your own home directory, not literally `/Users/you`. What matters is the
+**filename** at the end — the same one already visible in the `grid catalog` line above, after the
+last `/`. That filename is what `grid join --serve` needs.
+
+**Not in the catalog?** Any GGUF repo on Hugging Face works — just the repo, nothing else:
+
+```bash
+grid pull unsloth/gemma-3-4b-it-GGUF
+```
+
+A repo like this does not hold one file — it holds the *same* model saved several times, each a
+different size (that is what "quantized" means). In a real terminal you get all of them to choose
+from, biggest quality, smallest download flagged as the default:
+
+```
+unsloth/gemma-3-4b-it-GGUF ships 26 files:
+  1. gemma-3-4b-it-BF16.gguf
+  ...
+  10. gemma-3-4b-it-Q4_K_M.gguf  <- default
+  ...
+  15. gemma-3-4b-it-Q8_0.gguf
+Pick a number [1-26], or press Enter for the default:
+```
+
+Piped or scripted (no terminal to prompt), it takes that default — `Q4_K_M`, a reasonable middle
+ground. Already know which file you want? Name it in full after a `:` and there is no prompt:
+
+```bash
+grid pull unsloth/gemma-3-4b-it-GGUF:gemma-3-4b-it-Q8_0.gguf
+```
+
+Those are the only two ways: **the repo alone** and pick from the list, or **the repo plus the
+exact filename**. Half of a filename (`:Q8_0`) is refused rather than guessed at — it matches
+`gemma-3-4b-it-Q8_0.gguf` and `gemma-3-4b-it-UD-Q8_0.gguf` equally well, and neither is a choice
+you made.
+
+- `--advertise-as` gives the grid a short name again, so apps ask for something readable instead of
+  a filename.
+- Vision models need a second file. `grid pull` fetches it automatically and `--serve` finds it —
+  nothing extra to type.
+
+### Three ways to join a computer
+
+`<grid-url>` below is the address the computer hosting the grid printed at `grid start`.
+
+**Nothing installed on it yet** — install the engine Grid ships, download a model, then join:
+
+```bash
+grid engine install llama.cpp
+grid pull unsloth/gemma-3-4b-it-GGUF
+```
+
+Then join with the filename `grid pull` just printed on its `Saved` line:
+
+```bash
+grid join <grid-url> --serve "<model-file>" --advertise-as "<model-name>"
+```
+
+`grid engine install` picks the build for that machine: Metal on macOS, Vulkan on a Linux box with
+an NVIDIA card, CPU otherwise. It also says whether a faster CUDA build is possible there.
+
+| | you get | costs you | pick it when |
+|---|---|---|---|
+| **Vulkan** (default on Linux) | GPU inference now | one download | you want to be running today |
+| **CUDA** `--from-source` | the fastest backend | CUDA toolkit + a long compile | the box is a permanent node |
+
+**It already runs Ollama, vLLM or LM Studio** — keep it, and point Grid at it:
+
+```bash
+grid join <grid-url> --at <engine-url> -m "<model-name>" --name "<computer-name>"
+```
+
+`<engine-url>` is where that program already listens, and `<model-name>` is a model it already
+serves — Grid does not download it or start it, it only routes to it:
+
+```bash
+grid join http://192.168.1.25:8090 --at http://192.168.1.20:11434/v1 -m "qwen3-coder" --name "gpu-4090"
+```
+
+`11434` is Ollama's port; vLLM is usually `8000` and LM Studio `1234`.
+
+**It is somewhere else** — another office, a friend's house, behind a VPN. Local mode needs every
+computer on the same network, so this one needs [remote mode](#working-from-anywhere).
+
+The engine sizes itself to whatever machine it lands on: at load it measures free memory and takes
+the largest context that fits. `--ctx-size N` pins it instead. `--n-predict`, `--parallel`,
+`--temp`, `--flash-attn` and `--endpoint-port` are there too — see `grid join --help`.
+
+### Stopping, leaving, deleting
+
+Three different commands, easy to mix up:
+
+- **`grid leave`** — this computer stops serving. Everyone else on the grid keeps working.
+- **`grid stop`** — pauses the grid itself. Nothing is lost; `grid start` brings it back exactly
+  as it was.
+- **`grid delete`** — removes a grid's local config for good. Cannot be undone.
+
+```bash
+# Done serving from this computer
+grid leave
+```
+```
+Left engine <computer-name> on <grid-name>.
+```
+
+Serving more than one thing from here? Say which — the `--name` you gave at join works, so does
+the model it serves:
+
+```bash
+grid leave --engine "<computer-name>"
+grid leave --engine "<model-name>"
+grid leave --all      # everything this computer joined
+```
+
+```bash
+# Pause the grid itself
+grid stop
+```
+```
+✓ Grid 'home' stopped. Its setup is kept.
+```
+
+Deleting removes a grid for good, not just pauses it — it asks to confirm first:
+
+```bash
+grid delete <grid-name>
+```
+```
+Delete grid '<grid-name>' (ag-a1b2c3d4)? This removes its local config and cannot be undone. [y/N] y
+Deleted grid '<grid-name>'.
+```
+
+A grid name with a space needs quotes: `grid delete "my grid"`.
+
+### Running commands from another computer
+
+`grid models` and `grid chat` need no arguments on the computer that hosts the grid. From anywhere
+else, name the grid by its URL:
+
+```bash
+grid models http://192.168.1.25:8090
+grid chat --grid http://192.168.1.25:8090 -m "<model-name>" "hello"
+```
+
+`No grid on this computer yet` means *this* machine has no grid set up — not that yours has stopped.
+
+### More than one grid
+
+Your first grid is called `home`. Pass a name to make another one:
+
+```bash
+grid start <grid-name>
+```
+```
+✓ Grid '<grid-name>' running — http://192.168.1.25:8091
+```
+
+Starting it does not switch to it — `grid info`, `grid models` and `grid chat` still mean `home`
+until you switch:
+
+```bash
+grid use <grid-name>
+```
+
+With one grid, none of this comes up.
+
+### Pointing apps at the grid
+
+Every app below needs the two values `grid info --env` printed: `OPENAI_BASE_URL` becomes
+`baseUrl` / `base_url`, `OPENAI_API_KEY` becomes `apiKey`.
 
 <details>
 <summary><b>OpenClaw</b></summary>
@@ -335,14 +332,14 @@ Add Grid as a provider in `~/.openclaw/openclaw.json`
 
 ```json
 {
-  "agents": { "defaults": { "model": { "primary": "grid/qwen36-35b-a3b-mtp" } } },
+  "agents": { "defaults": { "model": { "primary": "grid/<model-name>" } } },
   "models": {
     "providers": {
       "grid": {
         "baseUrl": "http://192.168.1.25:8090/v1",
         "apiKey": "local-grid",
         "api": "openai-completions",
-        "models": [{ "id": "qwen36-35b-a3b-mtp", "name": "Qwen3.6 35B (via Grid)" }]
+        "models": [{ "id": "<model-name>", "name": "<model-name> (via Grid)" }]
       }
     }
   }
@@ -360,12 +357,12 @@ Set the endpoint in `~/.hermes/config.yaml`
 ```yaml
 model:
   provider: custom
-  default: qwen36-35b-a3b-mtp
+  default: <model-name>
   base_url: http://192.168.1.25:8090/v1
 ```
 
 ```bash
-echo 'OPENAI_API_KEY=local-grid' >> ~/.hermes/.env     # remote: use your access token
+echo 'OPENAI_API_KEY=local-grid' >> ~/.hermes/.env
 ```
 
 </details>
@@ -373,46 +370,74 @@ echo 'OPENAI_API_KEY=local-grid' >> ~/.hermes/.env     # remote: use your access
 <details>
 <summary><b>Your own code</b></summary>
 
-Point any OpenAI SDK at the values from `grid info --env`:
+Any OpenAI SDK works the same way:
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(base_url="http://192.168.1.25:8090/v1", api_key="local-grid")
 client.chat.completions.create(
-    model="qwen36-35b-a3b-mtp",         # routed to the Mac Studio automatically
+    model="<model-name>",               # routed to whichever computer serves it
     messages=[{"role": "user", "content": "hello"}],
 )
 ```
 
 </details>
 
----
+### The commands
+
+| | |
+|---|---|
+| `grid start` / `grid stop` | start or stop the grid on this computer |
+| `grid delete` | remove a grid's local config for good |
+| `grid join` / `grid leave` | add or remove this computer from a grid |
+| `grid engine install` | install the engine that runs models |
+| `grid catalog` | models available to pull, and models already here |
+| `grid pull` | download a model |
+| `grid models` | what the grid can answer right now |
+| `grid chat` | send one message |
+| `grid info` | the address and key for apps |
+| `grid ls` / `grid use` | list grids, pick the active one |
+| `grid mode` | switch between local and remote |
+
+`grid up` and `grid down` still work — older names for `start` and `stop`. Full reference:
+[docs/cli.md](docs/cli.md).
+
 
 ## Working from anywhere
 
-To reach the same computers from outside your network, switch to remote mode: engines poll
-Autonomous Relay outbound, so they serve from behind a NAT with no inbound port and no public IP.
-
-**The trade is that your request and its answer pass through our relay, which local mode never
-does.** We forward and keep nothing — no stored prompts, no training on your traffic.
+Local mode needs every computer on the same network. Remote mode drops that: each machine dials
+out to Autonomous Relay, so it serves from behind a NAT with no inbound port and no public IP.
 
 ```bash
-grid mode remote     # persisted to ~/.grid/state.json; --local / --remote overrides one command
-grid login           # device-code flow, opens a browser; --no-browser prints the code
+# Switch this computer to remote mode — remembered until you switch back
+grid mode remote
+
+# Sign in; opens a browser
+grid login
 ```
+
+- The mode is remembered. `--local` / `--remote` overrides one command.
+- `grid login` opens a browser. `--no-browser` prints a code to type instead.
+- Requests pass through our relay, which local mode never does. We forward and keep nothing — no
+  stored prompts, no training on your traffic.
 
 Three commands change. `chat`, `models`, `info` and your apps are identical.
 
 | | 🏠 local | 🌐 remote |
 |---|---|---|
-| **start a grid** | `grid up` | `grid up research` then `grid use research` |
-| **add a computer** | `grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1` | `grid join research --at http://localhost:8000/v1` |
+| **start a grid** | `grid start` | `grid start <grid-name>` then `grid use <grid-name>` |
+| **add a computer** | `grid join <grid-url> --at <engine-url>` | `grid join <grid-name> --at <engine-url>` |
 | **API key** | `local-grid` — auth is off | your per-grid token, from `grid info --env` |
 
-Remote `--at` is `localhost` because the engine polls outbound; nothing reaches in. `grid ls` lists
-the grids your sign-in can reach, `--type permissioned-providers` restricts who may serve, and
-`grid members add research <email>` invites people ([Members](docs/cli.md#members)).
+Remote `--at` is `localhost` because the engine dials out; nothing reaches in.
+
+- `grid ls` — the grids your sign-in can reach
+- `grid start <grid-name> --type permissioned-providers` — restrict who may serve
+- `grid members add <grid-name> someone@example.com` — invite people ([Members](docs/cli.md#members))
+- `grid leave` and `grid stop` work exactly like [local](#stopping-leaving-deleting). `grid delete`
+  doesn't — a remote grid lives on the account that created it, not your disk. Delete it for
+  everyone from the grid's page on [autonomous.ai/grid](https://www.autonomous.ai/grid) instead.
 
 ---
 
@@ -422,95 +447,110 @@ the grids your sign-in can reach, `--type permissioned-providers` restricts who 
 <img src="docs/fig-inference.png" width="880" alt="Your apps — OpenClaw, Hermes, your own code — call one OpenAI-compatible endpoint. Below the orchestrator sits your fleet: a MacBook Pro, a Mac Studio, a Mac mini, an RTX 6000 and an RTX 5090. A request goes down to the single machine already serving that model and the answer comes back the same way; the rest stay idle.">
 </p>
 
-### Engines and models
+### Images and video
 
-**Grid runs no model code of its own; an inference engine does.** Bring one, or let Grid install
-one of the two it ships: `llama.cpp` for text, ComfyUI for media. Both work the same in either mode
-— only the grid you join differs (a remote name, or a local `grid_url`).
+Grid ships a second engine, ComfyUI, for media:
 
 ```bash
-grid engine install llama.cpp           # the text engine — add --from-source for CUDA on Linux
-grid pull qwen36-35b-a3b-mtp            # a text MODEL — see `grid catalog`, or any HF GGUF
-grid join http://192.168.1.25:8090 --serve Qwen3.6-35B-A3B-UD-IQ3_S.gguf --advertise-as qwen36-35b-a3b-mtp
-                                        # --serve takes the FILENAME `grid pull` saved
+# Install the media engine
+grid engine install comfyui
 
-grid engine install comfyui             # the media engine
-grid engine pull image_generation       # a media BUNDLE — also image_editing, i2v
+# Download the model files for making images
+grid engine pull image_generation
+
+# Join this computer as a media engine
 grid join http://192.168.1.25:8090 --media --bundle image_generation
-grid image "a compact walnut desk beside a sunlit window"
+
+# Make an image
+grid image "a compact walnut desk beside a sunlit window" --grid http://192.168.1.25:8090
 ```
 
-On local, `grid image` needs `--grid http://192.168.1.25:8090` — use-commands take the grid as a flag, because
-the positional argument is the prompt.
+- `grid engine pull` also takes `image_editing` and `i2v`.
+- `grid image` needs `--grid` on local — its positional argument is the prompt, so the grid is a flag.
 
-### No GPU at all? Join with an API key
+### No GPU? Join with an API key
 
-`grid join --api openai` serves OpenAI's models to your grid under your own key — an API engine,
-remote only. See what a join would serve first, with no key and no network call:
+`grid join --api openai` serves OpenAI's models to your grid under your own key. Remote only.
+
+See what a join would serve first — no key, no network call:
 
 ```bash
 grid catalog --api openai
-#   openai:gpt-5.5           1,050,000 ctx   tools, vision, json, structured
-#   openai:gpt-5.4-mini        400,000 ctx   tools, vision, json, structured
-
-export OPENAI_API_KEY=sk-…
-grid join research --api openai         # or -m openai:gpt-5.4-mini to narrow
 ```
-
-The key comes from the environment or a hidden prompt, never a flag, and is stored `0o600`. It
-survives `grid logout` — it is your vendor credential, not your grid sign-in. **Requests to
-`openai:*` models leave the grid for OpenAI under your own account's terms**, which the prefix keeps
-visible in every model list. There is no grid-side spend cap; put a budget on the key's OpenAI
-project.
-
-A ChatGPT subscription works instead of a key. `grid join --api codex` contributes a Codex
-subscription seat — no API key; the CLI signs into your ChatGPT account (browser OAuth,
-`--no-browser` for headless) and probes the seat and your egress IP before advertising anything.
-Datacenter and VPS addresses are typically refused, so serve from a residential connection.
+```
+openai:gpt-5.5           1,050,000 ctx   tools, vision, json, structured
+openai:gpt-5.4-mini        400,000 ctx   tools, vision, json, structured
+```
 
 ```bash
-grid catalog --api codex        # per-tier table, offline, no sign-in
-grid join research --api codex
+# The key is read from the environment, never passed as a flag
+export OPENAI_API_KEY=sk-…
+grid join <grid-name> --api openai
 ```
 
-`codex:*` models serve OpenAI's Responses API for external Codex apps — point a Codex CLI/Desktop
-at your grid with `grid info --env`
-([how](docs/cli.md#pointing-a-codex-app-at-your-grid-using-codex-models)); `grid chat` refuses them
-with that same guidance. Jobs spend the seat's own monthly allowance.
-Walkthrough: [docs/codex-quickstart.md](docs/codex-quickstart.md) · [ADR 0015](docs/adr/0015-codex-subscription-engine.md).
+- The key comes from the environment or a hidden prompt, never a flag. Stored `0o600`.
+- It survives `grid logout` — it is your vendor credential, not your grid sign-in.
+- Requests to `openai:*` leave the grid under your own account's terms. The prefix keeps that
+  visible in every model list.
+- No grid-side spend cap. Put a budget on the key's OpenAI project.
+
+A ChatGPT subscription works instead of a key:
+
+```bash
+# See what a codex seat would serve — offline, no sign-in
+grid catalog --api codex
+
+# Sign into ChatGPT in a browser, then serve the seat
+grid join <grid-name> --api codex
+```
+
+- No API key — the CLI signs into your ChatGPT account by browser OAuth (`--no-browser` for headless).
+- It probes the seat and your egress IP before advertising anything. Datacenter and VPS addresses
+  are typically refused, so serve from a residential connection.
+- `codex:*` models serve the Responses API for external Codex apps. Point one at your grid with
+  `grid info --env` ([how](docs/cli.md#pointing-a-codex-app-at-your-grid-using-codex-models));
+  `grid chat` refuses them with the same guidance.
+- Jobs spend the seat's own monthly allowance.
+
+Walkthrough: [docs/codex-quickstart.md](docs/codex-quickstart.md).
 
 ### Run Claude Code on your grid
 
 ```bash
-grid launch claude                      # …or `-- --continue`, and any other Claude Code flag
+grid launch claude
 ```
 
-`grid launch` starts an app already pointed at your grid: endpoint, credential and model names go
-into that app's own process environment and nowhere else — nothing exported to your shell, nothing
-written to a config file, nothing to undo. Remote only, because Claude Code speaks the Anthropic
-Messages dialect and only the relay translates it. It chooses **no model for you** — your own Claude
-Code configuration and `/model` still decide, so check `grid models` and point the app at a name the
-grid serves.
-Walkthrough: [docs/claude-code-quickstart.md](docs/claude-code-quickstart.md) ·
-[contract](docs/cli.md#launch) · [ADR 0028](docs/adr/0028-launch-hands-an-app-the-grid.md).
+`grid launch` starts an app already pointed at your grid.
+
+- Endpoint, credential and model names go into that app's own process environment and nowhere else.
+  Nothing exported to your shell, nothing written to a config file, nothing to undo.
+- Remote only — Claude Code speaks the Anthropic Messages dialect, and only the relay translates it.
+- It picks **no model for you**. Your own Claude Code config and `/model` still decide, so check
+  `grid models` and point the app at a name the grid serves.
+
+Walkthrough: [docs/claude-code-quickstart.md](docs/claude-code-quickstart.md).
 
 ### Don't know which model to ask for? Send `auto`
 
-A grid's catalog shifts as engines join and leave. Rather than hardcoding a model name, an app can
-send the reserved name `auto` and the grid picks a capable model that is free, so requests don't
-queue behind a busy model while idle ones sit unused.
+A grid's catalog shifts as engines join and leave. Instead of hardcoding a model name, an app can
+send the reserved name `auto`, and the grid picks a capable model that is free.
 
 ```bash
-grid router set-advisors openai:gpt-5-mini --grid research   # by name — no key, no URL
-grid router enable --grid research
+# Pick the model that decides where each request goes
+grid router set-advisors openai:gpt-5-mini --grid <grid-name>
+grid router enable --grid <grid-name>
+
+# Now ask for "auto" instead of a model name
 grid chat -m auto "summarize this file in one line"
 ```
 
-**Only a bounded excerpt of each request — never the full conversation — reaches the Advisor**, on
-the platform's key. A dead Advisor falls back to a deterministic pick, so `auto`'s availability
-equals your grid's rather than a vendor's. The `model` field and the `X-Grid-Routed-Model` header
-name whichever model actually answered.
-Contract and transparency table in [docs/cli.md](docs/cli.md#router) · [ADR 0013](docs/adr/0013-auto-routing.md).
+- Only a bounded excerpt of each request reaches the Advisor — never the full conversation — on the
+  platform's key.
+- A dead Advisor falls back to a deterministic pick, so `auto`'s availability equals your grid's
+  rather than a vendor's.
+- The `model` field and the `X-Grid-Routed-Model` header name whichever model actually answered.
+
+Details in [docs/cli.md](docs/cli.md#router).
 
 ---
 
@@ -530,37 +570,48 @@ was never on the internet. It is in your systems. **What you get is an expert in
 than a generalist — worse than the frontier at everything, better at your thing.**
 
 ```bash
-grid train packs                        # ready-made setups for real business data
-grid train init --pack support-replies  # tickets -> a reply-drafting model
-grid train serve                        # run THIS Mac as a rollout node (Apple Silicon)
-grid train run                          # the climb
-grid train ui                           # watch the reward and eval curves
+# Ready-made setups for real business data
+grid train packs
+
+# Turn support tickets into a reply-drafting model
+grid train init --pack support-replies
+
+# Run this Mac as a rollout node (Apple Silicon)
+grid train serve
+
+# The climb
+grid train run
+
+# Watch the reward and eval curves
+grid train ui
 ```
 
-The grid samples rollouts across its nodes, one machine holds the trainer, and the LoRA adapter it
-produces goes back to the serving nodes under a stable name — where `auto` keeps routing to it.
-API nodes (`--api openai`, `--api codex`) cannot serve rollouts: vendors return neither the token
-ids they sampled nor their logprobs, and you cannot own an improvement to a model you rent. In a
-hybrid grid that becomes the useful loop — `auto` sends what the local model can't do yet to a
-frontier node, those tasks are what tonight's run consumes, and the frontier share shrinks as the
-local model catches up.
-
-Both backends train. vLLM returns sampled ids and logprobs natively; `grid train serve` does it from
-MLX, so an all-Apple-Silicon fleet needs no CUDA. `grid train convert-adapter` moves an adapter
-between them.
+- The grid samples rollouts across its nodes; one machine holds the trainer.
+- The LoRA adapter it produces goes back to the serving nodes under a stable name, where `auto`
+  keeps routing to it.
+- API nodes (`--api openai`, `--api codex`) cannot serve rollouts. Vendors return neither the token
+  ids they sampled nor their logprobs, and you cannot own an improvement to a model you rent.
+- In a hybrid grid that becomes the useful loop: `auto` sends what the local model can't do yet to
+  a frontier node, those tasks are what tonight's run consumes, and the frontier share shrinks as
+  the local model catches up.
+- Both backends train. vLLM returns sampled ids and logprobs natively; `grid train serve` does it
+  from MLX, so an all-Apple-Silicon fleet needs no CUDA. `grid train convert-adapter` moves an
+  adapter between them.
 
 A complete GRPO climb, no GPU:
 
 ```bash
-python -m train.torch_grpo_hello        # any machine, CUDA or CPU — ~6 min
-python -m train.mlx.grpo_hello          # Apple Silicon — ~1 min, needs: pip install mlx-lm
+# Any machine, CUDA or CPU — about six minutes
+python -m train.torch_grpo_hello
+
+# Apple Silicon, needs `pip install mlx-lm` — about one minute
+python -m train.mlx.grpo_hello
 ```
 
 Figures and measured curves: [train/README.md](train/README.md). One Mac:
 [docs/start-on-a-mac.md](docs/start-on-a-mac.md) · two machines:
 [docs/two-node-training.md](docs/two-node-training.md) · topologies:
-[docs/topologies.md](docs/topologies.md) · design and limits:
-[ADR 0019](docs/adr/0019-rl-training-plane.md).
+[docs/topologies.md](docs/topologies.md).
 
 ---
 
@@ -570,7 +621,7 @@ Grid sits above your computers the way an API gateway sits above services: one a
 many. The analogy stops there — a gateway routes by path, Grid routes by model name.
 
 - **the grid** — one endpoint routing each request to a computer serving that model. Locally a
-  proxy from `grid up`; remotely a hosted grid on Autonomous Relay after `grid login`.
+  proxy from `grid start`; remotely a hosted grid on Autonomous Relay after `grid login`.
 - **engines** — what runs a model, yours or one Grid installed. `grid join` advertises a computer's
   engines and heartbeats them; Grid never restarts or replaces them. Locally they register with the
   grid directly, remotely they poll the relay outbound — behind a NAT, no inbound port.
@@ -579,10 +630,20 @@ many. The analogy stops there — a gateway routes by path, Grid routes by model
   weights, asks for completions like any other client, and pushes its adapter back to the serving
   nodes.
 
+Two things run on the same fleet: **inference**, and **training** *(experimental)* — the same
+machines teaching a small model your work, where the data, the attempts and the weights never leave
+your network. *Intranet* is the old word for a private network.
+
 ```bash
-grid engines           # what each computer serves, and how many requests at once
-grid models --verbose  # every model, and which computer answers for it
+# What each computer serves, and how many requests it takes at once
+grid engines
+
+# Every model, and which computer answers for it
+grid models --verbose
 ```
+
+`engines` lists what each computer serves and how many requests it takes at once; `models` lists
+every model and which computer answers for it.
 
 Request flow: [ARCHITECTURE.md](docs/ARCHITECTURE.md). Full command surface, including membership
 and remote grid types: [docs/cli.md](docs/cli.md).
@@ -592,7 +653,11 @@ and remote grid types: [docs/cli.md](docs/cli.md).
 ```bash
 git clone https://github.com/autonomous-ai/autonomous-grid
 cd autonomous-grid
+
+# Create the environment, with test dependencies
 uv sync --extra dev
+
+# Run the tests
 uv run --extra dev pytest
 ```
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -69,21 +71,6 @@ def advertised_address_works(url: str, timeout: float = 3.0) -> bool:
         return True
     except httpx.HTTPError:
         return False
-
-
-def unreachable_address_hint(cfg: dict[str, Any], url: str) -> str:
-    """What to tell someone whose grid is up but whose advertised address does not answer."""
-    return (
-        f"\nWarning: this grid is running, but nothing can reach it at {url}.\n"
-        "That address belongs to an interface on this machine (often a VPN) that does not accept\n"
-        "connections back. The grid itself is fine — the address it is advertising is not.\n"
-        "\n"
-        "Give it an address that works, then re-run this command:\n"
-        f"  grid down {cfg['name']}\n"
-        f"  grid up {cfg['name']} --advertise-host <this machine's LAN IP>\n"
-        "\n"
-        "Use 127.0.0.1 to try everything on this one computer first."
-    )
 
 
 def normalize_url(value: str) -> str:
@@ -456,6 +443,88 @@ def _tcp_port_in_use(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.2)
         return sock.connect_ex((host, port)) == 0
+
+
+def port_in_use(port: int) -> bool:
+    """Whether something is already listening on [port] locally.
+
+    Delegates rather than reimplementing: `launcher.is_port_in_use` was already the engine's own
+    check, and a second copy here meant the two could answer differently — and meant a test that
+    stubbed one still reached the real socket through the other, making it depend on whatever
+    happened to be listening on the machine running it. One definition, one stub point.
+
+    Imported inside the call so the attribute is looked up per call: a test that patches
+    `launcher.is_port_in_use` must reach this path too.
+    """
+    from shared.engine import launcher
+
+    return launcher.is_port_in_use(int(port))
+
+
+def free_port_from(start: int, attempts: int = 40) -> int | None:
+    """The first free port at or after [start], so a busy default never dead-ends the first run."""
+    for candidate in range(int(start), int(start) + attempts):
+        if not port_in_use(candidate):
+            return candidate
+    return None
+
+
+def lan_ip_candidates() -> list[str]:
+    """Private IPv4 addresses on this machine, best guess first.
+
+    Needed because the one address `detect_local_ip` finds can be a VPN's, and telling someone to
+    substitute "<this machine's LAN IP>" is asking them to go and find a thing we are already
+    standing on. `getaddrinfo` is not enough — on a VPN'd Mac it returns only the VPN address — so
+    read the interfaces. Best-effort: an unparsable or missing tool yields an empty list and the
+    caller falls back to describing the value instead of naming it.
+    """
+    for cmd in (["ip", "-4", "-o", "addr"], ["ifconfig"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        found = []
+        for match in re.finditer(r"inet\s+(?:addr:)?(\d+\.\d+\.\d+\.\d+)", out.stdout or ""):
+            address = match.group(1)
+            try:
+                parsed = ipaddress.ip_address(address)
+            except ValueError:
+                continue
+            # `.0` hosts are network addresses that some VPN clients park on an interface; they are
+            # never dialable, so offering one would send the reader straight back here.
+            if parsed.is_private and not parsed.is_loopback and not address.endswith(".0"):
+                found.append(address)
+        if found:
+            # 192.168.* before 10.* / 172.16-31.*: home routers hand these out, so on the machines
+            # this message is written for it is the one a second computer can actually reach.
+            return sorted(set(found), key=lambda a: (not a.startswith("192.168."), a))
+    return []
+
+
+def port_holder(port: int, timeout: float = 3.0) -> str | None:
+    """Who is holding [port], as ``'name (pid 4711)'`` — or ``None`` when we cannot tell.
+
+    "Port 8090 is already in use" leaves the reader to discover `lsof` before they can act. Naming
+    the process turns it into something they can decide about, and very often the answer is a grid
+    from an earlier run that they simply need to stop. Best-effort everywhere: no `lsof`, a refusal,
+    or an unparsable answer all mean we say less rather than guess.
+    """
+    try:
+        out = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN", "-F", "cn"],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    pid, name = None, None
+    for line in (out.stdout or "").splitlines():
+        if line.startswith("p"):
+            pid = line[1:].strip()
+        elif line.startswith("c") and name is None:
+            name = line[1:].strip()
+    if not name:
+        return None
+    return f"{name} (pid {pid})" if pid else name
 
 
 def cli_command() -> list[str]:

@@ -18,20 +18,76 @@ def hf_url(repo: str, quantized_file: str) -> str:
     return f"{HF_BASE}/{repo}/resolve/main/{quantized_file}"
 
 
-def parse_spec(spec: str) -> tuple[str, str]:
+DEFAULT_QUANT = "Q4_K_M"
+
+
+def parse_spec(spec: str) -> tuple[str, str | None]:
+    """Split a pull spec into ``(repo, filename)``. ``filename`` is ``None`` for a bare
+    ``owner/repo``, which means the caller must show the repo's file list and let the reader pick.
+
+    Exactly two accepted forms, and no third: name the **exact** file (``repo:model-Q8_0.gguf``),
+    or name **only the repo** and choose from the list. A partial quant (``repo:Q8_0``) is refused
+    rather than silently substring-matched, because that match is a guess: `Q8_0` hits
+    `model-Q8_0.gguf` and `model-UD-Q8_0.gguf` alike, and picking one for a reader who typed
+    neither is how somebody ends up serving a file they never chose.
+    """
     if ":" in spec:
-        repo, _, filename = spec.partition(":")
-        repo = repo.strip()
-        filename = filename.strip()
-        if repo and filename:
-            return repo, filename
-    parts = spec.rsplit("/", 1)
-    if len(parts) == 2 and parts[0] and parts[1]:
-        return parts[0], parts[1]
+        repo, _, tail = spec.partition(":")
+        repo, tail = repo.strip(), tail.strip()
+        if not repo or not tail:
+            raise SystemExit(f"{spec!r} needs a repository before the colon.")
+        if not tail.lower().endswith(".gguf"):
+            raise SystemExit(
+                f"{tail!r} isn't a filename. After the colon, name the exact file — it ends "
+                f"'.gguf' (see the repo's Files and versions tab on huggingface.co). To choose "
+                f"from a list instead, drop the colon and pull just the repo: 'grid pull {repo}'."
+            )
+        return repo, tail
+    if "/" in spec:
+        return spec, None  # bare `owner/repo` — the caller lists the files and asks
     raise SystemExit(
-        f"Unrecognized model spec: {spec!r}. Use '<hf-id>:<filename>' "
-        "(for example unsloth/Qwen3.6-35B-A3B-MTP-GGUF:Qwen3.6-35B-A3B-UD-IQ3_S.gguf)."
+        f"{spec!r} isn't a Hugging Face repository. `grid pull` needs one, not a short name — "
+        "run `grid catalog` and copy the repo/file shown there, or name any repo yourself: "
+        "'unsloth/Qwen3.6-35B-A3B-MTP-GGUF' to pick from its files, or "
+        "'unsloth/Qwen3.6-35B-A3B-MTP-GGUF:<exact-filename>.gguf' to skip the prompt."
     )
+
+
+def list_model_files(repo: str, timeout: float = 15.0) -> list[str]:
+    """Every top-level `.gguf` model file in [repo] (never `mmproj-*`), alphabetically.
+
+    One list call, no download — the same repo listing `resolve_file` and `find_projector` each
+    need, factored out so a caller can show the reader what else was available instead of a
+    filename resolved in silence.
+    """
+    try:
+        resp = httpx.get(f"{HF_BASE}/api/models/{repo}", timeout=timeout, follow_redirects=True)
+        resp.raise_for_status()
+        siblings = resp.json().get("siblings")
+    except (httpx.HTTPError, ValueError) as exc:
+        raise SystemExit(f"Could not list files in {repo!r}: {exc}") from exc
+    return sorted(
+        s["rfilename"] for s in (siblings or [])
+        if isinstance(s, dict) and isinstance(s.get("rfilename"), str)
+        and "/" not in s["rfilename"]  # top-level only, never a nested variant dir
+        and s["rfilename"].lower().endswith(".gguf")
+        and "mmproj" not in s["rfilename"].lower()
+    )
+
+
+def resolve_file(repo: str, timeout: float = 15.0) -> tuple[str, list[str]]:
+    """``(suggested default, every .gguf in [repo])``.
+
+    The default is the ``DEFAULT_QUANT`` file, or the alphabetically first when the repo ships no
+    such quant — the same fallback llama.cpp's `-hf` documents. It is only ever a *suggestion* the
+    caller offers: choosing is the reader's, which is why the full list comes back with it.
+    """
+    names = list_model_files(repo, timeout=timeout)
+    if not names:
+        raise SystemExit(f"No .gguf files found in {repo!r}. Check the repo on huggingface.co.")
+    wanted = DEFAULT_QUANT.lower()
+    chosen = next((n for n in names if wanted in n.lower()), names[0])
+    return chosen, names
 
 
 def local_path(quantized_file: str) -> Path:
@@ -81,6 +137,12 @@ def find_projector(repo: str, timeout: float = 15.0) -> str | None:
 
 def download(repo: str, quantized_file: str, *, out: Path | None = None, on_progress=None) -> Path:
     target = out or local_path(quantized_file)
+    if target.is_file():
+        # `grid pull` must be safe to run twice — re-running it to double check a name, or
+        # because a script always calls it before `grid join`, must not re-download a multi-
+        # gigabyte file that is already sitting right there. Only a `.part` (a download that
+        # never finished) is worth resuming; a complete `target` is worth nothing more to do.
+        return target
     part = target.with_suffix(target.suffix + ".part")
     target.parent.mkdir(parents=True, exist_ok=True)
     url = hf_url(repo, quantized_file)
@@ -91,22 +153,30 @@ def download(repo: str, quantized_file: str, *, out: Path | None = None, on_prog
         headers["Range"] = f"bytes={have}-"
 
     mode = "ab" if have > 0 else "wb"
-    with httpx.stream("GET", url, headers=headers, timeout=httpx.Timeout(30, read=None), follow_redirects=True) as resp:
-        if resp.status_code not in (200, 206):
-            try:
-                body = resp.read().decode(errors="replace")[:300]
-            except httpx.HTTPError:
-                body = "(could not read response body)"
-            raise SystemExit(f"Download failed ({resp.status_code}): {body}")
-        total = have + int(resp.headers.get("Content-Length") or 0)
-        with part.open(mode) as fh:
-            for chunk in resp.iter_bytes(CHUNK):
-                if not chunk:
-                    continue
-                fh.write(chunk)
-                have += len(chunk)
-                if on_progress:
-                    on_progress(have, total)
+    try:
+        with httpx.stream("GET", url, headers=headers, timeout=httpx.Timeout(30, read=None), follow_redirects=True) as resp:
+            if resp.status_code not in (200, 206):
+                try:
+                    body = resp.read().decode(errors="replace")[:300]
+                except httpx.HTTPError:
+                    body = "(could not read response body)"
+                raise SystemExit(f"Download failed ({resp.status_code}): {body}")
+            total = have + int(resp.headers.get("Content-Length") or 0)
+            with part.open(mode) as fh:
+                for chunk in resp.iter_bytes(CHUNK):
+                    if not chunk:
+                        continue
+                    fh.write(chunk)
+                    have += len(chunk)
+                    if on_progress:
+                        on_progress(have, total)
+    except KeyboardInterrupt:
+        # `.part` is deliberately left in place, not deleted — it is what makes the `Range`
+        # header above resume from `have` instead of restarting a multi-gigabyte download from
+        # byte 0 next time. Ctrl-C here used to skip this entirely: httpx/httpcore/ssl raise
+        # KeyboardInterrupt from three layers down mid-socket-read, and with nothing catching it
+        # partway up the call stack, the reader got a 30-line stack trace instead of a cancellation.
+        raise SystemExit(f"\nCancelled. Resume with the same command — {have / 1e6:.0f} MB kept.") from None
 
     part.replace(target)
     return target

@@ -13,7 +13,8 @@ def cmd_engine_install(args: argparse.Namespace) -> int:
         from shared.engine import comfyui
 
         comfyui.install()
-        print("Done. Run `grid engine pull <bundle>` to download media model files.")
+        print("Done. Now download the model files for what you want to make:")
+        print("  grid engine pull image_generation     # also: image_editing, i2v")
         return 0
     raise SystemExit(f"Unknown engine {args.name!r}. Choose 'llama.cpp' (text) or 'comfyui' (media).")
 
@@ -93,9 +94,9 @@ def _install_llama_cpp(args: argparse.Namespace) -> int:
             path = installer.install_metal_from_source()
             print(f"Installed llama-server with Metal -> {path}")
             return 0
-        path = installer.install_macos_prebuilt()
-        print(f"Installed llama-server -> {path}")
-        print("Metal build — it uses this Mac's GPU. Nothing else to install.")
+        installer.install_macos_prebuilt()
+        print("\n✓ Engine installed — it uses this Mac's GPU.")
+        print("\nNext:  grid catalog")
         return 0
 
     from shared.system import gpu
@@ -120,24 +121,17 @@ def _install_llama_cpp(args: argparse.Namespace) -> int:
     # with no toolchain, and is told plainly how to get CUDA instead. This used to be two pinned
     # entries with PLACEHOLDER urls that could never be filled, so the command simply dead-ended.
     kind = "vulkan" if gpus else "cpu"
-    path = installer.install_linux_prebuilt(kind)
-    print(f"Installed llama-server -> {path}")
+    installer.install_linux_prebuilt(kind)
     if not gpus:
-        print("No GPU detected — this is the CPU build.")
+        print("\n✓ Engine installed — no GPU detected, so it runs on the CPU.")
+        print("\nNext:  grid catalog")
         return 0
 
     # Answer "can I have CUDA?" here, so nobody has to go and probe their own toolchain to find
     # out. The same prober gates `--from-source`, so this can never advise a build that would
     # then refuse to start.
-    print()
-    print("This is the Vulkan build — it runs on your NVIDIA GPUs with no CUDA toolkit.")
-    ready, blocker = installer.cuda_build_readiness(sm_required[0].removeprefix("sm_"))
-    if ready:
-        print("CUDA is faster, and this machine can build it:")
-        print("    grid engine install llama.cpp --from-source")
-    else:
-        print()
-        print("CUDA would be faster, but not from this machine yet:")
-        for line in blocker.splitlines():
-            print(f"  {line}")
+    ready, _ = installer.cuda_build_readiness(sm_required[0].removeprefix("sm_"))
+    faster = "  (a faster CUDA build is possible: add --from-source)" if ready else ""
+    print(f"\n✓ Engine installed — it uses your GPUs via Vulkan.{faster}")
+    print("\nNext:  grid catalog")
     return 0

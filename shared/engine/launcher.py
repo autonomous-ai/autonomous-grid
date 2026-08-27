@@ -70,15 +70,63 @@ NVIDIA_RUNTIME = RuntimeProfile(
     reasoning_budget=8192,
     spec_draft_n_max=1,
 )
+# A box with no GPU backend at all. Both caps below are the SAME settings as the GPU profiles
+# measured in wall-clock rather than tokens: a CPU build of this engine generates at roughly
+# 20 tok/s (measured on an Intel Mac, `Qwen3.5-2B-Q4_K_M`), where the GPU numbers become absurd —
+# `reasoning_budget=8192` is seven minutes of thinking before the answer starts, and
+# `n_predict=64000` lets one model that fails to stop run for the better part of an hour. There is
+# no third lever: the operator cannot make the box faster, so the budget is what has to give.
+CPU_RUNTIME = RuntimeProfile(
+    n_predict=4096,       # ~3 min at 20 tok/s; far above a real answer, far below a runaway
+    temp=0.7,
+    reasoning_budget=0,   # thinking is a GPU luxury; here it is dead time before the first word
+    spec_draft_n_max=1,
+)
+
+# Every GPU backend llama.cpp ships as a separate `libggml-<name>` next to the binary. Their
+# ABSENCE is what makes a build CPU-only, whatever hardware the box happens to contain.
+_GPU_BACKENDS = ("metal", "cuda", "vulkan", "hip", "sycl", "opencl", "musa", "cann")
 
 
 def is_apple_silicon() -> bool:
     return platform.system() == "Darwin" and platform.machine() in ("arm64", "aarch64")
 
 
+def has_gpu_backend() -> bool:
+    """Whether the INSTALLED llama.cpp build can reach a GPU at all.
+
+    Asks the build, not the box. A machine can hold a perfectly good GPU that this engine cannot
+    use — an Intel Mac with a Radeon, running the CPU tarball, ships only `libggml-cpu`,
+    `libggml-blas` and `libggml-rpc`, and every token comes off the CPU no matter what
+    `grid device-info` reports. Guessing from hardware is what put such a box on the NVIDIA
+    profile; reading the backends it actually loaded cannot.
+
+    Unknown (no install directory, unreadable) is treated as GPU-present: the conservative error
+    is to leave the generous GPU budgets alone, never to silently cap a real GPU node at 4096.
+    """
+    # `.resolve()`: the pinned path is a SYMLINK into the install directory (`~/.grid/bin/
+    # llama-server` -> `~/.grid/engines/llama.cpp/llama-server`), and the backends sit beside the
+    # real file, not beside the link. Reading the link's own parent finds an empty `bin/`, which
+    # this function would then report as "layout not recognised" — i.e. as a GPU build.
+    engine_dir = paths.llama_server_bin().resolve().parent
+    try:
+        names = [entry.name.lower() for entry in engine_dir.iterdir()]
+    except OSError:
+        return True
+    if not any(name.startswith("libggml-cpu") for name in names):
+        return True  # not a layout we recognise — do not infer anything from it
+    return any(
+        name.startswith(f"libggml-{backend}") for name in names for backend in _GPU_BACKENDS
+    )
+
+
 def runtime_profile() -> RuntimeProfile:
     if is_apple_silicon():
         return APPLE_SILICON_RUNTIME
+    # Before NVIDIA, because that profile's name is a claim about the hardware and this is the
+    # check that can falsify it: everything-not-Apple used to mean "assume a discrete GPU".
+    if not has_gpu_backend():
+        return CPU_RUNTIME
     return NVIDIA_RUNTIME
 
 
@@ -148,7 +196,12 @@ def start_llm(
     model_path = paths.models_dir() / Path(model_file).name
     if not model_path.is_file():
         raise SystemExit(
-            f"Model file not found: {model_path}. Use `grid models pull` first."
+            # `grid models pull` is not a command — `grid models` lists what the grid serves and
+            # takes no subcommand. Naming a command that does not exist sends the reader looking
+            # for it, which is worse than the missing file they came here for.
+            f"No model file at {model_path}.\n"
+            f"  Download it:   grid pull {Path(model_file).stem}\n"
+            "  Or see what is already here:   grid catalog"
         )
 
     log = paths.llama_log(port)

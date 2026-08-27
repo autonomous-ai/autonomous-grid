@@ -79,10 +79,9 @@ No engine on a box yet? Grid ships two open-source engines it sets up for you.
 grid engine install llama.cpp                 # Homebrew (macOS) or pinned tarball (Linux NVIDIA)
 grid engine install llama.cpp --from-source   # build locally (Metal on macOS, CUDA on NVIDIA)
 grid catalog                                  # models Grid can pull
-grid pull qwen36-35b-a3b-mtp                  # a catalog label, or any '<hf-repo>:<file>'
-grid pull unsloth/Qwen3.6-35B-A3B-MTP-GGUF:Qwen3.6-35B-A3B-UD-IQ3_S.gguf
+grid pull unsloth/Qwen3.6-35B-A3B-MTP-GGUF:Qwen3.6-35B-A3B-UD-IQ3_S.gguf   # '<hf-repo>:<file>'
 grid rm your-model.gguf --yes
-grid join home --serve qwen36-35b-a3b-mtp     # launch llama.cpp for it, then join
+grid join home --serve Qwen3.6-35B-A3B-UD-IQ3_S.gguf --advertise-as qwen36-35b-a3b-mtp
 ```
 
 - Apple Silicon macOS uses Homebrew's `llama.cpp` formula by default; `--from-source`

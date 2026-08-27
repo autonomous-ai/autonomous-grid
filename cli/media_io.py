@@ -73,6 +73,39 @@ def load_media_file(path_value: str) -> dict[str, str]:
     }
 
 
+# Exactly what llama.cpp can decode, and no more. Its `libmtmd` links stb_image, whose compiled-in
+# decoders are visible in the shipped binary as its own error strings — `bad IHDR len` (PNG),
+# `bad DQT table`/`no SOI` (JPEG), `bad BMP`, `bad Image Descriptor` (GIF). There is no WebP
+# decoder in there at all, so a `.webp` is refused here rather than sent: the engine does not
+# report a decode failure, it simply proceeds with no image, and the model then answers about a
+# picture it never received ("I can't access external links…") — a wrong answer that reads like a
+# real one. Better a refusal naming the formats than a confident reply to nothing.
+_IMAGE_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".bmp": "image/bmp",
+    ".gif": "image/gif",
+}
+
+
+def image_data_uri(path_value: str) -> str:
+    """[path_value] as a ``data:`` URI for a chat request's ``image_url`` part.
+
+    A data URI, not a path or an ``http://`` link: the engine that answers may be on another
+    machine entirely, so anything it would have to fetch for itself — a local path, a URL only
+    this box can reach — is not a thing it can read. The bytes travel with the request.
+    """
+    path = Path(path_value).expanduser()
+    if not path.is_file():
+        raise SystemExit(f"Image not found: {path}")
+    mime = _IMAGE_MIME.get(path.suffix.lower())
+    if mime is None:
+        kinds = ", ".join(sorted(_IMAGE_MIME))
+        raise SystemExit(f"{path.name}: not an image Grid can send. Use one of: {kinds}.")
+    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+
 def write_media_outputs(output_files: list[dict[str, Any]], output_dir: Path) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []

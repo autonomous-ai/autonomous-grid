@@ -14,7 +14,6 @@ TARGET_NVIDIA = "nvidia"
 
 @dataclass(frozen=True)
 class CatalogEntry:
-    label: str
     hf_repo: str
     quantized_file: str
     min_vram_gb: int
@@ -25,7 +24,6 @@ class CatalogEntry:
 
 CATALOG: tuple[CatalogEntry, ...] = (
     CatalogEntry(
-        label="qwen36-35b-a3b-mtp",
         hf_repo="unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
         quantized_file="Qwen3.6-35B-A3B-UD-IQ3_S.gguf",
         min_vram_gb=32,
@@ -34,7 +32,6 @@ CATALOG: tuple[CatalogEntry, ...] = (
         target=TARGET_APPLE_SILICON,
     ),
     CatalogEntry(
-        label="qwen36-27b-mtp",
         hf_repo="unsloth/Qwen3.6-27B-MTP-GGUF",
         quantized_file="Qwen3.6-27B-UD-Q5_K_XL.gguf",
         min_vram_gb=24,
@@ -43,13 +40,6 @@ CATALOG: tuple[CatalogEntry, ...] = (
         target=TARGET_NVIDIA,
     ),
 )
-
-
-def find(label: str) -> CatalogEntry | None:
-    for entry in CATALOG:
-        if entry.label == label:
-            return entry
-    return None
 
 
 def current_target() -> str | None:
@@ -84,7 +74,7 @@ def target_label(target: str) -> str:
 def format_catalog_entry(entry: CatalogEntry) -> str:
     target = "" if entry.target == TARGET_ANY else f"{target_label(entry.target)}, "
     return (
-        f"  {entry.label:<32} {entry.hf_repo}/{entry.quantized_file} "
+        f"  {entry.hf_repo}/{entry.quantized_file} "
         f"({target}min {entry.min_vram_gb} GB, {entry.kind})"
     )
 

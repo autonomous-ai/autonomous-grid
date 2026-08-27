@@ -61,13 +61,13 @@ def select_grid(name_or_id: str | None) -> dict[str, Any]:
         ]
         if not matches:
             raise SystemExit(
-                f"Grid not found: {name_or_id!r}. Run `grid up {name_or_id}` "
+                f"Grid not found: {name_or_id!r}. Run `grid start {name_or_id}` "
                 "on this device or pass a grid URL."
             )
         return matches[-1]
     grids = iter_grid_configs()
     if not grids:
-        raise SystemExit("No grids yet. Run `grid up` to bring one online.")
+        raise SystemExit("No grid on this computer yet.\n\nNext:  grid start")
     active = state.get_active("local")
     if active:
         for cfg in grids:

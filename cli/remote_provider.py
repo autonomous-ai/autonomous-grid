@@ -17,6 +17,7 @@ import argparse
 import contextlib
 import getpass
 import os
+import shlex
 import signal
 import socket
 import subprocess
@@ -529,11 +530,31 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     if task_serving.allowed:  # said only when it is true — the refusal has already gone to stderr
         print("tasks=on (claiming tasks for this grid)")
     print(f"log={paths.engines_dir(network_id) / f'{engine_id}.log'}")
+    # Quoted: a grid's display name is freeform and can carry a space ("Hydrate Grid"), and a hint
+    # printed bare isn't actually copy-pasteable — argparse splits it into two positionals and
+    # rejects the second as "unrecognized arguments" (grid-leave issue: a reader hit exactly this
+    # `Next:` line unquoted and it failed on paste).
+    quoted_label = shlex.quote(label)
+    # What a reader will actually type next: the ADVERTISED name, not the record's raw filename.
+    # `--advertise-as` is what got registered as the model id, so the filename would 404 (the same
+    # mismatch `run_records.own_model_case` exists to repair on the request side).
+    advertised = list(record.get("advertise_as") or []) or list(record.get("models") or [])
     if reloaded:  # the live process re-advertised in place — nothing restarted, nothing dropped
-        print(f"(hot-reloaded — no in-flight requests dropped; stop with `grid leave {label}`)")
+        print(f"(hot-reloaded — no in-flight requests dropped; stop with `grid leave {quoted_label}`)")
+        if advertised:
+            print("\nNext:")
+            for line in provider.chat_hints(advertised[0], provider.serves_vision(args)):
+                print(line)
     else:
         # The relay isn't locally pollable, so we can't confirm "registered" here — report starting.
-        print(f"(starting — stop with `grid leave {label}`)")
+        # `grid models` comes first because it is what actually confirms the engine came up; the
+        # chat lines follow so the whole path is on screen once, in order.
+        print(f"(starting — stop with `grid leave {quoted_label}`)")
+        print("\nNext:")
+        print(f"  grid models {quoted_label}")
+        if advertised:
+            for line in provider.chat_hints(advertised[0], provider.serves_vision(args)):
+                print(line)
     return 0
 
 
@@ -1060,7 +1081,12 @@ def _engine_union(records: list[dict[str, object]]) -> list[dict[str, object]]:
         specs = record.get("engines")
         if not specs and (record.get("endpoint_url") or record.get("models")):
             specs = [_flat_spec(record)]
-        union, _ = _merge_engines(union, specs or [])
+        # Tagged here, not carried on the stored spec itself: `meta_name` is the RECORD's display
+        # name (one per identity), and every engine flattened from the same record shares it — so
+        # `match_engine`'s node-name tier (shared.run_records) can find it without every spec
+        # producer remembering to stamp it individually.
+        tagged = [dict(spec, meta_name=record.get("meta_name")) for spec in (specs or [])]
+        union, _ = _merge_engines(union, tagged)
     return union
 
 
