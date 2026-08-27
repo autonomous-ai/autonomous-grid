@@ -143,6 +143,74 @@ DOGGI_WHITELIST: tuple[ApiModelEntry, ...] = (
     ),
 )
 
+# Taken 2026-08-26 from the LIVE feed (`GET https://openrouter.ai/api/v1/models`, 417 models), not
+# from prose docs — the exact command is beside OPENROUTER_WHITELIST below.
+OPENROUTER_LAST_VERIFIED = "2026-08-26"
+
+# The service-kind key. Named here beside the whitelist so the CLI and the tests spell it once.
+OPENROUTER_KIND = "openrouter"
+
+# The two models a hosted grid's first provider serves. Unlike every other kind here, the credential
+# is NOT the vendor's — `openrouter` reaches OpenRouter through the control plane's own passthrough
+# (`--at <control-plane>/v1/grid/internal/openrouter`), which holds the real `OPENROUTER_API_KEY` and
+# never hands it out. What the provider stores is the passthrough's own token, so a provider box that
+# is compromised cannot spend the operator's vendor account anywhere but through that one route.
+#
+# `base_url` is deliberately None: there is no fixed vendor endpoint for this kind, because the
+# endpoint is whichever control plane this box belongs to. `--at` is therefore required, and the join
+# refuses without it rather than defaulting to a URL that would send the passthrough token straight
+# to OpenRouter.
+#
+# The capability rows are DERIVED from the vendor's own machine-readable feed, not hand-copied.
+# Re-take them with one command when `last_verified` goes stale — OpenRouter is one of the few
+# vendors that publishes this, which is why these rows can be checked rather than believed:
+#
+#     curl -s https://openrouter.ai/api/v1/models | python3 -c 'import json,sys
+#     for m in json.load(sys.stdin)["data"]:
+#         if m["id"] in ("deepseek/deepseek-v4-flash-0731", "qwen/qwen3.8-27b"):
+#             sp = m.get("supported_parameters") or []
+#             print(m["id"], m["top_provider"]["context_length"],
+#                   "tools" in sp, "image" in m["architecture"]["input_modalities"],
+#                   "response_format" in sp, "structured_outputs" in sp)'
+#
+# The mapping, spelled out because two of the four are not the obvious field:
+#   context_window            <- top_provider.context_length          (NOT the top-level one)
+#   supports_tools            <- "tools" in supported_parameters
+#   supports_vision           <- "image" in architecture.input_modalities
+#   supports_json_mode        <- "response_format" in supported_parameters
+#   supports_structured_outputs <- "structured_outputs" in supported_parameters
+#
+# ⚠️ `context_window` is `top_provider.context_length`, deliberately the SMALLER of the two numbers
+# the feed carries. The top-level `context_length` is the largest any upstream provider offers
+# (deepseek: 1,310,720) while `top_provider` is what OpenRouter's own default routing actually
+# serves (1,048,576). Advertising the larger one is the fail-OPEN direction: the relay would route a
+# 1.2M-token request here on the strength of a number no request can reach, and the vendor would
+# refuse it after it had already been queued and dispatched.
+OPENROUTER_WHITELIST: tuple[ApiModelEntry, ...] = (
+    ApiModelEntry(
+        vendor_name="deepseek/deepseek-v4-flash-0731",
+        context_window=1_048_576,
+        supports_tools=True,
+        supports_vision=False,  # architecture: text->text
+        supports_json_mode=True,
+        supports_structured_outputs=True,
+        notes="Fast general-purpose text model; the default for a hosted grid's first provider.",
+    ),
+    ApiModelEntry(
+        vendor_name="qwen/qwen3.8-27b",
+        context_window=1_000_000,
+        supports_tools=True,
+        # architecture: text+image+video->text. The passthrough forwards the body verbatim, so image
+        # parts ride through untouched and this is honest to advertise — it is also what lets the
+        # auto-router put a vision request on a hosted grid at all.
+        supports_vision=True,
+        supports_json_mode=True,
+        supports_structured_outputs=True,
+        notes="Multimodal general-purpose model (text + image + video in); the second seat on a "
+              "hosted grid's first provider.",
+    ),
+)
+
 # The seat's backend (ADR 0015). Verified live on 2026-07-15 (spike 01, `.scratch/codex-subs/facts.md`).
 CODEX_LAST_VERIFIED = "2026-07-15"
 
@@ -435,6 +503,24 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         credential="none",
         flat_rate=True,
         local_seat_port=8098,
+    ),
+    OPENROUTER_KIND: ApiWhitelist(
+        last_verified=OPENROUTER_LAST_VERIFIED,
+        # None on purpose — see OPENROUTER_WHITELIST. The endpoint is the control plane's
+        # passthrough, which differs per deployment, so `--at` is required.
+        base_url=None,
+        # The passthrough's own token, NOT an OpenRouter key. Named so an operator standing a
+        # provider up by hand exports the same variable the control plane hands its own.
+        env_var="GRID_OPENROUTER_PROXY_TOKEN",
+        entries=OPENROUTER_WHITELIST,
+        # The passthrough forwards `GET /models`, so the join's key check and the whitelist ∩
+        # visible filter both work unchanged — that is what makes a retired vendor id a loud
+        # refusal at join time instead of a 404 on the first real request.
+        supports_model_listing=True,
+        # Chat only. Left at the default rather than spelled out to make the point that this kind
+        # adds no lockstep row: grid-src's `provider_supports` reads `chat/completions` for a kind
+        # it has never heard of, which is the fail-closed answer we want.
+        endpoints=("chat/completions",),
     ),
     "doggi": ApiWhitelist(
         last_verified=DOGGI_LAST_VERIFIED,

@@ -1110,6 +1110,54 @@ def test_api_whitelist_key_kinds_name_their_env_var():
         assert whitelist.env_var, f"{kind} needs the env var its key is read from"
 
 
+def test_openrouter_whitelist_serves_exactly_the_two_hosted_models():
+    """The set a hosted grid's first provider advertises, pinned by name.
+
+    Not a restatement of the table: with no `-m`, `_resolve_api_targets` joins **the whole
+    whitelist**, so this tuple *is* the model set every hosted grid comes up serving. Adding a third
+    row silently widens what the operator pays for on every grid created after that release.
+    """
+    served = {entry.vendor_name for entry in api_catalog.entries_for("openrouter")}
+    assert served == {"deepseek/deepseek-v4-flash-0731", "qwen/qwen3.8-27b"}
+
+
+def test_openrouter_has_no_base_url_so_the_join_cannot_reach_the_vendor_directly():
+    """`base_url is None` is a security property, not a gap in the table.
+
+    The credential this kind stores is the control plane's passthrough token, not an OpenRouter
+    key. `_resolve_key_api_targets` resolves the endpoint as `--at or whitelist.base_url` and
+    refuses when both are absent — so a default here would send the passthrough token to
+    `openrouter.ai` on any join that forgot `--at`, where it authenticates nothing and is simply
+    disclosed to the vendor. The refusal is what keeps `--at` mandatory.
+    """
+    assert api_catalog.WHITELISTS["openrouter"].base_url is None
+    assert api_catalog.WHITELISTS["openrouter"].env_var == "GRID_OPENROUTER_PROXY_TOKEN"
+
+
+def test_openrouter_vendor_names_survive_the_advertised_name_round_trip():
+    """`serve.py` recovers the upstream id with `advertised_model.partition(":")[2]`, so a vendor
+    id containing its own colon (ollama's `qwen3:8b` shape) would be truncated at that colon and
+    forwarded as a model the vendor has never heard of — a 404 on the first real request, long
+    after the join reported success. Slashes are fine and already precedented (`Wan-AI/…`); colons
+    are not.
+    """
+    for entry in api_catalog.entries_for("openrouter"):
+        advertised = api_catalog.advertised_name("openrouter", entry)
+        assert ":" not in entry.vendor_name, f"{entry.vendor_name} would be truncated by serve.py"
+        assert advertised.partition(":")[2] == entry.vendor_name
+
+
+def test_openrouter_is_chat_only_so_an_unknown_kind_fails_closed_on_the_relay():
+    """Chat-only, and therefore adding no lockstep row. grid-src's `provider_supports` answers
+    `chat/completions` for a kind it has never heard of, so this kind needs no hand-duplicated half
+    there — but only while the tuple stays exactly this. Declaring `responses` here would make the
+    relay and the CLI disagree in silence until a Responses request reached a seat that 400s it.
+    """
+    assert api_catalog.WHITELISTS["openrouter"].endpoints == ("chat/completions",)
+    assert api_catalog.responses_only_kind("openrouter:qwen/qwen3.8-27b") is None
+    assert api_catalog.kind_is_stream_only("openrouter") is False
+
+
 def test_codex_whitelist_has_no_env_var_and_no_output_cap():
     """The two fields an OAuth seat cannot have (issue 04), kept true now that issue 05 populates
     the row's model entries (the tier union — see test_codex_tier_whitelist_integrity):
