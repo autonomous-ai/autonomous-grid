@@ -37,21 +37,25 @@ COMFYUI_REPO = "https://github.com/comfyanonymous/ComfyUI"
 COMFYUI_GGUF_REPO = "https://github.com/city96/ComfyUI-GGUF"
 COMFYUI_PORT_DEFAULT = 8188
 
-# Pinned working media stack from Interns-Desktop-App's
-# additional_services_manager.py. ComfyUI source, custom node, gguf, and the
-# Apple Silicon PyTorch stack stay aligned so bundled media workflows resolve
-# the same nodes and dependency versions as the Desktop App.
-COMFYUI_PINNED_COMMIT = "47ccecaee009cce148e8c2a5bdc2ecb302cc52ee"
+# Pinned working media stack. Originally lifted from Interns-Desktop-App's
+# additional_services_manager.py; as of the 2026-08 bump the CLI pins ahead of the Desktop App,
+# because `image_generation` moved to Krea2 and `CLIPLoader type="krea2"` does not exist before
+# ComfyUI v0.26.0. ComfyUI source, custom node, gguf and the Apple Silicon PyTorch stack still move
+# together so bundled media workflows resolve the same nodes and dependency versions on every host.
+#
+# d8e7bbc (v0.34.0, 2026-08-27) is the exact commit this bump was verified against: all four bundled
+# workflows were checked against its live /object_info, and image_editing + i2v were run end to end
+# on real weights. If you bump it, re-run that verification — do not assume schema parity.
+COMFYUI_PINNED_COMMIT = "d8e7bbc9d586d95f758d6b0ed23d519088be578a"
 COMFYUI_GGUF_PINNED_COMMIT = "6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
-GGUF_PINNED_VERSION = "gguf==0.18.0"
-# PyTorch nightly (CPU/MPS index below). Bumped 2026-07-02: the prior dev20260423 pins aged out of
-# the nightly index (it keeps only ~recent dates), and torchaudio==2.11.0 only exists as a nightly —
-# dev20260504 is the earliest date with matching torch/torchvision/torchaudio cp311 arm64 wheels on
-# the same 2.13.0 line as the original pin.
-TORCH_PINNED = "torch==2.13.0.dev20260504"
-TORCHVISION_PINNED = "torchvision==0.27.0.dev20260504"
-TORCHAUDIO_PINNED = "torchaudio==2.11.0.dev20260504"
-TORCH_NIGHTLY_INDEX = "https://download.pytorch.org/whl/nightly/cpu"
+GGUF_PINNED_VERSION = "gguf==0.19.0"
+# Apple Silicon PyTorch stack. These were nightly pins only because the 2.13.0 line had not shipped
+# stable yet, which meant they aged out of the nightly index every few months (the 2026-07-02 bump
+# was exactly that). 2.13.0 / 0.28.0 / 2.11.0 are on PyPI proper now, so the nightly index is gone
+# and these are ordinary releases that cannot disappear.
+TORCH_PINNED = "torch==2.13.0"
+TORCHVISION_PINNED = "torchvision==0.28.0"
+TORCHAUDIO_PINNED = "torchaudio==2.11.0"
 MACOS_MEDIA_PACKAGE_LOCK = "comfyui_macos_package_lock.txt"
 
 # Pip-package pins originally from Interns-Desktop-App commit 5fbb26c ("Enforce
@@ -65,8 +69,8 @@ MACOS_MEDIA_PACKAGE_LOCK = "comfyui_macos_package_lock.txt"
 # is exactly what breaks the workflow JSONs we depend on for cross-client
 # node-ID parity. Re-evaluate (and check with the operator) before removing.
 COMFYUI_REQUIREMENT_PINS = (
-    "comfyui_frontend_package==1.42.14",
-    "comfyui_workflow_templates==0.9.62",
+    "comfyui_frontend_package==1.51.9",
+    "comfyui_workflow_templates==0.11.48",
 )
 
 
@@ -263,12 +267,8 @@ def _install_torch_stack() -> None:
         if installed == expected_torch_version:
             print(f"PyTorch already pinned at {expected_torch_version}.")
             return
-        print(f"Installing pinned PyTorch ({expected_torch_version}) from {TORCH_NIGHTLY_INDEX}")
-        _pip_install(
-            [TORCH_PINNED, TORCHVISION_PINNED, TORCHAUDIO_PINNED],
-            extra_index_url=TORCH_NIGHTLY_INDEX,
-            pre=True,
-        )
+        print(f"Installing pinned PyTorch ({expected_torch_version}) from PyPI")
+        _pip_install([TORCH_PINNED, TORCHVISION_PINNED, TORCHAUDIO_PINNED])
         return
 
     compute_cap = _pick_compute_cap()
@@ -289,11 +289,7 @@ def _install_macos_media_package_lock() -> None:
         return
     print(f"Installing Desktop-matched media package lock from {MACOS_MEDIA_PACKAGE_LOCK}")
     with _package_resource_path(MACOS_MEDIA_PACKAGE_LOCK) as requirements:
-        _pip_install_requirements(
-            requirements,
-            extra_index_url=TORCH_NIGHTLY_INDEX,
-            pre=True,
-        )
+        _pip_install_requirements(requirements)
 
 
 def install() -> None:

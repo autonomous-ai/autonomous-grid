@@ -7,7 +7,12 @@ weights onto a single CUDA device.
 
 Thresholds match common card sizes, assuming the VRAM-aware ComfyUI launch
 in `engine/comfyui.py` (`--lowvram --reserve-vram 1` when max card < 32 GB):
-    image_generation  - Z-Image Turbo runs on 24 GB cards (3090 / 4090).
+    image_generation  - Krea 2 Turbo. The bf16 UNet is ~26 GB, so on a 24 GB
+                        card it runs partitioned to RAM under --lowvram, the
+                        same way image_editing and i2v already do at this
+                        threshold. Heavier than the Z-Image Turbo it replaced
+                        (~12 GB UNet); if generation starts OOMing on 24 GB
+                        hosts, raise this gate rather than shrinking the model.
     image_editing     - Qwen-Image-Edit at Q4_1 + Lightning lora fits a
                         24 GB card under --lowvram (UNet partitioned to RAM).
     i2v               - Wan2.2 14B high+low noise sequential, also fits a
