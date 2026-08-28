@@ -39,6 +39,7 @@ class PlannerPolicy:
     queue_items_per_replica: int = 2
     latency_pressure_limit: float = 2.0
     error_pressure_limit: float = 0.5
+    model_failure_penalty: float = 50_000.0
     throttled_capacity_fraction: float = 0.5
     preserve_recent_residencies: bool = True
 
@@ -51,9 +52,10 @@ class PlannerPolicy:
                 self.demand_headroom_fraction,
                 self.node_ttl_seconds,
                 self.max_future_clock_skew_seconds,
+                self.model_failure_penalty,
             )
         ):
-            raise ValueError("headroom and TTL must be non-negative")
+            raise ValueError("planner weights and TTL must be finite and non-negative")
         if self.queue_items_per_replica < 1:
             raise ValueError("queue_items_per_replica must be positive")
         if (
@@ -1025,6 +1027,13 @@ def _candidate_score(
     else:
         score -= min(model.load_seconds, 1_000_000_000_000.0) * 20.0
         reasons.append("cold load required")
+    if (
+        residency
+        and residency.state == ResidencyState.FAILED
+        and residency.load_failures
+    ):
+        score -= min(residency.load_failures, 1_000) * policy.model_failure_penalty
+        reasons.append("prior model failures")
 
     domain = node.failure_domain or node.node_id
     if domain not in domains:

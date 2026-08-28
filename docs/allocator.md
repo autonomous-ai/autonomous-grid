@@ -57,7 +57,10 @@ an existing ready residency, local cached weights, another failure domain, measu
 best-fit memory. Before measured throughput exists, bounded memory-bandwidth and compute estimates
 break otherwise-cold ties; ready and cached bonuses remain much larger, so hardware estimates do
 not cause gratuitous migration. Cost, latency, host priority, cold-start time, and throttling lower
-a candidate's score. Explicit pins, per-host model limits, compatibility policies, and a feasible minimum failure-
+a candidate's score. Persisted failed warm/load attempts apply a bounded per-model penalty, allowing
+a healthy peer to be tried after backoff instead of selecting the same broken cache forever; the
+failed node remains a fallback when it is the only feasible target. Explicit pins, per-host model
+limits, compatibility policies, and a feasible minimum failure-
 domain count are hard constraints. A failure-domain shortfall or capacity shortage is reported
 rather than hidden by overcommit. A throttled host exposes only its configured fraction of capacity
 for new placement. When greedy placement fragments capacity, a deterministic bounded backtracking

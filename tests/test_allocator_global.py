@@ -94,6 +94,31 @@ def test_cold_unmeasured_placement_prefers_faster_hardware_without_repacking_cac
     assert "weights cached locally" in stable.assignments[0].reasons
 
 
+def test_failed_cached_target_yields_to_healthy_peer_but_remains_a_fallback():
+    profile = model(min_residency_seconds=0)
+    failed = node(
+        "failed",
+        cached=(profile.model_id,),
+        residencies=(
+            replace(
+                ready(),
+                state=ResidencyState.FAILED,
+                load_failures=1,
+            ),
+        ),
+    )
+    healthy = node("healthy", cached=(profile.model_id,))
+    planner = PlacementPlanner()
+
+    preferred = planner.plan((failed, healthy), (profile,), now=10)
+    assert preferred.nodes_for(profile.model_id) == ("healthy",)
+    assert "prior model failures" not in preferred.assignments[0].reasons
+
+    fallback = planner.plan((failed,), (profile,), now=10)
+    assert fallback.nodes_for(profile.model_id) == ("failed",)
+    assert "prior model failures" in fallback.assignments[0].reasons
+
+
 def test_measured_engine_performance_supersedes_hardware_prior_for_cold_placement():
     profile = replace(model(), backends=())
     high_spec_slow = node(
