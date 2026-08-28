@@ -144,7 +144,9 @@ class PlacementPlanner:
         for node in node_list:
             for residency in node.residencies:
                 if not _adds_model_slot(residency):
-                    capacity[node.node_id] = max(0, capacity[node.node_id] - residency.memory_mb)
+                    capacity[node.node_id] = max(
+                        0, capacity[node.node_id] - residency.memory_mb
+                    )
                     occupied_models[node.node_id] += 1
 
         desired_by_model = {
@@ -203,7 +205,9 @@ class PlacementPlanner:
                 if (model.model_id, node_id) in assigned_pairs:
                     pinned_successes_by_model[model.model_id] += 1
                     continue
-                node = next((item for item in node_list if item.node_id == node_id), None)
+                node = next(
+                    (item for item in node_list if item.node_id == node_id), None
+                )
                 residency = node.residency(model.model_id) if node is not None else None
                 for_new = residency is None or residency.state in (
                     ResidencyState.CACHED,
@@ -217,12 +221,16 @@ class PlacementPlanner:
                     self.policy,
                     for_new=for_new,
                 )
-                if node is None or reason is not None or not _fits(
-                    node,
-                    model,
-                    capacity,
-                    occupied_models,
-                    desired_model_slots,
+                if (
+                    node is None
+                    or reason is not None
+                    or not _fits(
+                        node,
+                        model,
+                        capacity,
+                        occupied_models,
+                        desired_model_slots,
+                    )
                 ):
                     unsatisfied.append(
                         UnsatisfiedConstraint(
@@ -294,7 +302,14 @@ class PlacementPlanner:
                 dict[str, int],
             ],
         ) -> None:
-            saved_assignments, saved_pairs, saved_domains, saved_capacity, saved_occupied, saved_slots = state
+            (
+                saved_assignments,
+                saved_pairs,
+                saved_domains,
+                saved_capacity,
+                saved_occupied,
+                saved_slots,
+            ) = state
             assignments[:] = saved_assignments
             assigned_pairs.clear()
             assigned_pairs.update(saved_pairs)
@@ -414,7 +429,9 @@ class PlacementPlanner:
                     desired_model_slots,
                 ):
                     continue
-                candidate_domain = candidate_node.failure_domain or candidate_node.node_id
+                candidate_domain = (
+                    candidate_node.failure_domain or candidate_node.node_id
+                )
                 if len(domains | {candidate_domain}) < required_domain_floor:
                     continue
                 score, reasons = _candidate_score(
@@ -427,7 +444,9 @@ class PlacementPlanner:
                         len(domains) < min(placement_model.min_failure_domains, target)
                     ),
                 )
-                candidates.append((score, candidate_node.node_id, candidate_node, reasons))
+                candidates.append(
+                    (score, candidate_node.node_id, candidate_node, reasons)
+                )
 
             for score, _, selected_node, reasons in sorted(
                 candidates,
@@ -467,8 +486,10 @@ class PlacementPlanner:
                         for item in assignments
                         if item.node_id == target_node.node_id
                         and item.model_id != placement_model.model_id
-                        and profile_by_id[item.model_id].priority == placement_model.priority
-                        and item.node_id not in profile_by_id[item.model_id].pinned_nodes
+                        and profile_by_id[item.model_id].priority
+                        == placement_model.priority
+                        and item.node_id
+                        not in profile_by_id[item.model_id].pinned_nodes
                         and _incremental_memory_mb(
                             target_node.residency(item.model_id),
                             profile_by_id[item.model_id].memory_mb,
@@ -493,7 +514,9 @@ class PlacementPlanner:
                                     victim.model_id,
                                     victim.replica_index,
                                     min(
-                                        len(assigned_domains.get(victim.model_id, set())),
+                                        len(
+                                            assigned_domains.get(victim.model_id, set())
+                                        ),
                                         min(
                                             victim_profile.min_failure_domains,
                                             desired_by_model[victim.model_id],
@@ -512,12 +535,17 @@ class PlacementPlanner:
                         ):
                             restore_placement_state(state)
                             continue
-                        target_domain = target_node.failure_domain or target_node.node_id
+                        target_domain = (
+                            target_node.failure_domain or target_node.node_id
+                        )
                         placement_domains = assigned_domains.setdefault(
                             placement_model.model_id,
                             set(),
                         )
-                        if len(placement_domains | {target_domain}) < required_domain_floor:
+                        if (
+                            len(placement_domains | {target_domain})
+                            < required_domain_floor
+                        ):
                             restore_placement_state(state)
                             continue
                         score, reasons = _candidate_score(
@@ -571,7 +599,10 @@ class PlacementPlanner:
             # still be placed normally.
             regular_slots = max(0, target - len(model.pinned_nodes))
             placement_goal = pinned_successes + regular_slots
-            while sum(1 for item in assignments if item.model_id == model.model_id) < placement_goal:
+            while (
+                sum(1 for item in assignments if item.model_id == model.model_id)
+                < placement_goal
+            ):
                 domains = assigned_domains.setdefault(model.model_id, set())
                 candidates: list[tuple[float, str, NodeSnapshot, tuple[str, ...]]] = []
                 compatible_new_domain_exists = False
@@ -584,7 +615,9 @@ class PlacementPlanner:
                         ResidencyState.FAILED,
                         ResidencyState.DRAINING,
                     )
-                    reason = _ineligible_reason(node, model, timestamp, self.policy, for_new=for_new)
+                    reason = _ineligible_reason(
+                        node, model, timestamp, self.policy, for_new=for_new
+                    )
                     if reason is not None:
                         continue
                     if (node.failure_domain or node.node_id) not in domains:
@@ -614,7 +647,8 @@ class PlacementPlanner:
                     new_domain_candidates = [
                         candidate
                         for candidate in candidates
-                        if (candidate[2].failure_domain or candidate[2].node_id) not in domains
+                        if (candidate[2].failure_domain or candidate[2].node_id)
+                        not in domains
                     ]
                     if new_domain_candidates:
                         candidates = new_domain_candidates
@@ -634,14 +668,22 @@ class PlacementPlanner:
                         ):
                             continue
                 if not candidates:
-                    index = sum(1 for item in assignments if item.model_id == model.model_id)
+                    index = sum(
+                        1 for item in assignments if item.model_id == model.model_id
+                    )
                     if try_place_with_repacking(model, index):
                         continue
                     break
                 # Highest score wins; node_id ascending is the deterministic final tie-break.
-                score, _, node, reasons = min(candidates, key=lambda item: (-item[0], item[1]))
-                index = sum(1 for item in assignments if item.model_id == model.model_id)
-                assignment = _assignment(model, node, index=index, score=score, reasons=reasons)
+                score, _, node, reasons = min(
+                    candidates, key=lambda item: (-item[0], item[1])
+                )
+                index = sum(
+                    1 for item in assignments if item.model_id == model.model_id
+                )
+                assignment = _assignment(
+                    model, node, index=index, score=score, reasons=reasons
+                )
                 _place(
                     assignment,
                     node,
@@ -657,14 +699,18 @@ class PlacementPlanner:
             regular_placed = sum(
                 1
                 for item in assignments
-                if item.model_id == model.model_id and item.node_id not in model.pinned_nodes
+                if item.model_id == model.model_id
+                and item.node_id not in model.pinned_nodes
             )
             regular_missing = max(0, regular_slots - regular_placed)
             if regular_missing:
                 eligible = [
                     node
                     for node in node_list
-                    if _ineligible_reason(node, model, timestamp, self.policy, for_new=True) is None
+                    if _ineligible_reason(
+                        node, model, timestamp, self.policy, for_new=True
+                    )
+                    is None
                 ]
                 code = "insufficient_capacity" if eligible else "no_eligible_nodes"
                 unsatisfied.append(
@@ -677,7 +723,9 @@ class PlacementPlanner:
                 )
         # Repacking can move a model after its own turn, so domain diagnostics must be computed from
         # final state rather than cached per-model loop state.
-        unsatisfied = [item for item in unsatisfied if item.code != "failure_domain_shortfall"]
+        unsatisfied = [
+            item for item in unsatisfied if item.code != "failure_domain_shortfall"
+        ]
         for model in model_list:
             placed = sum(1 for item in assignments if item.model_id == model.model_id)
             domains = assigned_domains.setdefault(model.model_id, set())
@@ -697,7 +745,9 @@ class PlacementPlanner:
                     )
                 )
 
-        assignments.sort(key=lambda item: (item.model_id, item.replica_index, item.node_id))
+        assignments.sort(
+            key=lambda item: (item.model_id, item.replica_index, item.node_id)
+        )
         unsatisfied.sort(key=lambda item: (item.model_id, item.code, item.message))
         # Wall-clock time is not itself a desired-state input, but TTL and scale-down boundaries
         # derived from it are. Include the resulting targets and placements so the controller
@@ -755,7 +805,9 @@ def desired_replica_count(
             # must not silently become the scale-to-zero cooldown: once no request has arrived for
             # the model's configured cooldown, old EWMA residue and old latency/error samples no
             # longer create a replica. Recent READY state is handled independently below.
-            forecast = DemandForecast(model_id=forecast.model_id, updated_at=forecast.updated_at)
+            forecast = DemandForecast(
+                model_id=forecast.model_id, updated_at=forecast.updated_at
+            )
         offered_concurrency = forecast.offered_concurrency
         # Normal Grid requests report their measured service time, but imported/early demand may
         # only contain a request rate.  The profile's service estimate is the conservative fallback
@@ -874,7 +926,10 @@ def _replicas_for_service_capacity(
             ResidencyState.FAILED,
             ResidencyState.DRAINING,
         )
-        if _ineligible_reason(node, model, timestamp, policy, for_new=for_new) is not None:
+        if (
+            _ineligible_reason(node, model, timestamp, policy, for_new=for_new)
+            is not None
+        ):
             continue
         is_ready = bool(residency and residency.state == ResidencyState.READY)
         capacity = model.replica_concurrency
@@ -1016,7 +1071,10 @@ def _candidate_score(
     if residency and residency.state == ResidencyState.READY:
         score += 100_000.0
         reasons.append("already resident and ready")
-    elif residency and residency.state in (ResidencyState.LOADING, ResidencyState.WARMING):
+    elif residency and residency.state in (
+        ResidencyState.LOADING,
+        ResidencyState.WARMING,
+    ):
         score += 75_000.0
         reasons.append("already loading")
     elif model.model_id in node.cached_models or (
@@ -1044,8 +1102,28 @@ def _candidate_score(
     after = remaining_mb - _incremental_memory_mb(residency, model.memory_mb)
     # Best fit preserves a large contiguous-capacity host for a future large model.
     score += 2_000.0 / (1.0 + after / max(model.memory_mb, 1))
-    if node.tokens_per_second:
-        score += min(node.tokens_per_second, 10_000.0) * 2.0
+    model_performance = node.performance(model.model_id)
+    ready_models = sum(item.state == ResidencyState.READY for item in node.residencies)
+    # A node-wide metric is safe for an empty/single-model engine, and remains a useful generic
+    # benchmark for a cold host. Once an engine serves several models it is not attributable: use
+    # only proxy measurements tagged with this exact model, or fall back to hardware priors.
+    node_metric_is_attributable = ready_models <= 1
+    measured_tokens_per_second = (
+        model_performance.tokens_per_second
+        if model_performance is not None
+        else node.tokens_per_second
+        if node_metric_is_attributable
+        else 0.0
+    )
+    measured_latency_ms = (
+        model_performance.latency_ms
+        if model_performance is not None
+        else node.latency_ms
+        if node_metric_is_attributable
+        else 0.0
+    )
+    if measured_tokens_per_second:
+        score += min(measured_tokens_per_second, 10_000.0) * 2.0
         reasons.append("measured throughput")
     elif node.memory_bandwidth_gbps or node.compute_gflops:
         # Model serving is usually bandwidth-bound; compute is a smaller secondary prior. These
@@ -1054,8 +1132,8 @@ def _candidate_score(
         score += min(node.memory_bandwidth_gbps, 2_000.0) * 10.0
         score += min(math.log2(1.0 + node.compute_gflops) * 100.0, 2_000.0)
         reasons.append("hardware performance estimate")
-    if node.latency_ms:
-        score -= min(node.latency_ms, 60_000.0) / 50.0
+    if measured_latency_ms:
+        score -= min(measured_latency_ms, 60_000.0) / 50.0
     if node.max_concurrency > 0:
         utilization = node.active_requests / node.max_concurrency
         if utilization:
@@ -1129,8 +1207,10 @@ def _incremental_memory_mb(
 def _adds_model_slot(residency: ModelResidency | None) -> bool:
     """Whether assigning this model consumes a slot beyond the observed residency."""
 
-    return residency is None or residency.state == ResidencyState.CACHED or (
-        residency.state == ResidencyState.FAILED and not residency.managed
+    return (
+        residency is None
+        or residency.state == ResidencyState.CACHED
+        or (residency.state == ResidencyState.FAILED and not residency.managed)
     )
 
 
@@ -1171,8 +1251,7 @@ def _input_digest(
             # and prose so inconsequential diagnostics do not churn command generations.
             "desired_replicas": sorted(desired_by_model.items()),
             "assignments": [
-                (item.model_id, item.node_id, item.memory_mb)
-                for item in assignments
+                (item.model_id, item.node_id, item.memory_mb) for item in assignments
             ],
         }
     )

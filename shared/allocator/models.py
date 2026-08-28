@@ -111,6 +111,33 @@ class ModelResidency:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelPerformance:
+    """Proxy-measured serving performance attributable to one model on one host."""
+
+    model_id: str
+    tokens_per_second: float = 0.0
+    latency_ms: float = 0.0
+    sample_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.model_id or len(self.model_id) > MAX_ID_LENGTH:
+            raise ValueError("model_id is required")
+        _finite_nonnegative(self.tokens_per_second, "tokens_per_second")
+        _finite_nonnegative(self.latency_ms, "latency_ms")
+        if not 0 <= self.sample_count <= MAX_COUNTER:
+            raise ValueError("sample_count is outside the supported range")
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ModelPerformance:
+        return cls(
+            model_id=str(value["model_id"]),
+            tokens_per_second=float(value.get("tokens_per_second") or 0.0),
+            latency_ms=float(value.get("latency_ms") or 0.0),
+            sample_count=int(value.get("sample_count") or 0),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class NodeSnapshot:
     node_id: str
     capacity_mb: int
@@ -132,6 +159,7 @@ class NodeSnapshot:
     queue_depth: int = 0
     tokens_per_second: float = 0.0
     latency_ms: float = 0.0
+    model_performance: tuple[ModelPerformance, ...] = ()
     memory_bandwidth_gbps: float = 0.0
     compute_gflops: float = 0.0
     cost_per_hour: float = 0.0
@@ -144,8 +172,13 @@ class NodeSnapshot:
     def __post_init__(self) -> None:
         if not self.node_id or len(self.node_id) > MAX_ID_LENGTH:
             raise ValueError("node_id is required")
-        if not 0 <= self.capacity_mb <= MAX_MEMORY_MB or not 0 <= self.reserved_mb <= MAX_MEMORY_MB:
-            raise ValueError("capacity_mb and reserved_mb are outside the supported range")
+        if (
+            not 0 <= self.capacity_mb <= MAX_MEMORY_MB
+            or not 0 <= self.reserved_mb <= MAX_MEMORY_MB
+        ):
+            raise ValueError(
+                "capacity_mb and reserved_mb are outside the supported range"
+            )
         if self.reserved_mb > self.capacity_mb:
             raise ValueError("reserved_mb cannot exceed capacity_mb")
         if self.max_models is not None and not 0 <= self.max_models <= MAX_COUNTER:
@@ -154,7 +187,9 @@ class NodeSnapshot:
             not 0 <= value <= MAX_COUNTER
             for value in (self.active_requests, self.max_concurrency, self.queue_depth)
         ):
-            raise ValueError("request counts and concurrency are outside the supported range")
+            raise ValueError(
+                "request counts and concurrency are outside the supported range"
+            )
         _finite_nonnegative(self.tokens_per_second, "tokens_per_second")
         _finite_nonnegative(self.latency_ms, "latency_ms")
         _finite_nonnegative(self.memory_bandwidth_gbps, "memory_bandwidth_gbps")
@@ -175,7 +210,9 @@ class NodeSnapshot:
             "cached_models",
             "actuator_capabilities",
         ):
-            object.__setattr__(self, field_name, _canonical_set(getattr(self, field_name)))
+            object.__setattr__(
+                self, field_name, _canonical_set(getattr(self, field_name))
+            )
         object.__setattr__(
             self,
             "residencies",
@@ -191,9 +228,27 @@ class NodeSnapshot:
                 )
             ),
         )
+        object.__setattr__(
+            self,
+            "model_performance",
+            tuple(
+                sorted(
+                    (
+                        item
+                        if isinstance(item, ModelPerformance)
+                        else ModelPerformance.from_dict(item)
+                        for item in self.model_performance
+                    ),
+                    key=lambda item: item.model_id,
+                )
+            ),
+        )
         model_ids = [item.model_id for item in self.residencies]
         if len(model_ids) != len(set(model_ids)):
             raise ValueError(f"node {self.node_id!r} has duplicate model residencies")
+        performance_model_ids = [item.model_id for item in self.model_performance]
+        if len(performance_model_ids) != len(set(performance_model_ids)):
+            raise ValueError(f"node {self.node_id!r} has duplicate model performance")
 
     @property
     def usable_capacity_mb(self) -> int:
@@ -216,7 +271,15 @@ class NodeSnapshot:
         )
 
     def residency(self, model_id: str) -> ModelResidency | None:
-        return next((item for item in self.residencies if item.model_id == model_id), None)
+        return next(
+            (item for item in self.residencies if item.model_id == model_id), None
+        )
+
+    def performance(self, model_id: str) -> ModelPerformance | None:
+        return next(
+            (item for item in self.model_performance if item.model_id == model_id),
+            None,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -234,6 +297,10 @@ class NodeSnapshot:
         fields.pop("schema_version", None)
         fields["residencies"] = tuple(
             ModelResidency.from_dict(item) for item in fields.get("residencies") or ()
+        )
+        fields["model_performance"] = tuple(
+            ModelPerformance.from_dict(item)
+            for item in fields.get("model_performance") or ()
         )
         return cls(**fields)
 
@@ -300,7 +367,9 @@ class ModelProfile:
             "forbidden_tags",
             "pinned_nodes",
         ):
-            object.__setattr__(self, field_name, _canonical_set(getattr(self, field_name)))
+            object.__setattr__(
+                self, field_name, _canonical_set(getattr(self, field_name))
+            )
         if len(self.pinned_nodes) > self.max_replicas:
             raise ValueError("pinned_nodes cannot exceed max_replicas")
 
@@ -362,7 +431,11 @@ class PlacementAssignment:
     def __post_init__(self) -> None:
         if not self.model_id or not self.node_id:
             raise ValueError("model_id and node_id are required")
-        if self.memory_mb <= 0 or self.replica_index < 0 or not math.isfinite(self.score):
+        if (
+            self.memory_mb <= 0
+            or self.replica_index < 0
+            or not math.isfinite(self.score)
+        ):
             raise ValueError("invalid assignment memory, index, or score")
         object.__setattr__(self, "reasons", _unique(self.reasons))
 
@@ -404,10 +477,14 @@ class PlacementPlan:
         return frozenset((item.node_id, item.model_id) for item in self.assignments)
 
     def nodes_for(self, model_id: str) -> tuple[str, ...]:
-        return tuple(item.node_id for item in self.assignments if item.model_id == model_id)
+        return tuple(
+            item.node_id for item in self.assignments if item.model_id == model_id
+        )
 
     def models_for(self, node_id: str) -> tuple[str, ...]:
-        return tuple(item.model_id for item in self.assignments if item.node_id == node_id)
+        return tuple(
+            item.model_id for item in self.assignments if item.node_id == node_id
+        )
 
     def target_for(self, model_id: str) -> int:
         return dict(self.desired_replicas).get(model_id, 0)
@@ -440,7 +517,12 @@ class MutationAction:
     executable: bool = False
 
     def __post_init__(self) -> None:
-        if not self.action_id or not self.node_id or not self.model_id or not self.reason:
+        if (
+            not self.action_id
+            or not self.node_id
+            or not self.model_id
+            or not self.reason
+        ):
             raise ValueError("action identity, target, and reason are required")
         if self.memory_mb <= 0:
             raise ValueError("memory_mb must be positive")
@@ -486,7 +568,9 @@ class MutationAction:
 
 def stable_digest(value: Any) -> str:
     """A deterministic, short identity for plan inputs and generations."""
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), default=str
+    ).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 

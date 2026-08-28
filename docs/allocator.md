@@ -67,13 +67,14 @@ for new placement. When greedy placement fragments capacity, a deterministic bou
 repair can evacuate and re-place several equal-priority replicas; unrelated or ineligible inventory
 does not change that search budget or its result.
 
-The proxy attributes each successful non-streaming response to the engine that served it and keeps
+The proxy attributes each successful response to both the engine and requested model, keeping
 bounded EWMAs of end-to-end latency and completion-token throughput. Those server-owned measurements
 override self-reported estimates in placement snapshots, so actual service performance eventually
-supersedes the cold hardware prior. Streaming responses still contribute latency even when their
-wire format does not expose token usage. The measurements are aggregate and private: discovery does
-not expose them, managed heartbeats cannot overwrite them, and no prompt or response content is
-retained for allocator telemetry.
+supersedes the cold hardware prior. A multi-model vLLM engine is scored only with measurements for
+the model being placed; its fast model cannot lend an unrelated slow model an inflated score.
+Streaming responses still contribute latency even when their wire format does not expose token
+usage. The measurements are private: discovery does not expose them, managed heartbeats cannot
+overwrite them, and no prompt or response content is retained for allocator telemetry.
 
 Recent ready replicas and a recently persisted demand watermark remain desired during the model's
 scale-down cooldown. This is the global hysteresis that prevents a quiet minute—or a signaling-

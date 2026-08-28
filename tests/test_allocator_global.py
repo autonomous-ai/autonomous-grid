@@ -10,6 +10,7 @@ from shared.allocator.models import (
     ActionKind,
     AllocatorMode,
     DemandForecast,
+    ModelPerformance,
     ModelProfile,
     ModelResidency,
     NodeSnapshot,
@@ -147,6 +148,41 @@ def test_measured_engine_performance_supersedes_hardware_prior_for_cold_placemen
     assert "hardware performance estimate" not in plan.assignments[0].reasons
 
 
+def test_multi_model_engine_uses_only_per_model_performance_for_placement():
+    profile = model()
+    misattributed = node(
+        "multi-model",
+        residencies=(ready(), ready("other")),
+        tokens_per_second=1_000,
+        latency_ms=10,
+    )
+    measured_qwen = node(
+        "measured-qwen",
+        residencies=(ready(),),
+        tokens_per_second=200,
+        latency_ms=100,
+    )
+    planner = PlacementPlanner()
+
+    safe = planner.plan((misattributed, measured_qwen), (profile,), now=10)
+    assert safe.nodes_for(profile.model_id) == ("measured-qwen",)
+
+    attributed = replace(
+        misattributed,
+        model_performance=(
+            ModelPerformance(
+                profile.model_id,
+                tokens_per_second=300,
+                latency_ms=50,
+                sample_count=5,
+            ),
+        ),
+    )
+    specific = planner.plan((attributed, measured_qwen), (profile,), now=10)
+    assert specific.nodes_for(profile.model_id) == ("multi-model",)
+    assert "measured throughput" in specific.assignments[0].reasons
+
+
 def ready(
     model_id: str = "qwen",
     memory_mb: int = 8_000,
@@ -190,7 +226,9 @@ def test_current_eight_node_framework_inventory_is_usable_but_never_actuated():
             runtime=runtime,
             backend=backend,
             domain=node_id,
-            residencies=tuple(ready(model_id, 32_000, managed=False) for model_id in models),
+            residencies=tuple(
+                ready(model_id, 32_000, managed=False) for model_id in models
+            ),
             manually_managed=True,
             actuator_capabilities=(),
         )
@@ -209,11 +247,13 @@ def test_current_eight_node_framework_inventory_is_usable_but_never_actuated():
         ModelProfile(
             model_id=model_id,
             memory_mb=32_000,
-            runtimes=(next(
-                runtime
-                for _node_id, runtime, _backend, models in inventory
-                if model_id in models
-            ),),
+            runtimes=(
+                next(
+                    runtime
+                    for _node_id, runtime, _backend, models in inventory
+                    if model_id in models
+                ),
+            ),
             min_replicas=len(node_ids),
             max_replicas=len(node_ids),
             min_residency_seconds=0,
@@ -224,9 +264,9 @@ def test_current_eight_node_framework_inventory_is_usable_but_never_actuated():
     plan = PlacementPlanner().plan(machines, profiles, now=10)
 
     assert plan.unsatisfied == ()
-    assert {profile.model_id: plan.nodes_for(profile.model_id) for profile in profiles} == {
-        model_id: tuple(sorted(node_ids)) for model_id, node_ids in expected.items()
-    }
+    assert {
+        profile.model_id: plan.nodes_for(profile.model_id) for profile in profiles
+    } == {model_id: tuple(sorted(node_ids)) for model_id, node_ids in expected.items()}
     result = Reconciler().reconcile(
         plan,
         machines,
@@ -255,13 +295,16 @@ def test_new_text_model_can_only_land_on_explicitly_owned_llama_nodes():
             manually_managed=True,
             actuator_capabilities=(),
         ),
-        *(node(
-            f"external-{index}",
-            runtime="vllm",
-            backend="cuda",
-            manually_managed=True,
-            actuator_capabilities=(),
-        ) for index in range(3)),
+        *(
+            node(
+                f"external-{index}",
+                runtime="vllm",
+                backend="cuda",
+                manually_managed=True,
+                actuator_capabilities=(),
+            )
+            for index in range(3)
+        ),
     )
     profile = model(
         "new-text-model",
@@ -308,6 +351,14 @@ def test_node_snapshot_round_trip_preserves_residency_and_enum():
         residencies=(ready(managed=False, pinned=True, active_requests=2),),
         cached=("other",),
         state=NodeState.THROTTLED,
+        model_performance=(
+            ModelPerformance(
+                "qwen",
+                tokens_per_second=12.5,
+                latency_ms=250,
+                sample_count=4,
+            ),
+        ),
         memory_bandwidth_gbps=400,
         compute_gflops=27_132,
     )
@@ -315,15 +366,18 @@ def test_node_snapshot_round_trip_preserves_residency_and_enum():
     assert restored == original
     assert restored.residency("qwen").managed is False
     assert restored.residency("qwen").active_requests == 2
+    assert restored.performance("qwen").tokens_per_second == 12.5
 
     legacy = original.to_dict()
     legacy["residencies"][0].pop("active_requests")
     legacy.pop("memory_bandwidth_gbps")
     legacy.pop("compute_gflops")
+    legacy.pop("model_performance")
     restored_legacy = NodeSnapshot.from_dict(legacy)
     assert restored_legacy.residency("qwen").active_requests == 0
     assert restored_legacy.memory_bandwidth_gbps == 0
     assert restored_legacy.compute_gflops == 0
+    assert restored_legacy.model_performance == ()
 
 
 def test_node_snapshot_rejects_duplicate_model_residencies():
@@ -347,11 +401,14 @@ def test_expired_demand_does_not_refresh_its_own_recency_watermark():
 
     assert forecast.sample_count == 0
     assert forecast.updated_at == 0
-    assert desired_replica_count(
-        model(min_replicas=0, max_replicas=1, scale_down_cooldown_seconds=60),
-        forecast,
-        now=100,
-    ) == 0
+    assert (
+        desired_replica_count(
+            model(min_replicas=0, max_replicas=1, scale_down_cooldown_seconds=60),
+            forecast,
+            now=100,
+        )
+        == 0
+    )
 
 
 def test_demand_tracker_estimates_rate_concurrency_queue_and_p95():
@@ -384,7 +441,9 @@ def test_demand_tracker_accepts_out_of_order_completion_and_clock_regression():
 
 
 def test_demand_tracker_bounds_history_and_round_trips():
-    tracker = DemandTracker(window_seconds=1_000, bucket_seconds=10, max_samples_per_model=3)
+    tracker = DemandTracker(
+        window_seconds=1_000, bucket_seconds=10, max_samples_per_model=3
+    )
     for timestamp in range(10):
         tracker.observe("m", timestamp=timestamp, service_seconds=1)
     # Requests in one time bucket are compacted without losing their aggregate demand.
@@ -512,12 +571,15 @@ def test_replica_count_credits_a_single_model_vllm_batcher():
         residencies=(ready(managed=False),),
     )
 
-    assert desired_replica_count(
-        profile,
-        DemandForecast("qwen", offered_concurrency=6),
-        nodes=(batcher,),
-        now=10,
-    ) == 1
+    assert (
+        desired_replica_count(
+            profile,
+            DemandForecast("qwen", offered_concurrency=6),
+            nodes=(batcher,),
+            now=10,
+        )
+        == 1
+    )
 
 
 def test_replica_count_does_not_depend_on_selecting_the_widest_ready_engine():
@@ -545,12 +607,15 @@ def test_replica_count_does_not_depend_on_selecting_the_widest_ready_engine():
         residencies=(ready(managed=False),),
     )
 
-    assert desired_replica_count(
-        profile,
-        DemandForecast("qwen", offered_concurrency=6),
-        nodes=(narrow, wide),
-        now=10,
-    ) == 2
+    assert (
+        desired_replica_count(
+            profile,
+            DemandForecast("qwen", offered_concurrency=6),
+            nodes=(narrow, wide),
+            now=10,
+        )
+        == 2
+    )
 
 
 def test_replica_count_does_not_multiply_shared_multi_model_batch_capacity():
@@ -569,12 +634,15 @@ def test_replica_count_does_not_multiply_shared_multi_model_batch_capacity():
         residencies=(ready(managed=False), ready("other", managed=False)),
     )
 
-    assert desired_replica_count(
-        profile,
-        DemandForecast("qwen", offered_concurrency=1),
-        nodes=(shared_batcher,),
-        now=10,
-    ) == 3
+    assert (
+        desired_replica_count(
+            profile,
+            DemandForecast("qwen", offered_concurrency=1),
+            nodes=(shared_batcher,),
+            now=10,
+        )
+        == 3
+    )
 
 
 def test_observed_pressure_scales_beyond_a_wide_ready_batcher():
@@ -593,17 +661,20 @@ def test_observed_pressure_scales_beyond_a_wide_ready_batcher():
         residencies=(ready(managed=False),),
     )
 
-    assert desired_replica_count(
-        profile,
-        DemandForecast(
-            "qwen",
-            offered_concurrency=1,
-            queue_depth=1,
-            p95_latency_ms=2_000,
-        ),
-        nodes=(batcher,),
-        now=10,
-    ) == 2
+    assert (
+        desired_replica_count(
+            profile,
+            DemandForecast(
+                "qwen",
+                offered_concurrency=1,
+                queue_depth=1,
+                p95_latency_ms=2_000,
+            ),
+            nodes=(batcher,),
+            now=10,
+        )
+        == 2
+    )
 
 
 def test_profile_replica_concurrency_sizes_not_yet_ready_capacity():
@@ -614,11 +685,14 @@ def test_profile_replica_concurrency_sizes_not_yet_ready_capacity():
         replica_concurrency=4,
     )
 
-    assert desired_replica_count(
-        profile,
-        DemandForecast("qwen", offered_concurrency=1),
-        now=10,
-    ) == 1
+    assert (
+        desired_replica_count(
+            profile,
+            DemandForecast("qwen", offered_concurrency=1),
+            now=10,
+        )
+        == 1
+    )
 
 
 def test_recent_demand_watermark_preserves_one_replica_across_registry_restart():
@@ -664,8 +738,14 @@ def test_replica_count_keeps_recent_ready_replicas_during_scale_down():
         node("a", residencies=(ready(last_used_at=90),)),
         node("b", residencies=(ready(last_used_at=80),)),
     ]
-    assert desired_replica_count(profile, DemandForecast("qwen"), nodes=nodes, now=100) == 2
-    assert desired_replica_count(profile, DemandForecast("qwen"), nodes=nodes, now=500) == 1
+    assert (
+        desired_replica_count(profile, DemandForecast("qwen"), nodes=nodes, now=100)
+        == 2
+    )
+    assert (
+        desired_replica_count(profile, DemandForecast("qwen"), nodes=nodes, now=500)
+        == 1
+    )
 
 
 def test_replica_count_does_not_treat_a_future_node_timestamp_as_recent_forever():
@@ -674,12 +754,15 @@ def test_replica_count_does_not_treat_a_future_node_timestamp_as_recent_forever(
         "future-clock",
         residencies=(ready(loaded_at=1_000_000, last_used_at=1_000_000),),
     )
-    assert desired_replica_count(
-        profile,
-        DemandForecast("qwen"),
-        nodes=[skewed],
-        now=100,
-    ) == 0
+    assert (
+        desired_replica_count(
+            profile,
+            DemandForecast("qwen"),
+            nodes=[skewed],
+            now=100,
+        )
+        == 0
+    )
 
 
 def test_planner_empty_inputs_are_valid_and_deterministic():
@@ -797,7 +880,12 @@ def test_planner_enforces_privacy_runtime_backend_and_tags():
     )
     machines = [
         node("public"),
-        node("wrong-runtime", tiers=("confidential",), tags=("finance",), runtime="ollama"),
+        node(
+            "wrong-runtime",
+            tiers=("confidential",),
+            tags=("finance",),
+            runtime="ollama",
+        ),
         node("contractor", tiers=("confidential",), tags=("finance", "contractor")),
         node("approved", tiers=("confidential",), tags=("finance",)),
     ]
@@ -875,7 +963,9 @@ def test_planner_does_not_add_models_to_manual_node_but_uses_existing_replica():
     manual = node("n", manually_managed=True)
     assert PlacementPlanner().plan([manual], [model()], now=10).assignments == ()
     existing = node("n", manually_managed=True, residencies=(ready(managed=False),))
-    assert PlacementPlanner().plan([existing], [model()], now=10).nodes_for("qwen") == ("n",)
+    assert PlacementPlanner().plan([existing], [model()], now=10).nodes_for("qwen") == (
+        "n",
+    )
 
 
 def test_planner_does_not_count_ineligible_external_replica_as_available_capacity():
@@ -891,7 +981,9 @@ def test_planner_does_not_count_ineligible_external_replica_as_available_capacit
         manually_managed=True,
         residencies=(ready(managed=False),),
     )
-    plan = PlacementPlanner().plan([paused, wrong_tier], [model(data_tier="internal")], now=10)
+    plan = PlacementPlanner().plan(
+        [paused, wrong_tier], [model(data_tier="internal")], now=10
+    )
     assert plan.assignments == ()
     assert any(item.code == "no_eligible_nodes" for item in plan.unsatisfied)
 
@@ -1272,7 +1364,9 @@ def test_reconciler_automatic_mode_applies_global_and_per_node_governor():
     machines = [node("a"), node("b")]
     profile = model(min_replicas=2, max_replicas=2)
     plan = PlacementPlanner().plan(machines, [profile], now=10)
-    reconciler = Reconciler(ReconcilePolicy(max_concurrent_mutations=2, max_mutations_per_node=1))
+    reconciler = Reconciler(
+        ReconcilePolicy(max_concurrent_mutations=2, max_mutations_per_node=1)
+    )
     result = reconciler.reconcile(
         plan, machines, [profile], mode=AllocatorMode.AUTOMATIC, now=10
     )
@@ -1387,7 +1481,10 @@ def test_reconciler_readmission_retains_failed_warm_backoff():
     )
 
     assert result.actions == ()
-    assert any(item.kind == ActionKind.WARM and item.code == "cooldown" for item in result.deferred)
+    assert any(
+        item.kind == ActionKind.WARM and item.code == "cooldown"
+        for item in result.deferred
+    )
 
 
 def test_reconciler_failed_desired_residency_bypasses_only_old_success_observation():
@@ -1522,7 +1619,10 @@ def test_reconciler_exponential_failure_backoff_then_retries():
     reconciler = Reconciler(ReconcilePolicy(failure_backoff_base_seconds=10))
     waiting = reconciler.reconcile(plan, [machine], [profile], [failed], now=49)
     assert waiting.actions == ()
-    assert next(item for item in waiting.deferred if item.code == "cooldown").retry_at == 50
+    assert (
+        next(item for item in waiting.deferred if item.code == "cooldown").retry_at
+        == 50
+    )
     retried = reconciler.reconcile(plan, [machine], [profile], [failed], now=50)
     assert [item.kind for item in retried.actions] == [ActionKind.WARM]
 
@@ -1586,7 +1686,9 @@ def test_failed_unload_uses_unload_history_for_backoff():
     assert deferred.retry_at == 20
     assert [
         item.kind
-        for item in reconciler.reconcile(plan, [machine], [profile], [failed], now=20).actions
+        for item in reconciler.reconcile(
+            plan, [machine], [profile], [failed], now=20
+        ).actions
     ] == [ActionKind.UNLOAD]
 
 
@@ -1666,4 +1768,6 @@ def test_reconciler_action_ids_are_stable_for_same_plan():
     plan = PlacementPlanner().plan([machine], [profile], now=10)
     one = Reconciler().reconcile(plan, [machine], [profile], now=11)
     two = Reconciler().reconcile(plan, [machine], [profile], now=12)
-    assert [item.action_id for item in one.actions] == [item.action_id for item in two.actions]
+    assert [item.action_id for item in one.actions] == [
+        item.action_id for item in two.actions
+    ]

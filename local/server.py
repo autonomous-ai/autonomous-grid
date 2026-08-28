@@ -31,6 +31,7 @@ from shared.allocator.models import (
     MAX_MEMORY_MB,
     SCHEMA_VERSION,
     AllocatorMode,
+    ModelPerformance,
     ModelProfile,
     ModelResidency,
     MutationAction,
@@ -106,6 +107,13 @@ def _request_fields_set(value: BaseModel) -> set[str]:
 
 
 @dataclass
+class _ProxyModelPerformance:
+    latency_ms: float = 0.0
+    tokens_per_second: float = 0.0
+    samples: int = 0
+
+
+@dataclass
 class Node:
     node_id: str
     role: str
@@ -134,6 +142,9 @@ class Node:
     proxy_latency_ms: float = 0.0
     proxy_tokens_per_second: float = 0.0
     proxy_performance_samples: int = 0
+    proxy_model_performance: dict[str, _ProxyModelPerformance] = field(
+        default_factory=dict
+    )
     # Server-owned request timestamps. Managed heartbeats must not overwrite these with a runtime
     # timestamp that predates work the proxy has already routed.
     model_last_used_at: dict[str, float] = field(default_factory=dict)
@@ -148,6 +159,7 @@ class Node:
         data.pop("proxy_latency_ms", None)
         data.pop("proxy_tokens_per_second", None)
         data.pop("proxy_performance_samples", None)
+        data.pop("proxy_model_performance", None)
         data.pop("engine_api_key", None)
         data.pop("engine_tls_ca_pem", None)
         data["last_heartbeat_at"] = datetime.fromtimestamp(
@@ -501,11 +513,11 @@ def create_app(
                 revision_processed = await _await_allocator_revision(app, revision)
             else:
                 await _run_allocator_tick(app)
-                revision_processed = int(app.state.allocator_processed_revision) >= revision
+                revision_processed = (
+                    int(app.state.allocator_processed_revision) >= revision
+                )
         commands = ()
-        successful_revision = (
-            int(app.state.allocator_last_success_revision) >= revision
-        )
+        successful_revision = int(app.state.allocator_last_success_revision) >= revision
         error_blocks_revision = bool(app.state.allocator_last_error) and (
             int(app.state.allocator_last_error_revision) >= revision
         )
@@ -517,10 +529,9 @@ def create_app(
             and successful_revision
             and not error_blocks_revision
         ):
-            destructive_safety_current = (
-                int(app.state.allocator_last_success_safety_revision)
-                == int(app.state.allocator_safety_revision)
-            )
+            destructive_safety_current = int(
+                app.state.allocator_last_success_safety_revision
+            ) == int(app.state.allocator_safety_revision)
             commands = _allocator(app).commands_for(
                 host_id or node.node_id,
                 include_destructive=destructive_safety_current,
@@ -650,10 +661,7 @@ def create_app(
                 status_code=400,
                 detail="mode must be one of observe, recommend, automatic",
             ) from exc
-        if (
-            mode == AllocatorMode.AUTOMATIC
-            and _allocator(app).state_path is None
-        ):
+        if mode == AllocatorMode.AUTOMATIC and _allocator(app).state_path is None:
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -828,6 +836,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
                 _record_engine_performance(
                     engine,
                     started_at,
+                    model=model,
                     status_code=engine_response.status_code,
                 )
                 if collector is not None:
@@ -865,6 +874,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     _record_engine_performance(
         engine,
         started_at,
+        model=model,
         status_code=engine_response.status_code,
         response=engine_response,
     )
@@ -1188,18 +1198,22 @@ def _ensure_registry_capacity(
             status_code=503,
             detail="node registry capacity is exhausted; retry after stale leases expire",
         )
-    if adds_record and not managed and sum(
-        not _managed_node(node) for node in _nodes(app).values()
-    ) >= (
-        MAX_PUBLIC_REGISTRY_NODES
+    if (
+        adds_record
+        and not managed
+        and sum(not _managed_node(node) for node in _nodes(app).values())
+        >= (MAX_PUBLIC_REGISTRY_NODES)
     ):
         raise HTTPException(
             status_code=503,
             detail="public node registry capacity is exhausted; retry after stale leases expire",
         )
-    if managed and host_id is not None and sum(
-        _node_host_id(node) == host_id for node in _nodes(app).values()
-    ) >= MAX_MANAGED_NODES_PER_HOST:
+    if (
+        managed
+        and host_id is not None
+        and sum(_node_host_id(node) == host_id for node in _nodes(app).values())
+        >= MAX_MANAGED_NODES_PER_HOST
+    ):
         raise HTTPException(
             status_code=503,
             detail="managed host registry capacity is exhausted",
@@ -1211,9 +1225,7 @@ def _active_engines(app: FastAPI, model: str | None = None) -> list[Node]:
     _purge_stale_nodes(app, now=now)
     engines: list[Node] = []
     live_nodes = [
-        node
-        for node in _nodes(app).values()
-        if _node_lease_is_live(node, now=now)
+        node for node in _nodes(app).values() if _node_lease_is_live(node, now=now)
     ]
     host_control_states: dict[str, NodeState] = {}
     state_rank = {state: index for index, state in enumerate(NodeState)}
@@ -1233,7 +1245,9 @@ def _active_engines(app: FastAPI, model: str | None = None) -> list[Node]:
             continue
         if _node_allocator_state(node) not in _ROUTABLE_NODE_STATES:
             continue
-        decision = node.allocator.get("decision") if isinstance(node.allocator, dict) else None
+        decision = (
+            node.allocator.get("decision") if isinstance(node.allocator, dict) else None
+        )
         if isinstance(decision, dict) and decision.get("accept") is False:
             continue
         host_id = _node_host_id(node)
@@ -1320,7 +1334,11 @@ def _engine_dict(node: Node) -> dict[str, Any]:
 
 def _load_score(load: dict[str, Any]) -> float:
     active = load.get("active_tasks")
-    if not isinstance(active, bool) and isinstance(active, (int, float)) and active >= 0:
+    if (
+        not isinstance(active, bool)
+        and isinstance(active, (int, float))
+        and active >= 0
+    ):
         return float(active)
     return 0.0
 
@@ -1330,7 +1348,9 @@ def _route_priority(node: Node) -> float:
 
     if _node_allocator_state(node) != NodeState.THROTTLED:
         return 0.0
-    decision = node.allocator.get("decision") if isinstance(node.allocator, dict) else None
+    decision = (
+        node.allocator.get("decision") if isinstance(node.allocator, dict) else None
+    )
     value = decision.get("priority_multiplier") if isinstance(decision, dict) else 0.5
     try:
         multiplier = float(value)
@@ -1357,7 +1377,11 @@ def _node_concurrency_limit(node: Node) -> int | None:
     multiplier = 1.0
     if _node_allocator_state(node) == NodeState.THROTTLED:
         decision = allocator.get("decision")
-        raw = decision.get("concurrency_multiplier") if isinstance(decision, dict) else 0.5
+        raw = (
+            decision.get("concurrency_multiplier")
+            if isinstance(decision, dict)
+            else 0.5
+        )
         try:
             multiplier = float(raw)
         except (TypeError, ValueError, OverflowError):
@@ -1381,11 +1405,15 @@ def _managed_node(node: Node | None) -> bool:
 
 def _validate_public_registry_input(node_id: str, models: list[str]) -> None:
     if not node_id or len(node_id) > MAX_ID_LENGTH:
-        raise HTTPException(status_code=400, detail="node_id is outside the supported range")
+        raise HTTPException(
+            status_code=400, detail="node_id is outside the supported range"
+        )
     if len(models) > 4_096:
         raise HTTPException(status_code=400, detail="too many advertised models")
     if any(not model or len(model) > MAX_ID_LENGTH for model in models):
-        raise HTTPException(status_code=400, detail="model id is outside the supported range")
+        raise HTTPException(
+            status_code=400, detail="model id is outside the supported range"
+        )
 
 
 def _validate_managed_registry_identity(
@@ -1401,7 +1429,9 @@ def _validate_managed_registry_identity(
             expected = control_node_id(host_id)
         elif role in ("engine", "both"):
             if len(models) != 1:
-                raise ValueError("a managed engine record must advertise exactly one model")
+                raise ValueError(
+                    "a managed engine record must advertise exactly one model"
+                )
             expected = engine_node_id(host_id, models[0])
         else:
             raise ValueError("a managed registry record must be an allocator or engine")
@@ -1493,7 +1523,9 @@ def _validate_managed_endpoint_transport(value: str, *, request: Request) -> Non
         parsed = urlsplit(str(value))
         host = parsed.hostname or ""
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail="managed endpoint URL is invalid") from exc
+        raise HTTPException(
+            status_code=400, detail="managed endpoint URL is invalid"
+        ) from exc
     if parsed.username is not None or parsed.password is not None:
         raise HTTPException(
             status_code=400,
@@ -1535,7 +1567,9 @@ def _managed_tls_ca_pem(allocator: Mapping[str, Any]) -> str:
     try:
         size = len(raw.encode("ascii"))
     except UnicodeEncodeError as exc:
-        raise HTTPException(status_code=400, detail="engine TLS CA must be ASCII PEM") from exc
+        raise HTTPException(
+            status_code=400, detail="engine TLS CA must be ASCII PEM"
+        ) from exc
     if size > 65_536 or "-----BEGIN CERTIFICATE-----" not in raw:
         raise HTTPException(
             status_code=400,
@@ -1545,7 +1579,9 @@ def _managed_tls_ca_pem(allocator: Mapping[str, Any]) -> str:
         context = ssl.create_default_context()
         context.load_verify_locations(cadata=raw)
     except (OSError, ssl.SSLError) as exc:
-        raise HTTPException(status_code=400, detail="engine TLS CA PEM is invalid") from exc
+        raise HTTPException(
+            status_code=400, detail="engine TLS CA PEM is invalid"
+        ) from exc
     return raw
 
 
@@ -1867,7 +1903,9 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
         node_active_requests = _first_nonnegative_int(node.load.get("active_tasks"))
         residencies_by_model: dict[str, ModelResidency] = {}
         raw_residencies = allocator.get("residencies")
-        malformed = raw_residencies is not None and not isinstance(raw_residencies, list)
+        malformed = raw_residencies is not None and not isinstance(
+            raw_residencies, list
+        )
         rows = raw_residencies if isinstance(raw_residencies, list) else ()
         for row in rows:
             if not isinstance(row, dict):
@@ -1875,9 +1913,7 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                 continue
             try:
                 loaded_age = _bounded_model_age(row.get("loaded_age_seconds"))
-                last_used_age = _bounded_model_age(
-                    row.get("last_used_age_seconds")
-                )
+                last_used_age = _bounded_model_age(row.get("last_used_age_seconds"))
                 # Timestamps originate on another wall clock. Age evidence is relative to that
                 # same clock, so reconstruct server-local timestamps at receipt time. Legacy or
                 # malformed rows receive age zero: conservative freshness can delay an unload but
@@ -2041,12 +2077,22 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                         node.proxy_latency_ms
                         or _nonnegative_float(node.load.get("latency_ms"))
                     ),
+                    model_performance=tuple(
+                        ModelPerformance(
+                            model_id=model_id,
+                            latency_ms=performance.latency_ms,
+                            tokens_per_second=performance.tokens_per_second,
+                            sample_count=performance.samples,
+                        )
+                        for model_id, performance in sorted(
+                            node.proxy_model_performance.items()
+                        )
+                        if model_id in node.models
+                    ),
                     memory_bandwidth_gbps=_nonnegative_float(
                         resources.get("memory_bandwidth_gbps")
                     ),
-                    compute_gflops=_nonnegative_float(
-                        resources.get("compute_gflops")
-                    ),
+                    compute_gflops=_nonnegative_float(resources.get("compute_gflops")),
                     cost_per_hour=_nonnegative_float(allocator.get("cost_per_hour")),
                     host_priority=_first_nonnegative_int(
                         allocator.get("host_priority")
@@ -2061,8 +2107,7 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                         else _string_tuple(allocator.get("actuator_capabilities"))
                     ),
                     manually_managed=bool(
-                        malformed
-                        or allocator.get("manually_managed", not allocator)
+                        malformed or allocator.get("manually_managed", not allocator)
                     ),
                 ),
             )
@@ -2097,9 +2142,11 @@ def _merge_allocator_hosts(
             control_members or members,
             key=lambda item: state_rank[item.state],
         )
-        host_admits_ready = not malformed and (
-            not control_members or restrictive.state in _ROUTABLE_NODE_STATES
-        ) and all(record.safety_lease for record in control_records)
+        host_admits_ready = (
+            not malformed
+            and (not control_members or restrictive.state in _ROUTABLE_NODE_STATES)
+            and all(record.safety_lease for record in control_records)
+        )
         residency_candidates: dict[
             str,
             list[tuple[_AllocatorSnapshotMember, ModelResidency]],
@@ -2156,6 +2203,14 @@ def _merge_allocator_hosts(
             )
         allowed_sets = [set(member.allowed_data_tiers) for member in members]
         allowed_tiers = set.intersection(*allowed_sets) if allowed_sets else set()
+        performance_by_model: dict[str, list[ModelPerformance]] = {}
+        for member in members:
+            for performance in member.model_performance:
+                if performance.model_id in residencies:
+                    performance_by_model.setdefault(
+                        performance.model_id,
+                        [],
+                    ).append(performance)
         merged.append(
             NodeSnapshot(
                 node_id=host_id,
@@ -2207,6 +2262,21 @@ def _merge_allocator_hosts(
                     sum(member.tokens_per_second for member in members),
                 ),
                 latency_ms=max(member.latency_ms for member in members),
+                model_performance=tuple(
+                    ModelPerformance(
+                        model_id=model_id,
+                        tokens_per_second=min(
+                            1_000_000_000_000.0,
+                            sum(item.tokens_per_second for item in samples),
+                        ),
+                        latency_ms=max(item.latency_ms for item in samples),
+                        sample_count=min(
+                            MAX_COUNTER,
+                            sum(item.sample_count for item in samples),
+                        ),
+                    )
+                    for model_id, samples in sorted(performance_by_model.items())
+                ),
                 # Capacity and child records repeat physical-host capability; never add them.
                 memory_bandwidth_gbps=max(
                     member.memory_bandwidth_gbps for member in members
@@ -2287,6 +2357,7 @@ def _record_engine_performance(
     engine: Node,
     started_at: float,
     *,
+    model: str,
     status_code: int,
     response: httpx.Response | None = None,
 ) -> None:
@@ -2307,13 +2378,32 @@ def _record_engine_performance(
         MAX_COUNTER,
         engine.proxy_performance_samples + 1,
     )
+    model_performance = engine.proxy_model_performance.setdefault(
+        model,
+        _ProxyModelPerformance(),
+    )
+    model_first = model_performance.samples == 0
+    model_alpha = 1.0 if model_first else _ENGINE_PERFORMANCE_EWMA_ALPHA
+    model_performance.latency_ms = (
+        latency_ms
+        if model_first
+        else model_alpha * latency_ms
+        + (1.0 - model_alpha) * model_performance.latency_ms
+    )
+    model_performance.samples = min(MAX_COUNTER, model_performance.samples + 1)
 
-    if response is None or elapsed <= 0 or len(response.content) > _MAX_PERFORMANCE_RESPONSE_BYTES:
+    if (
+        response is None
+        or elapsed <= 0
+        or len(response.content) > _MAX_PERFORMANCE_RESPONSE_BYTES
+    ):
         return
     try:
         payload = response.json()
         usage = payload.get("usage") if isinstance(payload, dict) else None
-        completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+        completion_tokens = (
+            usage.get("completion_tokens") if isinstance(usage, dict) else None
+        )
         if (
             isinstance(completion_tokens, bool)
             or not isinstance(completion_tokens, (int, float))
@@ -2326,8 +2416,13 @@ def _record_engine_performance(
     engine.proxy_tokens_per_second = (
         measured
         if engine.proxy_tokens_per_second == 0
-        else alpha * measured
-        + (1.0 - alpha) * engine.proxy_tokens_per_second
+        else alpha * measured + (1.0 - alpha) * engine.proxy_tokens_per_second
+    )
+    model_performance.tokens_per_second = (
+        measured
+        if model_performance.tokens_per_second == 0
+        else model_alpha * measured
+        + (1.0 - model_alpha) * model_performance.tokens_per_second
     )
 
 
@@ -2408,7 +2503,11 @@ def _nonnegative_float(value: Any) -> float:
         number = float(value)
     except (TypeError, ValueError, OverflowError):
         return 0.0
-    return min(number, 1_000_000_000_000.0) if math.isfinite(number) and number >= 0 else 0.0
+    return (
+        min(number, 1_000_000_000_000.0)
+        if math.isfinite(number) and number >= 0
+        else 0.0
+    )
 
 
 def _union(groups) -> tuple[str, ...]:

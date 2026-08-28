@@ -114,16 +114,22 @@ def _queue_pinned_replacement_drain(app, client: TestClient):
     _managed_engine(client, host_id="host-old", model_id="qwen")
     _managed_node(client, host_id="host-new")
     _managed_engine(client, host_id="host-new", model_id="qwen")
-    assert client.put(
-        "/allocator/models/qwen",
-        headers=AUTH,
-        json=_profile(pinned_nodes=["host-new"]),
-    ).status_code == 200
-    assert client.put(
-        "/allocator/mode",
-        headers=AUTH,
-        json={"mode": "automatic"},
-    ).status_code == 200
+    assert (
+        client.put(
+            "/allocator/models/qwen",
+            headers=AUTH,
+            json=_profile(pinned_nodes=["host-new"]),
+        ).status_code
+        == 200
+    )
+    assert (
+        client.put(
+            "/allocator/mode",
+            headers=AUTH,
+            json={"mode": "automatic"},
+        ).status_code
+        == 200
+    )
     pending = app.state.allocator.status()["pending_commands"]
     drain = next(
         item
@@ -235,7 +241,10 @@ def test_allocator_profile_route_supports_namespaced_model_ids(tmp_path):
 
 def test_request_demand_marks_allocator_dirty_for_an_event_driven_tick(tmp_path):
     app, client, _ = _app(tmp_path)
-    assert client.put("/allocator/models/qwen", json=_profile(), headers=AUTH).status_code == 200
+    assert (
+        client.put("/allocator/models/qwen", json=_profile(), headers=AUTH).status_code
+        == 200
+    )
     before = app.state.allocator_dirty_revision
 
     response = client.post(
@@ -399,7 +408,10 @@ def test_node_credentials_are_host_scoped_and_separate_from_operator_auth(tmp_pa
         "allocator": {"managed": True},
     }
 
-    assert client.put(f"/nodes/{host_b_node_id}", headers=AUTH, json=payload).status_code == 403
+    assert (
+        client.put(f"/nodes/{host_b_node_id}", headers=AUTH, json=payload).status_code
+        == 403
+    )
     assert (
         client.put(
             f"/nodes/{host_b_node_id}", headers=_node_auth("host-a"), json=payload
@@ -428,11 +440,15 @@ def test_node_credentials_are_host_scoped_and_separate_from_operator_auth(tmp_pa
     )
     assert changed.status_code == 409
     assert (
-        client.delete(f"/nodes/{host_b_node_id}", headers=_node_auth("host-a")).status_code
+        client.delete(
+            f"/nodes/{host_b_node_id}", headers=_node_auth("host-a")
+        ).status_code
         == 403
     )
     assert (
-        client.delete(f"/nodes/{host_b_node_id}", headers=_node_auth("host-b")).status_code
+        client.delete(
+            f"/nodes/{host_b_node_id}", headers=_node_auth("host-b")
+        ).status_code
         == 200
     )
 
@@ -506,7 +522,9 @@ def test_explicit_empty_data_tier_policy_fails_closed(tmp_path):
         },
     )
     assert response.status_code == 200
-    assert client.get("/allocator/status").json()["nodes"][0]["allowed_data_tiers"] == []
+    assert (
+        client.get("/allocator/status").json()["nodes"][0]["allowed_data_tiers"] == []
+    )
 
 
 def test_legacy_registration_bounds_node_and_model_identity(tmp_path):
@@ -624,7 +642,9 @@ def test_external_vllm_runtime_hint_is_routable_but_never_grants_management(tmp_
     assert node["max_concurrency"] == 16
     assert node["residencies"][0]["state"] == "ready"
     assert node["residencies"][0]["managed"] is False
-    discovered = client.get("/nodes/discover", params={"model": "qwen"}).json()["engines"][0]
+    discovered = client.get("/nodes/discover", params={"model": "qwen"}).json()[
+        "engines"
+    ][0]
     assert discovered["max_concurrency"] == 16
     engine = app.state.nodes["legacy"]
     assert server_module._choose_engine(app, "qwen") is engine
@@ -716,16 +736,22 @@ def test_control_only_ready_replacement_cannot_drain_live_route(tmp_path):
         },
     )
     assert control.status_code == 200, control.text
-    assert client.put(
-        "/allocator/models/qwen",
-        headers=AUTH,
-        json=_profile(pinned_nodes=["host-new"]),
-    ).status_code == 200
-    assert client.put(
-        "/allocator/mode",
-        headers=AUTH,
-        json={"mode": "automatic"},
-    ).status_code == 200
+    assert (
+        client.put(
+            "/allocator/models/qwen",
+            headers=AUTH,
+            json=_profile(pinned_nodes=["host-new"]),
+        ).status_code
+        == 200
+    )
+    assert (
+        client.put(
+            "/allocator/mode",
+            headers=AUTH,
+            json={"mode": "automatic"},
+        ).status_code
+        == 200
+    )
 
     before = client.get("/allocator/status").json()
     new_host = next(item for item in before["nodes"] if item["node_id"] == "host-new")
@@ -926,7 +952,9 @@ def test_empty_heartbeat_preserves_proxy_owned_in_flight_load(tmp_path):
     assert engine["load"]["active_tasks"] == 1
 
 
-def test_managed_runtime_and_proxy_activity_are_combined_without_double_counting(tmp_path):
+def test_managed_runtime_and_proxy_activity_are_combined_without_double_counting(
+    tmp_path,
+):
     app, client, _ = _app(tmp_path)
     child_id = engine_node_id("host-1", "qwen")
     _managed_engine(client, node_id=child_id, model_id="qwen", active_tasks=2)
@@ -945,7 +973,10 @@ def test_managed_runtime_and_proxy_activity_are_combined_without_double_counting
     )
     assert response.status_code == 200
     assert response.json()["load"]["active_tasks"] == 1
-    assert "reported_active_tasks" not in client.get("/nodes/discover").json()["engines"][0]
+    assert (
+        "reported_active_tasks"
+        not in client.get("/nodes/discover").json()["engines"][0]
+    )
 
     server_module._change_active_tasks(engine, -1)
     assert engine.load["active_tasks"] == 0
@@ -1107,9 +1138,7 @@ def _memory_tls_handshake(client_context: ssl.SSLContext, hostname: str) -> None
 
 def test_private_engine_ca_is_private_and_enforces_chain_and_hostname(tmp_path):
     app, client, _ = _app(tmp_path)
-    ca_pem = (
-        Path(__file__).parent / "fixtures" / "allocator_tls_ca.pem"
-    ).read_text()
+    ca_pem = (Path(__file__).parent / "fixtures" / "allocator_tls_ca.pem").read_text()
     child_id = engine_node_id("host-1", "qwen")
     response = client.put(
         f"/nodes/{child_id}",
@@ -1429,12 +1458,14 @@ def test_proxy_performance_ewma_is_private_and_overrides_reported_estimates(
         server_module._record_engine_performance(
             engine,
             100.0,
+            model="qwen",
             status_code=200,
             response=httpx.Response(200, json={"usage": {"completion_tokens": 20}}),
         )
         server_module._record_engine_performance(
             engine,
             100.0,
+            model="qwen",
             status_code=200,
             response=httpx.Response(200, json={"usage": {"completion_tokens": 80}}),
         )
@@ -1442,10 +1473,13 @@ def test_proxy_performance_ewma_is_private_and_overrides_reported_estimates(
     assert engine.proxy_performance_samples == 2
     assert engine.proxy_latency_ms == pytest.approx(2_400)
     assert engine.proxy_tokens_per_second == pytest.approx(12)
+    assert engine.proxy_model_performance["qwen"].latency_ms == pytest.approx(2_400)
+    assert engine.proxy_model_performance["qwen"].tokens_per_second == pytest.approx(12)
     public = engine.public_dict()
     assert "proxy_latency_ms" not in public
     assert "proxy_tokens_per_second" not in public
     assert "proxy_performance_samples" not in public
+    assert "proxy_model_performance" not in public
 
     heartbeat = client.post(
         "/nodes/heartbeat",
@@ -1459,6 +1493,8 @@ def test_proxy_performance_ewma_is_private_and_overrides_reported_estimates(
     snapshot = server_module._allocator_snapshots(app)[0]
     assert snapshot.latency_ms == pytest.approx(2_400)
     assert snapshot.tokens_per_second == pytest.approx(12)
+    assert snapshot.performance("qwen").latency_ms == pytest.approx(2_400)
+    assert snapshot.performance("qwen").tokens_per_second == pytest.approx(12)
 
 
 def test_proxy_performance_ignores_errors_and_unusable_usage(tmp_path, monkeypatch):
@@ -1470,12 +1506,14 @@ def test_proxy_performance_ignores_errors_and_unusable_usage(tmp_path, monkeypat
     server_module._record_engine_performance(
         engine,
         100.0,
+        model="qwen",
         status_code=500,
         response=httpx.Response(500, json={"usage": {"completion_tokens": 100}}),
     )
     server_module._record_engine_performance(
         engine,
         100.0,
+        model="qwen",
         status_code=200,
         response=httpx.Response(200, json={"usage": {"completion_tokens": True}}),
     )
@@ -1483,6 +1521,41 @@ def test_proxy_performance_ignores_errors_and_unusable_usage(tmp_path, monkeypat
     assert engine.proxy_performance_samples == 1
     assert engine.proxy_latency_ms == 5_000
     assert engine.proxy_tokens_per_second == 0
+
+
+def test_proxy_performance_keeps_multi_model_measurements_isolated(
+    tmp_path,
+    monkeypatch,
+):
+    app, client, _ = _app(tmp_path)
+    _managed_engine(client, host_id="host-per-model", model_id="qwen")
+    engine = app.state.nodes[engine_node_id("host-per-model", "qwen")]
+    engine.models.append("other")
+    clock = iter((102.0, 110.0))
+    monkeypatch.setattr(server_module.time, "monotonic", lambda: next(clock))
+
+    server_module._record_engine_performance(
+        engine,
+        100.0,
+        model="qwen",
+        status_code=200,
+        response=httpx.Response(200, json={"usage": {"completion_tokens": 20}}),
+    )
+    server_module._record_engine_performance(
+        engine,
+        100.0,
+        model="other",
+        status_code=200,
+        response=httpx.Response(200, json={"usage": {"completion_tokens": 20}}),
+    )
+
+    assert engine.proxy_model_performance["qwen"].latency_ms == 2_000
+    assert engine.proxy_model_performance["qwen"].tokens_per_second == 10
+    assert engine.proxy_model_performance["other"].latency_ms == 10_000
+    assert engine.proxy_model_performance["other"].tokens_per_second == 2
+    snapshot = server_module._allocator_snapshots(app)[0]
+    assert snapshot.performance("qwen").tokens_per_second == 10
+    assert snapshot.performance("other").tokens_per_second == 2
 
 
 def test_allocator_snapshot_normalizes_remote_wall_clocks_from_model_ages(tmp_path):
@@ -1574,7 +1647,15 @@ def test_invalid_model_age_evidence_is_rejected_at_registration(tmp_path):
 
 @pytest.mark.parametrize(
     ("status_code", "expected"),
-    [(400, False), (401, False), (404, False), (422, False), (429, True), (500, True), (503, True)],
+    [
+        (400, False),
+        (401, False),
+        (404, False),
+        (422, False),
+        (429, True),
+        (500, True),
+        (503, True),
+    ],
 )
 def test_only_retryable_upstream_statuses_create_allocator_error_pressure(
     status_code,
@@ -1619,10 +1700,16 @@ def test_control_heartbeat_with_unprocessed_revision_never_receives_old_commands
 ):
     app, client, _ = _app(tmp_path)
     _managed_node(client)
-    assert client.put("/allocator/models/qwen", json=_profile(), headers=AUTH).status_code == 200
-    assert client.put(
-        "/allocator/mode", json={"mode": "automatic"}, headers=AUTH
-    ).status_code == 200
+    assert (
+        client.put("/allocator/models/qwen", json=_profile(), headers=AUTH).status_code
+        == 200
+    )
+    assert (
+        client.put(
+            "/allocator/mode", json={"mode": "automatic"}, headers=AUTH
+        ).status_code
+        == 200
+    )
     assert app.state.allocator.status()["pending_commands"]
 
     async def never_processed(*_args, **_kwargs):
@@ -1678,11 +1765,11 @@ def test_identical_lease_churn_does_not_starve_destructive_delivery(
     assert [item["action_id"] for item in response.json()["allocator"]["commands"]] == [
         drain["action_id"]
     ]
+    assert app.state.allocator_dirty_revision > app.state.allocator_processed_revision
     assert (
-        app.state.allocator_dirty_revision
-        > app.state.allocator_processed_revision
+        drain["action_id"]
+        in json.loads(state_path.read_text())["delivered_command_ids"]
     )
-    assert drain["action_id"] in json.loads(state_path.read_text())["delivered_command_ids"]
 
 
 def test_destructive_delivery_requires_exact_safety_revision_match(
@@ -1721,9 +1808,10 @@ def test_destructive_delivery_requires_exact_safety_revision_match(
         item["action_id"] == drain["action_id"]
         for item in app.state.allocator.status()["pending_commands"]
     )
-    assert drain["action_id"] not in json.loads(state_path.read_text())[
-        "delivered_command_ids"
-    ]
+    assert (
+        drain["action_id"]
+        not in json.loads(state_path.read_text())["delivered_command_ids"]
+    )
 
 
 def test_semantic_change_during_tick_withholds_destructive_delivery(
@@ -1767,7 +1855,10 @@ def test_semantic_change_during_tick_withholds_destructive_delivery(
         item["action_id"] == drain["action_id"]
         for item in app.state.allocator.status()["pending_commands"]
     )
-    assert drain["action_id"] not in json.loads(state_path.read_text())["delivered_command_ids"]
+    assert (
+        drain["action_id"]
+        not in json.loads(state_path.read_text())["delivered_command_ids"]
+    )
 
 
 def test_near_expiry_ready_route_cannot_authorize_drain(tmp_path):
@@ -1783,16 +1874,22 @@ def test_near_expiry_ready_route_cannot_authorize_drain(tmp_path):
         + 0.1
     )
 
-    assert client.put(
-        "/allocator/models/qwen",
-        headers=AUTH,
-        json=_profile(pinned_nodes=["host-new"]),
-    ).status_code == 200
-    assert client.put(
-        "/allocator/mode",
-        headers=AUTH,
-        json={"mode": "automatic"},
-    ).status_code == 200
+    assert (
+        client.put(
+            "/allocator/models/qwen",
+            headers=AUTH,
+            json=_profile(pinned_nodes=["host-new"]),
+        ).status_code
+        == 200
+    )
+    assert (
+        client.put(
+            "/allocator/mode",
+            headers=AUTH,
+            json={"mode": "automatic"},
+        ).status_code
+        == 200
+    )
     status = app.state.allocator.status(server_module._allocator_snapshots(app))
 
     new_host = next(item for item in status["nodes"] if item["node_id"] == "host-new")
@@ -1849,9 +1946,10 @@ def test_replacement_expiry_during_tick_cannot_deliver_or_mark_drain(
         item["action_id"] == drain["action_id"]
         for item in app.state.allocator.status()["pending_commands"]
     )
-    assert drain["action_id"] not in json.loads(state_path.read_text())[
-        "delivered_command_ids"
-    ]
+    assert (
+        drain["action_id"]
+        not in json.loads(state_path.read_text())["delivered_command_ids"]
+    )
     active = server_module._active_engines(app, "qwen")
     assert [server_module._node_host_id(node) for node in active] == ["host-old"]
 
@@ -1905,9 +2003,10 @@ def test_slow_delivery_marker_save_revalidates_fresh_leases_before_drain(
     assert response.status_code == 200
     assert response.json()["allocator"]["commands"] == []
     assert delivery_save_seen
-    assert drain["action_id"] not in json.loads(state_path.read_text())[
-        "delivered_command_ids"
-    ]
+    assert (
+        drain["action_id"]
+        not in json.loads(state_path.read_text())["delivered_command_ids"]
+    )
 
 
 def test_failed_unsafe_marker_compensation_retains_conservative_uncertainty(
@@ -1962,14 +2061,16 @@ def test_failed_unsafe_marker_compensation_retains_conservative_uncertainty(
 
     assert response.status_code == 200
     assert response.json()["allocator"]["commands"] == []
-    assert drain["action_id"] in json.loads(state_path.read_text())[
-        "delivered_command_ids"
-    ]
+    assert (
+        drain["action_id"]
+        in json.loads(state_path.read_text())["delivered_command_ids"]
+    )
     status = app.state.allocator.status()
     assert drain["action_id"] in status["delivered_pending_action_ids"]
-    assert "could not clear prepared destructive delivery markers" in status[
-        "last_delivery_safety_error"
-    ]
+    assert (
+        "could not clear prepared destructive delivery markers"
+        in status["last_delivery_safety_error"]
+    )
 
 
 def test_volatile_available_memory_churn_does_not_starve_destructive_delivery(
@@ -2021,9 +2122,10 @@ def test_volatile_available_memory_churn_does_not_starve_destructive_delivery(
     assert [item["action_id"] for item in response.json()["allocator"]["commands"]] == [
         drain["action_id"]
     ]
-    assert drain["action_id"] in json.loads(state_path.read_text())[
-        "delivered_command_ids"
-    ]
+    assert (
+        drain["action_id"]
+        in json.loads(state_path.read_text())["delivered_command_ids"]
+    )
 
 
 def test_lease_heartbeat_does_not_wait_poll_or_mark_command_delivered(
@@ -2032,10 +2134,16 @@ def test_lease_heartbeat_does_not_wait_poll_or_mark_command_delivered(
 ):
     app, client, state_path = _app(tmp_path)
     _managed_node(client)
-    assert client.put("/allocator/models/qwen", json=_profile(), headers=AUTH).status_code == 200
-    assert client.put(
-        "/allocator/mode", json={"mode": "automatic"}, headers=AUTH
-    ).status_code == 200
+    assert (
+        client.put("/allocator/models/qwen", json=_profile(), headers=AUTH).status_code
+        == 200
+    )
+    assert (
+        client.put(
+            "/allocator/mode", json={"mode": "automatic"}, headers=AUTH
+        ).status_code
+        == 200
+    )
     pending = app.state.allocator.status()["pending_commands"]
     assert len(pending) == 1
     action_id = pending[0]["action_id"]
@@ -2060,7 +2168,9 @@ def test_lease_heartbeat_does_not_wait_poll_or_mark_command_delivered(
         poll_calls += 1
         return original_commands_for(*args, **kwargs)
 
-    monkeypatch.setattr(server_module, "_await_allocator_revision", mark_revision_processed)
+    monkeypatch.setattr(
+        server_module, "_await_allocator_revision", mark_revision_processed
+    )
     monkeypatch.setattr(app.state.allocator, "commands_for", count_command_poll)
     with TestClient(app) as running_client:
         lease = running_client.post(
@@ -2072,7 +2182,9 @@ def test_lease_heartbeat_does_not_wait_poll_or_mark_command_delivered(
         assert lease.json()["allocator"]["commands"] == []
         assert wait_calls == 0
         assert poll_calls == 0
-        assert action_id not in json.loads(state_path.read_text())["delivered_command_ids"]
+        assert (
+            action_id not in json.loads(state_path.read_text())["delivered_command_ids"]
+        )
 
         control = running_client.post(
             "/nodes/heartbeat",
