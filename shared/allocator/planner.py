@@ -40,6 +40,7 @@ class PlannerPolicy:
     latency_pressure_limit: float = 2.0
     error_pressure_limit: float = 0.5
     model_failure_penalty: float = 50_000.0
+    performance_ttl_seconds: float = 900.0
     throttled_capacity_fraction: float = 0.5
     preserve_recent_residencies: bool = True
 
@@ -53,6 +54,7 @@ class PlannerPolicy:
                 self.node_ttl_seconds,
                 self.max_future_clock_skew_seconds,
                 self.model_failure_penalty,
+                self.performance_ttl_seconds,
             )
         ):
             raise ValueError("planner weights and TTL must be finite and non-negative")
@@ -440,6 +442,7 @@ class PlacementPlanner:
                     capacity[candidate_node.node_id],
                     domains,
                     self.policy,
+                    now=timestamp,
                     need_new_domain=(
                         len(domains) < min(placement_model.min_failure_domains, target)
                     ),
@@ -554,6 +557,7 @@ class PlacementPlanner:
                             capacity[target_node.node_id],
                             placement_domains,
                             self.policy,
+                            now=timestamp,
                             need_new_domain=(
                                 len(placement_domains)
                                 < min(placement_model.min_failure_domains, target)
@@ -636,6 +640,7 @@ class PlacementPlanner:
                         capacity[node.node_id],
                         domains,
                         self.policy,
+                        now=timestamp,
                         need_new_domain=(
                             len(domains) < min(model.min_failure_domains, target)
                         ),
@@ -1063,6 +1068,7 @@ def _candidate_score(
     domains: set[str],
     policy: PlannerPolicy,
     *,
+    now: float,
     need_new_domain: bool,
 ) -> tuple[float, tuple[str, ...]]:
     score = 0.0
@@ -1103,6 +1109,14 @@ def _candidate_score(
     # Best fit preserves a large contiguous-capacity host for a future large model.
     score += 2_000.0 / (1.0 + after / max(model.memory_mb, 1))
     model_performance = node.performance(model.model_id)
+    if model_performance is not None:
+        performance_age = now - model_performance.updated_at
+        if not model_performance.updated_at or not (
+            -policy.max_future_clock_skew_seconds
+            <= performance_age
+            <= policy.performance_ttl_seconds
+        ):
+            model_performance = None
     ready_models = sum(item.state == ResidencyState.READY for item in node.residencies)
     # A node-wide metric is safe for an empty/single-model engine, and remains a useful generic
     # benchmark for a cold host. Once an engine serves several models it is not attributable: use

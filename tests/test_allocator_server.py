@@ -1475,6 +1475,7 @@ def test_proxy_performance_ewma_is_private_and_overrides_reported_estimates(
     assert engine.proxy_tokens_per_second == pytest.approx(12)
     assert engine.proxy_model_performance["qwen"].latency_ms == pytest.approx(2_400)
     assert engine.proxy_model_performance["qwen"].tokens_per_second == pytest.approx(12)
+    assert engine.proxy_model_performance["qwen"].updated_at > 0
     public = engine.public_dict()
     assert "proxy_latency_ms" not in public
     assert "proxy_tokens_per_second" not in public
@@ -1495,6 +1496,7 @@ def test_proxy_performance_ewma_is_private_and_overrides_reported_estimates(
     assert snapshot.tokens_per_second == pytest.approx(12)
     assert snapshot.performance("qwen").latency_ms == pytest.approx(2_400)
     assert snapshot.performance("qwen").tokens_per_second == pytest.approx(12)
+    assert snapshot.performance("qwen").updated_at > 0
 
 
 def test_proxy_performance_ignores_errors_and_unusable_usage(tmp_path, monkeypatch):

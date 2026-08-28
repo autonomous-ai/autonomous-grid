@@ -175,12 +175,35 @@ def test_multi_model_engine_uses_only_per_model_performance_for_placement():
                 tokens_per_second=300,
                 latency_ms=50,
                 sample_count=5,
+                updated_at=10,
             ),
         ),
     )
     specific = planner.plan((attributed, measured_qwen), (profile,), now=10)
     assert specific.nodes_for(profile.model_id) == ("multi-model",)
     assert "measured throughput" in specific.assignments[0].reasons
+
+    stale = replace(
+        attributed,
+        model_performance=(
+            replace(attributed.model_performance[0], updated_at=1),
+        ),
+    )
+    expired = PlacementPlanner(
+        PlannerPolicy(performance_ttl_seconds=5),
+    ).plan((stale, measured_qwen), (profile,), now=10)
+    assert expired.nodes_for(profile.model_id) == ("measured-qwen",)
+
+    fresh = replace(
+        attributed,
+        model_performance=(
+            replace(attributed.model_performance[0], updated_at=9),
+        ),
+    )
+    refreshed = PlacementPlanner(
+        PlannerPolicy(performance_ttl_seconds=5),
+    ).plan((fresh, measured_qwen), (profile,), now=10)
+    assert refreshed.nodes_for(profile.model_id) == ("multi-model",)
 
 
 def ready(
@@ -343,6 +366,10 @@ def test_allocator_models_validate_impossible_values():
         DemandForecast("m", requests_per_minute=math.inf)
     with pytest.raises(ValueError, match="active_requests"):
         ready(active_requests=-1)
+    with pytest.raises(ValueError, match="non-negative"):
+        PlannerPolicy(performance_ttl_seconds=-1)
+    with pytest.raises(ValueError, match="updated_at"):
+        ModelPerformance("qwen", updated_at=-1)
 
 
 def test_node_snapshot_round_trip_preserves_residency_and_enum():
@@ -357,6 +384,7 @@ def test_node_snapshot_round_trip_preserves_residency_and_enum():
                 tokens_per_second=12.5,
                 latency_ms=250,
                 sample_count=4,
+                updated_at=9,
             ),
         ),
         memory_bandwidth_gbps=400,
@@ -367,6 +395,7 @@ def test_node_snapshot_round_trip_preserves_residency_and_enum():
     assert restored.residency("qwen").managed is False
     assert restored.residency("qwen").active_requests == 2
     assert restored.performance("qwen").tokens_per_second == 12.5
+    assert restored.performance("qwen").updated_at == 9
 
     legacy = original.to_dict()
     legacy["residencies"][0].pop("active_requests")

@@ -74,7 +74,9 @@ supersedes the cold hardware prior. A multi-model vLLM engine is scored only wit
 the model being placed; its fast model cannot lend an unrelated slow model an inflated score.
 Streaming responses still contribute latency even when their wire format does not expose token
 usage. The measurements are private: discovery does not expose them, managed heartbeats cannot
-overwrite them, and no prompt or response content is retained for allocator telemetry.
+overwrite them, and no prompt or response content is retained for allocator telemetry. A bounded
+freshness window prevents an old benchmark from surviving an engine reload or long idle period;
+expired measurements fall back to current hardware priors until new requests refresh them.
 
 Recent ready replicas and a recently persisted demand watermark remain desired during the model's
 scale-down cooldown. This is the global hysteresis that prevents a quiet minute—or a signaling-

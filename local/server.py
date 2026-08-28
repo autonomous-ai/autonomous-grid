@@ -111,6 +111,7 @@ class _ProxyModelPerformance:
     latency_ms: float = 0.0
     tokens_per_second: float = 0.0
     samples: int = 0
+    updated_at: float = 0.0
 
 
 @dataclass
@@ -2083,6 +2084,7 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                             latency_ms=performance.latency_ms,
                             tokens_per_second=performance.tokens_per_second,
                             sample_count=performance.samples,
+                            updated_at=performance.updated_at,
                         )
                         for model_id, performance in sorted(
                             node.proxy_model_performance.items()
@@ -2274,6 +2276,9 @@ def _merge_allocator_hosts(
                             MAX_COUNTER,
                             sum(item.sample_count for item in samples),
                         ),
+                        # The merged value sums every child. It remains attributable only while
+                        # every contributing measurement is fresh, so retain the oldest timestamp.
+                        updated_at=min(item.updated_at for item in samples),
                     )
                     for model_id, samples in sorted(performance_by_model.items())
                 ),
@@ -2391,6 +2396,7 @@ def _record_engine_performance(
         + (1.0 - model_alpha) * model_performance.latency_ms
     )
     model_performance.samples = min(MAX_COUNTER, model_performance.samples + 1)
+    model_performance.updated_at = max(0.0, time.time())
 
     if (
         response is None

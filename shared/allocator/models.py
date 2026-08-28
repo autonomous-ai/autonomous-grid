@@ -118,12 +118,14 @@ class ModelPerformance:
     tokens_per_second: float = 0.0
     latency_ms: float = 0.0
     sample_count: int = 0
+    updated_at: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.model_id or len(self.model_id) > MAX_ID_LENGTH:
             raise ValueError("model_id is required")
         _finite_nonnegative(self.tokens_per_second, "tokens_per_second")
         _finite_nonnegative(self.latency_ms, "latency_ms")
+        _finite_nonnegative(self.updated_at, "updated_at")
         if not 0 <= self.sample_count <= MAX_COUNTER:
             raise ValueError("sample_count is outside the supported range")
 
@@ -134,6 +136,7 @@ class ModelPerformance:
             tokens_per_second=float(value.get("tokens_per_second") or 0.0),
             latency_ms=float(value.get("latency_ms") or 0.0),
             sample_count=int(value.get("sample_count") or 0),
+            updated_at=float(value.get("updated_at") or 0.0),
         )
 
 
