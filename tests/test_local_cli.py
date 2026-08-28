@@ -780,8 +780,9 @@ def test_provider_media_server_streams_sse_events(monkeypatch):
 
 
 def test_catalog_contains_reference_readme_qwen36_models():
-    apple = catalog.find("qwen36-35b-a3b-mtp")
-    nvidia = catalog.find("qwen36-27b-mtp")
+    by_repo = {entry.hf_repo: entry for entry in catalog.CATALOG}
+    apple = by_repo.get("unsloth/Qwen3.6-35B-A3B-MTP-GGUF")
+    nvidia = by_repo.get("unsloth/Qwen3.6-27B-MTP-GGUF")
 
     assert apple is not None
     assert apple.hf_repo == "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
@@ -3588,6 +3589,12 @@ def test_run_engine_launches_local_llama_server_by_default(monkeypatch, tmp_path
         return launcher.LlamaProcess(proc=FakeProc(), port=kwargs["port"], log=tmp_path / "llama.log")
 
     monkeypatch.setattr(launcher, "is_port_in_use", lambda port: False)
+    # The join now probes whether the address it is about to advertise is actually
+    # reachable, and falls back to a real LAN address when it is not. That probe is a live
+    # HTTP call: left unstubbed it fails against this test's fictional `detect_local_ip`,
+    # and the assertion below then reads whatever IP the machine running the suite happens
+    # to have. Stubbed to "reachable" so the test asks only what it means to ask.
+    monkeypatch.setattr(runtime, "advertised_address_works", lambda url, timeout=3.0: True)
     monkeypatch.setattr(launcher, "assert_supported_build", lambda: None)
     monkeypatch.setattr(launcher, "start_llm", fake_start_llm)
     monkeypatch.setattr(launcher, "wait_for_models", lambda proc: calls.setdefault("waited", proc.port))
@@ -3617,6 +3624,12 @@ def test_run_engine_advertise_as_routes_alias_and_sets_llama_alias(monkeypatch, 
         return launcher.LlamaProcess(proc=FakeProc(), port=kwargs["port"], log=tmp_path / "llama.log")
 
     monkeypatch.setattr(launcher, "is_port_in_use", lambda port: False)
+    # The join now probes whether the address it is about to advertise is actually
+    # reachable, and falls back to a real LAN address when it is not. That probe is a live
+    # HTTP call: left unstubbed it fails against this test's fictional `detect_local_ip`,
+    # and the assertion below then reads whatever IP the machine running the suite happens
+    # to have. Stubbed to "reachable" so the test asks only what it means to ask.
+    monkeypatch.setattr(runtime, "advertised_address_works", lambda url, timeout=3.0: True)
     monkeypatch.setattr(launcher, "assert_supported_build", lambda: None)
     monkeypatch.setattr(launcher, "start_llm", fake_start_llm)
     monkeypatch.setattr(launcher, "wait_for_models", lambda proc: None)
@@ -3705,6 +3718,12 @@ def test_run_engine_enable_media_advertises_media_models(monkeypatch, tmp_path):
     calls = {}
     monkeypatch.setattr(runtime, "detect_local_ip", lambda: "192.168.1.50")
     monkeypatch.setattr(launcher, "is_port_in_use", lambda port: False)
+    # The join now probes whether the address it is about to advertise is actually
+    # reachable, and falls back to a real LAN address when it is not. That probe is a live
+    # HTTP call: left unstubbed it fails against this test's fictional `detect_local_ip`,
+    # and the assertion below then reads whatever IP the machine running the suite happens
+    # to have. Stubbed to "reachable" so the test asks only what it means to ask.
+    monkeypatch.setattr(runtime, "advertised_address_works", lambda url, timeout=3.0: True)
     monkeypatch.setattr(launcher, "assert_supported_build", lambda: None)
     monkeypatch.setattr(
         launcher,
@@ -8952,7 +8971,7 @@ def test_remote_join_requires_grid_up(monkeypatch, tmp_path):
                         lambda *a, **k: pytest.fail("must not spawn when the grid is down"))
     with pytest.raises(SystemExit) as exc:
         cli.main(["join", "--serve", "m"])
-    assert "grid up" in str(exc.value).lower()
+    assert "grid start" in str(exc.value).lower()
 
 
 def test_remote_join_died_cleans_up_record(monkeypatch, tmp_path):
@@ -21156,7 +21175,7 @@ def test_remote_engines_requires_grid_up(monkeypatch, tmp_path):
     _mock_lifecycle(monkeypatch, status={"state": "stopped"})  # down → no relay address
     with pytest.raises(SystemExit) as exc:
         cli.main(["engines"])
-    assert "grid up" in str(exc.value).lower()
+    assert "grid start" in str(exc.value).lower()
 
 
 def test_remote_engines_works_without_access_token(monkeypatch, tmp_path, capsys):
@@ -29317,7 +29336,7 @@ def test_grid_down_converges_when_the_pid_is_unprovable_but_the_port_is_dead(
     _grid_port(monkeypatch, None)
 
     assert cli.main(["down", "home"]) == 0
-    assert "is down" in capsys.readouterr().out
+    assert "stopped" in capsys.readouterr().out
     saved = config.load_grid_config(cfg["grid_id"])
     assert runtime._server_identity(saved) == {"pid": 0, "pid_start_time": None, "pgid": None}
 
@@ -29364,7 +29383,7 @@ def test_grid_down_on_an_already_stopped_grid_is_quiet(monkeypatch, tmp_path, ca
     assert cli.main(["down", "home"]) == 0
 
     out, err = capsys.readouterr()
-    assert "is down" in out and sent == []
+    assert "stopped" in out and sent == []
     assert err == "", f"an already-stopped grid should say nothing on stderr: {err}"
 
 

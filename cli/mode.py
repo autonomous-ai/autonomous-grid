@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 
 from local import config
 from shared import state
@@ -23,7 +24,7 @@ def cmd_mode(args: argparse.Namespace) -> int:
         return 0
     print(mode)
     if target == "remote":
-        print("Remote mode: `grid login` to sign in, then `grid up` to bring a remote grid online, "
+        print("Remote mode: `grid login` to sign in, then `grid start` to bring a remote grid online, "
               "`grid join` to serve models to it, and `grid chat -m <model> \"…\"` to use them.")
     return 0
 
@@ -61,6 +62,6 @@ def _require_local_grid(name: str) -> None:
         if cfg.get("name") == name or cfg.get("grid_id") == name:
             return
     raise SystemExit(
-        f"Grid not found: {name!r}. Run `grid up {name}` on this device, or `grid ls` "
-        "to see your grids."
+        f"Grid not found: {name!r}. Run `grid start {shlex.quote(name)}` on this device, or "
+        "`grid ls` to see your grids."
     )

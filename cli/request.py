@@ -36,6 +36,27 @@ def reject_responses_only_model(model: str) -> None:
     )
 
 
+def chat_content(message: str, images: list[str] | None) -> Any:
+    """A chat message's ``content``: the plain string, or the multimodal parts array when
+    ``--image`` was given. Shared by both modes' chat handlers so the two can't drift.
+
+    A bare string when there are no images, rather than a one-element parts array: the array form
+    is the newer spelling of the same thing, and an engine or proxy that only implements the plain
+    string must not be broken by a request that had nothing multimodal about it.
+
+    Text first, then the images, matching the order the OpenAI vision docs use — some models
+    attend to the instruction differently depending on which side of the image it sits.
+    """
+    if not images:
+        return message
+    parts: list[dict[str, Any]] = [{"type": "text", "text": message}]
+    parts.extend(
+        {"type": "image_url", "image_url": {"url": media_io.image_data_uri(path)}}
+        for path in images
+    )
+    return parts
+
+
 # Remote-only request-routing flags (DECISIONS D16): rejected in local mode, where the concept doesn't
 # exist — the mirror of `cli/provider.py:_reject_remote_only_flags` for `grid join`.
 def _reject_remote_only_flags(args: argparse.Namespace) -> None:
@@ -59,11 +80,23 @@ def cmd_chat(args: argparse.Namespace) -> int:
     try:
         resp = httpx.post(
             f"{runtime.grid_url(cfg)}/v1/chat/completions",
-            json={"model": args.model, "messages": [{"role": "user", "content": args.message}]},
+            json={
+                "model": args.model,
+                "messages": [{
+                    "role": "user",
+                    "content": chat_content(args.message, getattr(args, "image", None)),
+                }],
+            },
             timeout=args.timeout,
         )
     except httpx.RequestError as exc:
         raise SystemExit(f"Request failed: {exc}") from exc
+    except KeyboardInterrupt:
+        # Same class of bug as the model-download and remote-chat cancel: KeyboardInterrupt during
+        # a blocking read is not an `httpx.RequestError` (it is a `BaseException`, not caught by
+        # the guard above), so it used to surface as a raw traceback through ssl/httpcore/httpx
+        # instead of a clean cancellation — exactly when a slow model makes Ctrl-C likely.
+        raise SystemExit("\nCancelled.") from None
     if getattr(args, "json", False) or resp.status_code >= 400:
         print(resp.text)
         return 0 if resp.status_code < 400 else 1
@@ -131,4 +164,7 @@ def _post_media_request(args: argparse.Namespace, endpoint_path: str, payload: d
             return media_io.consume_media_sse(resp, output_dir)
     except httpx.RequestError as exc:
         print(f"Media request failed: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
         return 1

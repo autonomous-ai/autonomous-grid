@@ -17,6 +17,7 @@ import argparse
 import contextlib
 import getpass
 import os
+import shlex
 import signal
 import socket
 import subprocess
@@ -532,11 +533,31 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     if task_serving.allowed:  # said only when it is true — the refusal has already gone to stderr
         print("tasks=on (claiming tasks for this grid)")
     print(f"log={paths.engines_dir(network_id) / f'{engine_id}.log'}")
+    # Quoted: a grid's display name is freeform and can carry a space ("Hydrate Grid"), and a hint
+    # printed bare isn't actually copy-pasteable — argparse splits it into two positionals and
+    # rejects the second as "unrecognized arguments" (grid-leave issue: a reader hit exactly this
+    # `Next:` line unquoted and it failed on paste).
+    quoted_label = shlex.quote(label)
+    # What a reader will actually type next: the ADVERTISED name, not the record's raw filename.
+    # `--advertise-as` is what got registered as the model id, so the filename would 404 (the same
+    # mismatch `run_records.own_model_case` exists to repair on the request side).
+    advertised = list(record.get("advertise_as") or []) or list(record.get("models") or [])
     if reloaded:  # the live process re-advertised in place — nothing restarted, nothing dropped
-        print(f"(hot-reloaded — no in-flight requests dropped; stop with `grid leave {label}`)")
+        print(f"(hot-reloaded — no in-flight requests dropped; stop with `grid leave {quoted_label}`)")
+        if advertised:
+            print("\nNext:")
+            for line in provider.chat_hints(advertised[0], provider.serves_vision(args)):
+                print(line)
     else:
         # The relay isn't locally pollable, so we can't confirm "registered" here — report starting.
-        print(f"(starting — stop with `grid leave {label}`)")
+        # `grid models` comes first because it is what actually confirms the engine came up; the
+        # chat lines follow so the whole path is on screen once, in order.
+        print(f"(starting — stop with `grid leave {quoted_label}`)")
+        print("\nNext:")
+        print(f"  grid models {quoted_label}")
+        if advertised:
+            for line in provider.chat_hints(advertised[0], provider.serves_vision(args)):
+                print(line)
     return 0
 
 
@@ -2000,7 +2021,7 @@ def _leave_one_engine(
     survivors = [rec for rec in records.values() if run_records.record_alive(rec)]
     survivors = survivors or list(records.values())
     union = _engine_union(survivors)
-    to_drop = _drop_spec(union, args.engine, label)
+    to_drop = _drop_spec(union, args.engine, label, _identity_field(survivors, "meta_name"))
     if not to_drop:
         raise SystemExit(
             f"No engine {args.engine!r} on {label} (match by endpoint URL, a served model, or a URL "
@@ -2053,9 +2074,28 @@ def _engines_summary(union: list[dict[str, object]]) -> str:
 
 
 def _drop_spec(
-    union: list[dict[str, object]], selector: str, label: str
+    union: list[dict[str, object]], selector: str, label: str, meta_name: object = None
 ) -> list[dict[str, object]]:
-    """The spec(s) to remove for ``selector`` — exact endpoint_url → engine_label → served model → URL
-    substring — via the shared matcher (`shared.run_records.match_engine`). Remote engines are keyed by
-    URL/label, so no exact-id short-circuit here (that's the local caller's job)."""
-    return run_records.match_engine(union, selector, label=label, summary=_engines_summary(union))
+    """The spec(s) to remove for ``selector`` — exact endpoint_url → engine_label → the identity's
+    ``--name`` → served model → URL substring — via the shared matcher
+    (`shared.run_records.match_engine`). Remote engines are keyed by URL/label, so no exact-id
+    short-circuit here (that's the local caller's job).
+
+    ``meta_name`` is stamped onto each spec for the duration of the match and taken straight back
+    off. It belongs to the RECORD, not to any one engine, and `union` is what the caller writes to
+    disk as ``record["engines"]`` — so a tag left behind is persisted onto some specs and not
+    others, and goes stale the first time the operator re-joins under a different ``--name``. The
+    matcher needs it on the spec; nothing else does, and nothing after this line should see it.
+    """
+    if meta_name:
+        for spec in union:
+            spec["meta_name"] = meta_name
+    try:
+        return run_records.match_engine(
+            union, selector, label=label, summary=_engines_summary(union)
+        )
+    finally:
+        # `finally`, not a trailing line: `match_engine` raises SystemExit on an ambiguous
+        # selector, and an exception must not leave the tag behind either.
+        for spec in union:
+            spec.pop("meta_name", None)

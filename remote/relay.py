@@ -106,11 +106,17 @@ class RelayError(Exception):
 
 
 def _client(signaling_url: str, access_token: str, *, timeout: float | httpx.Timeout) -> httpx.Client:
-    return httpx.Client(
-        base_url=signaling_url.rstrip("/"),
-        headers={"User-Agent": "grid-cli", "Authorization": f"Bearer {access_token}"},
-        timeout=timeout,
-    )
+    headers = {"User-Agent": "grid-cli"}
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+    # An empty token is a real, documented case — `_fetch_overview` calls the *public* overview
+    # route with `token = str(rec.get("access_token") or "")` before `grid sync` has ever stored
+    # one. Ghosting a header for that case used to instead build `"Authorization": "Bearer "` —
+    # a value ending in whitespace with nothing after the scheme, which httpx's own transport
+    # refuses to send at all: `httpx.LocalProtocolError: Illegal header value b'Bearer '`, raised
+    # client-side before any request reaches the network. Every other caller here always has a
+    # real token, so this only changes behavior for the one call site the empty string was for.
+    return httpx.Client(base_url=signaling_url.rstrip("/"), headers=headers, timeout=timeout)
 
 
 # Only `register_node` and `deregister_node` below catch `httpx.InvalidURL`, and that scoping is

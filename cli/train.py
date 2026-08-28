@@ -493,7 +493,7 @@ def cmd_train_where(args: argparse.Namespace) -> int:
 
     endpoints = resolve()
     if not endpoints:
-        print("No grid found. `grid up` starts one for this network; `grid login` connects to "
+        print("No grid found. `grid start` starts one for this network; `grid login` connects to "
               "your hosted grid.")
         return 1
     for endpoint in endpoints:

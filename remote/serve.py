@@ -189,7 +189,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
     network_id = record["grid_id"]  # the run record's grid_id IS the remote network_id
     signaling_url = (record.get("signaling_url") or "").rstrip("/")
     if not signaling_url:
-        raise SystemExit("This grid has no relay address; run `grid up` then re-join.")
+        raise SystemExit("This grid has no relay address; run `grid start` then re-join.")
     access_token, refresh_token = _load_tokens(network_id)
     if not access_token:
         raise SystemExit("Run `grid login` to refresh your grid tokens, then re-join.")
@@ -547,10 +547,26 @@ def _bring_up_one(
         raise SystemExit("Built-in engine launch supports exactly one model. Use --at for custom engines.")
 
     from shared.engine import launcher as launcher_mod
+    from local import runtime
 
     port = int(record.get("endpoint_port") or 8081)
-    if launcher_mod.is_port_in_use(port):
-        raise SystemExit(f"Port {port} already in use; aborting.")
+    if runtime.port_in_use(port):
+        # The exact bug already fixed once for the LOCAL `--serve` join (`cli/provider.py`) —
+        # this is `remote/serve.py`'s own separate copy of the same check, missed at the time
+        # because the two paths don't share the function. A remote join has no interactive
+        # terminal to retype a flag into: the detached child just dies, and the only trace was
+        # "Remote engine stopped: Port 8081 already in use; aborting." in this engine's own log —
+        # `grid join` itself reports "starting" and success regardless, because (per the comment
+        # below) the relay isn't locally pollable and this process can't confirm registration.
+        holder = runtime.port_holder(port)
+        replacement = runtime.free_port_from(port + 1)
+        if replacement is None:
+            raise SystemExit(
+                f"Port {port} is already in use{f' by {holder}' if holder else ''}, "
+                "and no free port was found near it."
+            )
+        print(f"Port {port} is in use{f' by {holder}' if holder else ''} — starting on {replacement} instead.")
+        port = replacement
     launcher_mod.assert_supported_build()
     launched = launcher_mod.start_llm(
         models[0],

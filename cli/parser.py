@@ -27,6 +27,7 @@ from .engine import (
     cmd_engine_stop,
 )
 from .grid import (
+    cmd_delete,
     cmd_down,
     cmd_info,
     cmd_ls,
@@ -147,26 +148,30 @@ def _add_credential(sub) -> None:
 
 
 def _add_grid_lifecycle(sub) -> None:
-    up = sub.add_parser("up", help="Bring a grid online (creates it on first run; default: home)")
-    up.add_argument("name", nargs="?", default=None,
-                    help="Grid name or id (ag-…). Omit for 'home'.")
-    up.add_argument("--port", type=int, default=runtime.DEFAULT_PORT)
-    up.add_argument("--host", default=runtime.DEFAULT_HOST)
-    up.add_argument("--advertise-host", default=None)
-    # Remote-only (local cmd_up ignores it): the network type set when `grid up` creates a remote grid.
-    # default=None lets the remote handler tell an explicit value on a *start* from this create default.
-    up.add_argument(
-        "--type",
-        choices=("permissioned-public", "permissioned-providers"),
-        default=None,
-        help="Remote grid network type, set on create (default permissioned-public).",
-    )
-    up.set_defaults(handler=cmd_up)
+    # `start`/`stop` beside `up`/`down`. The command names are the vocabulary a reader learns, and
+    # two metaphors is one too many: a grid went "up" while a computer "joined" it, so nothing
+    # paired with `grid leave`. Now the grid **starts** and **stops**, computers **join** and
+    # **leave**, and the docs can say one thing. `up`/`down` keep working — every existing script,
+    # every older README and every muscle memory still resolves.
+    for _verb, _summary in (("up", "Start a grid (creates it on first run; default: home)"),
+                            ("start", "Start a grid — same as `grid up`")):
+        _build_up_parser(sub, _verb, _summary)
 
-    down = sub.add_parser("down", help="Take a grid offline (config persists)")
-    down.add_argument("name", nargs="?", default=None,
-                      help="Grid name or id (ag-…). Omit for the active grid.")
-    down.set_defaults(handler=cmd_down)
+
+    for _verb, _summary in (("down", "Stop a grid (its setup is kept)"),
+                            ("stop", "Stop a grid — same as `grid down`")):
+        _d = sub.add_parser(_verb, help=_summary)
+        _d.add_argument("name", nargs="?", default=None,
+                        help="Grid name or id (ag-…). Omit for the active grid.")
+        _d.set_defaults(handler=cmd_down)
+
+    delete = sub.add_parser(
+        "delete", help="Delete a grid's local config for good (`grid stop` only pauses it)"
+    )
+    delete.add_argument("name", nargs="?", default=None,
+                        help="Grid name or id (ag-…). Omit for the active grid.")
+    delete.add_argument("--yes", action="store_true", help="Skip confirmation.")
+    delete.set_defaults(handler=cmd_delete)
 
     ls = sub.add_parser("ls", help="List your grids")
     ls.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
@@ -182,6 +187,34 @@ def _add_grid_lifecycle(sub) -> None:
     info.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     info.add_argument("--env", action="store_true", help="Print OPENAI_* shell exports.")
     info.set_defaults(handler=cmd_info)
+
+
+def _build_up_parser(sub, verb: str, summary: str):
+    """One definition, two names — see the note at the call site."""
+    parser = sub.add_parser(verb, help=summary)
+    parser.add_argument("name", nargs="?", default=None,
+                        help="Grid name or id (ag-…). Omit for 'home'.")
+    # `default=None`, not the real defaults: these three are also settings of a grid that already
+    # exists, and `cmd_up` can only apply the ones the operator actually typed if "not given" is
+    # distinguishable from "given the default value". Falling back to DEFAULT_* happens at use.
+    parser.add_argument("--port", type=int, default=None,
+                        help=f"Port to listen on (default {runtime.DEFAULT_PORT}). On a grid that "
+                             "already exists this changes its port.")
+    parser.add_argument("--host", default=None,
+                        help=f"Address to bind (default {runtime.DEFAULT_HOST}).")
+    parser.add_argument("--advertise-host", default=None,
+                        help="Address to hand out to other computers, when the one Grid picks is "
+                             "not reachable. Use 127.0.0.1 to keep everything on this machine.")
+    # Remote-only (local cmd_up ignores it): the network type set when `grid up` creates a remote
+    # grid. default=None lets the remote handler tell an explicit value from this create default.
+    parser.add_argument(
+        "--type",
+        choices=("permissioned-public", "permissioned-providers"),
+        default=None,
+        help="Remote grid network type, set on create (default permissioned-public).",
+    )
+    parser.set_defaults(handler=cmd_up)
+    return parser
 
 
 def _add_engines(sub) -> None:
@@ -325,8 +358,8 @@ def _add_engines(sub) -> None:
     leave.add_argument("grid", nargs="?", default=None,
                        help="Grid name or id (ag-…). Omit for the active grid.")
     leave.add_argument("--engine", default=None,
-                       help="Engine to leave. Matches, in order: exact engine id, endpoint URL, a "
-                            "served model, or a URL fragment (e.g. :8000).")
+                       help="Engine to leave. Matches, in order: exact engine id, endpoint URL, the "
+                            "--name given at join, a served model, or a URL fragment (e.g. :8000).")
     leave.add_argument("--all", action="store_true",
                        help="Leave every engine on this grid. Without --engine: a one-engine grid "
                             "leaves that one; a multi-engine grid requires --all.")
@@ -363,7 +396,11 @@ def _add_models(sub) -> None:
     )
     catalog.set_defaults(handler=cmd_catalog)
 
-    pull = sub.add_parser("pull", help="Download a model (catalog label or '<hf-repo>:<file>')")
+    pull = sub.add_parser(
+        "pull",
+        help="Download a model. Takes a name from `grid catalog`, or any GGUF on Hugging Face "
+             "as repository:file, e.g. unsloth/gemma-3-4b-it-GGUF:gemma-3-4b-it-Q4_K_M.gguf",
+    )
     pull.add_argument("model")
     pull.set_defaults(handler=cmd_pull)
 
@@ -383,6 +420,13 @@ def _add_use(sub) -> None:
     chat = sub.add_parser("chat", help="Send one chat message")
     chat.add_argument("-m", "--model", required=True)
     chat.add_argument("message")
+    # `append`, so several images go in one question ("what changed between these two?"). The model
+    # has to be one `grid models --verbose` shows as vision-capable; a text-only one will either
+    # ignore the image or refuse, and that is the engine's answer to give, not ours to pre-empt.
+    chat.add_argument(
+        "--image", action="append", metavar="PATH",
+        help="Send an image with the message (vision models). Repeat for more than one.",
+    )
     chat.add_argument("--grid", default=None)
     chat.add_argument("--json", action="store_true", help="Print the full JSON response.")
     chat.add_argument("--timeout", type=float, default=600.0)

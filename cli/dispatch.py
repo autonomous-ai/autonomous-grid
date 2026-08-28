@@ -59,6 +59,16 @@ AGNOSTIC = frozenset({
 GATED = (
     "up",
     "down",
+    # `start`/`stop` are `up`/`down` under a name that doesn't clash with `grid join`/`leave`
+    # (cli/parser.py `_build_up_parser`) — same handler, so they need the same remote classification
+    # or they hit the "not classified for remote dispatch" internal-error guard below.
+    "start",
+    "stop",
+    # No remote handler on purpose: `cmd_delete` reads LOCAL grid config only (`local.config`), never
+    # the remote grid records `remote.credentials` keeps — deleting one of those is a real
+    # server-side action against the control plane and deserves its own design, not a same-named
+    # local operation repurposed. The stub is the honest answer until that exists.
+    "delete",
     "ls",
     "list",
     "info",
@@ -89,6 +99,8 @@ REMOTE_HANDLERS = {
     **_REMOTE_STUBS,
     "up": remote_grid.cmd_remote_up,
     "down": remote_grid.cmd_remote_down,
+    "start": remote_grid.cmd_remote_up,
+    "stop": remote_grid.cmd_remote_down,
     "ls": remote_grid.cmd_remote_ls,
     "list": remote_grid.cmd_remote_ls,
     "info": remote_grid.cmd_remote_info,

@@ -2412,8 +2412,8 @@ For a machine with no engine:
 ```bash
 grid up
 grid engine install llama.cpp
-grid pull qwen36-35b-a3b-mtp
-grid join --serve qwen36-35b-a3b-mtp
+grid pull unsloth/Qwen3.6-35B-A3B-MTP-GGUF:Qwen3.6-35B-A3B-UD-IQ3_S.gguf
+grid join --serve Qwen3.6-35B-A3B-UD-IQ3_S.gguf --advertise-as qwen36-35b-a3b-mtp
 grid chat -m qwen36-35b-a3b-mtp "hello"
 ```
 

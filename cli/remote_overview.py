@@ -86,11 +86,6 @@ def _nodes_from(overview: dict[str, Any]) -> list[dict[str, Any]]:
     return [node for node in nodes if isinstance(node, dict)]
 
 
-def _nodes(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """The active remote grid's live engine nodes (fetches the overview)."""
-    return _nodes_from(_fetch_overview(args))
-
-
 def live_model_names(overview: dict[str, Any]) -> tuple[str, ...]:
     """Every model id the grid currently serves, first-seen order, deduped across engines.
 
@@ -102,17 +97,40 @@ def live_model_names(overview: dict[str, Any]) -> tuple[str, ...]:
     asking about when it asks which models exist.
     """
     return tuple(dict.fromkeys(
-        model for node in _nodes_from(overview) for model in _node_models(node)
+        model for node in _nodes_from(overview) for model in _node_models(node, overview)
     ))
 
 
-def _node_models(node: dict[str, Any]) -> list[str]:
+def _model_case_map(overview: dict[str, Any]) -> dict[str, str]:
+    """``lower(id) -> id``, read from the overview's own top-level ``models`` list.
+
+    That list is the ONE place the relay reports a model's id in its true case; every node's own
+    ``models`` array is lowercased for display (grid-leave issue: reproduced live serving
+    `Qwen3.5-2B-Q4_K_M`, listed under a node as `qwen3.5-2b-q4_k_m`, and rejected verbatim when
+    copied back into `grid chat -m`). Correcting it here, once, fixes it everywhere this renders —
+    `grid engines`, `grid models`, and `grid launch`'s preflight (`live_model_names`) all read
+    through this same function now, so none of them can show a name the grid won't answer to."""
+    entries = overview.get("models")
+    if not isinstance(entries, list):
+        return {}
+    return {
+        entry["id"].lower(): entry["id"]
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+
+
+def _node_models(node: dict[str, Any], overview: dict[str, Any] | None = None) -> list[str]:
     """A node's served model ids as strings (defends against a non-list ``models`` or non-string
-    items — otherwise ``",".join`` would split a bare string into characters or raise ``TypeError``)."""
+    items — otherwise ``",".join`` would split a bare string into characters or raise ``TypeError``).
+
+    Corrected against ``overview``'s true-case list when given; a caller that already has the whole
+    overview in scope should always pass it — the raw, lowercased id is never what should render."""
     models = node.get("models")
     if not isinstance(models, list):
         return []
-    return [str(model) for model in models]
+    case_map = _model_case_map(overview) if overview is not None else {}
+    return [case_map.get(str(model).lower(), str(model)) for model in models]
 
 
 def _node_responses_models(node: dict[str, Any]) -> set[str]:
@@ -128,7 +146,8 @@ def _node_responses_models(node: dict[str, Any]) -> set[str]:
 
 def cmd_remote_engines(args: argparse.Namespace) -> int:
     """`grid engines` (remote): the live engines (nodes) joined to the active grid."""
-    nodes = _nodes(args)
+    overview = _fetch_overview(args)
+    nodes = _nodes_from(overview)
 
     if getattr(args, "json", False):
         print(json.dumps(nodes, indent=2))  # passthrough of each node object — forward-compatible
@@ -138,21 +157,32 @@ def cmd_remote_engines(args: argparse.Namespace) -> int:
         print("(no engines — `grid join` one first)")
         return 0
 
-    names = [str(n.get("name") or "") for n in nodes]
+    raw_names = [str(n.get("name") or "") for n in nodes]
+    # `--name` at join is never enforced unique across DIFFERENT machines on the same grid (only
+    # this machine's own `grid leave` collision check is — cli/provider.py:414), so two members can
+    # genuinely show up with an identical NODE label. The overview carries `provider_email` per
+    # node precisely to tell them apart, but until now it only ever surfaced via `--json` — the
+    # plain table had nothing to distinguish two "this-computer" rows. Appended ONLY on an actual
+    # collision, so the common (all-unique) case stays exactly as terse as before — a column that is
+    # always full of everyone's email would be noise on every normal, non-colliding grid.
+    dupes = {name for name in raw_names if raw_names.count(name) > 1 and name}
+    names = [
+        f"{name} ({n.get('provider_email')})" if name in dupes and n.get("provider_email") else name
+        for name, n in zip(raw_names, nodes)
+    ]
     engines = [str(n.get("engine") or "") for n in nodes]
     devices = [str(n.get("device") or "") for n in nodes]
     nwidth = max(len("NODE"), *(len(x) for x in names))
     ewidth = max(len("ENGINE"), *(len(x) for x in engines))
     dwidth = max(len("DEVICE"), *(len(x) for x in devices))
     print(f"{'NODE':<{nwidth}}  {'ENGINE':<{ewidth}}  {'DEVICE':<{dwidth}}  TOK/S")
-    for node in nodes:
-        name = str(node.get("name") or "")
+    for name, node in zip(names, nodes):
         engine = str(node.get("engine") or "")
         device = str(node.get("device") or "")
         tok_s = node.get("throughput_tok_s")
         # bool is an int subclass — exclude it so `throughput_tok_s: true` shows "-", not "1".
         tok = f"{tok_s:g}" if isinstance(tok_s, (int, float)) and not isinstance(tok_s, bool) else "-"
-        models = ",".join(_node_models(node)) or "(none)"
+        models = ",".join(_node_models(node, overview)) or "(none)"
         print(f"{name:<{nwidth}}  {engine:<{ewidth}}  {device:<{dwidth}}  {tok}")
         print(f"{'':<{nwidth}}  models: {models}")
     return 0
@@ -172,7 +202,7 @@ def cmd_remote_models(args: argparse.Namespace) -> int:
         engine = str(node.get("engine") or "")
         name = str(node.get("name") or "")
         capable = _node_responses_models(node)  # resolved once per node, not per served model
-        for model in _node_models(node):
+        for model in _node_models(node, overview):
             rows.append((model, engine, name, model in capable))
     # When auto routing is enabled, advertise the reserved `auto` model FIRST — same as the relay's
     # /relay/v1/models endpoint (owner `grid-router`), so it shows even when zero engines are joined.
@@ -196,6 +226,13 @@ def cmd_remote_models(args: argparse.Namespace) -> int:
         print("(no live models — `grid join` an engine first)")
         return 0
 
+    seen = list(dict.fromkeys(model for model, *_ in rows))  # order-preserving dedup
+    # Prefer a real model over the reserved `auto` here: `auto` is always inserted first when
+    # routing is on, and a newcomer who just joined an engine wants to see THAT model chat-tested,
+    # not the router alias. Mirrors the local `cmd_models`' closing-the-loop hint (issue: `grid
+    # join`'s own "still loading" message can't yet promise a working model — this can).
+    target = next((m for m in seen if m != "auto"), seen[0])
+
     if getattr(args, "verbose", False):
         mwidth = max(len("MODEL"), *(len(model) for model, _, _, _ in rows))
         ewidth = max(len("ENGINE"), *(len(engine) for _, engine, _, _ in rows))
@@ -206,8 +243,14 @@ def cmd_remote_models(args: argparse.Namespace) -> int:
             # row ends at NODE.
             trailer = "  responses" if serves else ""
             print(f"{model:<{mwidth}}  {engine:<{ewidth}}  {node}{trailer}")
+        from . import provider
+
+        provider.print_models_hint(target)
         return 0
 
-    for model in dict.fromkeys(model for model, *_ in rows):  # order-preserving dedup
+    for model in seen:
         print(model)
+    from . import provider
+
+    provider.print_models_hint(target)
     return 0
