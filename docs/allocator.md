@@ -322,6 +322,14 @@ that model runtime. Every heartbeat refreshes physical memory and current extern
 residencies are subtracted exactly once, and the node rejects a `warm` before process launch if its
 local free-memory observation no longer satisfies the command.
 
+An authenticated `cached` residency is authoritative evidence that an earlier warm lifecycle has
+finished and no process remains. If later demand restores that placement, Grid may issue a fresh
+warm immediately instead of waiting for the old successful WARM receipt's observation timeout;
+failed warm history still retains its normal backoff. The same causal rule permits a new DRAIN when
+the runtime is authoritatively `ready` again and a new UNLOAD when it is `draining` again. This lets
+models cycle out and back in without a prior successful receipt imposing a false 120-second delay;
+failed destructive actions remain backoff-protected.
+
 For now, `load` is deliberately verification-only: the requested model ID must already name a GGUF
 in Grid's model store. Run `grid pull <model>` before enabling automatic placement. The actuator
 does not infer a mutable download source from a display name. When a profile declares
@@ -653,7 +661,9 @@ one-model-per-logical-host claimed capacity budget. Logical performance and memo
 partitioned so the harness never reports N times the physical Mac's capacity.
 `--scenario preemption --second-model <cached-alias.gguf>` keeps demand for a low-priority model
 active on every logical host, injects a high-priority burst for the second model, and requires real
-drain/unload of every incumbent before the second model is warmed and served.
+drain/unload of every incumbent before the second model is warmed and served. It then retires the
+critical burst and requires the displaced batch service to warm back onto every logical host and
+complete another real streamed request before final cleanup.
 
 ## Current limits
 

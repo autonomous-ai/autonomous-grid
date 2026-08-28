@@ -330,9 +330,10 @@ class Reconciler:
                     and profile.matches_artifact(residency)
                 )
             )
-            readmitting_existing_residency = bool(
+            authoritative_rewarm_state = bool(
                 residency
                 and residency.state in (
+                    ResidencyState.CACHED,
                     ResidencyState.DRAINING,
                     ResidencyState.FAILED,
                 )
@@ -392,7 +393,7 @@ class Reconciler:
                 blocked_until=mutation_blocks,
                 blocked_causes=mutation_block_causes,
                 history_cooldowns=history_cooldowns,
-                bypass_success_observation=readmitting_existing_residency,
+                bypass_success_observation=authoritative_rewarm_state,
             )
             if warm_action is None:
                 deferred.extend(
@@ -406,7 +407,7 @@ class Reconciler:
                         blocked_until=mutation_blocks,
                         blocked_causes=mutation_block_causes,
                         history_cooldowns=history_cooldowns,
-                        bypass_success_observation=readmitting_existing_residency,
+                        bypass_success_observation=authoritative_rewarm_state,
                     )
                 )
             else:
@@ -492,6 +493,7 @@ class Reconciler:
                         blocked_until=mutation_blocks,
                         blocked_causes=mutation_block_causes,
                         history_cooldowns=history_cooldowns,
+                        bypass_success_observation=True,
                     )
                 else:
                     action = self._proposal(
@@ -506,6 +508,7 @@ class Reconciler:
                         blocked_until=mutation_blocks,
                         blocked_causes=mutation_block_causes,
                         history_cooldowns=history_cooldowns,
+                        bypass_success_observation=True,
                     )
                 if action is None:
                     deferred.extend(
@@ -519,6 +522,7 @@ class Reconciler:
                             blocked_until=mutation_blocks,
                             blocked_causes=mutation_block_causes,
                             history_cooldowns=history_cooldowns,
+                            bypass_success_observation=True,
                         )
                     )
                 else:

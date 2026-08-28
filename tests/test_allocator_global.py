@@ -2887,6 +2887,110 @@ def test_reconciler_failed_desired_residency_bypasses_only_old_success_observati
     )
 
 
+def test_reconciler_cached_residency_can_rewarm_after_completed_prior_lifecycle():
+    profile = model(min_replicas=1, max_replicas=1, min_residency_seconds=0)
+    cached = ModelResidency(
+        "qwen",
+        8_000,
+        ResidencyState.CACHED,
+        loaded_at=90,
+        managed=True,
+    )
+    machine = node("n", residencies=(cached,), cached=("qwen",))
+    plan = PlacementPlanner().plan((machine,), (profile,), now=100)
+    succeeded = MutationRecord(
+        "old-warm-success",
+        ActionKind.WARM,
+        "n",
+        "qwen",
+        MutationStatus.SUCCEEDED,
+        99,
+        completed_at=99,
+    )
+
+    retried = Reconciler().reconcile(
+        plan,
+        (machine,),
+        (profile,),
+        (succeeded,),
+        mode=AllocatorMode.AUTOMATIC,
+        now=100,
+    )
+    assert [item.kind for item in retried.executable_actions] == [ActionKind.WARM]
+
+    failed = replace(
+        succeeded,
+        action_id="old-warm-failure",
+        status=MutationStatus.FAILED,
+    )
+    blocked = Reconciler().reconcile(
+        plan,
+        (machine,),
+        (profile,),
+        (failed,),
+        mode=AllocatorMode.AUTOMATIC,
+        now=100,
+    )
+    assert blocked.actions == ()
+    assert any(item.code == "cooldown" for item in blocked.deferred)
+
+
+@pytest.mark.parametrize(
+    ("kind", "state"),
+    [
+        (ActionKind.DRAIN, ResidencyState.READY),
+        (ActionKind.UNLOAD, ResidencyState.DRAINING),
+    ],
+)
+def test_authoritative_state_allows_repeated_destructive_lifecycle(kind, state):
+    profile = model(min_replicas=0, max_replicas=1, min_residency_seconds=0)
+    residency = ModelResidency(
+        "qwen",
+        8_000,
+        state,
+        loaded_at=90,
+        managed=True,
+    )
+    machine = node("n", residencies=(residency,))
+    plan = PlacementPlanner().plan((), (profile,), now=100)
+    old_success = MutationRecord(
+        "old-success",
+        kind,
+        "n",
+        "qwen",
+        MutationStatus.SUCCEEDED,
+        99,
+        completed_at=99,
+    )
+
+    repeated = Reconciler().reconcile(
+        plan,
+        (machine,),
+        (profile,),
+        (old_success,),
+        mode=AllocatorMode.AUTOMATIC,
+        now=100,
+    )
+    assert [item.kind for item in repeated.executable_actions] == [kind]
+
+    old_failure = replace(
+        old_success,
+        action_id="old-failure",
+        status=MutationStatus.FAILED,
+        failures=1,
+    )
+    blocked = Reconciler().reconcile(
+        plan,
+        (machine,),
+        (profile,),
+        (old_failure,),
+        mode=AllocatorMode.AUTOMATIC,
+        now=100,
+    )
+    assert blocked.actions == ()
+    assert any(item.code == "cooldown" for item in blocked.deferred)
+
+
 def test_reconciler_honours_minimum_residency():
     profile = model(min_replicas=0, max_replicas=1, min_residency_seconds=100)
     machine = node("n", residencies=(ready(loaded_at=50),))

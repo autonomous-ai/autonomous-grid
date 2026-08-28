@@ -495,18 +495,39 @@ def run(
                         ),
                     ]
                     completion = _stream_real_completion(client, second_model)
-                    measured_performance = _require_measured_performance(client)
+                    critical_performance = _require_measured_performance(client)
+
+                    retire_second = client.delete(
+                        f"/allocator/models/{second_model}",
+                        headers=headers,
+                    )
+                    retire_second.raise_for_status()
+                    restoration_cycles = _drive_until(
+                        client,
+                        hosts,
+                        lambda: _unloaded(hosts, second_model)
+                        and len(_ready_hosts(hosts, model)) == nodes,
+                        timeout=timeout,
+                        label="displaced batch service restored after critical burst",
+                    )
+                    restored_warm_seconds = _require_learned_warm_times(
+                        client,
+                        model=model,
+                        replicas=nodes,
+                    )
+                    if any(int(row.get("samples") or 0) < 2 for row in restored_warm_seconds):
+                        raise RuntimeError(
+                            "restored lifecycle did not update learned warm estimates: "
+                            f"{restored_warm_seconds}"
+                        )
+                    restored_completion = _stream_real_completion(client, model)
+                    restored_performance = _require_measured_performance(client)
 
                     retire_first = client.delete(
                         f"/allocator/models/{model}",
                         headers=headers,
                     )
                     retire_first.raise_for_status()
-                    retire_second = client.delete(
-                        f"/allocator/models/{second_model}",
-                        headers=headers,
-                    )
-                    retire_second.raise_for_status()
                     unload_cycles = _drive_until(
                         client,
                         hosts,
@@ -527,6 +548,7 @@ def run(
                         "batch_model": model,
                         "critical_model": second_model,
                         "preemption_cycles": preemption_cycles,
+                        "restoration_cycles": restoration_cycles,
                         "unload_cycles": unload_cycles,
                         "actions": actions,
                         "completion_id": completion.get("id"),
@@ -534,8 +556,15 @@ def run(
                         "stream_completion_tokens": completion.get(
                             "completion_tokens"
                         ),
+                        "restored_completion_id": restored_completion.get("id"),
+                        "restored_completion_model": restored_completion.get("model"),
+                        "restored_stream_completion_tokens": restored_completion.get(
+                            "completion_tokens"
+                        ),
                         "learned_warm_seconds": learned_warm_seconds,
-                        "measured_performance": measured_performance,
+                        "restored_warm_seconds": restored_warm_seconds,
+                        "critical_performance": critical_performance,
+                        "restored_performance": restored_performance,
                         "hosts": _host_summary(hosts),
                         "elapsed_seconds": round(time.monotonic() - started, 3),
                     }
