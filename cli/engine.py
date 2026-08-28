@@ -14,7 +14,7 @@ def cmd_engine_install(args: argparse.Namespace) -> int:
 
         comfyui.install()
         print("Done. Now download the model files for what you want to make:")
-        print("  grid engine pull image_generation     # also: image_editing, i2v")
+        print("  grid engine pull image_generation     # also: z_image, image_editing, i2v")
         return 0
     raise SystemExit(f"Unknown engine {args.name!r}. Choose 'llama.cpp' (text) or 'comfyui' (media).")
 

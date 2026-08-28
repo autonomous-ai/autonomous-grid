@@ -63,6 +63,33 @@ IMAGE_GENERATION = (
 )
 
 
+# Z-Image Turbo — the model IMAGE_GENERATION used before Krea 2, kept as a second choice on the
+# same route rather than removed. A caller picks it with `"model": "comfyui:z_image"`; omitting
+# `model` still gets Krea 2, so nothing that worked before changes.
+#
+# It is a separate bundle, not a variant of IMAGE_GENERATION, because a host may want one and not
+# the other: together they are ~57 GB and share nothing — different UNet, different text encoder
+# (Qwen3-4B here, Qwen3-VL-4B for Krea 2), different VAE.
+IMAGE_GENERATION_ZIMAGE = (
+    FileSpec(
+        "Comfy-Org/z_image_turbo",
+        "split_files/diffusion_models/z_image_turbo_bf16.safetensors",
+        "diffusion_models",
+    ),
+    FileSpec(
+        "Comfy-Org/z_image_turbo",
+        "split_files/text_encoders/qwen_3_4b.safetensors",
+        "text_encoders",
+    ),
+    FileSpec(
+        "Comfy-Org/z_image_turbo",
+        "split_files/vae/ae.safetensors",
+        "vae",
+        target_name="z_image_vae.safetensors",
+    ),
+)
+
+
 # Image editing (Qwen-Image-Edit-2511): desktop /image-editing/models/download
 IMAGE_EDITING = (
     FileSpec(
@@ -125,6 +152,7 @@ I2V = (
 
 BUNDLES = {
     "image_generation": IMAGE_GENERATION,
+    "z_image": IMAGE_GENERATION_ZIMAGE,
     "image_editing": IMAGE_EDITING,
     "i2v": I2V,
 }
@@ -185,6 +213,7 @@ def pull_bundle(name: str, *, on_progress=None) -> list[Path]:
 # `discover_providers(model=...)` exact match.
 CAPABILITY_NAME = {
     "image_generation": "comfyui:image_generation",
+    "z_image": "comfyui:z_image",
     "image_editing": "comfyui:image_editing",
     "i2v": "comfyui:i2v",
 }
