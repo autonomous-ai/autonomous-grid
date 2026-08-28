@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import random
 
+from shared.allocator.demand import DemandTracker
 from shared.allocator.models import (
     AllocatorMode,
     DemandForecast,
@@ -18,6 +19,60 @@ from shared.allocator.planner import (
     compatibility_reason,
 )
 from shared.allocator.reconcile import Reconciler
+
+
+def test_seeded_correlated_demand_is_bounded_deterministic_and_non_transitive():
+    rng = random.Random(0xC0DEDA7A)
+    for scenario in range(200):
+        tracker = DemandTracker(
+            bucket_seconds=10,
+            window_seconds=300,
+            confidence_samples=10,
+            correlation_max_sources=4,
+        )
+        model_ids = tuple(f"model-{index}" for index in range(10))
+        groups = (
+            model_ids[0:4],
+            model_ids[3:7],
+            model_ids[6:10],
+        )
+        for bucket in range(12):
+            timestamp = bucket * 10 + 1
+            group = rng.choice(groups)
+            for model_id in group:
+                tracker.observe(
+                    model_id,
+                    requests=rng.randint(1, 20),
+                    service_seconds=rng.choice((0.1, 1.0, 5.0)),
+                    timestamp=timestamp,
+                )
+        now = 121
+        for model_id in rng.choice(groups):
+            tracker.observe(
+                model_id,
+                requests=rng.randint(1, 20),
+                service_seconds=1,
+                timestamp=now,
+            )
+
+        shuffled = list(model_ids)
+        rng.shuffle(shuffled)
+        first = tracker.forecasts(shuffled, now=now)
+        second = tracker.forecasts(tuple(reversed(shuffled)), now=now)
+
+        assert first == second, f"forecast order changed scenario {scenario}"
+        for forecast in first:
+            assert math.isfinite(forecast.requests_per_minute)
+            assert math.isfinite(forecast.offered_concurrency)
+            assert 0 <= forecast.correlation_confidence <= 1
+            assert len(forecast.correlation_sources) <= 4
+            assert set(forecast.correlation_sources).issubset(model_ids)
+            if forecast.correlation_sources:
+                assert forecast.correlated_requests_per_minute > 0
+                assert forecast.requests_per_minute == (
+                    forecast.correlated_requests_per_minute
+                )
+                assert forecast.trend_per_minute == 0
 
 
 def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():

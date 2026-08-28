@@ -187,6 +187,58 @@ def test_controller_status_contains_forecast_plan_and_reconciliation():
     assert status["reconciliation"]["actions"]
 
 
+def test_controller_prewarms_correlated_model_group_before_peer_request_arrives():
+    controller = AllocatorController()
+    for model_id in ("source", "target"):
+        controller.put_profile(
+            ModelProfile(
+                model_id,
+                4_000,
+                runtimes=("llama.cpp",),
+                min_replicas=0,
+                max_replicas=2,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=0,
+            )
+        )
+    for timestamp in (1, 61, 121, 181):
+        for _ in range(40):
+            controller.observe("source", service_seconds=1, timestamp=timestamp)
+        for _ in range(10):
+            controller.observe("target", service_seconds=10, timestamp=timestamp)
+    for timestamp in (241, 301, 361):
+        for _ in range(40):
+            controller.observe("source", service_seconds=1, timestamp=timestamp)
+    nodes = tuple(
+        NodeSnapshot(
+            f"node-{index}",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            cached_models=("source", "target"),
+            last_heartbeat=361,
+        )
+        for index in range(4)
+    )
+
+    controller.tick(nodes, now=361)
+    status = controller.status(nodes, now=361)
+    forecasts = {item["model_id"]: item for item in status["forecasts"]}
+
+    assert forecasts["target"]["correlation_sources"] == ("source",)
+    assert forecasts["target"]["offered_concurrency"] > 0
+    assert status["plan"]["desired_replicas"]["target"] == 2
+    assignments = status["plan"]["assignments"]
+    assert sum(item["model_id"] == "source" for item in assignments) == 2
+    assert sum(item["model_id"] == "target" for item in assignments) == 2
+    assert len({item["node_id"] for item in assignments}) == 4
+    assert len(status["reconciliation"]["actions"]) == 4
+    assert {
+        (item["kind"], item["model_id"])
+        for item in status["reconciliation"]["actions"]
+    } == {("warm", "source"), ("warm", "target")}
+
+
 def test_controller_ignores_unconfigured_and_retiring_demand_keys():
     controller = AllocatorController()
     assert controller.observe("attacker-chosen-name", service_seconds=1, timestamp=1) is False

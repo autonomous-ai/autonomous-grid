@@ -835,6 +835,117 @@ def test_demand_tracker_rejects_invalid_samples_and_schema():
         DemandTracker.from_dict({"schema_version": 99})
 
 
+def test_demand_tracker_prewarms_quiet_models_from_mature_group_demand():
+    tracker = DemandTracker(
+        bucket_seconds=10,
+        window_seconds=200,
+        ewma_alpha=1,
+        confidence_samples=20,
+    )
+    for timestamp in (1, 11, 21, 31):
+        tracker.observe(
+            "source",
+            requests=20,
+            service_seconds=1,
+            timestamp=timestamp,
+        )
+        tracker.observe(
+            "target",
+            requests=10,
+            service_seconds=10,
+            latency_ms=20_000,
+            errors=2,
+            timestamp=timestamp,
+        )
+    tracker.observe("source", requests=20, service_seconds=1, timestamp=41)
+
+    independent = tracker.forecast("target", now=41)
+    forecasts = {item.model_id: item for item in tracker.forecasts(now=41)}
+    correlated = forecasts["target"]
+
+    assert independent.requests_per_minute == 0
+    assert independent.offered_concurrency == 0
+    assert correlated.requests_per_minute > 0
+    assert correlated.offered_concurrency > 0
+    assert correlated.correlated_requests_per_minute == correlated.requests_per_minute
+    assert correlated.correlation_sources == ("source",)
+    assert 0.7 * forecasts["source"].confidence < correlated.correlation_confidence < 1
+    assert correlated.updated_at == forecasts["source"].updated_at
+    assert correlated.trend_per_minute == 0
+    assert correlated.queue_depth == 0
+    assert correlated.p95_latency_ms == 0
+    assert correlated.error_rate == 0
+
+
+def test_demand_correlation_requires_support_and_rejects_popularity_overlap():
+    sparse = DemandTracker(bucket_seconds=10, window_seconds=200, ewma_alpha=1)
+    for timestamp in (1, 11):
+        sparse.observe("source", requests=20, service_seconds=1, timestamp=timestamp)
+        sparse.observe("target", requests=10, service_seconds=1, timestamp=timestamp)
+    sparse.observe("source", requests=20, service_seconds=1, timestamp=21)
+    sparse_target = {item.model_id: item for item in sparse.forecasts(now=21)}["target"]
+    assert sparse_target.correlation_sources == ()
+
+    popular = DemandTracker(bucket_seconds=10, window_seconds=200, ewma_alpha=1)
+    for timestamp in range(1, 101, 10):
+        popular.observe("target", requests=10, service_seconds=1, timestamp=timestamp)
+    for timestamp in (71, 81, 91, 101):
+        popular.observe("source", requests=20, service_seconds=1, timestamp=timestamp)
+    popular_target = {item.model_id: item for item in popular.forecasts(now=101)}["target"]
+    assert popular_target.correlation_sources == ()
+
+
+def test_correlated_demand_uses_maximum_source_without_transitive_amplification():
+    tracker = DemandTracker(
+        bucket_seconds=10,
+        window_seconds=200,
+        ewma_alpha=1,
+        confidence_samples=1,
+        correlation_threshold=0.5,
+    )
+    for timestamp in (1, 11, 21):
+        tracker.observe("a", requests=20, service_seconds=1, timestamp=timestamp)
+        tracker.observe("target", requests=10, service_seconds=1, timestamp=timestamp)
+        tracker.observe("b", requests=40, service_seconds=1, timestamp=timestamp)
+    tracker.observe("a", requests=20, service_seconds=1, timestamp=31)
+    tracker.observe("b", requests=40, service_seconds=1, timestamp=31)
+
+    forecasts = {item.model_id: item for item in tracker.forecasts(now=31)}
+    target = forecasts["target"]
+
+    assert target.correlation_sources == ("a", "b")
+    # Both sources learned the same target rate. Taking their maximum keeps the inferred target at
+    # its bounded historical scale instead of summing two equivalent explanations.
+    assert target.requests_per_minute <= 2 * 60
+
+
+def test_demand_correlation_configuration_round_trips_and_validates():
+    tracker = DemandTracker(
+        correlation_min_buckets=4,
+        correlation_threshold=0.8,
+        correlation_max_growth=1.5,
+        correlation_max_sources=7,
+    )
+    restored = DemandTracker.from_dict(tracker.to_dict())
+    assert restored.correlation_min_buckets == 4
+    assert restored.correlation_threshold == 0.8
+    assert restored.correlation_max_growth == 1.5
+    assert restored.correlation_max_sources == 7
+
+    with pytest.raises(ValueError, match="correlation_min_buckets"):
+        DemandTracker(correlation_min_buckets=0)
+    with pytest.raises(ValueError, match="correlation_min_buckets"):
+        DemandTracker(correlation_min_buckets=True)
+    with pytest.raises(ValueError, match="correlation_threshold"):
+        DemandTracker(correlation_threshold=0)
+    with pytest.raises(ValueError, match="correlation_max_growth"):
+        DemandTracker(correlation_max_growth=0.5)
+    with pytest.raises(ValueError, match="correlation_max_sources"):
+        DemandTracker(correlation_max_sources=0)
+    with pytest.raises(ValueError, match="correlation_max_sources"):
+        DemandTracker(correlation_max_sources=True)
+
+
 def test_replica_count_uses_offered_concurrency_headroom_and_bounds():
     profile = model(min_replicas=1, max_replicas=5, target_utilization=0.5)
     forecast = DemandForecast("qwen", offered_concurrency=1)

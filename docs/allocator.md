@@ -52,8 +52,14 @@ demand headroom and reacts to queue, latency, and error pressure while respectin
 and maximum bounds. Rising demand is also projected across each model's declared load-plus-warm
 time, confidence-weighted and capped to a five-minute/2× horizon, so slow cold starts begin before
 the queue arrives without letting one noisy slope cause a fleet-wide load spike. Negative trends
-never accelerate scale-down. Only configured, non-retiring model IDs create demand series, so the
-permissionless inference endpoint cannot grow controller state with arbitrary names.
+never accelerate scale-down. The tracker also learns mature groups of models that repeatedly become
+active in the same time buckets. Current demand for one group member can prewarm a quiet peer using
+a confidence-weighted historical rate ratio. This requires at least three co-active buckets and
+strong symmetric cosine association, caps inferred demand at twice the peer's observed peak, takes
+the maximum rather than sum across at most 32 current sources, and never propagates inferred demand
+transitively. Old peer-local queue, latency, and error evidence is not refreshed by a correlation.
+Only configured, non-retiring model IDs create demand series, so the permissionless inference
+endpoint cannot grow controller state with arbitrary names.
 
 Placement is deterministic. Higher-priority and larger models place first; candidates then prefer
 an existing ready residency, local cached weights, another failure domain, measured throughput, and

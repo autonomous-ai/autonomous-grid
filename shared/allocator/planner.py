@@ -1355,6 +1355,9 @@ def _input_digest(
                     "error_rate": item.error_rate,
                     "trend_per_minute": item.trend_per_minute,
                     "confidence": item.confidence,
+                    "correlated_requests_per_minute": item.correlated_requests_per_minute,
+                    "correlation_confidence": item.correlation_confidence,
+                    "correlation_sources": item.correlation_sources,
                     "sample_count": item.sample_count,
                     "updated_at": item.updated_at,
                 }

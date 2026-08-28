@@ -11,7 +11,7 @@ import math
 import statistics
 import time
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from shared.allocator.models import SCHEMA_VERSION, DemandForecast
@@ -55,6 +55,10 @@ class DemandTracker:
         ewma_alpha: float = 0.35,
         confidence_samples: int = 20,
         max_future_skew_seconds: float = 300.0,
+        correlation_min_buckets: int = 3,
+        correlation_threshold: float = 0.70,
+        correlation_max_growth: float = 2.0,
+        correlation_max_sources: int = 32,
     ) -> None:
         if window_seconds <= 0 or bucket_seconds <= 0:
             raise ValueError("window_seconds and bucket_seconds must be positive")
@@ -64,12 +68,32 @@ class DemandTracker:
             raise ValueError("ewma_alpha must be in (0, 1]")
         if not math.isfinite(max_future_skew_seconds) or max_future_skew_seconds < 0:
             raise ValueError("max_future_skew_seconds must be finite and non-negative")
+        if (
+            isinstance(correlation_min_buckets, bool)
+            or not isinstance(correlation_min_buckets, int)
+            or correlation_min_buckets < 1
+        ):
+            raise ValueError("correlation_min_buckets must be positive")
+        if not math.isfinite(correlation_threshold) or not 0 < correlation_threshold <= 1:
+            raise ValueError("correlation_threshold must be in (0, 1]")
+        if not math.isfinite(correlation_max_growth) or correlation_max_growth < 1:
+            raise ValueError("correlation_max_growth must be finite and at least 1")
+        if (
+            isinstance(correlation_max_sources, bool)
+            or not isinstance(correlation_max_sources, int)
+            or correlation_max_sources < 1
+        ):
+            raise ValueError("correlation_max_sources must be positive")
         self.window_seconds = float(window_seconds)
         self.bucket_seconds = float(bucket_seconds)
         self.max_samples_per_model = int(max_samples_per_model)
         self.ewma_alpha = float(ewma_alpha)
         self.confidence_samples = int(confidence_samples)
         self.max_future_skew_seconds = float(max_future_skew_seconds)
+        self.correlation_min_buckets = int(correlation_min_buckets)
+        self.correlation_threshold = float(correlation_threshold)
+        self.correlation_max_growth = float(correlation_max_growth)
+        self.correlation_max_sources = int(correlation_max_sources)
         self._samples: dict[str, list[DemandSample]] = {}
         # Clock rollback protection is model-local. A single global watermark lets one skewed
         # request timestamp prune every other model's healthy history and then reject their fresh
@@ -201,8 +225,12 @@ class DemandTracker:
         *,
         now: float | None = None,
     ) -> tuple[DemandForecast, ...]:
+        requested_now = time.time() if now is None else float(now)
+        if not math.isfinite(requested_now) or requested_now < 0:
+            raise ValueError("now must be finite and non-negative")
         ids = sorted(self._samples if model_ids is None else set(model_ids))
-        return tuple(self.forecast(model_id, now=now) for model_id in ids)
+        base = tuple(self.forecast(model_id, now=requested_now) for model_id in ids)
+        return self._apply_correlated_demand(base, now=requested_now)
 
     def clear(self, model_id: str | None = None) -> None:
         if model_id is None:
@@ -222,6 +250,10 @@ class DemandTracker:
                 "ewma_alpha": self.ewma_alpha,
                 "confidence_samples": self.confidence_samples,
                 "max_future_skew_seconds": self.max_future_skew_seconds,
+                "correlation_min_buckets": self.correlation_min_buckets,
+                "correlation_threshold": self.correlation_threshold,
+                "correlation_max_growth": self.correlation_max_growth,
+                "correlation_max_sources": self.correlation_max_sources,
             },
             # Retain the scalar summary for older readers while new readers use the model-local
             # map. It is diagnostic only and never drives pruning in this version.
@@ -326,6 +358,151 @@ class DemandTracker:
         max_buckets = max(1, math.ceil(self.window_seconds / self.bucket_seconds))
         start = max(start, end - max_buckets + 1)
         return [grouped[index] for index in range(start, end + 1)]
+
+    def _apply_correlated_demand(
+        self,
+        forecasts: tuple[DemandForecast, ...],
+        *,
+        now: float,
+    ) -> tuple[DemandForecast, ...]:
+        """Lift quiet peers of a mature, currently active model-demand group.
+
+        Association is symmetric cosine similarity over non-empty time buckets. Boosts use only
+        the unmodified forecasts passed into this method, so inferred demand cannot cascade through
+        a graph. Multiple sources take a maximum rather than summing into fleet-wide amplification.
+        """
+
+        if len(forecasts) < 2:
+            return forecasts
+        forecast_by_id = {item.model_id: item for item in forecasts}
+        rates_by_model = {
+            model_id: self._bucket_rates(self._samples.get(model_id, ()))
+            for model_id in forecast_by_id
+        }
+        recent_sources = tuple(
+            sorted(
+                (
+                    item
+                    for item in forecasts
+                    if item.requests_per_minute > 0
+                    and item.updated_at
+                    and -self.max_future_skew_seconds
+                    <= now - item.updated_at
+                    <= self.bucket_seconds
+                ),
+                key=lambda item: (
+                    -item.requests_per_minute,
+                    -item.confidence,
+                    item.model_id,
+                ),
+            )[: self.correlation_max_sources]
+        )
+        if not recent_sources:
+            return forecasts
+
+        augmented: list[DemandForecast] = []
+        for target in forecasts:
+            target_rates = rates_by_model[target.model_id]
+            if len(target_rates) < self.correlation_min_buckets:
+                augmented.append(target)
+                continue
+            best_rate = target.requests_per_minute
+            best_confidence = 0.0
+            sources: list[str] = []
+            target_buckets = set(target_rates)
+            target_peak = max(target_rates.values(), default=0.0)
+            for source in recent_sources:
+                if source.model_id == target.model_id or source.confidence <= 0:
+                    continue
+                source_rates = rates_by_model[source.model_id]
+                source_buckets = set(source_rates)
+                coactive = target_buckets.intersection(source_buckets)
+                if len(coactive) < self.correlation_min_buckets:
+                    continue
+                association = len(coactive) / math.sqrt(
+                    len(target_buckets) * len(source_buckets)
+                )
+                if association < self.correlation_threshold:
+                    continue
+                ratios = [
+                    target_rates[index] / source_rates[index]
+                    for index in coactive
+                    if source_rates[index] > 0
+                ]
+                if not ratios:
+                    continue
+                learned_ratio = min(10.0, max(0.1, statistics.median(ratios)))
+                confidence = association * source.confidence
+                candidate_rate = source.requests_per_minute * learned_ratio * confidence
+                candidate_rate = min(
+                    candidate_rate,
+                    target_peak * self.correlation_max_growth,
+                )
+                if candidate_rate <= target.requests_per_minute:
+                    continue
+                sources.append(source.model_id)
+                if candidate_rate > best_rate:
+                    best_rate = candidate_rate
+                    best_confidence = confidence
+            if best_rate <= target.requests_per_minute:
+                augmented.append(target)
+                continue
+
+            target_samples = self._samples.get(target.model_id, ())
+            request_count = sum(item.requests for item in target_samples)
+            service_mass = sum(
+                item.service_seconds * item.requests for item in target_samples
+            )
+            average_service = service_mass / request_count if request_count else 0.0
+            if not average_service and target.requests_per_minute > 0:
+                average_service = (
+                    target.offered_concurrency * 60.0 / target.requests_per_minute
+                )
+            correlated_concurrency = best_rate / 60.0 * average_service
+            source_updated_at = max(
+                forecast_by_id[source_id].updated_at for source_id in sources
+            )
+            target_is_recent = bool(
+                target.updated_at
+                and -self.max_future_skew_seconds
+                <= now - target.updated_at
+                < self.bucket_seconds
+            )
+            augmented.append(
+                replace(
+                    target,
+                    requests_per_minute=best_rate,
+                    offered_concurrency=max(
+                        target.offered_concurrency,
+                        correlated_concurrency,
+                    ),
+                    # Refresh only the inferred rate. Old target-local queue/SLO failures must not
+                    # become current merely because a correlated peer received a new request.
+                    queue_depth=target.queue_depth if target_is_recent else 0,
+                    p95_latency_ms=target.p95_latency_ms if target_is_recent else 0.0,
+                    error_rate=target.error_rate if target_is_recent else 0.0,
+                    # This lift is already a forecast from another model. Do not extrapolate the
+                    # target's older independent slope across its load time a second time.
+                    trend_per_minute=0.0,
+                    confidence=max(target.confidence, best_confidence),
+                    correlated_requests_per_minute=best_rate,
+                    correlation_confidence=best_confidence,
+                    correlation_sources=tuple(sources),
+                    updated_at=max(target.updated_at, source_updated_at),
+                )
+            )
+        return tuple(augmented)
+
+    def _bucket_rates(
+        self,
+        samples: list[DemandSample] | tuple[DemandSample, ...],
+    ) -> dict[int, float]:
+        rates: dict[int, float] = defaultdict(float)
+        for sample in samples:
+            rates[int(sample.timestamp // self.bucket_seconds)] += (
+                sample.requests * 60.0 / self.bucket_seconds
+            )
+        return {index: rate for index, rate in rates.items() if rate > 0}
 
 
 def _percentile(values: list[float], quantile: float) -> float:

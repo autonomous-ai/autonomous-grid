@@ -478,6 +478,9 @@ class DemandForecast:
     error_rate: float = 0.0
     trend_per_minute: float = 0.0
     confidence: float = 0.0
+    correlated_requests_per_minute: float = 0.0
+    correlation_confidence: float = 0.0
+    correlation_sources: tuple[str, ...] = ()
     sample_count: int = 0
     updated_at: float = 0.0
 
@@ -490,15 +493,26 @@ class DemandForecast:
             "p95_latency_ms",
             "error_rate",
             "confidence",
+            "correlated_requests_per_minute",
+            "correlation_confidence",
             "updated_at",
         ):
             _finite_nonnegative(float(getattr(self, name)), name)
         if self.queue_depth < 0 or self.sample_count < 0:
             raise ValueError("queue_depth and sample_count must be non-negative")
-        if self.error_rate > 1 or self.confidence > 1:
+        if (
+            self.error_rate > 1
+            or self.confidence > 1
+            or self.correlation_confidence > 1
+        ):
             raise ValueError("error_rate and confidence cannot exceed 1")
         if not math.isfinite(self.trend_per_minute):
             raise ValueError("trend_per_minute must be finite")
+        object.__setattr__(
+            self,
+            "correlation_sources",
+            _canonical_set(self.correlation_sources),
+        )
 
 
 @dataclass(frozen=True, slots=True)
