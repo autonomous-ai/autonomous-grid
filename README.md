@@ -421,19 +421,11 @@ grid mode remote
 # Sign in; opens a browser
 grid login
 
-# Pick which grid to work with — signing in does not choose one for you
+# Pick which grid to work with — signing in does not choose one for you.
+# `grid ls` prints a row per grid you can reach (name, id, type); `*` marks the active one.
 grid ls
 grid use <grid-name>
 ```
-
-`grid ls` prints one row per grid you can reach — name, id, type — and marks the active one with `*`:
-
-```
-  <your-grid-name>     <grid-id>   permissioned-providers
-  <another-grid-name>  <grid-id>   permissioned-public
-```
-
-After `grid use <your-grid-name>` that row comes back with a `*` in front of it.
 
 - The mode is remembered. `--local` / `--remote` overrides one command.
 - `grid login` opens a browser. `--no-browser` prints a code to type instead.
