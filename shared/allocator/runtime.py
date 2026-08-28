@@ -508,7 +508,12 @@ class LlamaCppBackend:
             spawned = self._spawned.get(handle.pid)
         if spawned is not None:
             return spawned[0].proc.poll() is None
-        return _pid_alive(handle.pid)
+        # An adopted child has no Popen object in this backend. Its former parent may still retain
+        # the old Popen after a node-agent restart, so an exited child can remain in the process
+        # table as a zombie until that parent polls it. A zombie is already dead and must release
+        # the residency for safe replacement; treating mere PID existence as liveness instead
+        # creates a permanent live-but-unowned fence because zombies have no argv to prove.
+        return not stopped_running(handle.pid)
 
     def owns(self, handle: RuntimeHandle, model_id: str) -> bool:
         with self._lock:

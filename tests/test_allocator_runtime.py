@@ -196,6 +196,20 @@ def test_adopted_process_exit_as_zombie_completes_without_identity_false_alarm(
     assert signals == [(12_345, runtime_module.signal.SIGTERM)]
 
 
+def test_adopted_zombie_is_dead_for_health_recovery(monkeypatch):
+    backend = LlamaCppBackend()
+    handle = RuntimeHandle(
+        12_345,
+        18_081,
+        "birth:original",
+        executable_path="/opt/grid/llama-server",
+        model_path="/models/qwen.gguf",
+    )
+    monkeypatch.setattr(runtime_module, "stopped_running", lambda _pid: True)
+
+    assert backend.alive(handle) is False
+
+
 def test_adopted_live_process_with_changed_identity_still_fails_closed(monkeypatch):
     monkeypatch.setattr(runtime_module, "stopped_running", lambda _pid: False)
 
