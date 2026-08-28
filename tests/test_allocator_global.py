@@ -2334,6 +2334,58 @@ def test_priority_preemption_targets_missing_hard_pin_before_cheaper_host():
     assert converged.nodes_for("critical") == ("a-pinned",)
 
 
+def test_correlation_only_prediction_cannot_preempt_live_observed_service():
+    batch = model(
+        "batch",
+        8_000,
+        priority=10,
+        min_residency_seconds=0,
+    )
+    critical = model(
+        "critical",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+        priority=1_000,
+        min_residency_seconds=0,
+    )
+    machine = node("n", 8_000, residencies=(ready("batch", 8_000),))
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    inferred = DemandForecast(
+        "critical",
+        requests_per_minute=60,
+        offered_concurrency=1,
+        correlated_requests_per_minute=60,
+        correlation_confidence=1,
+        correlation_sources=("batch",),
+        updated_at=10,
+    )
+
+    speculative = planner.plan(
+        (machine,),
+        (batch, critical),
+        (inferred,),
+        now=10,
+    )
+    assert speculative.preemptions == ()
+    assert speculative.nodes_for("batch") == ("n",)
+
+    direct = DemandForecast(
+        "critical",
+        requests_per_minute=60,
+        offered_concurrency=1,
+        observed_requests_per_minute=60,
+        updated_at=11,
+    )
+    observed = planner.plan(
+        (replace(machine, last_heartbeat=11),),
+        (batch, critical),
+        (direct,),
+        now=11,
+    )
+    assert observed.preempted_pairs == frozenset({("n", "batch")})
+
+
 def test_priority_preemption_preserves_ownership_and_minimum_residency():
     critical = model(
         "critical",

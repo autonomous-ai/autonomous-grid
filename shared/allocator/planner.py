@@ -798,6 +798,14 @@ class PlacementPlanner:
             for model in order
         }
         for beneficiary in order:
+            if _placement_demand_urgency(
+                beneficiary,
+                forecast_by_model.get(beneficiary.model_id),
+            ) < 2:
+                # Correlation-only demand is valuable for filling spare capacity, but it is not
+                # strong enough evidence to destroy live service. Wait for direct traffic/pressure
+                # or an explicit configured baseline before staging a preemption.
+                continue
             placed = sum(
                 item.model_id == beneficiary.model_id for item in assignments
             )
