@@ -468,7 +468,7 @@ Grid ships a second engine, ComfyUI, for media:
 grid engine install comfyui
 
 # Download the model files for what you want to make
-grid engine pull image_generation      # also: image_editing, i2v
+grid engine pull image_generation      # also: z_image, image_editing, i2v
 
 # Join this computer as a media engine; repeat --bundle for more than one
 grid join <grid-url> --media --bundle image_generation
@@ -490,6 +490,11 @@ grid video "morning light moves across the desk" \
 
 - Each command needs `-m`: `comfyui:image_generation`, `comfyui:image_editing` or `comfyui:i2v`.
   A computer serves only the bundles it joined with.
+- Two models make images. `comfyui:image_generation` is Krea 2 Turbo, also reachable as
+  `comfyui:krea2`; `comfyui:z_image` is the lighter Z-Image Turbo. Pull and join `z_image` to serve
+  both, then pick per request — the command is the same, only `-m` changes.
+- `--steps` is optional, and better left off: each model ships with the step count it was distilled
+  for. Both of these want 4, and asking for more is slower without being better.
 - `grid edit` takes up to three `-i` images. `grid video` takes one, and `--duration` is `5s` or `8s`.
 - `--grid` is only needed on local, because the positional argument is the prompt.
 - Results are written to `~/.grid/outputs` — `-o` puts them somewhere else.

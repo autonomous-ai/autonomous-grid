@@ -46,6 +46,31 @@ _COMFYUI_MAX_RETRIES = 10
 _WORKFLOW_DIR = os.path.join(os.path.dirname(__file__), "workflows")
 _workflow_cache: dict[str, dict] = {}
 
+# The generation models `media/image/generate` can serve, and where each graph keeps the four
+# things a request sets. The ids are per-workflow — Krea 2 numbers its nodes 1..10, the Z-Image
+# graph carries "34:*" subgraph ids — so they belong in a table beside the file name, not inlined
+# at the call site where one model's ids would silently be used on the other's graph.
+#
+# Keys are the advertised capability names from `media_bundles.CAPABILITY_NAME`. A host serves
+# whichever it joined with; a request names one, or gets `_DEFAULT_IMAGE_GEN`.
+_DEFAULT_IMAGE_GEN = "comfyui:image_generation"
+
+_KREA2_GRAPH = {
+    "file": "image_generation_krea2_workflow.json",
+    "text": "4", "size": "6", "steps": "7", "save": "10",
+}
+
+_IMAGE_GEN_WORKFLOWS: dict[str, dict[str, str]] = {
+    # `comfyui:image_generation` (the task) and `comfyui:krea2` (the model) are the same graph —
+    # see the note on GATES in media_gating.py for why both names exist.
+    "comfyui:image_generation": _KREA2_GRAPH,
+    "comfyui:krea2": _KREA2_GRAPH,
+    "comfyui:z_image": {
+        "file": "image_generation_zimage_workflow.json",
+        "text": "34:27", "size": "34:13", "steps": "34:3", "save": "9",
+    },
+}
+
 
 def _load_workflow(name: str) -> dict:
     """Load a workflow JSON and cache it. Returns a deep copy."""
@@ -110,9 +135,18 @@ class MediaHandler:
         prompt_text = body.get("prompt", "")
         width = body.get("width", 720)
         height = body.get("height", 720)
-        steps = body.get("steps", 4)
+        # No default here: each generation workflow already carries the step count its model was
+        # distilled for (4 for both of ours), and forcing a number from this side would override a
+        # graph that knows better the moment one of them differs. Only an explicit request wins.
+        steps = body.get("steps")
         self._ensure_comfyui_running()
-        workflow = self._build_image_gen_workflow(prompt_text, width, height, steps)
+        # `model` is optional: the route already names the task, so omitting it keeps the
+        # behaviour every existing caller has. Naming one picks between the generation models
+        # this route serves — the proxy has already resolved the request to an engine that
+        # advertises it, so anything unknown here just falls back to the default.
+        workflow = self._build_image_gen_workflow(
+            prompt_text, width, height, steps, model=body.get("model")
+        )
         yield from self._submit_and_track(workflow, "image/png", "output_image")
 
     # ------------------------------------------------------------------
@@ -121,7 +155,7 @@ class MediaHandler:
 
     def _handle_image_editing(self, body: dict):
         prompt_text = body.get("prompt", "")
-        steps = body.get("steps", 4)
+        steps = body.get("steps")  # absent -> the graph keeps its own count
         input_images = body.get("input_images", [])
         if not input_images:
             yield f'data: {json.dumps({"error": "No input images provided"})}'
@@ -438,42 +472,46 @@ class MediaHandler:
     # ------------------------------------------------------------------
 
     def _build_image_gen_workflow(self, prompt: str, width: int, height: int,
-                                  steps: int) -> dict:
-        # Krea 2 Turbo. Node ids are the workflow's own and differ from the Z-Image graph this
-        # replaced (which used the "34:*" subgraph ids): 4=CLIPTextEncode, 6=EmptyLatentImage,
-        # 7=KSampler, 10=SaveImage.
-        workflow = _load_workflow("image_generation_krea2_workflow.json")
-        workflow["prompt"]["4"]["inputs"]["text"] = prompt
-        workflow["prompt"]["6"]["inputs"]["width"] = width
-        workflow["prompt"]["6"]["inputs"]["height"] = height
-        workflow["prompt"]["7"]["inputs"]["steps"] = steps
-        workflow["prompt"]["10"]["inputs"]["filename_prefix"] = "output_image"
+                                  steps: int | None = None, model: str | None = None) -> dict:
+        """Text-to-image, on whichever generation model the request named.
+
+        Both models serve the one `media/image/generate` route, so the node ids cannot be
+        hard-coded here: each graph numbers its own nodes, and the Z-Image one uses "34:*"
+        subgraph ids. An unknown (or absent) model falls back to the route's default.
+        """
+        spec = _IMAGE_GEN_WORKFLOWS.get(model or "") or _IMAGE_GEN_WORKFLOWS[_DEFAULT_IMAGE_GEN]
+        workflow = _load_workflow(spec["file"])
+        nodes = workflow["prompt"]
+        nodes[spec["text"]]["inputs"]["text"] = prompt
+        nodes[spec["size"]]["inputs"]["width"] = width
+        nodes[spec["size"]]["inputs"]["height"] = height
+        if steps is not None:
+            nodes[spec["steps"]]["inputs"]["steps"] = steps
+        nodes[spec["save"]]["inputs"]["filename_prefix"] = "output_image"
         return workflow
 
     def _build_image_edit_workflow(self, prompt: str, image_paths: list[str],
-                                   steps: int) -> dict:
+                                   steps: int | None = None) -> dict:
         num_images = len(image_paths)
         if num_images == 1:
             workflow = _load_workflow("one_image_editing_workflow.json")
-            workflow["prompt"]["111"]["inputs"]["prompt"] = prompt
-            workflow["prompt"]["3"]["inputs"]["steps"] = steps
             workflow["prompt"]["78"]["inputs"]["image"] = image_paths[0]
-            workflow["prompt"]["60"]["inputs"]["filename_prefix"] = "output_image"
         elif num_images == 2:
             workflow = _load_workflow("two_images_editing_workflow.json")
-            workflow["prompt"]["111"]["inputs"]["prompt"] = prompt
-            workflow["prompt"]["3"]["inputs"]["steps"] = steps
             workflow["prompt"]["78"]["inputs"]["image"] = image_paths[0]
             workflow["prompt"]["106"]["inputs"]["image"] = image_paths[1]
-            workflow["prompt"]["60"]["inputs"]["filename_prefix"] = "output_image"
         else:
             workflow = _load_workflow("three_images_editing_workflow.json")
-            workflow["prompt"]["111"]["inputs"]["prompt"] = prompt
-            workflow["prompt"]["3"]["inputs"]["steps"] = steps
             workflow["prompt"]["78"]["inputs"]["image"] = image_paths[0]
             workflow["prompt"]["106"]["inputs"]["image"] = image_paths[1]
             workflow["prompt"]["108"]["inputs"]["image"] = image_paths[2]
-            workflow["prompt"]["60"]["inputs"]["filename_prefix"] = "output_image"
+        # The three graphs differ only in how many images they take; the prompt, sampler and save
+        # nodes are the same ids in all of them, so setting them once is the same work without the
+        # chance of the branches drifting apart.
+        workflow["prompt"]["111"]["inputs"]["prompt"] = prompt
+        workflow["prompt"]["60"]["inputs"]["filename_prefix"] = "output_image"
+        if steps is not None:  # otherwise the graph's own count stands — see _build_image_gen_workflow
+            workflow["prompt"]["3"]["inputs"]["steps"] = steps
         return workflow
 
     def _build_i2v_workflow(self, prompt: str, image_path: str, duration: str,

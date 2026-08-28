@@ -152,6 +152,11 @@ def cmd_video(args: argparse.Namespace) -> int:
 
 
 def _post_media_request(args: argparse.Namespace, endpoint_path: str, payload: dict[str, Any]) -> int:
+    # An unset flag is an absent field, not a null one. `steps` is the case that matters: the
+    # provider's workflow carries the step count its model was distilled for, and it only overrides
+    # that when the request actually asks for something else. Sending `"steps": null` would be a
+    # request to set it, so the key has to go.
+    payload = {key: value for key, value in payload.items() if value is not None}
     cfg = config.select_grid(getattr(args, "grid", None))
     timeout = httpx.Timeout(float(args.timeout), read=float(args.timeout))
     url = f"{runtime.grid_url(cfg)}/v1/{endpoint_path}"

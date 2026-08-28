@@ -496,8 +496,52 @@ def test_media_pinned_engine_versions_and_bundles_are_ported():
         "comfyui_frontend_package==1.51.9",
         "comfyui_workflow_templates==0.11.48",
     )
-    assert set(media_bundles.BUNDLES) == {"image_generation", "image_editing", "i2v"}
+    assert set(media_bundles.BUNDLES) == {"image_generation", "z_image", "image_editing", "i2v"}
     assert media_bundles.CAPABILITY_NAME["image_generation"] == "comfyui:image_generation"
+    assert media_bundles.CAPABILITY_NAME["z_image"] == "comfyui:z_image"
+
+
+def test_image_gen_workflow_is_chosen_by_model():
+    """`media/image/generate` serves two models, and each graph numbers its own nodes.
+
+    The prompt landing in the right node is the whole point: Krea 2 keeps it at "4", the Z-Image
+    graph at "34:27". Picking the file without picking the ids would write the prompt into
+    whatever node happened to be called "4" — a KeyError at best, the wrong input at worst.
+    """
+    from shared.media.media_handler import MediaHandler
+
+    krea = MediaHandler._build_image_gen_workflow(None, "a crane", 1024, 1024)
+    assert krea["prompt"]["4"]["inputs"]["text"] == "a crane"
+
+    # The task name and the model name are the same graph.
+    named = MediaHandler._build_image_gen_workflow(None, "a crane", 1024, 1024, model="comfyui:krea2")
+    assert named["prompt"]["4"]["inputs"]["text"] == "a crane"
+
+    zimage = MediaHandler._build_image_gen_workflow(None, "a crane", 1024, 1024, model="comfyui:z_image")
+    assert zimage["prompt"]["34:27"]["inputs"]["text"] == "a crane"
+    assert "4" not in zimage["prompt"]  # not merely a superset — a different graph
+
+    # An unroutable name reaching the handler means the proxy already matched an engine on it, so
+    # serve the route's default rather than 500 on a lookup.
+    unknown = MediaHandler._build_image_gen_workflow(None, "a crane", 1024, 1024, model="comfyui:nope")
+    assert unknown["prompt"]["4"]["inputs"]["text"] == "a crane"
+
+
+def test_image_gen_steps_default_comes_from_the_workflow():
+    """Omitting `steps` must leave the graph's own value, not a number picked in the handler.
+
+    Both bundled models are 4-step distills, and their LoRAs are what make that work — a handler
+    that always wrote its own default would silently override a future graph tuned for something
+    else. Only an explicit request overrides.
+    """
+    from shared.media.media_handler import MediaHandler
+
+    for model, sampler_id in (("comfyui:krea2", "7"), ("comfyui:z_image", "34:3")):
+        default = MediaHandler._build_image_gen_workflow(None, "x", 1024, 1024, model=model)
+        assert default["prompt"][sampler_id]["inputs"]["steps"] == 4
+
+        asked = MediaHandler._build_image_gen_workflow(None, "x", 1024, 1024, steps=12, model=model)
+        assert asked["prompt"][sampler_id]["inputs"]["steps"] == 12
 
 
 def test_create_venv_seeds_pip_into_the_uv_venv(monkeypatch, tmp_path):
@@ -684,7 +728,9 @@ def test_prepare_media_engine_defaults_to_present_bundles(monkeypatch, tmp_path)
 
     out = media_engine.prepare_media_engine(
         media_bundles=None, comfyui_port=8188, media_port=8190, advertise_host=None)
-    assert out["models"] == ["comfyui:image_generation"]
+    # One bundle, two advertised names: the task name every existing caller uses, and the model
+    # name that reads correctly beside `comfyui:z_image`.
+    assert out["models"] == ["comfyui:image_generation", "comfyui:krea2"]
 
 
 def test_prepare_media_engine_errors_when_no_bundle_present(monkeypatch, tmp_path):
