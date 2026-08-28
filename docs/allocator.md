@@ -84,7 +84,9 @@ manual, pinned, and minimum-residency-protected work is never bypassed. Among eq
 choices, the allocator prefers the victim set with the lowest learned warm-back cost, reducing the
 price of restoring displaced service after the burst. Required failure-domain diversity is reserved
 before that cost comparison, so several cheap victims in one rack cannot strand a critical model
-that needs capacity across racks. Candidates otherwise prefer
+that needs capacity across racks. A missing hard pin targets its exact node before either domain or
+cost selection; freeing a cheaper host that cannot satisfy the pin would be gratuitous disruption.
+Candidates otherwise prefer
 an existing ready residency, local
 cached weights, another failure domain, measured throughput, and best-fit memory. Before measured
 throughput exists, bounded memory-bandwidth and compute estimates break otherwise-cold ties; ready

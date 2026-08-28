@@ -2290,6 +2290,50 @@ def test_priority_preemption_reserves_required_failure_domains_before_cost():
     } == {"rack-a", "rack-b"}
 
 
+def test_priority_preemption_targets_missing_hard_pin_before_cheaper_host():
+    batch = model(
+        "batch",
+        8_000,
+        min_replicas=2,
+        max_replicas=2,
+        priority=10,
+        min_residency_seconds=0,
+    )
+    critical = model(
+        "critical",
+        8_000,
+        pinned_nodes=("a-pinned",),
+        priority=1_000,
+        min_residency_seconds=0,
+    )
+    pinned = node(
+        "a-pinned",
+        8_000,
+        residencies=(ready("batch", 8_000),),
+    )
+    cheap_but_invalid = node(
+        "z-cheap",
+        8_000,
+        residencies=(ready("batch", 8_000),),
+    )
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+
+    staged = planner.plan(
+        (pinned, cheap_but_invalid),
+        (batch, critical),
+        now=10,
+        startup_seconds={
+            ("a-pinned", "batch"): 100,
+            ("z-cheap", "batch"): 1,
+        },
+    )
+
+    assert staged.preempted_pairs == frozenset({("a-pinned", "batch")})
+    released = (replace(pinned, residencies=()), cheap_but_invalid)
+    converged = planner.plan(released, (batch, critical), now=11)
+    assert converged.nodes_for("critical") == ("a-pinned",)
+
+
 def test_priority_preemption_preserves_ownership_and_minimum_residency():
     critical = model(
         "critical",

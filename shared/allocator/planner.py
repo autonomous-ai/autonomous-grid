@@ -802,7 +802,16 @@ class PlacementPlanner:
                 item.model_id == beneficiary.model_id for item in assignments
             )
             missing = max(0, desired_by_model[beneficiary.model_id] - placed)
-            for _ in range(missing):
+            pending_pins = [
+                node_id
+                for node_id in beneficiary.pinned_nodes
+                if (beneficiary.model_id, node_id) not in assigned_pairs
+            ]
+            preemption_targets: list[str | None] = [
+                *pending_pins,
+                *(None for _ in range(max(0, missing - len(pending_pins)))),
+            ]
+            for required_node_id in preemption_targets:
                 staged = _stage_priority_preemption(
                     beneficiary,
                     node_list,
@@ -824,6 +833,7 @@ class PlacementPlanner:
                         )
                     ),
                     existing_domains=staged_domains[beneficiary.model_id],
+                    required_node_id=required_node_id,
                     excluded_nodes=preempted_nodes,
                 )
                 if not staged:
@@ -1527,6 +1537,7 @@ def _stage_priority_preemption(
     *,
     require_new_domain: bool,
     existing_domains: set[str],
+    required_node_id: str | None,
     excluded_nodes: set[str],
 ) -> tuple[str, tuple[ModelResidency, ...]] | None:
     """Remove desired incumbents only after proving a lower-priority staged eviction fits."""
@@ -1539,6 +1550,8 @@ def _stage_priority_preemption(
         ]
     ] = []
     for node in nodes:
+        if required_node_id is not None and node.node_id != required_node_id:
+            continue
         if node.node_id in excluded_nodes:
             continue
         if (beneficiary.model_id, node.node_id) in assigned_pairs:
