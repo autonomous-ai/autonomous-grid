@@ -365,11 +365,13 @@ class DemandTracker:
         *,
         now: float,
     ) -> tuple[DemandForecast, ...]:
-        """Lift quiet peers of a mature, currently active model-demand group.
+        """Lift quiet peers of a mature coactive group or directional model sequence.
 
-        Association is symmetric cosine similarity over non-empty time buckets. Boosts use only
-        the unmodified forecasts passed into this method, so inferred demand cannot cascade through
-        a graph. Multiple sources take a maximum rather than summing into fleet-wide amplification.
+        Coactivity uses symmetric cosine similarity over non-empty time buckets. Sequential evidence
+        uses the conditional frequency of a target in the bucket after a source, considering only
+        completed target buckets. Boosts use only the unmodified forecasts passed into this method,
+        so inferred demand cannot cascade through a graph. Multiple sources take a maximum rather
+        than summing into fleet-wide amplification.
         """
 
         if len(forecasts) < 2:
@@ -399,6 +401,7 @@ class DemandTracker:
         )
         if not recent_sources:
             return forecasts
+        current_bucket = int(now // self.bucket_seconds)
 
         augmented: list[DemandForecast] = []
         for target in forecasts:
@@ -416,34 +419,74 @@ class DemandTracker:
                     continue
                 source_rates = rates_by_model[source.model_id]
                 source_buckets = set(source_rates)
+                evidence: list[tuple[float, list[float]]] = []
                 coactive = target_buckets.intersection(source_buckets)
-                if len(coactive) < self.correlation_min_buckets:
-                    continue
-                association = len(coactive) / math.sqrt(
-                    len(target_buckets) * len(source_buckets)
-                )
-                if association < self.correlation_threshold:
-                    continue
-                ratios = [
-                    target_rates[index] / source_rates[index]
-                    for index in coactive
-                    if source_rates[index] > 0
+                if len(coactive) >= self.correlation_min_buckets:
+                    association = len(coactive) / math.sqrt(
+                        len(target_buckets) * len(source_buckets)
+                    )
+                    if association >= self.correlation_threshold:
+                        evidence.append(
+                            (
+                                association,
+                                [
+                                    target_rates[index] / source_rates[index]
+                                    for index in coactive
+                                    if source_rates[index] > 0
+                                ],
+                            )
+                        )
+
+                # A source in the current bucket predicts a target in the next bucket using only
+                # older, fully observable transitions. The current and immediately prior source
+                # buckets are not counted as failures while their target buckets are incomplete.
+                completed_sources = [
+                    index
+                    for index in source_buckets
+                    if index + 1 < current_bucket
                 ]
-                if not ratios:
-                    continue
-                learned_ratio = min(10.0, max(0.1, statistics.median(ratios)))
-                confidence = association * source.confidence
-                candidate_rate = source.requests_per_minute * learned_ratio * confidence
-                candidate_rate = min(
-                    candidate_rate,
-                    target_peak * self.correlation_max_growth,
-                )
-                if candidate_rate <= target.requests_per_minute:
+                transitioned = [
+                    index
+                    for index in completed_sources
+                    if index + 1 in target_buckets
+                ]
+                if len(transitioned) >= self.correlation_min_buckets:
+                    transition_confidence = len(transitioned) / len(completed_sources)
+                    if transition_confidence >= self.correlation_threshold:
+                        evidence.append(
+                            (
+                                transition_confidence,
+                                [
+                                    target_rates[index + 1] / source_rates[index]
+                                    for index in transitioned
+                                    if source_rates[index] > 0
+                                ],
+                            )
+                        )
+
+                source_best_rate = target.requests_per_minute
+                source_best_confidence = 0.0
+                for association, ratios in evidence:
+                    if not ratios:
+                        continue
+                    learned_ratio = min(10.0, max(0.1, statistics.median(ratios)))
+                    confidence = association * source.confidence
+                    candidate_rate = (
+                        source.requests_per_minute * learned_ratio * confidence
+                    )
+                    candidate_rate = min(
+                        candidate_rate,
+                        target_peak * self.correlation_max_growth,
+                    )
+                    if candidate_rate > source_best_rate:
+                        source_best_rate = candidate_rate
+                        source_best_confidence = confidence
+                if source_best_rate <= target.requests_per_minute:
                     continue
                 sources.append(source.model_id)
-                if candidate_rate > best_rate:
-                    best_rate = candidate_rate
-                    best_confidence = confidence
+                if source_best_rate > best_rate:
+                    best_rate = source_best_rate
+                    best_confidence = source_best_confidence
             if best_rate <= target.requests_per_minute:
                 augmented.append(target)
                 continue

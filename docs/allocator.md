@@ -53,11 +53,13 @@ and maximum bounds. Rising demand is also projected across each model's declared
 time, confidence-weighted and capped to a five-minute/2× horizon, so slow cold starts begin before
 the queue arrives without letting one noisy slope cause a fleet-wide load spike. Negative trends
 never accelerate scale-down. The tracker also learns mature groups of models that repeatedly become
-active in the same time buckets. Current demand for one group member can prewarm a quiet peer using
-a confidence-weighted historical rate ratio. This requires at least three co-active buckets and
-strong symmetric cosine association, caps inferred demand at twice the peer's observed peak, takes
-the maximum rather than sum across at most 32 current sources, and never propagates inferred demand
-transitively. Old peer-local queue, latency, and error evidence is not refreshed by a correlation.
+active in the same time buckets and directional pairs that repeatedly activate one bucket apart.
+Current demand for one group member can prewarm a quiet peer; a current workflow stage can likewise
+prewarm its historically next model. Both use a confidence-weighted historical rate ratio, require
+at least three supporting buckets and a 0.70 association/transition threshold, and exclude incomplete
+future buckets from transition failures. Inferred demand is capped at twice the target's observed
+peak, takes the maximum rather than sum across at most 32 current sources, and never propagates
+transitively. Old target-local queue, latency, and error evidence is not refreshed by an association.
 Only configured, non-retiring model IDs create demand series, so the permissionless inference
 endpoint cannot grow controller state with arbitrary names.
 

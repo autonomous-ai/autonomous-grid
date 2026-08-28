@@ -924,6 +924,70 @@ def test_demand_tracker_prewarms_quiet_models_from_mature_group_demand():
     assert correlated.error_rate == 0
 
 
+def test_demand_tracker_prewarms_mature_next_model_sequence():
+    tracker = DemandTracker(
+        bucket_seconds=10,
+        window_seconds=200,
+        ewma_alpha=1,
+        confidence_samples=1,
+    )
+    for source_timestamp in (1, 21, 41, 61, 81):
+        tracker.observe(
+            "planner",
+            requests=20,
+            service_seconds=1,
+            timestamp=source_timestamp,
+        )
+        tracker.observe(
+            "implementer",
+            requests=10,
+            service_seconds=2,
+            timestamp=source_timestamp + 10,
+        )
+    tracker.observe(
+        "planner",
+        requests=20,
+        service_seconds=1,
+        timestamp=101,
+    )
+
+    independent = tracker.forecast("implementer", now=101)
+    forecasts = {item.model_id: item for item in tracker.forecasts(now=101)}
+    predicted = forecasts["implementer"]
+
+    assert independent.requests_per_minute == 0
+    assert predicted.requests_per_minute == pytest.approx(
+        forecasts["planner"].requests_per_minute / 2
+    )
+    assert predicted.offered_concurrency == pytest.approx(
+        predicted.requests_per_minute / 30
+    )
+    assert predicted.correlation_confidence == 1
+    assert predicted.correlation_sources == ("planner",)
+    assert predicted.updated_at == 101
+
+
+def test_sequential_demand_prediction_does_not_propagate_two_hops():
+    tracker = DemandTracker(
+        bucket_seconds=10,
+        window_seconds=200,
+        ewma_alpha=1,
+        confidence_samples=1,
+    )
+    for first_timestamp in (1, 31, 61):
+        tracker.observe("first", requests=20, timestamp=first_timestamp)
+        tracker.observe("second", requests=10, timestamp=first_timestamp + 10)
+        tracker.observe("third", requests=5, timestamp=first_timestamp + 20)
+    tracker.observe("first", requests=20, timestamp=91)
+
+    forecasts = {item.model_id: item for item in tracker.forecasts(now=91)}
+
+    assert forecasts["second"].correlation_sources == ("first",)
+    assert forecasts["second"].requests_per_minute > 0
+    assert forecasts["third"].correlation_sources == ()
+    assert forecasts["third"].requests_per_minute == 0
+
+
 def test_demand_correlation_requires_support_and_rejects_popularity_overlap():
     sparse = DemandTracker(bucket_seconds=10, window_seconds=200, ewma_alpha=1)
     for timestamp in (1, 11):
