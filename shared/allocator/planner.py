@@ -41,6 +41,8 @@ class PlannerPolicy:
     error_pressure_limit: float = 0.5
     model_failure_penalty: float = 50_000.0
     performance_ttl_seconds: float = 900.0
+    max_predictive_lookahead_seconds: float = 300.0
+    predictive_growth_limit: float = 2.0
     throttled_capacity_fraction: float = 0.5
     preserve_recent_residencies: bool = True
 
@@ -55,9 +57,15 @@ class PlannerPolicy:
                 self.max_future_clock_skew_seconds,
                 self.model_failure_penalty,
                 self.performance_ttl_seconds,
+                self.max_predictive_lookahead_seconds,
             )
         ):
             raise ValueError("planner weights and TTL must be finite and non-negative")
+        if (
+            not math.isfinite(self.predictive_growth_limit)
+            or self.predictive_growth_limit < 1
+        ):
+            raise ValueError("predictive_growth_limit must be finite and at least 1")
         if self.queue_items_per_replica < 1:
             raise ValueError("queue_items_per_replica must be positive")
         if (
@@ -821,6 +829,12 @@ def desired_replica_count(
             offered_concurrency = (
                 forecast.requests_per_minute / 60.0 * model.expected_service_seconds
             )
+        offered_concurrency = _predictive_offered_concurrency(
+            model,
+            forecast,
+            offered_concurrency,
+            policy,
+        )
         concurrency = offered_concurrency * (1.0 + policy.demand_headroom_fraction)
         required_capacity = _bounded_replica_ceil(
             concurrency / model.target_utilization,
@@ -902,6 +916,45 @@ def desired_replica_count(
     # its own target and would weaken replacement/failure-domain safety checks in reconciliation.
     target = max(target, len(model.pinned_nodes))
     return min(model.max_replicas, target)
+
+
+def _predictive_offered_concurrency(
+    model: ModelProfile,
+    forecast: DemandForecast,
+    offered_concurrency: float,
+    policy: PlannerPolicy,
+) -> float:
+    """Project a rising workload across the time needed to make a new replica ready.
+
+    DemandTracker already includes a short one-bucket trend in its base forecast. This additional
+    horizon is model-specific: a model that takes two minutes to load must start earlier than one
+    that warms in two seconds. Confidence and a hard growth ratio bound noisy or imported trends.
+    Negative trends never accelerate scale-down; residency cooldown remains its sole authority.
+    """
+
+    startup_horizon = min(
+        policy.max_predictive_lookahead_seconds,
+        model.load_seconds + model.warm_seconds,
+    )
+    base_rate = forecast.requests_per_minute
+    if (
+        offered_concurrency <= 0
+        or base_rate <= 0
+        or forecast.trend_per_minute <= 0
+        or forecast.confidence <= 0
+        or startup_horizon <= 0
+    ):
+        return offered_concurrency
+    trend_growth = (
+        forecast.trend_per_minute
+        * (startup_horizon / 60.0)
+        * forecast.confidence
+    )
+    projected_rate = min(
+        base_rate * policy.predictive_growth_limit,
+        base_rate + trend_growth,
+    )
+    return offered_concurrency * (projected_rate / base_rate)
 
 
 def _replicas_for_service_capacity(

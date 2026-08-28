@@ -368,6 +368,10 @@ def test_allocator_models_validate_impossible_values():
         ready(active_requests=-1)
     with pytest.raises(ValueError, match="non-negative"):
         PlannerPolicy(performance_ttl_seconds=-1)
+    with pytest.raises(ValueError, match="non-negative"):
+        PlannerPolicy(max_predictive_lookahead_seconds=-1)
+    with pytest.raises(ValueError, match="predictive_growth_limit"):
+        PlannerPolicy(predictive_growth_limit=0.9)
     with pytest.raises(ValueError, match="updated_at"):
         ModelPerformance("qwen", updated_at=-1)
 
@@ -582,6 +586,85 @@ def test_replica_count_uses_offered_concurrency_headroom_and_bounds():
     assert desired_replica_count(profile, forecast, now=100) == 3
     huge = DemandForecast("qwen", offered_concurrency=100)
     assert desired_replica_count(profile, huge, now=100) == 5
+
+
+def test_replica_count_prewarms_across_model_startup_horizon():
+    slow = model(
+        min_replicas=0,
+        max_replicas=10,
+        target_utilization=1,
+        load_seconds=60,
+        warm_seconds=0,
+    )
+    instant = replace(slow, load_seconds=0)
+    rising = DemandForecast(
+        "qwen",
+        requests_per_minute=60,
+        offered_concurrency=1,
+        trend_per_minute=60,
+        confidence=1,
+    )
+
+    assert desired_replica_count(instant, rising, now=100) == 2
+    assert desired_replica_count(slow, rising, now=100) == 3
+
+
+def test_predictive_prewarm_ignores_untrusted_or_falling_trends_and_bounds_growth():
+    profile = model(
+        min_replicas=0,
+        max_replicas=10,
+        target_utilization=0.5,
+        load_seconds=10_000,
+        warm_seconds=10_000,
+    )
+    baseline = DemandForecast(
+        "qwen",
+        requests_per_minute=60,
+        offered_concurrency=1,
+    )
+    no_confidence = replace(
+        baseline,
+        trend_per_minute=1_000_000,
+        confidence=0,
+    )
+    falling = replace(baseline, trend_per_minute=-1_000_000, confidence=1)
+    adversarial = replace(baseline, trend_per_minute=1_000_000, confidence=1)
+    bounded_policy = PlannerPolicy(
+        max_predictive_lookahead_seconds=300,
+        predictive_growth_limit=1.5,
+    )
+
+    assert desired_replica_count(profile, baseline, now=100) == 3
+    assert desired_replica_count(profile, no_confidence, now=100) == 3
+    assert desired_replica_count(profile, falling, now=100) == 3
+    assert (
+        desired_replica_count(
+            profile,
+            adversarial,
+            now=100,
+            policy=bounded_policy,
+        )
+        == 4
+    )
+
+
+def test_predictive_prewarm_does_not_resurrect_expired_demand():
+    profile = model(
+        min_replicas=0,
+        max_replicas=10,
+        load_seconds=300,
+        scale_down_cooldown_seconds=10,
+    )
+    stale = DemandForecast(
+        "qwen",
+        requests_per_minute=60,
+        offered_concurrency=1,
+        trend_per_minute=1_000,
+        confidence=1,
+        updated_at=1,
+    )
+
+    assert desired_replica_count(profile, stale, now=100) == 0
 
 
 def test_replica_count_credits_a_single_model_vllm_batcher():

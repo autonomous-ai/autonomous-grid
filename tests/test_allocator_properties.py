@@ -94,8 +94,11 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
         forecasts = tuple(
             DemandForecast(
                 profile.model_id,
+                requests_per_minute=rng.choice((0.0, 60.0, 600.0)),
                 offered_concurrency=rng.random() * 2,
                 queue_depth=rng.randint(0, 3),
+                trend_per_minute=rng.choice((-10.0, 0.0, 10.0, 100.0)),
+                confidence=rng.random(),
             )
             for profile in profiles
         )
@@ -282,8 +285,11 @@ def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries
         demand = tuple(
             DemandForecast(
                 item.model_id,
+                requests_per_minute=rng.choice((0.0, 60.0, 600.0)),
                 offered_concurrency=rng.random() * 2,
                 queue_depth=rng.randint(0, 3),
+                trend_per_minute=rng.choice((-10.0, 0.0, 10.0, 100.0)),
+                confidence=rng.random(),
             )
             for item in profiles
         )
@@ -480,6 +486,7 @@ def test_seeded_vllm_batch_pressure_spills_only_to_owned_logical_llama_nodes():
         pressure_kind = rng.choice(("none", "queue", "latency", "error"))
         forecast = DemandForecast(
             profile.model_id,
+            requests_per_minute=rng.choice((0.0, 60.0, 600.0)),
             offered_concurrency=rng.choice((0.0, 0.5, 1.0, 2.0, 8.0, 32.0)),
             queue_depth=rng.randint(1, 8) if pressure_kind == "queue" else 0,
             p95_latency_ms=rng.choice((1_500.0, 3_000.0))
@@ -488,6 +495,8 @@ def test_seeded_vllm_batch_pressure_spills_only_to_owned_logical_llama_nodes():
             error_rate=rng.choice((0.05, 0.25, 0.75))
             if pressure_kind == "error"
             else 0,
+            trend_per_minute=rng.choice((-100.0, 0.0, 10.0, 1_000.0)),
+            confidence=rng.random(),
         )
         nodes = [external_vllm, *immutable_inventory, *logical_llama]
         rng.shuffle(nodes)

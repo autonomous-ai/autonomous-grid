@@ -49,7 +49,10 @@ Demand history is bounded by time buckets and contains aggregate timings and cou
 responses. Bursts are folded into their bucket rather than truncated at a raw-request limit. A
 bucketed EWMA and positive trend term make the near-term forecast. The target replica count adds
 demand headroom and reacts to queue, latency, and error pressure while respecting per-model minimum
-and maximum bounds. Only configured, non-retiring model IDs create demand series, so the
+and maximum bounds. Rising demand is also projected across each model's declared load-plus-warm
+time, confidence-weighted and capped to a five-minute/2× horizon, so slow cold starts begin before
+the queue arrives without letting one noisy slope cause a fleet-wide load spike. Negative trends
+never accelerate scale-down. Only configured, non-retiring model IDs create demand series, so the
 permissionless inference endpoint cannot grow controller state with arbitrary names.
 
 Placement is deterministic. Higher-priority and larger models place first; candidates then prefer
