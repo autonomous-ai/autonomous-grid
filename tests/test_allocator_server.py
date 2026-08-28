@@ -1871,6 +1871,57 @@ def test_proxy_routes_away_after_repeated_server_failures(tmp_path, monkeypatch)
     assert calls == [preferred_port, preferred_port, fallback_port]
 
 
+def test_broken_success_stream_opens_circuit_without_learning_performance(
+    tmp_path,
+    monkeypatch,
+):
+    app, client, _ = _app(tmp_path)
+    _managed_node(client)
+    _managed_engine(client, model_id="qwen")
+    assert (
+        client.put("/allocator/models/qwen", json=_profile(), headers=AUTH).status_code
+        == 200
+    )
+    engine = app.state.nodes[engine_node_id("host-1", "qwen")]
+
+    class BrokenStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            raise httpx.ReadError("upstream disconnected")
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=BrokenStream(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        server_module.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_async_client(
+            *args,
+            **{**kwargs, "transport": httpx.MockTransport(upstream)},
+        ),
+    )
+
+    for _ in range(2):
+        with pytest.raises(httpx.ReadError, match="disconnected"):
+            client.post(
+                "/v1/chat/completions",
+                json={"model": "qwen", "messages": [], "stream": True},
+            )
+
+    assert engine.proxy_performance_samples == 0
+    assert engine.proxy_model_performance == {}
+    health = engine.proxy_route_health["qwen"]
+    assert health.consecutive_failures == 2
+    assert health.quarantine_until > time.monotonic()
+    demand = app.state.allocator.demand.to_dict()["models"]["qwen"]
+    assert sum(bucket["errors"] for bucket in demand) == 2
+
+
 @pytest.mark.parametrize(
     ("body", "expected"),
     [

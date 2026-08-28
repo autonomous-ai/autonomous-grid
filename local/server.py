@@ -882,15 +882,19 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
                     app,
                     model,
                     started_at,
-                    error=_allocator_capacity_error(engine_response.status_code),
+                    error=(
+                        stream_transport_error
+                        or _allocator_capacity_error(engine_response.status_code)
+                    ),
                 )
-                _record_engine_performance(
-                    engine,
-                    started_at,
-                    model=model,
-                    status_code=engine_response.status_code,
-                    completion_tokens=usage_collector.completion_tokens,
-                )
+                if not stream_transport_error:
+                    _record_engine_performance(
+                        engine,
+                        started_at,
+                        model=model,
+                        status_code=engine_response.status_code,
+                        completion_tokens=usage_collector.completion_tokens,
+                    )
                 if collector is not None:
                     collector.store()
 
