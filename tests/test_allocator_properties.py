@@ -53,7 +53,9 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
                 residencies.append(
                     ModelResidency(
                         profile.model_id,
-                        rng.choice((profile.memory_mb, max(1, profile.memory_mb - 500))),
+                        rng.choice(
+                            (profile.memory_mb, max(1, profile.memory_mb - 500))
+                        ),
                         rng.choice(
                             (
                                 ResidencyState.READY,
@@ -112,22 +114,22 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
                 ResidencyState.CACHED,
                 ResidencyState.FAILED,
             }
-            assert compatibility_reason(
-                node,
-                profile,
-                now=100,
-                policy=policy,
-                for_new=for_new,
-            ) is None
+            assert (
+                compatibility_reason(
+                    node,
+                    profile,
+                    now=100,
+                    policy=policy,
+                    for_new=for_new,
+                )
+                is None
+            )
             # An external ready residency is inventory, not a new allocation. Every other new or
             # resized placement must fit inside memory left after current live processes.
             if (
                 residency is None
                 or residency.state == ResidencyState.CACHED
-                or (
-                    residency.state == ResidencyState.FAILED
-                    and not residency.managed
-                )
+                or (residency.state == ResidencyState.FAILED and not residency.managed)
             ):
                 incremental_by_node[node.node_id] += assignment.memory_mb
                 added_slots_by_node[node.node_id] += 1
@@ -146,23 +148,20 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
                 residency.memory_mb
                 for residency in node.residencies
                 if residency.state != ResidencyState.CACHED
-                and (
-                    residency.state != ResidencyState.FAILED
-                    or residency.managed
-                )
+                and (residency.state != ResidencyState.FAILED or residency.managed)
             )
             assert incremental_by_node[node.node_id] <= max(0, budget - live_memory)
             if node.max_models is not None:
                 live_slots = sum(
                     residency.state != ResidencyState.CACHED
-                    and (
-                        residency.state != ResidencyState.FAILED
-                        or residency.managed
-                    )
+                    and (residency.state != ResidencyState.FAILED or residency.managed)
                     for residency in node.residencies
                 )
                 if live_slots <= node.max_models:
-                    assert live_slots + added_slots_by_node[node.node_id] <= node.max_models
+                    assert (
+                        live_slots + added_slots_by_node[node.node_id]
+                        <= node.max_models
+                    )
 
 
 def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries():
@@ -228,7 +227,12 @@ def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries
                 runtimes=("llama.cpp",),
                 backends=("metal",),
                 state=rng.choice(
-                    (NodeState.ACCEPTING, NodeState.ACCEPTING, NodeState.THROTTLED, NodeState.PAUSED)
+                    (
+                        NodeState.ACCEPTING,
+                        NodeState.ACCEPTING,
+                        NodeState.THROTTLED,
+                        NodeState.PAUSED,
+                    )
                 ),
                 failure_domain=f"mac-{index}",
                 residencies=tuple(
@@ -307,6 +311,239 @@ def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries
         assert all(
             profile_by_id[action.model_id].runtimes == ("llama.cpp",)
             for action in result.actions
+        )
+
+
+def test_seeded_vllm_batch_pressure_spills_only_to_owned_logical_llama_nodes():
+    """Stress capacity-aware spillover on the live framework mix without physical hosts."""
+
+    rng = random.Random(0xBA7C4A11)
+    policy = PlannerPolicy(memory_headroom_fraction=0.05)
+    planner = PlacementPlanner(policy)
+    reconciler = Reconciler()
+
+    for scenario in range(500):
+        profile = ModelProfile(
+            "Qwen3.8-27B",
+            32_000,
+            runtimes=("llama.cpp", "vllm"),
+            backends=("cuda", "metal"),
+            min_replicas=0,
+            max_replicas=5,
+            target_utilization=rng.choice((0.5, 0.7, 0.9)),
+            replica_concurrency=rng.choice((1, 2, 4)),
+            latency_slo_ms=1_000,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=0,
+            min_failure_domains=2,
+        )
+        batch_width = rng.choice((1, 4, 16, 64))
+        external_vllm = NodeSnapshot(
+            "8x50902-67-qwen38-27b",
+            768_000,
+            runtimes=("vllm",),
+            backends=("cuda",),
+            state=NodeState.ACCEPTING,
+            failure_domain="nvidia-rack-3",
+            residencies=(
+                ModelResidency(
+                    profile.model_id,
+                    profile.memory_mb,
+                    ResidencyState.READY,
+                    managed=False,
+                ),
+            ),
+            max_concurrency=batch_width,
+            active_requests=rng.randint(0, batch_width),
+            queue_depth=rng.randint(0, 3),
+            tokens_per_second=rng.choice((0.0, 40.0, 120.0)),
+            manually_managed=True,
+            actuator_capabilities=(),
+            last_heartbeat=100,
+        )
+        immutable_inventory = (
+            NodeSnapshot(
+                "mac-studio-turtle",
+                196_608,
+                runtimes=("comfyui",),
+                backends=("mps",),
+                state=NodeState.ACCEPTING,
+                failure_domain="mac-studio-turtle",
+                residencies=(
+                    ModelResidency(
+                        "comfyui:krea2",
+                        32_000,
+                        ResidencyState.READY,
+                        managed=False,
+                    ),
+                    ModelResidency(
+                        "comfyui:z_image",
+                        32_000,
+                        ResidencyState.READY,
+                        managed=False,
+                    ),
+                ),
+                manually_managed=True,
+                actuator_capabilities=(),
+                last_heartbeat=100,
+            ),
+            *(
+                NodeSnapshot(
+                    node_id,
+                    768_000,
+                    runtimes=("vllm",),
+                    backends=("cuda",),
+                    state=NodeState.ACCEPTING,
+                    failure_domain=domain,
+                    residencies=(
+                        ModelResidency(
+                            model_id,
+                            32_000,
+                            ResidencyState.READY,
+                            managed=False,
+                        ),
+                    ),
+                    max_concurrency=rng.choice((4, 16, 64)),
+                    manually_managed=True,
+                    actuator_capabilities=(),
+                    last_heartbeat=100,
+                )
+                for node_id, domain, model_id in (
+                    ("scholes-60002-01", "nvidia-rack-1", "Qwen3.8-Flash-Next"),
+                    ("scholes-60001", "nvidia-rack-2", "DeepSeek-V4-Flash"),
+                )
+            ),
+        )
+
+        logical_llama: list[NodeSnapshot] = []
+        for index, node_id in enumerate(
+            (
+                "firmware-engineer-daniel",
+                "video-editor-tom",
+                "3d-artist-diego",
+                "ml-engineer-priya",
+            )
+        ):
+            residency_state = rng.choice(
+                (
+                    None,
+                    None,
+                    ResidencyState.CACHED,
+                    ResidencyState.FAILED,
+                    ResidencyState.READY,
+                )
+            )
+            residencies = ()
+            cached_models = ()
+            if residency_state is not None:
+                residencies = (
+                    ModelResidency(
+                        profile.model_id,
+                        profile.memory_mb,
+                        residency_state,
+                        load_failures=(
+                            rng.randint(1, 5)
+                            if residency_state == ResidencyState.FAILED
+                            else 0
+                        ),
+                    ),
+                )
+                if residency_state == ResidencyState.CACHED:
+                    cached_models = (profile.model_id,)
+            logical_llama.append(
+                NodeSnapshot(
+                    node_id,
+                    48_000,
+                    reserved_mb=rng.choice((0, 4_000, 8_000)),
+                    runtimes=("llama.cpp",),
+                    backends=("metal",),
+                    state=rng.choice(
+                        (
+                            NodeState.ACCEPTING,
+                            NodeState.ACCEPTING,
+                            NodeState.THROTTLED,
+                            NodeState.PAUSED,
+                        )
+                    ),
+                    failure_domain=f"logical-mac-{index}",
+                    max_models=1,
+                    residencies=residencies,
+                    cached_models=cached_models,
+                    active_requests=rng.randint(0, 2),
+                    max_concurrency=rng.choice((1, 2, 4)),
+                    queue_depth=rng.randint(0, 3),
+                    tokens_per_second=rng.choice((0.0, 10.0, 40.0, 80.0)),
+                    last_heartbeat=100,
+                )
+            )
+
+        pressure_kind = rng.choice(("none", "queue", "latency", "error"))
+        forecast = DemandForecast(
+            profile.model_id,
+            offered_concurrency=rng.choice((0.0, 0.5, 1.0, 2.0, 8.0, 32.0)),
+            queue_depth=rng.randint(1, 8) if pressure_kind == "queue" else 0,
+            p95_latency_ms=rng.choice((1_500.0, 3_000.0))
+            if pressure_kind == "latency"
+            else 0,
+            error_rate=rng.choice((0.05, 0.25, 0.75))
+            if pressure_kind == "error"
+            else 0,
+        )
+        nodes = [external_vllm, *immutable_inventory, *logical_llama]
+        rng.shuffle(nodes)
+
+        plan = planner.plan(nodes, (profile,), (forecast,), now=100)
+        permuted = planner.plan(reversed(nodes), (profile,), (forecast,), now=100)
+        assert plan == permuted, (
+            f"planner depended on node order in scenario {scenario}"
+        )
+        assert (
+            profile.min_replicas
+            <= plan.target_for(profile.model_id)
+            <= profile.max_replicas
+        )
+        if pressure_kind != "none":
+            assert plan.target_for(profile.model_id) >= 2
+
+        node_by_id = {node.node_id: node for node in nodes}
+        for assignment in plan.assignments:
+            target = node_by_id[assignment.node_id]
+            residency = target.residency(profile.model_id)
+            for_new = residency is None or residency.state in {
+                ResidencyState.CACHED,
+                ResidencyState.FAILED,
+                ResidencyState.DRAINING,
+            }
+            assert (
+                compatibility_reason(
+                    target,
+                    profile,
+                    now=100,
+                    policy=policy,
+                    for_new=for_new,
+                )
+                is None
+            )
+            if target.manually_managed:
+                assert target.node_id == external_vllm.node_id
+                assert residency is not None
+                assert residency.state == ResidencyState.READY
+                assert residency.managed is False
+
+        result = reconciler.reconcile(
+            plan,
+            nodes,
+            (profile,),
+            mode=AllocatorMode.AUTOMATIC,
+            now=100,
+        )
+        assert all(
+            action.node_id in {node.node_id for node in logical_llama}
+            for action in result.actions
+        )
+        assert all(
+            action.kind.value in node_by_id[action.node_id].actuator_capabilities
+            for action in result.executable_actions
         )
 
 
