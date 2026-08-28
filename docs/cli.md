@@ -541,6 +541,7 @@ grid allocator model set <model> --memory-mb <n>
     [--service-seconds <s>] [--latency-slo-ms <ms>] [--priority <n>]
     [--load-seconds <s>] [--warm-seconds <s>] [--min-residency-seconds <s>]
     [--scale-down-cooldown-seconds <s>] [--min-failure-domains <n>]
+    [--max-colocated-models <n>]
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
 grid allocator model remove|rm <model>
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]

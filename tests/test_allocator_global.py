@@ -112,6 +112,86 @@ def test_artifact_sha256_rejects_invalid_values(digest):
         model(artifact_sha256=digest)
 
 
+@pytest.mark.parametrize("value", [-1, True, 1.5])
+def test_max_colocated_models_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="max_colocated_models"):
+        model(max_colocated_models=value)
+
+
+@pytest.mark.parametrize(
+    ("exclusive_priority", "shared_priority"),
+    [(200, 100), (100, 200)],
+)
+def test_exclusive_model_never_shares_host_regardless_of_placement_order(
+    exclusive_priority,
+    shared_priority,
+):
+    exclusive = model(
+        "latency",
+        priority=exclusive_priority,
+        max_colocated_models=1,
+    )
+    shared = model("batch", priority=shared_priority)
+
+    plan = PlacementPlanner().plan(
+        [node("a"), node("b")],
+        [exclusive, shared],
+        now=10,
+    )
+
+    assert plan.unsatisfied == ()
+    assert plan.nodes_for("latency") != plan.nodes_for("batch")
+
+
+def test_exclusive_model_rejects_live_peer_but_ignores_cached_weights():
+    exclusive = model("latency", max_colocated_models=1)
+    live_peer = ModelResidency("batch", 8_000, ResidencyState.READY)
+    cached_peer = replace(live_peer, state=ResidencyState.CACHED)
+
+    blocked = PlacementPlanner().plan(
+        [node("host", residencies=(live_peer,))],
+        [exclusive],
+        now=10,
+    )
+    allowed = PlacementPlanner().plan(
+        [node("host", residencies=(cached_peer,))],
+        [exclusive],
+        now=10,
+    )
+
+    assert blocked.nodes_for("latency") == ()
+    assert blocked.unsatisfied[0].code == "colocation_limit"
+    assert allowed.nodes_for("latency") == ("host",)
+
+
+def test_colocation_policy_never_actuates_external_vllm_inventory():
+    profile = ModelProfile(
+        model_id="qwen",
+        memory_mb=8_000,
+        runtimes=("vllm",),
+        backends=("cuda",),
+        max_colocated_models=1,
+    )
+    external = node(
+        "external-vllm",
+        runtime="vllm",
+        backend="cuda",
+        manually_managed=True,
+        actuator_capabilities=(),
+        residencies=(
+            ready("qwen", managed=False),
+            ready("other", managed=False),
+        ),
+    )
+
+    plan = PlacementPlanner().plan([external], [profile], now=10)
+    result = Reconciler().reconcile(plan, [external], [profile], now=10)
+
+    assert plan.nodes_for("qwen") == ()
+    assert result.actions == ()
+    assert all(item.code == "not_allocator_owned" for item in result.deferred)
+
+
 @pytest.mark.parametrize(
     "runtime_memory_mb",
     [

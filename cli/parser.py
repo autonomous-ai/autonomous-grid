@@ -229,6 +229,13 @@ def _add_allocator(sub) -> None:
         default=0,
         help="Require each needed GPU to have at least this much physical VRAM.",
     )
+    set_model.add_argument(
+        "--max-colocated-models",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Limit distinct live models per host; 1 requests exclusive serving (default: unlimited).",
+    )
     _add_allocator_grid(set_model, token=True)
     set_model.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     set_model.set_defaults(handler=cmd_allocator_model_set)

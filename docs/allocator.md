@@ -38,7 +38,8 @@ request counts, latency, queues          host telemetry and local override
 The global loop consumes:
 
 - model profiles: memory, optional immutable artifact SHA-256, runtime/backend compatibility,
-  replica bounds, priority, data tier, placement tags, failure-domain goal, pins, and cooldowns;
+  replica bounds, priority, data tier, placement tags, failure-domain goal, co-location ceiling,
+  pins, and cooldowns;
 - host snapshots: usable memory, reserve, runtime/backend, lifecycle state, policy tags, cached and
   resident models, concurrency, queue, measured throughput and latency, memory bandwidth, compute,
   heartbeat age, and actuator ownership;
@@ -448,6 +449,7 @@ budget for one replica, not the file's compressed size:
 grid allocator model set <model.gguf> \
   --memory-mb 12000 \
   --artifact-sha256 <64-hex-digest> \
+  --max-colocated-models 1 \
   --min-replicas 1 \
   --max-replicas 3 \
   --min-failure-domains 2
@@ -458,6 +460,12 @@ The profile command also accepts repeated `--runtime`, `--backend`, `--required-
 latency SLO, priority, load/warm estimates, residency and scale-down cooldowns are explicit flags.
 `--artifact-sha256` is optional but recommended for managed production GGUFs; it is canonicalized
 to lowercase and becomes part of command, retry, and readiness identity.
+`--max-colocated-models` is also optional (`0` means unlimited). The value counts the candidate
+itself, so `1` requests exclusive serving for an interference-sensitive model. The constraint is
+reciprocal: Grid will neither place that model beside another live/planned model nor later place a
+different configured model beside it. Cached-only weights do not consume a serving slot. Existing
+manually managed vLLM inventory that violates a profile remains visible but is reported unsatisfied;
+the constraint never grants Grid authority to resize or stop the external engine.
 `--replica-concurrency` declares a conservative service-slot estimate for a newly managed replica.
 Once a single-model engine is ready, its live `max_concurrency` may prove a higher batch width; a
 multi-model engine's shared node-wide limit is never credited independently to every model. Queue,
@@ -638,5 +646,8 @@ partitioned so the harness never reports N times the physical Mac's capacity.
   SHA-256; remote artifact distribution and source-revision resolution remain operator-managed.
 - The planner is a transparent deterministic heuristic, not an optimal mixed-integer solver. It
   prioritizes predictable safety and understandable decisions over a mathematically minimal cost.
+- Inter-model interference is currently controlled through the explicit per-profile
+  `max_colocated_models` ceiling. Grid does not yet infer a pairwise interference matrix from
+  production co-run experiments or partition GPU execution resources such as CUDA MPS/MIG.
 - In-memory LAN node membership is rebuilt by registration after a local signaling-server restart;
   durable controller state does not make a stale node eligible without a fresh heartbeat.

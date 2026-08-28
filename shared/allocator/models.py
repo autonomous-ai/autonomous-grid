@@ -401,6 +401,7 @@ class ModelProfile:
     min_gpu_count: int = 0
     min_gpu_memory_mb: int = 0
     artifact_sha256: str = ""
+    max_colocated_models: int = 0
 
     def __post_init__(self) -> None:
         if not self.model_id or len(self.model_id) > MAX_ID_LENGTH:
@@ -459,6 +460,14 @@ class ModelProfile:
             or not 0 <= self.min_gpu_memory_mb <= MAX_MEMORY_MB
         ):
             raise ValueError(f"min_gpu_memory_mb must be in [0, {MAX_MEMORY_MB}]")
+        if (
+            isinstance(self.max_colocated_models, bool)
+            or not isinstance(self.max_colocated_models, int)
+            or not 0 <= self.max_colocated_models <= MAX_COUNTER
+        ):
+            raise ValueError(
+                f"max_colocated_models must be in [0, {MAX_COUNTER}]"
+            )
         for name in (
             "expected_service_seconds",
             "latency_slo_ms",

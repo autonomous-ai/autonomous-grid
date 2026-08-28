@@ -180,6 +180,7 @@ class PlacementPlanner:
             )
             for model in model_list
         }
+        profile_by_id = {item.model_id: item for item in model_list}
 
         # Higher-priority and larger models place first.  Larger-first is the standard bin-packing
         # guard against a collection of small replicas fragmenting every host before a large model.
@@ -201,6 +202,8 @@ class PlacementPlanner:
                     capacity,
                     occupied_models,
                     desired_model_slots,
+                    assignments,
+                    profile_by_id,
                 )
                 for node in node_list
             )
@@ -241,6 +244,8 @@ class PlacementPlanner:
                         capacity,
                         occupied_models,
                         desired_model_slots,
+                        assignments,
+                        profile_by_id,
                     )
                 ):
                     unsatisfied.append(
@@ -283,7 +288,6 @@ class PlacementPlanner:
                 item.model_id,
             ),
         )
-        profile_by_id = {item.model_id: item for item in model_list}
         node_by_id = {item.node_id: item for item in node_list}
         # Moving an assignment can change net resource use when runtimes have different model
         # footprints or a destination already has resident weights. Only the simple homogeneous
@@ -443,6 +447,8 @@ class PlacementPlanner:
                     capacity,
                     occupied_models,
                     desired_model_slots,
+                    assignments,
+                    profile_by_id,
                 ):
                     continue
                 candidate_domain = (
@@ -582,6 +588,8 @@ class PlacementPlanner:
                             capacity,
                             occupied_models,
                             desired_model_slots,
+                            assignments,
+                            profile_by_id,
                         ):
                             restore_placement_state(state)
                             continue
@@ -669,6 +677,8 @@ class PlacementPlanner:
                     capacity,
                     occupied_models,
                     desired_model_slots,
+                    assignments,
+                    profile_by_id,
                 ):
                     continue
                 score, reasons = _candidate_score(
@@ -791,12 +801,36 @@ class PlacementPlanner:
                     )
                     is None
                 ]
-                code = "insufficient_capacity" if eligible else "no_eligible_nodes"
+                colocation_eligible = [
+                    node
+                    for node in eligible
+                    if _colocation_allowed(
+                        node,
+                        model,
+                        assignments,
+                        profile_by_id,
+                    )
+                ]
+                code = (
+                    "no_eligible_nodes"
+                    if not eligible
+                    else "colocation_limit"
+                    if not colocation_eligible
+                    else "insufficient_capacity"
+                )
+                message = (
+                    f"Placed {placed} of {target} desired replicas"
+                    if code != "colocation_limit"
+                    else (
+                        f"Placed {placed} of {target} desired replicas; all eligible hosts "
+                        "would violate a model co-location limit"
+                    )
+                )
                 unsatisfied.append(
                     UnsatisfiedConstraint(
                         model_id=model.model_id,
                         code=code,
-                        message=f"Placed {placed} of {target} desired replicas",
+                        message=message,
                         missing_replicas=regular_missing,
                     )
                 )
@@ -1218,10 +1252,14 @@ def _fits(
     capacity: dict[str, int],
     occupied_models: dict[str, int],
     desired_model_slots: dict[str, int],
+    assignments: list[PlacementAssignment],
+    profile_by_id: Mapping[str, ModelProfile],
 ) -> bool:
     residency = node.residency(model.model_id)
     incremental_mb = _incremental_memory_mb(residency, model.memory_for(node.runtimes))
     if capacity[node.node_id] < incremental_mb:
+        return False
+    if not _colocation_allowed(node, model, assignments, profile_by_id):
         return False
     adds_slot = _adds_model_slot(residency)
     if node.max_models is None:
@@ -1229,6 +1267,39 @@ def _fits(
     if desired_model_slots[node.node_id] >= node.max_models:
         return False
     return not adds_slot or occupied_models[node.node_id] < node.max_models
+
+
+def _colocation_allowed(
+    node: NodeSnapshot,
+    model: ModelProfile,
+    assignments: Iterable[PlacementAssignment],
+    profile_by_id: Mapping[str, ModelProfile],
+) -> bool:
+    other_models = {
+        residency.model_id
+        for residency in node.residencies
+        if residency.model_id != model.model_id and not _adds_model_slot(residency)
+    }
+    other_models.update(
+        assignment.model_id
+        for assignment in assignments
+        if assignment.node_id == node.node_id and assignment.model_id != model.model_id
+    )
+    colocated_count = len(other_models) + 1
+    if (
+        model.max_colocated_models
+        and colocated_count > model.max_colocated_models
+    ):
+        return False
+    for other_model in other_models:
+        peer = profile_by_id.get(other_model)
+        if (
+            peer is not None
+            and peer.max_colocated_models
+            and colocated_count > peer.max_colocated_models
+        ):
+            return False
+    return True
 
 
 def _candidate_score(

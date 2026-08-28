@@ -111,11 +111,13 @@ def _profile(
     *,
     memory_mb: int = 256,
     artifact_sha256: str = "",
+    max_colocated_models: int = 0,
 ) -> dict[str, Any]:
     return {
         # Includes ample runtime/KV overhead above this model's ~94 MB weights.
         "memory_mb": memory_mb,
         "artifact_sha256": artifact_sha256,
+        "max_colocated_models": max_colocated_models,
         "runtimes": ["llama.cpp"],
         # Empty means CPU and Metal logical hosts can share this physical-Mac trial profile.
         "backends": [],
@@ -364,6 +366,7 @@ def run(
                     cooldown_seconds=max(60.0, timeout),
                     memory_mb=claimed_memory_mb,
                     artifact_sha256=artifact_sha256,
+                    max_colocated_models=1 if scenario == "contention" else 0,
                 ),
             )
             profile_response.raise_for_status()
@@ -377,6 +380,7 @@ def run(
                         cooldown_seconds=max(60.0, timeout),
                         memory_mb=claimed_memory_mb,
                         artifact_sha256=second_artifact_sha256,
+                        max_colocated_models=1,
                     ),
                 )
                 second_profile.raise_for_status()
@@ -776,6 +780,7 @@ def run(
                         cooldown_seconds=1.0,
                         memory_mb=claimed_memory_mb,
                         artifact_sha256=artifact_sha256,
+                        max_colocated_models=1 if scenario == "contention" else 0,
                     ),
                 )
                 scale_down_profile.raise_for_status()

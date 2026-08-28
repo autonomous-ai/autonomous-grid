@@ -184,6 +184,8 @@ def test_model_set_sends_validated_profile_and_secret_header(monkeypatch, capsys
             "finance",
             "--artifact-sha256",
             "A" * 64,
+            "--max-colocated-models",
+            "1",
         ]
     )
     assert args.handler(args) == 0
@@ -194,6 +196,7 @@ def test_model_set_sends_validated_profile_and_secret_header(monkeypatch, capsys
     assert captured["json"]["replica_concurrency"] == 8
     assert captured["json"]["required_tags"] == ("finance",)
     assert captured["json"]["artifact_sha256"] == "a" * 64
+    assert captured["json"]["max_colocated_models"] == 1
     assert "secret-token" not in capsys.readouterr().out
 
 
