@@ -641,7 +641,14 @@ class PlacementPreemption:
     for_model_id: str = ""
 
     def __post_init__(self) -> None:
-        if not self.node_id or not self.model_id:
+        if (
+            not self.node_id
+            or not self.model_id
+            or any(
+                len(value) > MAX_ID_LENGTH
+                for value in (self.node_id, self.model_id, self.for_model_id)
+            )
+        ):
             raise ValueError("preemption node and victim model are required")
         if self.for_model_id and self.model_id == self.for_model_id:
             raise ValueError("a model cannot preempt itself")
@@ -670,6 +677,9 @@ class PlacementPlan:
         preemption_pairs = [(item.node_id, item.model_id) for item in self.preemptions]
         if len(preemption_pairs) != len(set(preemption_pairs)):
             raise ValueError("a residency cannot be preempted more than once")
+        desired_pairs = {(node_id, model_id) for model_id, node_id in pairs}
+        if desired_pairs.intersection(preemption_pairs):
+            raise ValueError("a residency cannot be both desired and preempted")
 
     @property
     def desired_pairs(self) -> frozenset[tuple[str, str]]:

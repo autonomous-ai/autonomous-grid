@@ -886,6 +886,95 @@ class PlacementPlanner:
                 preemptions.append(preemption)
                 preempted_pairs.add((node.node_id, victim.model_id))
 
+        # A newly tightened reciprocal co-location policy has the same staged-convergence need as
+        # a lowered host model ceiling. Keep the assignment winners, then evict only managed,
+        # unpinned incumbents until every selected model's isolation contract is actually true.
+        for node in node_list:
+            selected = [item for item in assignments if item.node_id == node.node_id]
+            protected_profiles = tuple(
+                profile_by_id[item.model_id]
+                for item in selected
+                if item.model_id in profile_by_id
+            )
+            if not protected_profiles:
+                # A pre-existing reciprocal violation can prevent *every* model from being
+                # selected. Elect the same highest-priority/model-ID winner as ordinary placement
+                # would use once the peers are gone, then stage only its removable blockers.
+                configured_live = {
+                    item.model_id
+                    for item in node.residencies
+                    if not _adds_model_slot(item)
+                    and desired_by_model.get(item.model_id, 0) > 0
+                    and item.model_id in profile_by_id
+                }
+                protected_profiles = tuple(
+                    sorted(
+                        (profile_by_id[model_id] for model_id in configured_live),
+                        key=lambda item: (
+                            -item.priority,
+                            item.max_colocated_models or MAX_COUNTER,
+                            -item.maximum_memory_mb,
+                            item.model_id,
+                        ),
+                    )[:1]
+                )
+            if not protected_profiles:
+                continue
+            projected_residencies = [
+                item
+                for item in node.residencies
+                if (node.node_id, item.model_id) not in preempted_pairs
+            ]
+
+            def violates_selected_colocation() -> bool:
+                projected = replace(node, residencies=tuple(projected_residencies))
+                return any(
+                    not _colocation_allowed(
+                        projected,
+                        profile,
+                        assignments,
+                        profile_by_id,
+                    )
+                    for profile in protected_profiles
+                )
+
+            while violates_selected_colocation():
+                selected_models = {item.model_id for item in protected_profiles}
+                removable = sorted(
+                    (
+                        item
+                        for item in projected_residencies
+                        if item.model_id not in selected_models
+                        and item.state
+                        in (
+                            ResidencyState.READY,
+                            ResidencyState.DRAINING,
+                            ResidencyState.FAILED,
+                        )
+                        and item.managed
+                        and not item.pinned
+                        and not node.manually_managed
+                        and (profile := profile_by_id.get(item.model_id)) is not None
+                        and node.node_id not in profile.pinned_nodes
+                    ),
+                    key=lambda item: (
+                        profile_by_id[item.model_id].priority,
+                        item.model_id,
+                    ),
+                )
+                if not removable:
+                    break
+                victim = removable[0]
+                beneficiary = protected_profiles[0]
+                preemption = PlacementPreemption(
+                    node_id=node.node_id,
+                    model_id=victim.model_id,
+                    for_model_id=beneficiary.model_id,
+                )
+                preemptions.append(preemption)
+                preempted_pairs.add((node.node_id, victim.model_id))
+                projected_residencies.remove(victim)
+
         for model in order:
             target = desired_by_model[model.model_id]
             regular_slots = max(0, target - len(model.pinned_nodes))

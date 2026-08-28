@@ -15,6 +15,7 @@ from shared.allocator.models import (
     ModelResidency,
     NodeSnapshot,
     NodeState,
+    PlacementPreemption,
     ResidencyState,
 )
 from shared.allocator.planner import (
@@ -120,6 +121,16 @@ def test_artifact_sha256_rejects_invalid_values(digest):
         model(artifact_sha256=digest)
 
 
+def test_plan_rejects_a_residency_that_is_both_desired_and_preempted():
+    plan = PlacementPlanner().plan((node("n"),), (model(),), now=10)
+
+    with pytest.raises(ValueError, match="both desired and preempted"):
+        replace(
+            plan,
+            preemptions=(PlacementPreemption("n", "qwen", "critical"),),
+        )
+
+
 @pytest.mark.parametrize("value", [-1, True, 1.5])
 def test_max_colocated_models_rejects_invalid_values(value):
     with pytest.raises(ValueError, match="max_colocated_models"):
@@ -198,6 +209,65 @@ def test_colocation_policy_never_actuates_external_vllm_inventory():
     assert plan.nodes_for("qwen") == ()
     assert result.actions == ()
     assert all(item.code == "not_allocator_owned" for item in result.deferred)
+
+
+@pytest.mark.parametrize(
+    ("exclusive_priority", "batch_priority", "victim", "beneficiary"),
+    [
+        (100, 100, "batch", "latency"),
+        (100, 200, "latency", "batch"),
+    ],
+)
+def test_managed_colocation_violation_stages_deterministic_convergence(
+    exclusive_priority,
+    batch_priority,
+    victim,
+    beneficiary,
+):
+    exclusive = model(
+        "latency",
+        priority=exclusive_priority,
+        max_colocated_models=1,
+        min_residency_seconds=0,
+    )
+    batch = model(
+        "batch",
+        priority=batch_priority,
+        min_residency_seconds=0,
+    )
+    machine = node(
+        "managed",
+        residencies=(ready("latency"), ready("batch")),
+    )
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+
+    staged = planner.plan((machine,), (exclusive, batch), now=10)
+
+    assert staged.assignments == ()
+    assert [
+        (item.node_id, item.model_id, item.for_model_id)
+        for item in staged.preemptions
+    ] == [("managed", victim, beneficiary)]
+    result = Reconciler().reconcile(
+        staged,
+        (machine,),
+        (exclusive, batch),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+    assert [
+        (item.kind, item.model_id) for item in result.executable_actions
+    ] == [(ActionKind.DRAIN, victim)]
+
+    converged_node = replace(
+        machine,
+        residencies=tuple(
+            item for item in machine.residencies if item.model_id != victim
+        ),
+    )
+    converged = planner.plan((converged_node,), (exclusive, batch), now=11)
+    assert converged.nodes_for(beneficiary) == ("managed",)
+    assert converged.preemptions == ()
 
 
 @pytest.mark.parametrize(

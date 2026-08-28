@@ -485,9 +485,12 @@ to lowercase and becomes part of command, retry, and readiness identity.
 `--max-colocated-models` is also optional (`0` means unlimited). The value counts the candidate
 itself, so `1` requests exclusive serving for an interference-sensitive model. The constraint is
 reciprocal: Grid will neither place that model beside another live/planned model nor later place a
-different configured model beside it. Cached-only weights do not consume a serving slot. Existing
-manually managed vLLM inventory that violates a profile remains visible but is reported unsatisfied;
-the constraint never grants Grid authority to resize or stop the external engine.
+different configured model beside it. Cached-only weights do not consume a serving slot. When a
+managed host already violates a tightened ceiling, Grid deterministically elects the higher-priority
+(then more constrained) survivor and stages safe drain/unload of removable peers before it admits
+new work. Existing manually managed vLLM inventory that violates a profile remains visible but is
+reported unsatisfied; the constraint never grants Grid authority to resize or stop the external
+engine.
 `--replica-concurrency` declares a conservative service-slot estimate for a newly managed replica.
 Once a single-model engine is ready, its live `max_concurrency` may prove a higher batch width; a
 multi-model engine's shared node-wide limit is never credited independently to every model. Queue,
