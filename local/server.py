@@ -1264,8 +1264,10 @@ def _active_engines(app: FastAPI, model: str | None = None) -> list[Node]:
     engines.sort(
         key=lambda item: (
             _route_priority(item),
+            _route_load_score(item),
             _load_score(item.load),
             item.last_heartbeat,
+            item.node_id,
         )
     )
     return engines
@@ -1360,6 +1362,24 @@ def _route_priority(node: Node) -> float:
     if not math.isfinite(multiplier):
         multiplier = 0.0
     return 1.0 - min(1.0, max(0.0, multiplier))
+
+
+def _route_load_score(node: Node) -> float:
+    """Compare heterogeneous engines by occupied fraction, not raw request count.
+
+    Every candidate has already passed model-locality filtering, so routing locality is binary and
+    equal. The remaining load term is current occupancy divided by the effective admission width.
+    Engines without a declared width retain the legacy raw-load score rather than inventing
+    capacity, while a zero-width engine sorts last (and is independently rejected for admission).
+    """
+
+    active = _load_score(node.load)
+    limit = _node_concurrency_limit(node)
+    if limit is None:
+        return active
+    if limit <= 0:
+        return math.inf
+    return active / limit
 
 
 def _node_concurrency_limit(node: Node) -> int | None:

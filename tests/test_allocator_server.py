@@ -1434,6 +1434,66 @@ def test_throttled_engines_are_lower_priority_and_honor_admission_limit(tmp_path
     assert server_module._choose_engine(app, "qwen") is None
 
 
+def test_router_normalizes_load_by_heterogeneous_engine_capacity(tmp_path):
+    app, client, _ = _app(tmp_path)
+    _managed_engine(client, host_id="narrow", model_id="qwen", active_tasks=1)
+    _managed_engine(client, host_id="wide", model_id="qwen", active_tasks=2)
+    narrow = app.state.nodes[engine_node_id("narrow", "qwen")]
+    wide = app.state.nodes[engine_node_id("wide", "qwen")]
+    narrow.allocator["max_concurrency"] = 2
+    wide.allocator["max_concurrency"] = 16
+
+    assert server_module._route_load_score(narrow) == 0.5
+    assert server_module._route_load_score(wide) == 0.125
+    assert server_module._choose_engine(app, "qwen") is wide
+
+    # Once the wide engine is proportionally busier, the narrow engine becomes the better target.
+    wide.load["active_tasks"] = 9
+    assert server_module._choose_engine(app, "qwen") is narrow
+
+
+def test_router_keeps_unknown_capacity_conservative_and_zero_capacity_closed(tmp_path):
+    app, client, _ = _app(tmp_path)
+    _managed_engine(client, host_id="unknown", model_id="qwen", active_tasks=1)
+    _managed_engine(client, host_id="known", model_id="qwen", active_tasks=8)
+    unknown = app.state.nodes[engine_node_id("unknown", "qwen")]
+    known = app.state.nodes[engine_node_id("known", "qwen")]
+    unknown.allocator.pop("max_concurrency", None)
+    unknown.load.pop("max_concurrency", None)
+    known.allocator["max_concurrency"] = 16
+
+    assert server_module._route_load_score(unknown) == 1
+    assert server_module._route_load_score(known) == 0.5
+    assert server_module._choose_engine(app, "qwen") is known
+
+    known.allocator["max_concurrency"] = 0
+    assert server_module._route_load_score(known) == float("inf")
+    assert server_module._choose_engine(app, "qwen") is unknown
+
+
+def test_router_distributes_demand_in_proportion_to_engine_capacity(tmp_path):
+    app, client, _ = _app(tmp_path)
+    engines = {}
+    for host_id, limit in (("narrow", 2), ("medium", 4), ("wide", 16)):
+        _managed_engine(client, host_id=host_id, model_id="qwen")
+        engine = app.state.nodes[engine_node_id(host_id, "qwen")]
+        engine.allocator["max_concurrency"] = limit
+        engines[host_id] = engine
+
+    for _ in range(11):
+        selected = server_module._choose_engine(app, "qwen")
+        assert selected is not None
+        server_module._change_active_tasks(selected, 1)
+
+    assert {
+        host_id: engine.load["active_tasks"] for host_id, engine in engines.items()
+    } == {"narrow": 1, "medium": 2, "wide": 8}
+    assert all(
+        engine.load["active_tasks"] <= engine.allocator["max_concurrency"]
+        for engine in engines.values()
+    )
+
+
 def test_proxy_owned_last_used_timestamp_survives_allocator_snapshot(tmp_path):
     app, client, _ = _app(tmp_path)
     _managed_engine(client, host_id="host-used", model_id="qwen")

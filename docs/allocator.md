@@ -76,6 +76,14 @@ for new placement. When greedy placement fragments capacity, a deterministic bou
 repair can evacuate and re-place several equal-priority replicas; unrelated or ineligible inventory
 does not change that search budget or its result.
 
+Request routing uses the same heterogeneous capacity evidence after placement. Among engines in the
+same host-protection class that already serve the requested model, Grid compares active requests as
+a fraction of each engine's effective concurrency limit rather than comparing raw request counts.
+This keeps a wide-batching vLLM server from appearing busier than a narrow llama.cpp engine merely
+because it safely carries more simultaneous work. Missing capacity remains conservative raw load;
+zero capacity remains closed. Throttled-host priority and hard admission limits still take
+precedence over this load balance.
+
 The proxy attributes each successful response to both the engine and requested model, keeping
 bounded EWMAs of end-to-end latency and completion-token throughput. Those server-owned measurements
 override self-reported estimates in placement snapshots, so actual service performance eventually
