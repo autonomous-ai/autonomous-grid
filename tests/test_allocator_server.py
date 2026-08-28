@@ -1448,7 +1448,7 @@ def test_router_normalizes_load_by_heterogeneous_engine_capacity(tmp_path):
     assert server_module._choose_engine(app, "qwen") is wide
 
     # Once the wide engine is proportionally busier, the narrow engine becomes the better target.
-    wide.load["active_tasks"] = 9
+    wide.load["active_tasks"] = 15
     assert server_module._choose_engine(app, "qwen") is narrow
 
 
@@ -1519,6 +1519,76 @@ def test_router_prefers_fresh_equal_load_without_rewarding_future_clock_skew(
     assert server_module._route_lease_age(fresh, now=1_000) == 0
     assert server_module._choose_engine(app, "qwen") is fresh
 
+
+def test_router_uses_mature_fresh_model_latency_for_expected_completion(
+    tmp_path,
+    monkeypatch,
+):
+    app, client, _ = _app(tmp_path)
+    _managed_engine(client, host_id="slow", model_id="qwen", active_tasks=1)
+    _managed_engine(client, host_id="fast", model_id="qwen", active_tasks=3)
+    slow = app.state.nodes[engine_node_id("slow", "qwen")]
+    fast = app.state.nodes[engine_node_id("fast", "qwen")]
+    slow.allocator["max_concurrency"] = 8
+    fast.allocator["max_concurrency"] = 8
+    slow.proxy_model_performance["qwen"] = server_module._ProxyModelPerformance(
+        latency_ms=1_000,
+        samples=8,
+        updated_at=1_000,
+    )
+    fast.proxy_model_performance["qwen"] = server_module._ProxyModelPerformance(
+        latency_ms=100,
+        samples=8,
+        updated_at=1_000,
+    )
+    slow.last_heartbeat = 1_000
+    fast.last_heartbeat = 1_000
+    monkeypatch.setattr(server_module.time, "time", lambda: 1_000)
+
+    assert server_module._choose_engine(app, "qwen") is fast
+
+    # Measurements for another model cannot lend this route a false speed advantage.
+    fast.proxy_model_performance = {
+        "other": server_module._ProxyModelPerformance(
+            latency_ms=1,
+            samples=8,
+            updated_at=1_000,
+        )
+    }
+    assert server_module._choose_engine(app, "qwen") is slow
+
+
+def test_router_expires_stale_latency_and_blends_low_sample_outliers(
+    tmp_path,
+):
+    app, client, _ = _app(tmp_path)
+    _managed_engine(client, host_id="candidate", model_id="qwen")
+    candidate = app.state.nodes[engine_node_id("candidate", "qwen")]
+    candidate.allocator["max_concurrency"] = 4
+    candidate.proxy_model_performance["qwen"] = server_module._ProxyModelPerformance(
+        latency_ms=10,
+        samples=1,
+        updated_at=1_000,
+    )
+
+    baseline = 100.0
+    score = server_module._route_expected_completion_score(
+        candidate,
+        model="qwen",
+        now=1_000,
+        latency_baseline_ms=baseline,
+    )
+    # One sample contributes only 1/8 confidence: estimated latency is 88.75 ms, then one request
+    # occupies one quarter of the declared width.
+    assert score == pytest.approx(88.75 / 4)
+
+    stale = server_module._route_expected_completion_score(
+        candidate,
+        model="qwen",
+        now=1_000 + server_module._ROUTE_PERFORMANCE_TTL_SECONDS,
+        latency_baseline_ms=baseline,
+    )
+    assert stale == pytest.approx(100 / 4)
 
 def test_proxy_owned_last_used_timestamp_survives_allocator_snapshot(tmp_path):
     app, client, _ = _app(tmp_path)

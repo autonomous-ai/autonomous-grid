@@ -84,6 +84,10 @@ because it safely carries more simultaneous work. Missing capacity remains conse
 zero capacity remains closed. Throttled-host priority and hard admission limits still take
 precedence over this load balance. Equivalent engines prefer the freshest lease, but a timestamp
 inside the allowed future-skew window is clamped to zero age and cannot gain extra priority.
+When private proxy measurements exist for the requested model, routing minimizes estimated
+completion time: the incoming request's service wave is multiplied by a confidence- and
+freshness-weighted latency EWMA. Weak or missing measurements blend toward the current cohort
+median, measurements for other models are ignored, and expired evidence falls back completely.
 
 The proxy attributes each successful response to both the engine and requested model, keeping
 bounded EWMAs of end-to-end latency and completion-token throughput. Those server-owned measurements

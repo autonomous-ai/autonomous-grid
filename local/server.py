@@ -6,6 +6,7 @@ import json
 import math
 import secrets
 import ssl
+import statistics
 import time
 import uuid
 from collections.abc import Mapping
@@ -1325,6 +1326,22 @@ def _choose_engine(app: FastAPI, model: str, *, media: bool = False) -> Node | N
     ]
     if media:
         engines = [engine for engine in engines if engine.media_url]
+    now = time.time()
+    latency_baseline = _route_latency_baseline(engines, model=model, now=now)
+    engines.sort(
+        key=lambda engine: (
+            _route_priority(engine),
+            _route_expected_completion_score(
+                engine,
+                model=model,
+                now=now,
+                latency_baseline_ms=latency_baseline,
+            ),
+            _route_load_score(engine),
+            _route_lease_age(engine, now=now),
+            engine.node_id,
+        )
+    )
     return engines[0] if engines else None
 
 
@@ -1386,6 +1403,64 @@ def _route_lease_age(node: Node, *, now: float) -> float:
     """Prefer fresh equivalent engines without rewarding a future-skewed heartbeat."""
 
     return max(0.0, now - node.last_heartbeat)
+
+
+_ROUTE_PERFORMANCE_TTL_SECONDS = 900.0
+_ROUTE_PERFORMANCE_FULL_SAMPLES = 8
+
+
+def _route_latency_baseline(
+    engines: list[Node],
+    *,
+    model: str,
+    now: float,
+) -> float:
+    measurements = [
+        performance.latency_ms
+        for engine in engines
+        if (performance := _fresh_route_performance(engine, model=model, now=now))
+        is not None
+        and performance.latency_ms > 0
+    ]
+    return statistics.median(measurements) if measurements else 1.0
+
+
+def _fresh_route_performance(
+    node: Node,
+    *,
+    model: str,
+    now: float,
+) -> _ProxyModelPerformance | None:
+    performance = node.proxy_model_performance.get(model)
+    if performance is None or performance.samples <= 0 or performance.latency_ms <= 0:
+        return None
+    age = now - performance.updated_at
+    if not -MAX_FUTURE_LEASE_SKEW_SECONDS <= age < _ROUTE_PERFORMANCE_TTL_SECONDS:
+        return None
+    return performance
+
+
+def _route_expected_completion_score(
+    node: Node,
+    *,
+    model: str,
+    now: float,
+    latency_baseline_ms: float,
+) -> float:
+    performance = _fresh_route_performance(node, model=model, now=now)
+    estimated_latency = latency_baseline_ms
+    if performance is not None:
+        age = max(0.0, now - performance.updated_at)
+        confidence = min(1.0, performance.samples / _ROUTE_PERFORMANCE_FULL_SAMPLES)
+        freshness = max(0.0, 1.0 - age / _ROUTE_PERFORMANCE_TTL_SECONDS)
+        weight = confidence * freshness
+        estimated_latency = (
+            weight * performance.latency_ms + (1.0 - weight) * latency_baseline_ms
+        )
+    active = _load_score(node.load)
+    limit = _node_concurrency_limit(node)
+    service_waves = active + 1.0 if limit is None else (active + 1.0) / max(1, limit)
+    return estimated_latency * service_waves
 
 
 def _node_concurrency_limit(node: Node) -> int | None:
