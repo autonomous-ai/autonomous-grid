@@ -505,11 +505,14 @@ port ranges, capacity shares, and real llama.cpp children:
 uv run python tests/e2e_allocator_logical.py --nodes 2
 uv run python tests/e2e_allocator_logical.py --nodes 4
 uv run python tests/e2e_allocator_logical.py --nodes 4 --scenario activity
+uv run python tests/e2e_allocator_logical.py --nodes 2 --scenario restart
 ```
 
 The lifecycle runs cover demand-driven warm, real OpenAI-compatible inference, route fencing,
 drain, unload, and abrupt child recovery. The activity scenario runs three replicas with a fourth
 logical spare, marks a loaded partition user-active, and requires make-before-break evacuation.
+The restart scenario rebuilds each logical node agent from durable state and requires it to adopt
+the exact live llama.cpp PID before proving that the adopted process can still drain and unload.
 `--scenario contention --second-model <cached-alias.gguf>` exercises two model identities under a
 one-model-per-logical-host claimed capacity budget. Logical performance and memory telemetry are
 partitioned so the harness never reports N times the physical Mac's capacity.

@@ -50,7 +50,7 @@ from shared.allocator.models import (
 )
 from shared.allocator.reconcile import MutationStatus
 from shared.models import store as model_store
-from shared.run_records import pid_alive
+from shared.run_records import pid_alive, stopped_running
 from shared.system.hostsignals import HostSignalCollector
 
 RUNTIME_SCHEMA_VERSION = 1
@@ -2612,9 +2612,11 @@ def _terminate_owned_pid(
     *,
     identity_check: Callable[[], bool] | None = None,
 ) -> None:
-    if not _pid_alive(pid):
+    if stopped_running(pid):
         return
     if identity_check is not None and not identity_check():
+        if stopped_running(pid):
+            return
         raise RuntimeError("refusing to stop a process whose ownership changed")
     if sys.platform == "win32":
         result = subprocess.run(
@@ -2632,13 +2634,27 @@ def _terminate_owned_pid(
     graceful_deadline = deadline - confirmation_budget
     while _pid_alive(pid) and time.monotonic() < graceful_deadline:
         if identity_check is not None and not identity_check():
+            if stopped_running(pid):
+                return
             raise RuntimeError("process ownership changed during allocator shutdown")
         time.sleep(0.05)
     if _pid_alive(pid):
+        if stopped_running(pid):
+            return
         if identity_check is not None and not identity_check():
+            if stopped_running(pid):
+                return
             raise RuntimeError("process ownership changed before allocator escalation")
         os.kill(pid, signal.SIGKILL)
+        next_zombie_probe = time.monotonic()
         while _pid_alive(pid) and time.monotonic() < deadline:
+            now = time.monotonic()
+            if now >= next_zombie_probe:
+                if stopped_running(pid):
+                    return
+                next_zombie_probe = now + 0.25
             time.sleep(0.01)
         if _pid_alive(pid):
+            if stopped_running(pid):
+                return
             raise RuntimeError(f"allocator-owned process {pid} survived SIGKILL")

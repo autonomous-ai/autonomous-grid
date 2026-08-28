@@ -343,6 +343,87 @@ def run(
                     label=f"{desired_replicas} ready replicas",
                 )
 
+                restart_adoption: dict[str, Any] | None = None
+                if scenario == "restart":
+                    original_pids = {
+                        host.runtime.host_id: next(
+                            item.handle.pid
+                            for item in host.runtime.residencies
+                            if item.model_id == model and item.handle is not None
+                        )
+                        for host in hosts
+                    }
+                    restarted_hosts: list[LogicalHost] = []
+                    for index, old_host in enumerate(hosts):
+                        backend = LlamaCppBackend(
+                            readiness_timeout=min(120.0, timeout),
+                            bind_host="127.0.0.1",
+                            endpoint_host="127.0.0.1",
+                        )
+                        runtime = ManagedModelRuntime(
+                            old_host.runtime.state_path,
+                            host_id=old_host.runtime.host_id,
+                            backend=backend,
+                            signal_collector=old_host.signals,
+                            protection_loop=LocalHostProtectionLoop(
+                                HostPolicy(
+                                    pause_for_user_activity=True,
+                                    activity_debounce_seconds=0,
+                                    drain_grace_seconds=0,
+                                    recovery_cooldown_seconds=0,
+                                    activity_recovery_seconds=0,
+                                    thermal_recovery_seconds=0,
+                                )
+                            ),
+                            port_start=old_host.runtime.port_start,
+                            port_end=old_host.runtime.port_end,
+                        )
+                        agent = AllocatorNodeAgent(
+                            grid_url="http://testserver",
+                            control_token=mint_node_token(
+                                CONTROL_TOKEN,
+                                runtime.host_id,
+                            ),
+                            runtime=runtime,
+                            advertise_host="127.0.0.1",
+                            client=client,
+                            resource_collector=_logical_resources(
+                                physical,
+                                node_index=index,
+                                node_count=nodes,
+                            ),
+                            heartbeat_interval=0.25,
+                            allow_insecure_http=True,
+                        )
+                        restarted_hosts.append(
+                            LogicalHost(agent, runtime, old_host.signals)
+                        )
+                    hosts[:] = restarted_hosts
+                    adoption_cycles = _drive_until(
+                        client,
+                        hosts,
+                        lambda: len(_ready_hosts(hosts, model)) == desired_replicas,
+                        timeout=timeout,
+                        label="restarted node agents adopt live owned processes",
+                    )
+                    adopted_pids = {
+                        host.runtime.host_id: next(
+                            item.handle.pid
+                            for item in host.runtime.residencies
+                            if item.model_id == model and item.handle is not None
+                        )
+                        for host in hosts
+                    }
+                    if adopted_pids != original_pids:
+                        raise RuntimeError(
+                            "node restart respawned instead of adopting live children: "
+                            f"before={original_pids}, after={adopted_pids}"
+                        )
+                    restart_adoption = {
+                        "cycles": adoption_cycles,
+                        "pids": adopted_pids,
+                    }
+
                 if scenario == "contention":
                     assert second_model is not None
                     for _ in range(60):
@@ -587,6 +668,7 @@ def run(
                     "warm_cycles": warm_cycles,
                     "failure_recovery": failure,
                     "activity_evacuation": activity_evacuation,
+                    "restart_adoption": restart_adoption,
                     "unload_cycles": unload_cycles,
                     "actions": actions,
                     "completion_id": completion.get("id"),
@@ -615,7 +697,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument(
         "--scenario",
-        choices=("lifecycle", "activity", "contention"),
+        choices=("lifecycle", "activity", "contention", "restart"),
         default="lifecycle",
     )
     parser.add_argument("--second-model")

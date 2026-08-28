@@ -174,6 +174,38 @@ def test_mutation_action_wire_round_trip_and_schema_validation():
         raise AssertionError("unknown schema was accepted")
 
 
+def test_adopted_process_exit_as_zombie_completes_without_identity_false_alarm(
+    monkeypatch,
+):
+    stopped = iter((False, True))
+    identities = iter((True, False))
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(runtime_module, "stopped_running", lambda _pid: next(stopped))
+    monkeypatch.setattr(runtime_module, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        runtime_module.os,
+        "kill",
+        lambda pid, sent_signal: signals.append((pid, sent_signal)),
+    )
+
+    runtime_module._terminate_owned_pid(
+        12_345,
+        identity_check=lambda: next(identities),
+    )
+
+    assert signals == [(12_345, runtime_module.signal.SIGTERM)]
+
+
+def test_adopted_live_process_with_changed_identity_still_fails_closed(monkeypatch):
+    monkeypatch.setattr(runtime_module, "stopped_running", lambda _pid: False)
+
+    with pytest.raises(RuntimeError, match="ownership changed"):
+        runtime_module._terminate_owned_pid(
+            12_345,
+            identity_check=lambda: False,
+        )
+
+
 def test_runtime_persists_stable_host_identity(tmp_path):
     backend = FakeBackend()
     first = ManagedModelRuntime(tmp_path / "state.json", backend=backend)
