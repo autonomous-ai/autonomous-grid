@@ -1780,6 +1780,97 @@ def test_affinity_key_is_hashed_only_when_bounded_and_printable():
     assert server_module._affinity_digest("bad\u200bkey") is None
 
 
+def test_route_circuit_breaker_is_bounded_per_model_and_recovers(tmp_path, monkeypatch):
+    app, client, _ = _app(tmp_path)
+    monkeypatch.setattr(server_module.time, "time", lambda: 1_000)
+    for host_id in ("one", "two"):
+        _managed_node(client, host_id=host_id)
+        _managed_engine(client, host_id=host_id, model_id="qwen")
+    selected = server_module._choose_engine(app, "qwen")
+    assert selected is not None
+
+    server_module._record_proxy_route_outcome(
+        selected,
+        "qwen",
+        status_code=500,
+        now=10,
+    )
+    assert server_module._choose_engine(app, "qwen") is selected
+    server_module._record_proxy_route_outcome(
+        selected,
+        "qwen",
+        status_code=503,
+        now=10,
+    )
+    assert server_module._proxy_route_is_quarantined(selected, "qwen", now=10.5)
+    assert not server_module._proxy_route_is_quarantined(selected, "other", now=10.5)
+    assert "proxy_route_health" not in selected.public_dict()
+
+    monotonic_now = [10.5]
+    monkeypatch.setattr(server_module.time, "monotonic", lambda: monotonic_now[0])
+    assert server_module._choose_engine(app, "qwen") is not selected
+    monotonic_now[0] = 11.0
+    assert server_module._choose_engine(app, "qwen") is selected
+    server_module._record_proxy_route_outcome(
+        selected,
+        "qwen",
+        status_code=200,
+        now=11,
+    )
+    assert "qwen" not in selected.proxy_route_health
+    server_module._record_proxy_route_outcome(
+        selected,
+        "qwen",
+        status_code=429,
+        now=20,
+    )
+    assert server_module._proxy_route_is_quarantined(selected, "qwen", now=20.5)
+
+
+def test_proxy_routes_away_after_repeated_server_failures(tmp_path, monkeypatch):
+    app, client, _ = _app(tmp_path)
+    for index, host_id in enumerate(("one", "two"), start=1):
+        _managed_node(client, host_id=host_id)
+        _managed_engine(client, host_id=host_id, model_id="qwen")
+        engine = app.state.nodes[engine_node_id(host_id, "qwen")]
+        engine.endpoint_url = f"http://127.0.0.1:900{index}/v1"
+    preferred = server_module._choose_engine(app, "qwen")
+    assert preferred is not None
+    preferred_port = 9001 if preferred.endpoint_url.endswith("9001/v1") else 9002
+    fallback_port = 9002 if preferred_port == 9001 else 9001
+    calls: list[int] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        port = request.url.port
+        assert port is not None
+        calls.append(port)
+        return httpx.Response(
+            500 if port == preferred_port else 200,
+            json={"id": "completion"},
+        )
+
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        server_module.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: real_async_client(
+            *args,
+            **{**kwargs, "transport": httpx.MockTransport(upstream)},
+        ),
+    )
+
+    responses = [
+        client.post(
+            "/v1/chat/completions",
+            json={"model": "qwen", "messages": []},
+        )
+        for _ in range(3)
+    ]
+
+    assert [response.status_code for response in responses] == [500, 500, 200]
+    assert calls == [preferred_port, preferred_port, fallback_port]
+
+
 @pytest.mark.parametrize(
     ("body", "expected"),
     [

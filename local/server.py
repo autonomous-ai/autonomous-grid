@@ -60,6 +60,9 @@ ALLOCATOR_DESTRUCTIVE_LEASE_MARGIN_SECONDS = 30.0
 _ROUTABLE_NODE_STATES = frozenset((NodeState.ACCEPTING, NodeState.THROTTLED))
 _MAX_AFFINITY_KEY_BYTES = 256
 _AFFINITY_ROUTE_SLOWDOWN_FRACTION = 0.20
+_ROUTE_FAILURE_THRESHOLD = 2
+_ROUTE_FAILURE_BACKOFF_BASE_SECONDS = 1.0
+_ROUTE_FAILURE_BACKOFF_MAX_SECONDS = 30.0
 
 
 class NodeCreateRequest(BaseModel):
@@ -125,6 +128,12 @@ class _ProxyModelPerformance:
 
 
 @dataclass
+class _ProxyRouteHealth:
+    consecutive_failures: int = 0
+    quarantine_until: float = 0.0
+
+
+@dataclass
 class Node:
     node_id: str
     role: str
@@ -157,6 +166,9 @@ class Node:
     proxy_model_performance: dict[str, _ProxyModelPerformance] = field(
         default_factory=dict
     )
+    # Per-model circuit state is private and monotonic-clock based. One broken model route on a
+    # multi-model vLLM engine must not hide its healthy peers or leak into discovery metadata.
+    proxy_route_health: dict[str, _ProxyRouteHealth] = field(default_factory=dict)
     # Server-owned request timestamps. Managed heartbeats must not overwrite these with a runtime
     # timestamp that predates work the proxy has already routed.
     model_last_used_at: dict[str, float] = field(default_factory=dict)
@@ -173,6 +185,7 @@ class Node:
         data.pop("proxy_performance_samples", None)
         data.pop("proxy_throughput_samples", None)
         data.pop("proxy_model_performance", None)
+        data.pop("proxy_route_health", None)
         data.pop("engine_api_key", None)
         data.pop("engine_tls_ca_pem", None)
         data["last_heartbeat_at"] = datetime.fromtimestamp(
@@ -424,6 +437,11 @@ def create_app(
         node.model_last_used_at = {
             model: timestamp
             for model, timestamp in node.model_last_used_at.items()
+            if model in node.models
+        }
+        node.proxy_route_health = {
+            model: health
+            for model, health in node.proxy_route_health.items()
             if model in node.models
         }
         node.last_heartbeat = time.time()
@@ -827,6 +845,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         except httpx.RequestError as exc:
             await client.aclose()
             _change_active_tasks(engine, -1)
+            _record_proxy_route_outcome(engine, model, transport_error=True)
             _observe_allocator_request(app, model, started_at, error=True)
             return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
 
@@ -838,17 +857,27 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         usage_collector = _StreamUsageCollector()
 
         async def stream_response():
+            stream_transport_error = False
             try:
                 async for chunk in engine_response.aiter_raw():
                     usage_collector.feed(chunk)
                     if collector is not None:
                         collector.feed(chunk)
                     yield chunk
+            except httpx.HTTPError:
+                stream_transport_error = True
+                raise
             finally:
                 usage_collector.finish()
                 await engine_response.aclose()
                 await client.aclose()
                 _change_active_tasks(engine, -1)
+                _record_proxy_route_outcome(
+                    engine,
+                    model,
+                    status_code=engine_response.status_code,
+                    transport_error=stream_transport_error,
+                )
                 _observe_allocator_request(
                     app,
                     model,
@@ -885,9 +914,15 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
             engine_response = await client.post(url, content=raw_body, headers=headers)
     except httpx.RequestError as exc:
         _change_active_tasks(engine, -1)
+        _record_proxy_route_outcome(engine, model, transport_error=True)
         _observe_allocator_request(app, model, started_at, error=True)
         return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
     _change_active_tasks(engine, -1)
+    _record_proxy_route_outcome(
+        engine,
+        model,
+        status_code=engine_response.status_code,
+    )
     _observe_allocator_request(
         app,
         model,
@@ -1225,16 +1260,27 @@ async def _proxy_media(
     except httpx.RequestError as exc:
         await client.aclose()
         _change_active_tasks(engine, -1)
+        _record_proxy_route_outcome(engine, model, transport_error=True)
         return _openai_error(502, f"Engine media request failed: {exc}", "engine_error")
 
     async def stream_response():
+        stream_transport_error = False
         try:
             async for chunk in engine_response.aiter_raw():
                 yield chunk
+        except httpx.HTTPError:
+            stream_transport_error = True
+            raise
         finally:
             await engine_response.aclose()
             await client.aclose()
             _change_active_tasks(engine, -1)
+            _record_proxy_route_outcome(
+                engine,
+                model,
+                status_code=engine_response.status_code,
+                transport_error=stream_transport_error,
+            )
 
     return StreamingResponse(
         stream_response(),
@@ -1430,6 +1476,7 @@ def _choose_engine(
     # Inventory/discovery remains stable while an engine is busy. Admission capacity is a routing
     # concern only; applying it in _active_engines made /grid/info, discovery, and /v1/models
     # flicker to empty whenever a healthy single-concurrency engine served one request.
+    route_now = time.monotonic()
     engines = [
         engine
         for engine in _active_engines(app, model)
@@ -1437,6 +1484,7 @@ def _choose_engine(
             (limit := _node_concurrency_limit(engine)) is None
             or _load_score(engine.load) < limit
         )
+        and not _proxy_route_is_quarantined(engine, model, now=route_now)
     ]
     if media:
         engines = [engine for engine in engines if engine.media_url]
@@ -1503,6 +1551,48 @@ def _affinity_digest(value: str | None) -> bytes | None:
 def _affinity_rank(digest: bytes, *, model: str, node_id: str) -> int:
     payload = b"\0".join((digest, model.encode("utf-8"), node_id.encode("utf-8")))
     return int.from_bytes(hashlib.sha256(payload).digest(), "big")
+
+
+def _proxy_route_is_quarantined(node: Node, model: str, *, now: float) -> bool:
+    health = node.proxy_route_health.get(model)
+    return health is not None and health.quarantine_until > now
+
+
+def _record_proxy_route_outcome(
+    node: Node,
+    model: str,
+    *,
+    status_code: int | None = None,
+    transport_error: bool = False,
+    now: float | None = None,
+) -> None:
+    """Open a bounded per-model circuit without treating caller errors as route faults."""
+
+    if not transport_error and status_code is not None and 200 <= status_code < 300:
+        node.proxy_route_health.pop(model, None)
+        return
+    retryable = (
+        transport_error
+        or status_code == 429
+        or (status_code is not None and status_code >= 500)
+    )
+    if not retryable:
+        return
+    timestamp = time.monotonic() if now is None else max(0.0, float(now))
+    health = node.proxy_route_health.setdefault(model, _ProxyRouteHealth())
+    health.consecutive_failures = min(
+        MAX_COUNTER,
+        health.consecutive_failures + 1,
+    )
+    threshold = 1 if status_code == 429 else _ROUTE_FAILURE_THRESHOLD
+    if health.consecutive_failures < threshold:
+        return
+    exponent = min(30, health.consecutive_failures - threshold)
+    delay = min(
+        _ROUTE_FAILURE_BACKOFF_MAX_SECONDS,
+        math.ldexp(_ROUTE_FAILURE_BACKOFF_BASE_SECONDS, exponent),
+    )
+    health.quarantine_until = max(health.quarantine_until, timestamp + delay)
 
 
 def _engine_dict(node: Node) -> dict[str, Any]:

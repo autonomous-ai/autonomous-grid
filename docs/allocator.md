@@ -117,6 +117,16 @@ and routes whose estimated completion time is within 20% of the best available r
 removing an otherwise equivalent engine therefore remaps only the sessions assigned to the changed
 engine; load, throttling, or failure can still move a session immediately.
 
+Lease health is not the only routing signal. Grid keeps a private per-engine, per-model circuit
+breaker for outcomes observed by the proxy. A 429 opens a one-second cooldown immediately; two
+consecutive transport or 5xx failures open it, with exponential backoff capped at 30 seconds. An
+expired circuit admits a half-open probe and any 2xx response resets the streak. Caller-caused 4xx
+responses do not poison route health, and a broken model route on a multi-model vLLM server does not
+hide its healthy models. Circuit state never changes discovery inventory, never grants lifecycle
+authority, and is not persisted across a Grid-server restart. Grid also does not automatically
+replay a failed POST: the breaker redirects only subsequent requests, avoiding duplicate inference
+or tool side effects.
+
 The proxy attributes each successful response to both the engine and requested model, keeping
 bounded EWMAs of end-to-end latency and completion-token throughput. Those server-owned measurements
 override self-reported estimates in placement snapshots, so actual service performance eventually

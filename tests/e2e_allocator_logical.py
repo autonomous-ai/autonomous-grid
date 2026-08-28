@@ -24,9 +24,10 @@ from typing import Any, Callable
 
 from fastapi.testclient import TestClient
 
+from local import server as server_module
 from local.allocator_node import AllocatorNodeAgent
 from local.server import create_app
-from shared.allocator.auth import mint_node_token
+from shared.allocator.auth import engine_node_id, mint_node_token
 from shared.allocator.local import HostPolicy, LocalHostProtectionLoop
 from shared.allocator.models import ResidencyState
 from shared.allocator.runtime import LlamaCppBackend, ManagedModelRuntime
@@ -252,6 +253,20 @@ def _require_learned_warm_times(
     ):
         raise RuntimeError(f"real warm actions produced invalid timing signals: {learned}")
     return learned
+
+
+def _affinity_key_for_host(app, *, model: str, host_id: str) -> str:
+    target = engine_node_id(host_id, model)
+    for index in range(10_000):
+        key = f"logical-failover-{index}"
+        selected = server_module._choose_engine(
+            app,
+            model,
+            affinity_digest=server_module._affinity_digest(key),
+        )
+        if selected is not None and selected.node_id == target:
+            return key
+    raise RuntimeError(f"could not map an affinity key to logical host {host_id}")
 
 
 def _stream_real_completion(client: TestClient, model: str) -> dict[str, Any]:
@@ -593,6 +608,7 @@ def run(
                     }
 
                 failure: dict[str, Any] | None = None
+                route_failover: dict[str, Any] | None = None
                 activity_evacuation: dict[str, Any] | None = None
                 if scenario == "activity":
                     initially_ready = _ready_hosts(hosts, model)
@@ -657,7 +673,39 @@ def run(
                         if item.model_id == model and item.handle is not None
                     )
                     old_pid = old_residency.handle.pid
+                    affinity_key = _affinity_key_for_host(
+                        app,
+                        model=model,
+                        host_id=victim.runtime.host_id,
+                    )
                     os.kill(old_pid, signal.SIGKILL)
+                    time.sleep(0.05)
+                    failover_responses = [
+                        client.post(
+                            "/v1/chat/completions",
+                            headers={"X-Grid-Affinity-Key": affinity_key},
+                            json={
+                                "model": model,
+                                "messages": [
+                                    {"role": "user", "content": "Reply with OK."}
+                                ],
+                                "max_tokens": 1,
+                            },
+                        )
+                        for _ in range(3)
+                    ]
+                    failover_statuses = [
+                        response.status_code for response in failover_responses
+                    ]
+                    if failover_statuses != [502, 502, 200]:
+                        raise RuntimeError(
+                            "dead route did not fail over after its bounded threshold: "
+                            f"{failover_statuses}"
+                        )
+                    route_failover = {
+                        "host_id": victim.runtime.host_id,
+                        "statuses": failover_statuses,
+                    }
 
                     def victim_recovered() -> bool:
                         ready = _ready_hosts(hosts, model)
@@ -739,6 +787,7 @@ def run(
                     },
                     "warm_cycles": warm_cycles,
                     "failure_recovery": failure,
+                    "route_failover": route_failover,
                     "activity_evacuation": activity_evacuation,
                     "restart_adoption": restart_adoption,
                     "unload_cycles": unload_cycles,
