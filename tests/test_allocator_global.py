@@ -2221,6 +2221,75 @@ def test_priority_preemption_prefers_the_cheapest_learned_warm_back_cost():
     ] == [("z-cheap", "batch", "critical")]
 
 
+def test_priority_preemption_reserves_required_failure_domains_before_cost():
+    batch = model(
+        "batch",
+        8_000,
+        min_replicas=3,
+        max_replicas=3,
+        priority=10,
+        min_residency_seconds=0,
+    )
+    critical = model(
+        "critical",
+        8_000,
+        min_replicas=2,
+        max_replicas=2,
+        min_failure_domains=2,
+        priority=1_000,
+        min_residency_seconds=0,
+    )
+    nodes = (
+        node(
+            "a-cheapest",
+            8_000,
+            domain="rack-a",
+            residencies=(ready("batch", 8_000),),
+        ),
+        node(
+            "a-second",
+            8_000,
+            domain="rack-a",
+            residencies=(ready("batch", 8_000),),
+        ),
+        node(
+            "b-expensive",
+            8_000,
+            domain="rack-b",
+            residencies=(ready("batch", 8_000),),
+        ),
+    )
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    plan = planner.plan(
+        nodes,
+        (batch, critical),
+        now=10,
+        startup_seconds={
+            ("a-cheapest", "batch"): 1,
+            ("a-second", "batch"): 2,
+            ("b-expensive", "batch"): 100,
+        },
+    )
+
+    assert plan.preempted_pairs == frozenset(
+        {("a-cheapest", "batch"), ("b-expensive", "batch")}
+    )
+    released = tuple(
+        replace(node_snapshot, residencies=())
+        if (node_snapshot.node_id, "batch") in plan.preempted_pairs
+        else node_snapshot
+        for node_snapshot in nodes
+    )
+    converged = planner.plan(released, (batch, critical), now=11)
+    critical_nodes = {
+        node_snapshot.node_id: node_snapshot for node_snapshot in released
+    }
+    assert {
+        critical_nodes[node_id].failure_domain
+        for node_id in converged.nodes_for("critical")
+    } == {"rack-a", "rack-b"}
+
+
 def test_priority_preemption_preserves_ownership_and_minimum_residency():
     critical = model(
         "critical",

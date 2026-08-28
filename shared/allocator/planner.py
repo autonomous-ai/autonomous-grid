@@ -793,6 +793,10 @@ class PlacementPlanner:
         # lower-priority victims. The beneficiary remains unsatisfied this tick and is placed only
         # after later heartbeats prove that drain/unload actually released the resource.
         preempted_nodes: set[str] = set()
+        staged_domains = {
+            model.model_id: set(assigned_domains.get(model.model_id, set()))
+            for model in order
+        }
         for beneficiary in order:
             placed = sum(
                 item.model_id == beneficiary.model_id for item in assignments
@@ -812,12 +816,24 @@ class PlacementPlanner:
                     timestamp,
                     self.policy,
                     startup_by_pair,
+                    require_new_domain=(
+                        len(staged_domains[beneficiary.model_id])
+                        < min(
+                            beneficiary.min_failure_domains,
+                            desired_by_model[beneficiary.model_id],
+                        )
+                    ),
+                    existing_domains=staged_domains[beneficiary.model_id],
                     excluded_nodes=preempted_nodes,
                 )
                 if not staged:
                     break
                 node_id, victims = staged
                 preempted_nodes.add(node_id)
+                selected_node = node_by_id[node_id]
+                staged_domains[beneficiary.model_id].add(
+                    selected_node.failure_domain or selected_node.node_id
+                )
                 preemptions.extend(
                     PlacementPreemption(
                         node_id=node_id,
@@ -1509,6 +1525,8 @@ def _stage_priority_preemption(
     policy: PlannerPolicy,
     startup_seconds: Mapping[tuple[str, str], float],
     *,
+    require_new_domain: bool,
+    existing_domains: set[str],
     excluded_nodes: set[str],
 ) -> tuple[str, tuple[ModelResidency, ...]] | None:
     """Remove desired incumbents only after proving a lower-priority staged eviction fits."""
@@ -1637,6 +1655,14 @@ def _stage_priority_preemption(
 
     if not candidates:
         return None
+    if require_new_domain:
+        new_domain_candidates = [
+            item
+            for item in candidates
+            if (item[1].failure_domain or item[1].node_id) not in existing_domains
+        ]
+        if new_domain_candidates:
+            candidates = new_domain_candidates
     _, selected_node, victims = min(candidates, key=lambda item: item[0])
     for victim in victims:
         assignment = next(
