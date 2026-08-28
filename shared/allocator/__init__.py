@@ -17,6 +17,7 @@ from shared.allocator.models import (
     NodeState,
     PlacementAssignment,
     PlacementPlan,
+    PlacementPreemption,
     ResidencyState,
     UnsatisfiedConstraint,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "NodeState",
     "PlacementAssignment",
     "PlacementPlan",
+    "PlacementPreemption",
     "ResidencyState",
     "UnsatisfiedConstraint",
 ]

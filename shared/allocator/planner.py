@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import combinations
 
 from shared.allocator.models import (
@@ -23,6 +23,7 @@ from shared.allocator.models import (
     NodeState,
     PlacementAssignment,
     PlacementPlan,
+    PlacementPreemption,
     ResidencyState,
     UnsatisfiedConstraint,
     new_generation,
@@ -156,6 +157,7 @@ class PlacementPlanner:
         assigned_pairs: set[tuple[str, str]] = set()
         assigned_domains: dict[str, set[str]] = {}
         unsatisfied: list[UnsatisfiedConstraint] = []
+        preemptions: list[PlacementPreemption] = []
 
         # Reserve every process that is resident *now*, including allocator-owned models that the
         # new plan intends to remove.  Reconciliation warms replacements before draining obsolete
@@ -785,6 +787,105 @@ class PlacementPlanner:
                     # bounded repacking already exhausted every admissible rearrangement here.
                     blocked.update(model.model_id for model in current_level)
 
+        # A lower-priority managed residency can otherwise deadlock a saturated fleet forever:
+        # its live memory prevents the critical placement, while its desired assignment prevents
+        # reconciliation from draining it. Explicitly stage a deterministic lower-priority set of
+        # lower-priority victims. The beneficiary remains unsatisfied this tick and is placed only
+        # after later heartbeats prove that drain/unload actually released the resource.
+        preempted_nodes: set[str] = set()
+        for beneficiary in order:
+            placed = sum(
+                item.model_id == beneficiary.model_id for item in assignments
+            )
+            missing = max(0, desired_by_model[beneficiary.model_id] - placed)
+            for _ in range(missing):
+                staged = _stage_priority_preemption(
+                    beneficiary,
+                    node_list,
+                    assignments,
+                    assigned_pairs,
+                    assigned_domains,
+                    capacity,
+                    occupied_models,
+                    desired_model_slots,
+                    profile_by_id,
+                    timestamp,
+                    self.policy,
+                    excluded_nodes=preempted_nodes,
+                )
+                if not staged:
+                    break
+                node_id, victims = staged
+                preempted_nodes.add(node_id)
+                preemptions.extend(
+                    PlacementPreemption(
+                        node_id=node_id,
+                        model_id=victim.model_id,
+                        for_model_id=beneficiary.model_id,
+                    )
+                    for victim in victims
+                )
+
+        # Host model ceilings can be lowered below live inventory. Preserve the winners selected by
+        # ordinary priority placement and explicitly evict only the excess managed residencies;
+        # otherwise replacement-readiness safety would retain a violating incumbent indefinitely.
+        preempted_pairs = {
+            (item.node_id, item.model_id) for item in preemptions
+        }
+        for node in node_list:
+            if node.max_models is None:
+                continue
+            live = [item for item in node.residencies if not _adds_model_slot(item)]
+            already_staged = sum(
+                (node.node_id, item.model_id) in preempted_pairs for item in live
+            )
+            excess = max(0, len(live) - node.max_models - already_staged)
+            if not excess:
+                continue
+            selected_models = {
+                item.model_id for item in assignments if item.node_id == node.node_id
+            }
+            beneficiary = max(
+                (
+                    profile_by_id[model_id]
+                    for model_id in selected_models
+                    if model_id in profile_by_id
+                ),
+                key=lambda item: (item.priority, item.model_id),
+                default=None,
+            )
+            removable = sorted(
+                (
+                    item
+                    for item in live
+                    if item.model_id not in selected_models
+                    and (node.node_id, item.model_id) not in preempted_pairs
+                    and item.state
+                    in (
+                        ResidencyState.READY,
+                        ResidencyState.DRAINING,
+                        ResidencyState.FAILED,
+                    )
+                    and item.managed
+                    and not item.pinned
+                    and not node.manually_managed
+                    and (profile := profile_by_id.get(item.model_id)) is not None
+                    and node.node_id not in profile.pinned_nodes
+                ),
+                key=lambda item: (
+                    profile_by_id[item.model_id].priority,
+                    item.model_id,
+                ),
+            )
+            for victim in removable[:excess]:
+                preemption = PlacementPreemption(
+                    node_id=node.node_id,
+                    model_id=victim.model_id,
+                    for_model_id=(beneficiary.model_id if beneficiary else ""),
+                )
+                preemptions.append(preemption)
+                preempted_pairs.add((node.node_id, victim.model_id))
+
         for model in order:
             target = desired_by_model[model.model_id]
             regular_slots = max(0, target - len(model.pinned_nodes))
@@ -876,6 +977,7 @@ class PlacementPlanner:
             forecast_by_model,
             desired_by_model=desired_by_model,
             assignments=assignments,
+            preemptions=preemptions,
         )
         objective = sum(item.score for item in assignments) - 1_000_000 * sum(
             item.missing_replicas for item in unsatisfied
@@ -888,6 +990,7 @@ class PlacementPlanner:
             unsatisfied=tuple(unsatisfied),
             objective_score=objective,
             input_digest=input_digest,
+            preemptions=tuple(preemptions),
         )
 
 
@@ -1301,6 +1404,168 @@ def _fits(
     return not adds_slot or occupied_models[node.node_id] < node.max_models
 
 
+def _stage_priority_preemption(
+    beneficiary: ModelProfile,
+    nodes: list[NodeSnapshot],
+    assignments: list[PlacementAssignment],
+    assigned_pairs: set[tuple[str, str]],
+    assigned_domains: dict[str, set[str]],
+    capacity: dict[str, int],
+    occupied_models: dict[str, int],
+    desired_model_slots: dict[str, int],
+    profile_by_id: Mapping[str, ModelProfile],
+    now: float,
+    policy: PlannerPolicy,
+    *,
+    excluded_nodes: set[str],
+) -> tuple[str, tuple[ModelResidency, ...]] | None:
+    """Remove desired incumbents only after proving a lower-priority staged eviction fits."""
+
+    candidates: list[
+        tuple[
+            tuple[int, int, int, str],
+            NodeSnapshot,
+            tuple[ModelResidency, ...],
+        ]
+    ] = []
+    for node in nodes:
+        if node.node_id in excluded_nodes:
+            continue
+        if (beneficiary.model_id, node.node_id) in assigned_pairs:
+            continue
+        residency = node.residency(beneficiary.model_id)
+        if (
+            _ineligible_reason(
+                node,
+                beneficiary,
+                now,
+                policy,
+                for_new=_requires_new_runtime(residency, beneficiary),
+            )
+            is not None
+        ):
+            continue
+        victims = sorted(
+            (
+                item
+                for item in node.residencies
+                if item.model_id != beneficiary.model_id
+                and not _adds_model_slot(item)
+                and item.state
+                in (
+                    ResidencyState.READY,
+                    ResidencyState.DRAINING,
+                    ResidencyState.FAILED,
+                )
+                and item.managed
+                and not item.pinned
+                and not node.manually_managed
+                and (victim_profile := profile_by_id.get(item.model_id)) is not None
+                and victim_profile.priority < beneficiary.priority
+                and node.node_id not in victim_profile.pinned_nodes
+            ),
+            key=lambda item: (
+                profile_by_id[item.model_id].priority,
+                -item.memory_mb,
+                item.model_id,
+            ),
+        )
+        if not victims:
+            continue
+
+        simulated_assignments = list(assignments)
+        simulated_capacity = dict(capacity)
+        simulated_occupied = dict(occupied_models)
+        simulated_slots = dict(desired_model_slots)
+        selected: list[ModelResidency] = []
+        for victim in victims:
+            selected.append(victim)
+            assignment = next(
+                (
+                    item
+                    for item in simulated_assignments
+                    if item.node_id == node.node_id
+                    and item.model_id == victim.model_id
+                ),
+                None,
+            )
+            if assignment is not None:
+                simulated_assignments.remove(assignment)
+                simulated_capacity[node.node_id] += _incremental_memory_mb(
+                    victim,
+                    assignment.memory_mb,
+                )
+                simulated_slots[node.node_id] -= 1
+            simulated_capacity[node.node_id] += victim.memory_mb
+            simulated_occupied[node.node_id] = max(
+                0,
+                simulated_occupied[node.node_id] - 1,
+            )
+            projected = replace(
+                node,
+                residencies=tuple(
+                    item for item in node.residencies if item not in selected
+                ),
+            )
+            if not _fits(
+                projected,
+                beneficiary,
+                simulated_capacity,
+                simulated_occupied,
+                simulated_slots,
+                simulated_assignments,
+                profile_by_id,
+            ):
+                continue
+            victim_profiles = [profile_by_id[item.model_id] for item in selected]
+            candidates.append(
+                (
+                    (
+                        sum(item.priority for item in victim_profiles),
+                        len(selected),
+                        sum(item.memory_mb for item in selected),
+                        node.node_id,
+                    ),
+                    node,
+                    tuple(selected),
+                )
+            )
+            break
+
+    if not candidates:
+        return None
+    _, selected_node, victims = min(candidates, key=lambda item: item[0])
+    for victim in victims:
+        assignment = next(
+            (
+                item
+                for item in assignments
+                if item.node_id == selected_node.node_id
+                and item.model_id == victim.model_id
+            ),
+            None,
+        )
+        if assignment is not None:
+            assignments.remove(assignment)
+            assigned_pairs.remove((victim.model_id, selected_node.node_id))
+            capacity[selected_node.node_id] += _incremental_memory_mb(
+                victim,
+                assignment.memory_mb,
+            )
+            desired_model_slots[selected_node.node_id] -= 1
+            assigned_domains[victim.model_id] = {
+                node.failure_domain or node.node_id
+                for node in nodes
+                if (victim.model_id, node.node_id) in assigned_pairs
+            }
+        capacity[selected_node.node_id] += victim.memory_mb
+        occupied_models[selected_node.node_id] = max(
+            0,
+            occupied_models[selected_node.node_id] - 1,
+        )
+    return selected_node.node_id, victims
+
+
 def _colocation_allowed(
     node: NodeSnapshot,
     model: ModelProfile,
@@ -1611,6 +1876,7 @@ def _input_digest(
     *,
     desired_by_model: dict[str, int],
     assignments: list[PlacementAssignment],
+    preemptions: list[PlacementPreemption],
 ) -> str:
     return stable_digest(
         {
@@ -1640,6 +1906,10 @@ def _input_digest(
             "desired_replicas": sorted(desired_by_model.items()),
             "assignments": [
                 (item.model_id, item.node_id, item.memory_mb) for item in assignments
+            ],
+            "preemptions": [
+                (item.node_id, item.model_id, item.for_model_id)
+                for item in preemptions
             ],
         }
     )

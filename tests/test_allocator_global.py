@@ -1979,6 +1979,108 @@ def test_higher_priority_model_can_use_all_scarce_capacity():
     assert plan.nodes_for("batch") == ()
 
 
+def test_higher_priority_model_stages_managed_incumbent_preemption():
+    policy = PlannerPolicy(memory_headroom_fraction=0)
+    planner = PlacementPlanner(policy)
+    critical = model(
+        "critical",
+        8_000,
+        priority=1_000,
+        min_residency_seconds=0,
+    )
+    batch = model(
+        "batch",
+        8_000,
+        priority=10,
+        min_residency_seconds=0,
+    )
+    ready_batch = ready("batch", 8_000, loaded_at=1)
+    occupied = node("n", 8_000, residencies=(ready_batch,))
+
+    drain_plan = planner.plan((occupied,), (batch, critical), now=10)
+
+    assert drain_plan.assignments == ()
+    assert [
+        (item.node_id, item.model_id, item.for_model_id)
+        for item in drain_plan.preemptions
+    ] == [("n", "batch", "critical")]
+    assert drain_plan.to_dict()["preemptions"] == [
+        {"node_id": "n", "model_id": "batch", "for_model_id": "critical"}
+    ]
+    drain = Reconciler().reconcile(
+        drain_plan,
+        (occupied,),
+        (batch, critical),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+    assert [item.kind for item in drain.executable_actions] == [ActionKind.DRAIN]
+    assert "higher-priority model 'critical'" in drain.executable_actions[0].reason
+
+    draining = replace(
+        occupied,
+        residencies=(replace(ready_batch, state=ResidencyState.DRAINING),),
+    )
+    unload_plan = planner.plan((draining,), (batch, critical), now=11)
+    assert unload_plan.preempted_pairs == frozenset({("n", "batch")})
+    unload = Reconciler().reconcile(
+        unload_plan,
+        (draining,),
+        (batch, critical),
+        mode=AllocatorMode.AUTOMATIC,
+        now=11,
+    )
+    assert [item.kind for item in unload.executable_actions] == [ActionKind.UNLOAD]
+
+    available = replace(occupied, residencies=())
+    ready_plan = planner.plan((available,), (batch, critical), now=12)
+    assert ready_plan.nodes_for("critical") == ("n",)
+    assert ready_plan.preemptions == ()
+
+
+def test_priority_preemption_preserves_ownership_and_minimum_residency():
+    critical = model(
+        "critical",
+        8_000,
+        priority=1_000,
+        min_residency_seconds=0,
+    )
+    batch = model(
+        "batch",
+        8_000,
+        priority=10,
+        min_residency_seconds=100,
+    )
+    policy = PlannerPolicy(memory_headroom_fraction=0)
+    planner = PlacementPlanner(policy)
+
+    external = node(
+        "external",
+        8_000,
+        residencies=(ready("batch", 8_000, managed=False),),
+        manually_managed=True,
+        actuator_capabilities=(),
+    )
+    assert planner.plan((external,), (batch, critical), now=10).preemptions == ()
+
+    recent = node(
+        "managed",
+        8_000,
+        residencies=(ready("batch", 8_000, loaded_at=9),),
+    )
+    plan = planner.plan((recent,), (batch, critical), now=10)
+    assert plan.preempted_pairs == frozenset({("managed", "batch")})
+    result = Reconciler().reconcile(
+        plan,
+        (recent,),
+        (batch, critical),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+    assert result.actions == ()
+    assert any(item.code == "minimum_residency" for item in result.deferred)
+
+
 def test_planner_converges_when_model_limit_is_lowered_below_existing_inventory():
     machine = node(
         "n",
@@ -1995,12 +2097,26 @@ def test_planner_converges_when_model_limit_is_lowered_below_existing_inventory(
     )
     assert plan.models_for("n") == ("important",)
     assert any(item.model_id == "background" for item in plan.unsatisfied)
+    assert plan.preempted_pairs == frozenset({("n", "background")})
 
 
 def test_zero_model_limit_selects_no_existing_residency():
     machine = node("n", max_models=0, residencies=(ready(),))
-    plan = PlacementPlanner().plan([machine], [model()], now=10)
+    profile = model(min_residency_seconds=0)
+    plan = PlacementPlanner().plan([machine], [profile], now=10)
     assert plan.assignments == ()
+    assert plan.preempted_pairs == frozenset({("n", "qwen")})
+    result = Reconciler().reconcile(
+        plan,
+        (machine,),
+        (profile,),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+    assert [item.kind for item in result.executable_actions] == [ActionKind.DRAIN]
+    assert result.executable_actions[0].reason == (
+        "Enforce the host model-capacity policy"
+    )
 
 
 def test_throttled_capacity_fraction_limits_new_placement_memory():

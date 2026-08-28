@@ -75,7 +75,13 @@ Placement is deterministic. Hard pins are reserved first and higher-priority cla
 lower-priority work. Within one priority class, constrained and larger models define each round's
 order, but placement progresses one replica per model per round. Scarce capacity is therefore
 max-min fair among equally important compatible models instead of being monopolized by the first
-model ID before its peers receive a baseline. Candidates prefer an existing ready residency, local
+model ID before its peers receive a baseline. If lower-priority managed residencies already occupy
+all compatible capacity, Grid emits an explicit staged preemption: it first drains and unloads the
+lowest-priority sufficient victim set, continues reporting the important model as
+unsatisfied, and places it only after a later heartbeat proves that memory is actually free. The
+same mechanism converges a host whose model ceiling was lowered below its live inventory. External,
+manual, pinned, and minimum-residency-protected work is never bypassed. Candidates otherwise prefer
+an existing ready residency, local
 cached weights, another failure domain, measured throughput, and best-fit memory. Before measured
 throughput exists, bounded memory-bandwidth and compute estimates break otherwise-cold ties; ready
 and cached bonuses remain much larger, so hardware estimates do not cause gratuitous migration.
@@ -211,7 +217,9 @@ The planner and reconciler keep these rules even when demand, membership, or clo
    heartbeat, or implausibly future-heartbeat hosts receive no new placement. Runtime, backend,
    data tier, tags, allow/deny lists, pins, and per-host model limits are enforced.
 3. **Make capacity available before removing it.** Missing desired replicas are loaded and warmed
-   before obsolete replicas are considered for drain.
+   before obsolete replicas are considered for drain. The deliberate exception is an explicit
+   higher-priority preemption on a saturated compatible host: the victim drains first, and the new
+   model is not assigned until a later heartbeat proves the memory was released.
 4. **Route only admitted ready models.** Cached, loading, warming, and failed residencies never enter
    the model identity list. A draining child may retain its identity while existing requests finish,
    but the host/model admission gates remove it from active routing immediately. A managed control

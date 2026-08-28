@@ -633,6 +633,21 @@ class UnsatisfiedConstraint:
 
 
 @dataclass(frozen=True, slots=True)
+class PlacementPreemption:
+    """A staged removal that makes scarce capacity available to more important work."""
+
+    node_id: str
+    model_id: str
+    for_model_id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.node_id or not self.model_id:
+            raise ValueError("preemption node and victim model are required")
+        if self.for_model_id and self.model_id == self.for_model_id:
+            raise ValueError("a model cannot preempt itself")
+
+
+@dataclass(frozen=True, slots=True)
 class PlacementPlan:
     generation: str
     created_at: float
@@ -641,6 +656,7 @@ class PlacementPlan:
     unsatisfied: tuple[UnsatisfiedConstraint, ...] = ()
     objective_score: float = 0.0
     input_digest: str = ""
+    preemptions: tuple[PlacementPreemption, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.generation:
@@ -651,10 +667,17 @@ class PlacementPlan:
         pairs = [(item.model_id, item.node_id) for item in self.assignments]
         if len(pairs) != len(set(pairs)):
             raise ValueError("a model cannot be assigned twice to the same node")
+        preemption_pairs = [(item.node_id, item.model_id) for item in self.preemptions]
+        if len(preemption_pairs) != len(set(preemption_pairs)):
+            raise ValueError("a residency cannot be preempted more than once")
 
     @property
     def desired_pairs(self) -> frozenset[tuple[str, str]]:
         return frozenset((item.node_id, item.model_id) for item in self.assignments)
+
+    @property
+    def preempted_pairs(self) -> frozenset[tuple[str, str]]:
+        return frozenset((item.node_id, item.model_id) for item in self.preemptions)
 
     def nodes_for(self, model_id: str) -> tuple[str, ...]:
         return tuple(
@@ -679,6 +702,7 @@ class PlacementPlan:
             "unsatisfied": [asdict(item) for item in self.unsatisfied],
             "objective_score": self.objective_score,
             "input_digest": self.input_digest,
+            "preemptions": [asdict(item) for item in self.preemptions],
         }
 
 

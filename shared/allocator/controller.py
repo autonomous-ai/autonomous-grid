@@ -707,6 +707,7 @@ class AllocatorController:
             unsatisfied=plan.unsatisfied,
             objective_score=plan.objective_score,
             input_digest=plan.input_digest,
+            preemptions=plan.preemptions,
         )
 
     def _sequence_actions(self, result: ReconcileResult) -> ReconcileResult:

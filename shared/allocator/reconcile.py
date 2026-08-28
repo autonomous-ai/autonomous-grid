@@ -164,7 +164,8 @@ class Reconciler:
         )
         for action in destructive:
             pair = (action.node_id, action.model_id)
-            if pair in plan.desired_pairs:
+            priority_preemption = pair in plan.preempted_pairs
+            if pair in plan.desired_pairs and not priority_preemption:
                 deferrals[action.action_id] = DeferredMutation(
                     action.kind,
                     action.node_id,
@@ -193,6 +194,7 @@ class Reconciler:
                 plan,
                 safety,
                 timestamp,
+                priority_preemption=priority_preemption,
                 allow_applied_state=True,
             )
             if deferral is not None:
@@ -266,6 +268,9 @@ class Reconciler:
         proposals: list[MutationAction] = []
         deferred: list[DeferredMutation] = []
         desired = plan.desired_pairs
+        preemptions = {
+            (item.node_id, item.model_id): item for item in plan.preemptions
+        }
         safety = _destructive_safety_state(plan, node_by_id, profile_by_id)
         ready_pairs = safety.ready_pairs
         active_drain_pairs: set[tuple[str, str]] = set()
@@ -412,7 +417,8 @@ class Reconciler:
         for node in sorted(node_by_id.values(), key=lambda item: item.node_id):
             for residency in sorted(node.residencies, key=lambda item: item.model_id):
                 pair = (node.node_id, residency.model_id)
-                if pair in desired or residency.state in (
+                priority_preemption = preemptions.get(pair)
+                if (pair in desired and priority_preemption is None) or residency.state in (
                     ResidencyState.CACHED,
                     ResidencyState.LOADING,
                     ResidencyState.WARMING,
@@ -443,6 +449,7 @@ class Reconciler:
                     plan,
                     safety,
                     timestamp,
+                    priority_preemption=priority_preemption is not None,
                     diversity_already_projected=(
                         action_kind == ActionKind.DRAIN and pair in active_drain_pairs
                     ),
@@ -471,7 +478,15 @@ class Reconciler:
                         profile,
                         plan,
                         timestamp,
-                        "Stop assigning new work before removing the obsolete replica",
+                        (
+                            "Yield scarce capacity to higher-priority model "
+                            f"{priority_preemption.for_model_id!r}"
+                            if priority_preemption is not None
+                            and priority_preemption.for_model_id
+                            else "Enforce the host model-capacity policy"
+                            if priority_preemption is not None
+                            else "Stop assigning new work before removing the obsolete replica"
+                        ),
                         history=records,
                         mode=mode,
                         blocked_until=mutation_blocks,
@@ -946,6 +961,7 @@ def _destructive_deferral(
     safety: _DestructiveSafetyState,
     now: float,
     *,
+    priority_preemption: bool = False,
     allow_applied_state: bool = False,
     diversity_already_projected: bool = False,
 ) -> DeferredMutation | None:
@@ -976,45 +992,47 @@ def _destructive_deferral(
             f"Residency state changed to {residency.state.value}",
         )
 
-    desired_nodes = plan.nodes_for(profile.model_id)
-    ready_desired = sum(
-        (desired_node, profile.model_id) in safety.ready_pairs
-        for desired_node in desired_nodes
-    )
-    required_ready = plan.target_for(profile.model_id)
-    if required_ready and ready_desired < required_ready:
-        return DeferredMutation(
-            kind,
-            node.node_id,
-            profile.model_id,
-            "replacement_not_ready",
-            f"Only {ready_desired} of {required_ready} required replacements are ready",
+    if not priority_preemption:
+        desired_nodes = plan.nodes_for(profile.model_id)
+        ready_desired = sum(
+            (desired_node, profile.model_id) in safety.ready_pairs
+            for desired_node in desired_nodes
         )
+        required_ready = plan.target_for(profile.model_id)
+        if required_ready and ready_desired < required_ready:
+            return DeferredMutation(
+                kind,
+                node.node_id,
+                profile.model_id,
+                "replacement_not_ready",
+                f"Only {ready_desired} of {required_ready} required replacements are ready",
+            )
 
-    # Permissionless legacy engines are useful inventory, but an unauthenticated endpoint must
-    # never be sufficient evidence to remove the last allocator-owned baseline.
-    required_managed = (
-        min(required_ready, max(1, profile.min_replicas)) if required_ready else 0
-    )
-    ready_managed = sum(
-        (desired_node, profile.model_id) in safety.managed_ready_pairs
-        for desired_node in desired_nodes
-    )
-    if ready_managed < required_managed:
-        return DeferredMutation(
-            kind,
-            node.node_id,
-            profile.model_id,
-            "trusted_replacement_not_ready",
-            (
-                f"Only {ready_managed} of {required_managed} required managed "
-                "replacements are ready"
-            ),
+        # Permissionless legacy engines are useful inventory, but an unauthenticated endpoint must
+        # never be sufficient evidence to remove the last allocator-owned baseline.
+        required_managed = (
+            min(required_ready, max(1, profile.min_replicas)) if required_ready else 0
         )
+        ready_managed = sum(
+            (desired_node, profile.model_id) in safety.managed_ready_pairs
+            for desired_node in desired_nodes
+        )
+        if ready_managed < required_managed:
+            return DeferredMutation(
+                kind,
+                node.node_id,
+                profile.model_id,
+                "trusted_replacement_not_ready",
+                (
+                    f"Only {ready_managed} of {required_managed} required managed "
+                    "replacements are ready"
+                ),
+            )
 
     if (
         kind == ActionKind.DRAIN
         and residency.state == ResidencyState.READY
+        and not priority_preemption
         and not diversity_already_projected
     ):
         counts = safety.domain_counts[profile.model_id]

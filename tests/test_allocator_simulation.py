@@ -572,6 +572,68 @@ def test_equal_priority_bursts_share_nodes_then_switch_models_without_overcommit
     )
 
 
+def test_four_logical_nodes_preempt_batch_for_critical_demand_then_refill():
+    nodes = tuple(
+        host(
+            f"logical-{index}",
+            capacity_mb=10_000,
+            residencies=(ready("batch", 8_000, now=1),),
+            cached=("batch", "critical"),
+            now=100,
+        )
+        for index in range(4)
+    )
+    batch = replace(
+        profile("batch", 8_000, min_replicas=4, max_replicas=4, priority=10),
+        scale_down_cooldown_seconds=0,
+    )
+    critical = replace(
+        profile(
+            "critical",
+            8_000,
+            min_replicas=0,
+            max_replicas=4,
+            priority=1_000,
+        ),
+        scale_down_cooldown_seconds=0,
+    )
+    models = (batch, critical)
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+
+    staged = planner.plan(
+        nodes,
+        models,
+        (DemandForecast("critical", offered_concurrency=3, updated_at=100),),
+        now=100,
+    )
+
+    assert staged.nodes_for("critical") == ()
+    assert staged.nodes_for("batch") == ()
+    assert staged.preempted_pairs == frozenset(
+        (f"logical-{index}", "batch") for index in range(4)
+    )
+    drains = Reconciler().reconcile(
+        staged,
+        nodes,
+        models,
+        mode=AllocatorMode.AUTOMATIC,
+        now=100,
+    )
+    assert len(drains.executable_actions) == 4
+    assert all(action.kind == ActionKind.DRAIN for action in drains.executable_actions)
+
+    released = tuple(replace(node, residencies=(), last_heartbeat=101) for node in nodes)
+    refilled = planner.plan(
+        released,
+        models,
+        (DemandForecast("critical", offered_concurrency=3, updated_at=101),),
+        now=101,
+    )
+    assert len(refilled.nodes_for("critical")) == 4
+    assert refilled.preemptions == ()
+    assert_no_overcommit(refilled, released, PlannerPolicy(memory_headroom_fraction=0))
+
+
 def test_failover_keeps_last_replica_until_replacement_is_ready_and_drained():
     model = profile("code", 12_000, max_replicas=1)
     old = host(
