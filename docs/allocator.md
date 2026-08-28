@@ -536,7 +536,9 @@ partitioned so the harness never reports N times the physical Mac's capacity.
 - The current autonomous.ai NVIDIA engines are vLLM/CUDA even though live discovery labels their
   ownership class `external`. Framework identity and lifecycle ownership are independent: those
   engines participate in routing and placement evidence, but discovery alone does not grant Grid
-  permission to start, drain, or stop them.
+  permission to start, drain, or stop them. Local auto-discovery publishes the detected runtime;
+  when pointing at an engine explicitly, use `grid join --at <url> -m <model> --kind vllm` (or the
+  corresponding kind) so runtime-constrained profiles can use the inventory.
 - The llama.cpp `load` action verifies an already cached GGUF; it does not download one. Artifact
   distribution remains an explicit `grid pull` operation.
 - Capacity is refreshed by the node as stable physical capacity plus dynamic non-Grid reserve.

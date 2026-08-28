@@ -224,7 +224,7 @@ See [ADR 0003](./adr/0003-remote-grid-lifecycle.md).
 ```
 grid join [grid]                                      # auto-detect local engines
 grid join [grid] --all                                # join every detected engine
-grid join [grid] --at <url> -m <model>... [--name <id>]
+grid join [grid] --at <url> -m <model>... [--kind <runtime>] [--name <id>]
 grid join [grid] --serve <model> [--name <id>]
 grid join [grid] --media [--bundle <bundle>]... [--name <id>]
 grid join [grid] --api <kind> [-m <model>...]         # join a third-party API engine (openai, codex, doggi)
@@ -244,6 +244,11 @@ grid engine ls [grid] [--json]                        # live engines joined to a
 When detection finds more than one engine, print the plan and ask for confirmation in
 interactive terminals. In non-interactive mode, require `--all`, `--kind <kind>`, or
 explicit `--at`.
+
+Auto-detected engines publish their detected runtime to the allocator. When `--at` points at an
+engine whose implementation Grid cannot infer from the OpenAI-compatible wire protocol, add
+`--kind vllm`, `--kind ollama`, or the corresponding runtime. This is compatibility metadata only;
+the externally started process remains manually managed and Grid receives no lifecycle authority.
 
 Example detection output:
 

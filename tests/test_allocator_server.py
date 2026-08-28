@@ -596,7 +596,7 @@ def test_managed_reregistration_preserves_proxy_owned_load(tmp_path):
     assert heartbeat.json()["load"]["active_tasks"] == 2
 
 
-def test_legacy_engine_is_routable_but_manually_managed(tmp_path):
+def test_external_vllm_runtime_hint_is_routable_but_never_grants_management(tmp_path):
     _, client, _ = _app(tmp_path)
     response = client.put(
         "/nodes/legacy",
@@ -604,7 +604,11 @@ def test_legacy_engine_is_routable_but_manually_managed(tmp_path):
             "role": "engine",
             "models": ["qwen"],
             "endpoint_url": "http://127.0.0.1:9000/v1",
-            "resources": {"capacity_mb": 16_000, "runtimes": ["llama.cpp"]},
+            "resources": {
+                "capacity_mb": 16_000,
+                "runtimes": ["vllm"],
+                "backends": ["cuda"],
+            },
         },
     )
     assert response.status_code == 200
@@ -612,7 +616,10 @@ def test_legacy_engine_is_routable_but_manually_managed(tmp_path):
 
     status = client.get("/allocator/status").json()
     node = status["nodes"][0]
+    assert node["runtimes"] == ["vllm"]
+    assert node["backends"] == ["cuda"]
     assert node["manually_managed"] is True
+    assert node["actuator_capabilities"] == []
     assert node["residencies"][0]["state"] == "ready"
     assert node["residencies"][0]["managed"] is False
 

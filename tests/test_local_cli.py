@@ -3657,6 +3657,7 @@ def test_run_engine_launches_local_llama_server_by_default(monkeypatch, tmp_path
     assert calls["waited"] == 8081
     assert calls["stopped"] == 8081
     assert calls["payload"]["endpoint_url"] == "http://192.168.1.50:8081/v1"
+    assert calls["payload"]["resources"] == {"runtimes": ["llama.cpp"]}
 
 
 def test_run_engine_advertise_as_routes_alias_and_sets_llama_alias(monkeypatch, tmp_path):
@@ -3704,10 +3705,15 @@ def test_run_engine_endpoint_url_skips_local_llama_server(monkeypatch, tmp_path)
     monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
-    args = _engine_args(models=["custom-model"], endpoint_url="http://192.168.1.50:8081/v1")
+    args = _engine_args(
+        models=["custom-model"],
+        endpoint_url="http://192.168.1.50:8081/v1",
+        runtime_kind="vllm",
+    )
 
     assert cli.provider._run_engine(args) == 0
     assert calls["payload"]["endpoint_url"] == "http://192.168.1.50:8081/v1"
+    assert calls["payload"]["resources"] == {"runtimes": ["vllm"]}
 
 
 def test_run_engine_external_advertise_as_maps_upstream(monkeypatch, tmp_path):
@@ -3856,6 +3862,8 @@ def test_join_at_writes_record_and_spawns_detached(monkeypatch, tmp_path):
         "llama3",
         "--name",
         "mac",
+        "--kind",
+        "vllm",
     ])
     assert cli.cmd_join(args) == 0
 
@@ -3863,6 +3871,7 @@ def test_join_at_writes_record_and_spawns_detached(monkeypatch, tmp_path):
     assert "mac" in records
     assert records["mac"]["endpoint_url"] == "http://192.168.1.10:11434/v1"
     assert records["mac"]["models"] == ["llama3"]
+    assert records["mac"]["runtime_kind"] == "vllm"
     assert records["mac"]["pid"] == 4321
     assert spawned["cmd"][-3:] == ["__engine", cfg["grid_id"], "mac"]
     assert spawned["kwargs"]["start_new_session"] is True
@@ -3939,6 +3948,7 @@ def test_join_kind_filters_to_one_engine(monkeypatch, tmp_path):
 
     assert cli.cmd_join(cli.build_parser().parse_args(["join", "home", "--kind", "vllm"])) == 0
     assert set(cli.provider._read_records(grid_id)) == {"vllm"}  # only the vllm engine joined
+    assert cli.provider._read_records(grid_id)["vllm"]["runtime_kind"] == "vllm"
     # the --engine alias drives the same filter (and errors on no match)
     assert cli.cmd_join(cli.build_parser().parse_args(["join", "home", "--engine", "ollama"])) == 0
     assert set(cli.provider._read_records(grid_id)) == {"vllm", "ollama"}

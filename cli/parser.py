@@ -430,7 +430,8 @@ def _add_engines(sub) -> None:
     )
     choose.add_argument("--all", action="store_true", help="Join every detected engine.")
     choose.add_argument("--kind", "--engine", dest="kind", default=None,
-                        help="Join only the detected engine of this kind (e.g. ollama, vllm).")
+                        help="Join only the detected engine of this kind (e.g. ollama, vllm); "
+                             "with --at, record that runtime kind for placement.")
     choose.add_argument(
         "--api",
         metavar="KIND",

@@ -130,13 +130,34 @@ def cmd_join(args: argparse.Namespace) -> int:
     if args.at:
         if not args.models:
             raise SystemExit("--at requires at least one -m/--model naming what that engine serves.")
-        return _spawn_engine(cfg, args, endpoint_url=args.at, models=list(args.models), media=args.media)
+        return _spawn_engine(
+            cfg,
+            args,
+            endpoint_url=args.at,
+            models=list(args.models),
+            media=args.media,
+            runtime_kind=args.kind,
+        )
 
     if args.serve:
-        return _spawn_engine(cfg, args, endpoint_url=None, models=[args.serve], media=args.media)
+        return _spawn_engine(
+            cfg,
+            args,
+            endpoint_url=None,
+            models=[args.serve],
+            media=args.media,
+            runtime_kind="llama.cpp",
+        )
 
     if args.media and not args.models:
-        return _spawn_engine(cfg, args, endpoint_url=None, models=[], media=True)
+        return _spawn_engine(
+            cfg,
+            args,
+            endpoint_url=None,
+            models=[],
+            media=True,
+            runtime_kind="comfyui",
+        )
 
     if args.models:
         raise SystemExit(
@@ -183,6 +204,7 @@ def cmd_join(args: argparse.Namespace) -> int:
                 models=engine.models,
                 engine_id=engine_id,
                 media=engine.media,
+                runtime_kind=engine.label,
             )
         except SystemExit as exc:
             print(f"Skipped {engine.label}: {exc}", file=sys.stderr)
@@ -410,6 +432,7 @@ def _spawn_engine(
     api_kind: str | None = None,
     api_base_url: str | None = None,
     api_key: str | None = None,
+    runtime_kind: str | None = None,
 ) -> int:
     grid_id = cfg["grid_id"]
     engine_id = engine_id or getattr(args, "name", None) or f"engine-{uuid.uuid4().hex[:8]}"
@@ -423,6 +446,9 @@ def _spawn_engine(
         "pid": 0,
         "endpoint_url": endpoint_url,
         "models": models,
+        # Serving implementation is independent from ownership. In particular, an external vLLM
+        # process remains manually managed even though its runtime is now available to placement.
+        "runtime_kind": runtime_kind,
         "advertise_as": list(getattr(args, "advertise_as", []) or []),
         "media": bool(media),
         "media_bundles": list(getattr(args, "bundles", []) or []),
@@ -967,6 +993,24 @@ def _run_engine(args: SimpleNamespace) -> int:
             "load": {"active_tasks": 0},
             "upstream": upstream,
         }
+        # Old built-in records predate ``runtime_kind``; their missing endpoint is still definitive
+        # evidence that this loop launched llama.cpp. External records stay unknown unless the
+        # operator supplied --kind or auto-discovery recorded the detected label.
+        runtime_kind = getattr(args, "runtime_kind", None)
+        if not runtime_kind and not args.endpoint_url and args.models:
+            runtime_kind = "llama.cpp"
+        runtimes = list(
+            dict.fromkeys(
+                runtime
+                for runtime in (
+                    runtime_kind,
+                    "comfyui" if args.enable_media else None,
+                )
+                if runtime
+            )
+        )
+        if runtimes:
+            payload["resources"] = {"runtimes": runtimes}
         _register_engine(grid_url, node_id, payload)
         registered = True
         print(f"Engine {node_id} advertised on {grid_url}")
@@ -1236,5 +1280,4 @@ def _record_alive(grid_id: str, engine_id: str) -> bool:
     reaper — made this refuse a re-join of an engine that had already died."""
     record = run_records.read_records(grid_id).get(engine_id)
     return bool(record and run_records.record_alive(record))
-
 
