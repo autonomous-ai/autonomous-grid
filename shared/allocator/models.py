@@ -549,6 +549,7 @@ class DemandForecast:
     correlation_sources: tuple[str, ...] = ()
     sample_count: int = 0
     updated_at: float = 0.0
+    observed_requests_per_minute: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.model_id:
@@ -561,6 +562,7 @@ class DemandForecast:
             "confidence",
             "correlated_requests_per_minute",
             "correlation_confidence",
+            "observed_requests_per_minute",
             "updated_at",
         ):
             _finite_nonnegative(float(getattr(self, name)), name)
@@ -572,6 +574,14 @@ class DemandForecast:
             or self.correlation_confidence > 1
         ):
             raise ValueError("error_rate and confidence cannot exceed 1")
+        if self.observed_requests_per_minute > self.requests_per_minute:
+            raise ValueError(
+                "observed_requests_per_minute cannot exceed requests_per_minute"
+            )
+        if self.correlated_requests_per_minute > self.requests_per_minute:
+            raise ValueError(
+                "correlated_requests_per_minute cannot exceed requests_per_minute"
+            )
         if not math.isfinite(self.trend_per_minute):
             raise ValueError("trend_per_minute must be finite")
         object.__setattr__(

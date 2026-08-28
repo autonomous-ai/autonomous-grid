@@ -983,6 +983,18 @@ def test_demand_tracker_rejects_invalid_samples_and_schema():
         tracker.observe("m", requests=1, errors=2)
     with pytest.raises(ValueError, match="unsupported"):
         DemandTracker.from_dict({"schema_version": 99})
+    with pytest.raises(ValueError, match="observed_requests_per_minute"):
+        DemandForecast(
+            "m",
+            requests_per_minute=1,
+            observed_requests_per_minute=2,
+        )
+    with pytest.raises(ValueError, match="correlated_requests_per_minute"):
+        DemandForecast(
+            "m",
+            requests_per_minute=1,
+            correlated_requests_per_minute=2,
+        )
 
 
 def test_demand_tracker_prewarms_quiet_models_from_mature_group_demand():
@@ -1018,6 +1030,8 @@ def test_demand_tracker_prewarms_quiet_models_from_mature_group_demand():
     assert correlated.requests_per_minute > 0
     assert correlated.offered_concurrency > 0
     assert correlated.correlated_requests_per_minute == correlated.requests_per_minute
+    assert correlated.observed_requests_per_minute == 0
+    assert forecasts["source"].observed_requests_per_minute > 0
     assert correlated.correlation_sources == ("source",)
     assert 0.7 * forecasts["source"].confidence < correlated.correlation_confidence < 1
     assert correlated.updated_at == forecasts["source"].updated_at
@@ -1158,6 +1172,61 @@ def test_demand_correlation_configuration_round_trips_and_validates():
         DemandTracker(correlation_max_sources=0)
     with pytest.raises(ValueError, match="correlation_max_sources"):
         DemandTracker(correlation_max_sources=True)
+
+
+def test_observed_demand_is_placed_before_inferred_only_prewarm():
+    inferred = model("a-inferred", min_replicas=0, max_replicas=1)
+    observed = model("z-observed", min_replicas=0, max_replicas=1)
+    forecasts = (
+        DemandForecast(
+            "a-inferred",
+            requests_per_minute=60,
+            offered_concurrency=1,
+            correlated_requests_per_minute=60,
+            correlation_confidence=1,
+            correlation_sources=("z-observed",),
+            updated_at=10,
+        ),
+        DemandForecast(
+            "z-observed",
+            requests_per_minute=60,
+            observed_requests_per_minute=60,
+            offered_concurrency=1,
+            updated_at=10,
+        ),
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        [node("only", capacity_mb=8_000)],
+        [inferred, observed],
+        forecasts,
+        now=10,
+    )
+
+    assert plan.nodes_for("z-observed") == ("only",)
+    assert plan.nodes_for("a-inferred") == ()
+
+
+def test_required_baseline_is_placed_before_burst_capacity_at_equal_priority():
+    observed = model("a-observed", min_replicas=0, max_replicas=1)
+    baseline = model("z-baseline", min_replicas=1, max_replicas=1)
+    forecast = DemandForecast(
+        "a-observed",
+        requests_per_minute=60,
+        observed_requests_per_minute=60,
+        offered_concurrency=1,
+        updated_at=10,
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        [node("only", capacity_mb=8_000)],
+        [observed, baseline],
+        [forecast],
+        now=10,
+    )
+
+    assert plan.nodes_for("z-baseline") == ("only",)
+    assert plan.nodes_for("a-observed") == ()
 
 
 def test_replica_count_uses_offered_concurrency_headroom_and_bounds():

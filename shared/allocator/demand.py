@@ -209,6 +209,7 @@ class DemandTracker:
         return DemandForecast(
             model_id=model_id,
             requests_per_minute=predicted_rate,
+            observed_requests_per_minute=predicted_rate,
             offered_concurrency=max(0.0, offered_concurrency),
             queue_depth=queue_depth,
             p95_latency_ms=_percentile(latencies, 0.95),

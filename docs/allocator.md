@@ -64,6 +64,13 @@ transitively. Old target-local queue, latency, and error evidence is not refresh
 Only configured, non-retiring model IDs create demand series, so the permissionless inference
 endpoint cannot grow controller state with arbitrary names.
 
+Correlation-derived demand retains a separate observed-rate field. Within the same administrator
+priority class, required baseline replicas place first, then models with direct request/queue/SLO
+evidence, then inferred-only prewarms. This makes prediction opportunistic: it can use otherwise
+idle capacity, but an alphabetically earlier speculative model cannot evict the only slot available
+to real traffic. Older forecast producers without correlation lineage remain direct evidence for
+wire compatibility.
+
 Placement is deterministic. Hard pins are reserved first and higher-priority classes fill before
 lower-priority work. Within one priority class, constrained and larger models define each round's
 order, but placement progresses one replica per model per round. Scarce capacity is therefore

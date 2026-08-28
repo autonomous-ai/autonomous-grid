@@ -283,6 +283,10 @@ class PlacementPlanner:
             model_list,
             key=lambda item: (
                 -item.priority,
+                -_placement_demand_urgency(
+                    item,
+                    forecast_by_model.get(item.model_id),
+                ),
                 eligible_host_count(item),
                 -item.maximum_memory_mb,
                 item.model_id,
@@ -885,6 +889,34 @@ class PlacementPlanner:
             objective_score=objective,
             input_digest=input_digest,
         )
+
+
+def _placement_demand_urgency(
+    model: ModelProfile,
+    forecast: DemandForecast | None,
+) -> int:
+    """Keep speculative prewarms behind required and directly observed service."""
+
+    if model.min_replicas or model.pinned_nodes:
+        return 3
+    if forecast is None:
+        return 0
+    observed_rate = forecast.observed_requests_per_minute
+    # Forecasts supplied by older peers/tests predate the explicit observed field. No correlation
+    # lineage means their ordinary request rate is direct evidence, preserving wire compatibility.
+    if not observed_rate and not forecast.correlation_sources:
+        observed_rate = forecast.requests_per_minute
+    if (
+        observed_rate > 0
+        or forecast.queue_depth
+        or forecast.p95_latency_ms
+        or forecast.error_rate
+        or (forecast.offered_concurrency > 0 and not forecast.correlation_sources)
+    ):
+        return 2
+    if forecast.correlation_sources and forecast.correlated_requests_per_minute > 0:
+        return 1
+    return 0
 
 
 def desired_replica_count(
@@ -1588,6 +1620,7 @@ def _input_digest(
                     "correlated_requests_per_minute": item.correlated_requests_per_minute,
                     "correlation_confidence": item.correlation_confidence,
                     "correlation_sources": item.correlation_sources,
+                    "observed_requests_per_minute": item.observed_requests_per_minute,
                     "sample_count": item.sample_count,
                     "updated_at": item.updated_at,
                 }
