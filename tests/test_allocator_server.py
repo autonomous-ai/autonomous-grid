@@ -1011,10 +1011,15 @@ def test_managed_engine_key_is_private_and_forwarded_only_by_grid(
     assert "engine_api_key" not in client.get("/allocator/status").text
     assert app.state.nodes[child_id].engine_api_key == engine_key
 
-    seen: list[str | None] = []
+    seen: list[tuple[str | None, str | None]] = []
 
     def upstream(request: httpx.Request) -> httpx.Response:
-        seen.append(request.headers.get("authorization"))
+        seen.append(
+            (
+                request.headers.get("authorization"),
+                request.headers.get("x-grid-affinity-key"),
+            )
+        )
         return httpx.Response(200, json={"id": "completion"})
 
     real_async_client = httpx.AsyncClient
@@ -1028,10 +1033,11 @@ def test_managed_engine_key_is_private_and_forwarded_only_by_grid(
     )
     proxied = client.post(
         "/v1/chat/completions",
+        headers={"X-Grid-Affinity-Key": "private-session"},
         json={"model": "qwen", "messages": []},
     )
     assert proxied.status_code == 200
-    assert seen == [f"Bearer {engine_key}"]
+    assert seen == [(f"Bearer {engine_key}", None)]
 
 
 @pytest.mark.parametrize(
@@ -1651,6 +1657,101 @@ def test_router_uses_output_length_to_choose_latency_or_throughput_engine(
         server_module._choose_engine(app, "qwen", requested_output_tokens=1_000)
         is throughput
     )
+
+
+def test_router_affinity_is_sticky_distributed_and_minimally_disruptive(
+    tmp_path,
+    monkeypatch,
+):
+    app, client, _ = _app(tmp_path)
+    monkeypatch.setattr(server_module.time, "time", lambda: 1_000)
+    for host_id in ("one", "two", "three"):
+        _managed_node(client, host_id=host_id)
+        _managed_engine(client, host_id=host_id, model_id="qwen")
+        engine = app.state.nodes[engine_node_id(host_id, "qwen")]
+        engine.allocator["max_concurrency"] = 8
+    digests = {
+        key: server_module._affinity_digest(f"session-{key}") for key in range(256)
+    }
+
+    before = {
+        key: server_module._choose_engine(
+            app,
+            "qwen",
+            affinity_digest=digest,
+        ).node_id
+        for key, digest in digests.items()
+    }
+    repeated = {
+        key: server_module._choose_engine(
+            app,
+            "qwen",
+            affinity_digest=digest,
+        ).node_id
+        for key, digest in digests.items()
+    }
+
+    assert before == repeated
+    assert len(set(before.values())) == 3
+
+    _managed_node(client, host_id="four")
+    _managed_engine(client, host_id="four", model_id="qwen")
+    added = app.state.nodes[engine_node_id("four", "qwen")]
+    added.allocator["max_concurrency"] = 8
+    after = {
+        key: server_module._choose_engine(
+            app,
+            "qwen",
+            affinity_digest=digest,
+        ).node_id
+        for key, digest in digests.items()
+    }
+    changed = {key for key in before if before[key] != after[key]}
+
+    assert changed
+    assert {after[key] for key in changed} == {added.node_id}
+
+
+def test_router_affinity_never_overrides_load_or_host_protection(tmp_path, monkeypatch):
+    app, client, _ = _app(tmp_path)
+    monkeypatch.setattr(server_module.time, "time", lambda: 1_000)
+    for host_id in ("one", "two"):
+        _managed_node(client, host_id=host_id)
+        _managed_engine(client, host_id=host_id, model_id="qwen")
+        engine = app.state.nodes[engine_node_id(host_id, "qwen")]
+        engine.allocator["max_concurrency"] = 4
+    digest = server_module._affinity_digest("sticky-session")
+    preferred = server_module._choose_engine(
+        app,
+        "qwen",
+        affinity_digest=digest,
+    )
+    assert preferred is not None
+
+    server_module._change_active_tasks(preferred, 1)
+    assert (
+        server_module._choose_engine(app, "qwen", affinity_digest=digest)
+        is not preferred
+    )
+    server_module._change_active_tasks(preferred, -1)
+
+    preferred.allocator["state"] = "throttled"
+    assert (
+        server_module._choose_engine(app, "qwen", affinity_digest=digest)
+        is not preferred
+    )
+
+
+def test_affinity_key_is_hashed_only_when_bounded_and_printable():
+    digest = server_module._affinity_digest("private-session")
+
+    assert isinstance(digest, bytes)
+    assert len(digest) == 32
+    assert b"private-session" not in digest
+    assert server_module._affinity_digest("x" * 257) is None
+    assert server_module._affinity_digest("bad\nkey") is None
+    assert server_module._affinity_digest("bad\x7fkey") is None
+    assert server_module._affinity_digest("bad\u200bkey") is None
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import math
@@ -57,6 +58,8 @@ ALLOCATOR_REVISION_WAIT_TIMEOUT_SECONDS = 10.0
 # at 30 seconds; a route with less remaining lease is inventory, not replacement evidence.
 ALLOCATOR_DESTRUCTIVE_LEASE_MARGIN_SECONDS = 30.0
 _ROUTABLE_NODE_STATES = frozenset((NodeState.ACCEPTING, NodeState.THROTTLED))
+_MAX_AFFINITY_KEY_BYTES = 256
+_AFFINITY_ROUTE_SLOWDOWN_FRACTION = 0.20
 
 
 class NodeCreateRequest(BaseModel):
@@ -783,6 +786,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         app,
         model,
         requested_output_tokens=_requested_output_tokens(body),
+        affinity_digest=_affinity_digest(request.headers.get("x-grid-affinity-key")),
     )
     if not engine:
         _observe_allocator_request(app, model, started_at, error=True, queue_depth=1)
@@ -1183,7 +1187,12 @@ async def _proxy_media(
 
     # media=True: only engines that actually advertise a media URL are candidates, so a text-only
     # or stale registration of the same model can never win the pick and 503 a healthy grid.
-    engine = _choose_engine(app, model, media=True)
+    engine = _choose_engine(
+        app,
+        model,
+        media=True,
+        affinity_digest=_affinity_digest(request.headers.get("x-grid-affinity-key")),
+    )
 
     if not engine:
         return _openai_error(
@@ -1408,6 +1417,7 @@ def _choose_engine(
     *,
     media: bool = False,
     requested_output_tokens: int = 0,
+    affinity_digest: bytes | None = None,
 ) -> Node | None:
     """The least-loaded live engine serving ``model``.
 
@@ -1432,23 +1442,66 @@ def _choose_engine(
     now = time.time()
     latency_baseline = _route_latency_baseline(engines, model=model, now=now)
     throughput_baseline = _route_throughput_baseline(engines, model=model, now=now)
+    completion_scores = {
+        engine.node_id: _route_expected_completion_score(
+            engine,
+            model=model,
+            now=now,
+            latency_baseline_ms=latency_baseline,
+            throughput_baseline=throughput_baseline,
+            requested_output_tokens=requested_output_tokens,
+        )
+        for engine in engines
+    }
     engines.sort(
         key=lambda engine: (
             _route_priority(engine),
-            _route_expected_completion_score(
-                engine,
-                model=model,
-                now=now,
-                latency_baseline_ms=latency_baseline,
-                throughput_baseline=throughput_baseline,
-                requested_output_tokens=requested_output_tokens,
-            ),
+            completion_scores[engine.node_id],
             _route_load_score(engine),
             _route_lease_age(engine, now=now),
             engine.node_id,
         )
     )
+    if engines and affinity_digest is not None:
+        best_priority = _route_priority(engines[0])
+        same_protection = [
+            engine for engine in engines if _route_priority(engine) == best_priority
+        ]
+        best_completion = min(
+            completion_scores[engine.node_id] for engine in same_protection
+        )
+        affinity_band = best_completion * (
+            1.0 + _AFFINITY_ROUTE_SLOWDOWN_FRACTION
+        )
+        affinity_candidates = [
+            engine
+            for engine in same_protection
+            if completion_scores[engine.node_id] <= affinity_band
+        ]
+        return max(
+            affinity_candidates,
+            key=lambda engine: (
+                _affinity_rank(affinity_digest, model=model, node_id=engine.node_id),
+                engine.node_id,
+            ),
+        )
     return engines[0] if engines else None
+
+
+def _affinity_digest(value: str | None) -> bytes | None:
+    """Hash a bounded opaque key immediately; raw session identifiers are never retained."""
+
+    if not value or not value.isprintable():
+        return None
+    encoded = value.encode("utf-8")
+    if len(encoded) > _MAX_AFFINITY_KEY_BYTES:
+        return None
+    return hashlib.sha256(encoded).digest()
+
+
+def _affinity_rank(digest: bytes, *, model: str, node_id: str) -> int:
+    payload = b"\0".join((digest, model.encode("utf-8"), node_id.encode("utf-8")))
+    return int.from_bytes(hashlib.sha256(payload).digest(), "big")
 
 
 def _engine_dict(node: Node) -> dict[str, Any]:

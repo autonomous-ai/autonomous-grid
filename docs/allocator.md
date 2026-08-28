@@ -101,6 +101,15 @@ For text generation, a bounded `max_completion_tokens` or `max_tokens` hint adds
 lower bound to that estimate, allowing short requests to favor low latency and long generations to
 favor high token throughput. Grid never inspects or stores prompt content for this decision.
 
+Clients with multi-turn or iterative workloads may send an opaque `X-Grid-Affinity-Key` header.
+Grid immediately hashes a printable key of at most 256 UTF-8 bytes and uses rendezvous hashing to
+keep that model's requests on the same near-equivalent engine, preserving runtime KV/prompt caches
+without a centralized session map. The raw key is neither retained nor forwarded upstream. Host
+protection and admission remain hard gates, and affinity considers only the best protection class
+and routes whose estimated completion time is within 20% of the best available route. Adding or
+removing an otherwise equivalent engine therefore remaps only the sessions assigned to the changed
+engine; load, throttling, or failure can still move a session immediately.
+
 The proxy attributes each successful response to both the engine and requested model, keeping
 bounded EWMAs of end-to-end latency and completion-token throughput. Those server-owned measurements
 override self-reported estimates in placement snapshots, so actual service performance eventually
