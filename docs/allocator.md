@@ -82,7 +82,8 @@ a fraction of each engine's effective concurrency limit rather than comparing ra
 This keeps a wide-batching vLLM server from appearing busier than a narrow llama.cpp engine merely
 because it safely carries more simultaneous work. Missing capacity remains conservative raw load;
 zero capacity remains closed. Throttled-host priority and hard admission limits still take
-precedence over this load balance.
+precedence over this load balance. Equivalent engines prefer the freshest lease, but a timestamp
+inside the allowed future-skew window is clamped to zero age and cannot gain extra priority.
 
 The proxy attributes each successful response to both the engine and requested model, keeping
 bounded EWMAs of end-to-end latency and completion-token throughput. Those server-owned measurements

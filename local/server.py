@@ -1266,7 +1266,7 @@ def _active_engines(app: FastAPI, model: str | None = None) -> list[Node]:
             _route_priority(item),
             _route_load_score(item),
             _load_score(item.load),
-            item.last_heartbeat,
+            _route_lease_age(item, now=now),
             item.node_id,
         )
     )
@@ -1380,6 +1380,12 @@ def _route_load_score(node: Node) -> float:
     if limit <= 0:
         return math.inf
     return active / limit
+
+
+def _route_lease_age(node: Node, *, now: float) -> float:
+    """Prefer fresh equivalent engines without rewarding a future-skewed heartbeat."""
+
+    return max(0.0, now - node.last_heartbeat)
 
 
 def _node_concurrency_limit(node: Node) -> int | None:

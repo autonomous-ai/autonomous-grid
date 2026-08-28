@@ -1494,6 +1494,32 @@ def test_router_distributes_demand_in_proportion_to_engine_capacity(tmp_path):
     )
 
 
+def test_router_prefers_fresh_equal_load_without_rewarding_future_clock_skew(
+    tmp_path,
+    monkeypatch,
+):
+    app, client, _ = _app(tmp_path)
+    _managed_engine(client, host_id="old", model_id="qwen")
+    _managed_engine(client, host_id="fresh", model_id="qwen")
+    old = app.state.nodes[engine_node_id("old", "qwen")]
+    fresh = app.state.nodes[engine_node_id("fresh", "qwen")]
+    old.allocator["max_concurrency"] = 4
+    fresh.allocator["max_concurrency"] = 4
+    old.last_heartbeat = 970
+    fresh.last_heartbeat = 999
+    monkeypatch.setattr(server_module.time, "time", lambda: 1_000)
+
+    assert server_module._choose_engine(app, "qwen") is fresh
+
+    # Both a current timestamp and an allowed positive skew have age zero. Stable node identity,
+    # not the forged amount of future skew, resolves that tie.
+    old.last_heartbeat = 1_020
+    fresh.last_heartbeat = 1_000
+    assert server_module._route_lease_age(old, now=1_000) == 0
+    assert server_module._route_lease_age(fresh, now=1_000) == 0
+    assert server_module._choose_engine(app, "qwen") is fresh
+
+
 def test_proxy_owned_last_used_timestamp_survives_allocator_snapshot(tmp_path):
     app, client, _ = _app(tmp_path)
     _managed_engine(client, host_id="host-used", model_id="qwen")
