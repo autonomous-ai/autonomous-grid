@@ -568,6 +568,14 @@ def run(
                         timeout=timeout,
                         label="first model offloaded before second model expands",
                     )
+                    learned_warm_seconds = [
+                        *learned_warm_seconds,
+                        *_require_learned_warm_times(
+                            client,
+                            model=second_model,
+                            replicas=nodes,
+                        ),
+                    ]
 
                     completion = _stream_real_completion(client, second_model)
                     measured_performance = _require_measured_performance(client)
