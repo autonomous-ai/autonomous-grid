@@ -236,7 +236,8 @@ serves — Grid does not download it or start it, it only routes to it:
 grid join http://192.168.1.25:8090 --at http://192.168.1.20:11434/v1 -m "qwen3-coder" --name "gpu-4090"
 ```
 
-`11434` is Ollama's port; vLLM is usually `8000` and LM Studio `1234`.
+Grid attaches to any engine that speaks the OpenAI API — Ollama, vLLM and LM Studio among them — so
+point it at whichever one you already run. Each prints its own URL when it starts.
 
 **It is somewhere else** — another office, a friend's house, behind a VPN. Local mode needs every
 computer on the same network, so this one needs [remote mode](#working-from-anywhere).
@@ -419,10 +420,16 @@ grid mode remote
 
 # Sign in; opens a browser
 grid login
+
+# Pick which grid to work with — signing in does not choose one for you
+grid ls
+grid use <grid-name>
 ```
 
 - The mode is remembered. `--local` / `--remote` overrides one command.
 - `grid login` opens a browser. `--no-browser` prints a code to type instead.
+- Signing in never selects a grid, so `grid use` is the step that makes one active. Until then the
+  other commands have nothing to talk to. `grid start <grid-name>` on a new grid still needs it too.
 - Requests pass through our relay, which local mode never does. We forward and keep nothing — no
   stored prompts, no training on your traffic.
 
