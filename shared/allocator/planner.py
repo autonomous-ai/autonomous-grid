@@ -41,6 +41,7 @@ class PlannerPolicy:
     error_pressure_limit: float = 0.5
     model_failure_penalty: float = 50_000.0
     performance_ttl_seconds: float = 900.0
+    performance_full_confidence_samples: int = 8
     max_predictive_lookahead_seconds: float = 300.0
     predictive_growth_limit: float = 2.0
     throttled_capacity_fraction: float = 0.5
@@ -68,6 +69,14 @@ class PlannerPolicy:
             raise ValueError("predictive_growth_limit must be finite and at least 1")
         if self.queue_items_per_replica < 1:
             raise ValueError("queue_items_per_replica must be positive")
+        if (
+            isinstance(self.performance_full_confidence_samples, bool)
+            or not isinstance(self.performance_full_confidence_samples, int)
+            or not 1 <= self.performance_full_confidence_samples <= MAX_COUNTER
+        ):
+            raise ValueError(
+                f"performance_full_confidence_samples must be in [1, {MAX_COUNTER}]"
+            )
         if (
             not math.isfinite(self.latency_pressure_limit)
             or not math.isfinite(self.error_pressure_limit)
@@ -1174,14 +1183,29 @@ def _candidate_score(
     # Best fit preserves a large contiguous-capacity host for a future large model.
     score += 2_000.0 / (1.0 + after / max(model_memory_mb, 1))
     model_performance = node.performance(model.model_id)
+    model_performance_weight = 0.0
     if model_performance is not None:
         performance_age = now - model_performance.updated_at
         if not model_performance.updated_at or not (
             -policy.max_future_clock_skew_seconds
             <= performance_age
-            <= policy.performance_ttl_seconds
+            < policy.performance_ttl_seconds
         ):
             model_performance = None
+        else:
+            sample_confidence = min(
+                1.0,
+                model_performance.sample_count
+                / policy.performance_full_confidence_samples,
+            )
+            freshness = (
+                max(0.0, 1.0 - max(0.0, performance_age) / policy.performance_ttl_seconds)
+                if policy.performance_ttl_seconds
+                else 1.0
+            )
+            model_performance_weight = sample_confidence * freshness
+            if not model_performance_weight:
+                model_performance = None
     ready_models = sum(item.state == ResidencyState.READY for item in node.residencies)
     # A node-wide metric is safe for an empty/single-model engine, and remains a useful generic
     # benchmark for a cold host. Once an engine serves several models it is not attributable: use
@@ -1201,18 +1225,28 @@ def _candidate_score(
         if node_metric_is_attributable
         else 0.0
     )
+    performance_weight = model_performance_weight if model_performance is not None else 1.0
     if measured_tokens_per_second:
-        score += min(measured_tokens_per_second, 10_000.0) * 2.0
+        score += min(measured_tokens_per_second, 10_000.0) * 2.0 * performance_weight
         reasons.append("measured throughput")
-    elif node.memory_bandwidth_gbps or node.compute_gflops:
+    hardware_weight = 1.0
+    if measured_tokens_per_second:
+        hardware_weight = (
+            1.0 - performance_weight if model_performance is not None else 0.0
+        )
+    if hardware_weight and (node.memory_bandwidth_gbps or node.compute_gflops):
         # Model serving is usually bandwidth-bound; compute is a smaller secondary prior. These
-        # estimates only break cold/unmeasured ties: READY and cached placement bonuses above are
-        # intentionally much larger, so hardware heterogeneity never causes gratuitous migration.
-        score += min(node.memory_bandwidth_gbps, 2_000.0) * 10.0
-        score += min(math.log2(1.0 + node.compute_gflops) * 100.0, 2_000.0)
+        # estimates break cold/unmeasured ties and blend out as proxy evidence matures. READY and
+        # cached bonuses above are intentionally much larger, so hardware heterogeneity never
+        # causes gratuitous migration.
+        score += min(node.memory_bandwidth_gbps, 2_000.0) * 10.0 * hardware_weight
+        score += (
+            min(math.log2(1.0 + node.compute_gflops) * 100.0, 2_000.0)
+            * hardware_weight
+        )
         reasons.append("hardware performance estimate")
     if measured_latency_ms:
-        score -= min(measured_latency_ms, 60_000.0) / 50.0
+        score -= min(measured_latency_ms, 60_000.0) / 50.0 * performance_weight
     if node.max_concurrency > 0:
         utilization = node.active_requests / node.max_concurrency
         if utilization:

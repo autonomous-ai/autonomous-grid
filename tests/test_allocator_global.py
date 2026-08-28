@@ -332,7 +332,7 @@ def test_multi_model_engine_uses_only_per_model_performance_for_placement():
                 profile.model_id,
                 tokens_per_second=300,
                 latency_ms=50,
-                sample_count=5,
+                sample_count=8,
                 updated_at=10,
             ),
         ),
@@ -362,6 +362,99 @@ def test_multi_model_engine_uses_only_per_model_performance_for_placement():
         PlannerPolicy(performance_ttl_seconds=5),
     ).plan((fresh, measured_qwen), (profile,), now=10)
     assert refreshed.nodes_for(profile.model_id) == ("multi-model",)
+
+
+def test_per_model_performance_weights_sample_confidence_over_one_outlier():
+    profile = model()
+    noisy = node(
+        "noisy",
+        residencies=(ready(), ready("other")),
+        model_performance=(
+            ModelPerformance(
+                profile.model_id,
+                tokens_per_second=1_000,
+                latency_ms=10,
+                sample_count=1,
+                updated_at=100,
+            ),
+        ),
+        now=100,
+    )
+    mature = node(
+        "mature",
+        residencies=(ready(), ready("other")),
+        model_performance=(
+            ModelPerformance(
+                profile.model_id,
+                tokens_per_second=200,
+                latency_ms=100,
+                sample_count=8,
+                updated_at=100,
+            ),
+        ),
+        now=100,
+    )
+
+    plan = PlacementPlanner().plan((noisy, mature), (profile,), now=100)
+
+    assert plan.nodes_for(profile.model_id) == ("mature",)
+
+    cold_prior = replace(
+        noisy,
+        memory_bandwidth_gbps=400,
+        compute_gflops=27_132,
+    )
+    blended = PlacementPlanner().plan((cold_prior,), (profile,), now=100)
+    assert set(blended.assignments[0].reasons) >= {
+        "measured throughput",
+        "hardware performance estimate",
+    }
+    trusted = replace(
+        cold_prior,
+        model_performance=(
+            replace(cold_prior.model_performance[0], sample_count=8),
+        ),
+    )
+    mature_plan = PlacementPlanner().plan((trusted,), (profile,), now=100)
+    assert "hardware performance estimate" not in mature_plan.assignments[0].reasons
+
+
+def test_per_model_performance_decays_smoothly_before_expiry():
+    profile = model()
+
+    def measured(node_id: str, updated_at: float) -> NodeSnapshot:
+        return node(
+            node_id,
+            residencies=(ready(), ready("other")),
+            model_performance=(
+                ModelPerformance(
+                    profile.model_id,
+                    tokens_per_second=200,
+                    latency_ms=100,
+                    sample_count=8,
+                    updated_at=updated_at,
+                ),
+            ),
+            now=100,
+        )
+
+    fresh = measured("fresh", 99)
+    aging = measured("aging", 25)
+    plan = PlacementPlanner(PlannerPolicy(performance_ttl_seconds=100)).plan(
+        (aging, fresh),
+        (profile,),
+        now=100,
+    )
+
+    assert plan.nodes_for(profile.model_id) == ("fresh",)
+
+    expired = measured("expired", 1)
+    boundary = PlacementPlanner(PlannerPolicy(performance_ttl_seconds=99)).plan(
+        (expired,),
+        (profile,),
+        now=100,
+    )
+    assert "measured throughput" not in boundary.assignments[0].reasons
 
 
 def ready(
@@ -526,6 +619,10 @@ def test_allocator_models_validate_impossible_values():
         ready(active_requests=-1)
     with pytest.raises(ValueError, match="non-negative"):
         PlannerPolicy(performance_ttl_seconds=-1)
+    with pytest.raises(ValueError, match="performance_full_confidence_samples"):
+        PlannerPolicy(performance_full_confidence_samples=0)
+    with pytest.raises(ValueError, match="performance_full_confidence_samples"):
+        PlannerPolicy(performance_full_confidence_samples=True)
     with pytest.raises(ValueError, match="non-negative"):
         PlannerPolicy(max_predictive_lookahead_seconds=-1)
     with pytest.raises(ValueError, match="predictive_growth_limit"):

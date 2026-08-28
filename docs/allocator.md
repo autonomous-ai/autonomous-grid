@@ -75,6 +75,9 @@ bounded EWMAs of end-to-end latency and completion-token throughput. Those serve
 override self-reported estimates in placement snapshots, so actual service performance eventually
 supersedes the cold hardware prior. A multi-model vLLM engine is scored only with measurements for
 the model being placed; its fast model cannot lend an unrelated slow model an inflated score.
+Per-model evidence ramps to full placement authority over eight successful samples and then decays
+with age, preventing one fast outlier or an almost-expired benchmark from dominating a mature
+measurement. Current engine-reported node telemetry remains fully weighted.
 Streaming responses still contribute latency even when their wire format does not expose token
 usage. The measurements are private: discovery does not expose them, managed heartbeats cannot
 overwrite them, and no prompt or response content is retained for allocator telemetry. A bounded
