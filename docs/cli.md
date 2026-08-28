@@ -534,6 +534,7 @@ the `openai:*` namespacing, and the key-store lifecycle.
 grid allocator status [--grid <g>] [--json]
 
 grid allocator model set <model> --memory-mb <n>
+    [--artifact-sha256 <64-hex-digest>]
     [--runtime <name>]... [--backend <name>]... [--data-tier <tier>]
     [--required-tag <tag>]... [--forbidden-tag <tag>]... [--pin <host>]...
     [--min-replicas <n>] [--max-replicas <n>] [--target-utilization <f>]

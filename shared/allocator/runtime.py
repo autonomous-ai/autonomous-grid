@@ -12,6 +12,7 @@ automatic mode from fetching mutable or unverified artifacts behind an administr
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import math
 import os
@@ -47,6 +48,7 @@ from shared.allocator.models import (
     MutationAction,
     NodeState,
     ResidencyState,
+    canonical_sha256,
 )
 from shared.allocator.reconcile import MutationStatus
 from shared.models import store as model_store
@@ -152,6 +154,7 @@ class ManagedResidency:
     load_failures: int = 0
     pinned: bool = False
     handle: RuntimeHandle | None = None
+    artifact_sha256: str = ""
 
     def __post_init__(self) -> None:
         if not self.model_id or self.memory_mb <= 0:
@@ -164,6 +167,9 @@ class ManagedResidency:
             raise ValueError(
                 "managed residency counters and timestamps must be non-negative"
             )
+        object.__setattr__(
+            self, "artifact_sha256", canonical_sha256(self.artifact_sha256)
+        )
 
     def to_model_residency(self) -> ModelResidency:
         return ModelResidency(
@@ -175,6 +181,7 @@ class ManagedResidency:
             load_failures=self.load_failures,
             pinned=self.pinned,
             managed=True,
+            artifact_sha256=self.artifact_sha256,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -198,6 +205,7 @@ class ManagedResidency:
                 if isinstance(raw_handle, Mapping)
                 else None
             ),
+            artifact_sha256=value.get("artifact_sha256") or "",
         )
 
 
@@ -263,6 +271,8 @@ class ModelRuntimeBackend(Protocol):
     """Side-effect boundary used by the node state machine and its tests."""
 
     def cached_models(self) -> tuple[str, ...]: ...
+
+    def artifact_sha256(self, model_id: str) -> str: ...
 
     def start(self, model_id: str, port: int) -> RuntimeHandle: ...
 
@@ -351,6 +361,8 @@ class LlamaCppBackend:
         self._starting: set[int] = set()
         self._cancelled = False
         self._lock = threading.Lock()
+        self._artifact_lock = threading.Lock()
+        self._artifact_digests: dict[tuple[str, int, int, int, int, int], str] = {}
 
     def configure_api_key(self, api_key: str) -> None:
         """Install the runtime's durable key before adopting or starting any process."""
@@ -384,6 +396,53 @@ class LlamaCppBackend:
             for item in model_store.list_all()
             if item.path.suffix.lower() == ".gguf"
         )
+
+    def artifact_sha256(self, model_id: str) -> str:
+        """Hash the exact cached GGUF, caching only an unchanged filesystem identity."""
+
+        path = _cached_model_path(model_id)
+        if path is None:
+            raise RuntimeError(f"model weights are not cached: {model_id!r}")
+        try:
+            with path.open("rb") as artifact:
+                before = os.fstat(artifact.fileno())
+                key = (
+                    str(path.resolve()),
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
+                with self._artifact_lock:
+                    cached = self._artifact_digests.get(key)
+                if cached is not None:
+                    after = os.fstat(artifact.fileno())
+                    current = path.stat()
+                    if _stat_identity(before) != _stat_identity(
+                        after
+                    ) or _stat_identity(before) != _stat_identity(current):
+                        raise RuntimeError(
+                            f"cached model changed while checking its hash: {model_id!r}"
+                        )
+                    return cached
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                after = os.fstat(artifact.fileno())
+            current = path.stat()
+        except OSError as exc:
+            raise RuntimeError(f"could not hash cached model {model_id!r}: {exc}") from exc
+        if _stat_identity(before) != _stat_identity(after) or _stat_identity(
+            before
+        ) != _stat_identity(current):
+            raise RuntimeError(f"cached model changed while hashing: {model_id!r}")
+        value = digest.hexdigest()
+        with self._artifact_lock:
+            self._artifact_digests[key] = value
+            while len(self._artifact_digests) > 64:
+                self._artifact_digests.pop(next(iter(self._artifact_digests)))
+        return value
 
     def start(self, model_id: str, port: int) -> RuntimeHandle:
         return self._start(model_id, port, on_spawn=None)
@@ -1190,6 +1249,7 @@ class ManagedModelRuntime:
                 load_failures=current.load_failures,
                 pinned=current.pinned,
                 handle=current.handle,
+                artifact_sha256=current.artifact_sha256,
             )
             self._save_locked()
             return True
@@ -1350,6 +1410,7 @@ class ManagedModelRuntime:
                 residency.load_failures,
                 residency.pinned,
                 handle,
+                residency.artifact_sha256,
             )
         if (
             not recovering
@@ -1379,6 +1440,7 @@ class ManagedModelRuntime:
             ),
             residency.pinned,
             handle if alive is not False else None,
+            residency.artifact_sha256,
         )
 
     def begin_shutdown(self) -> None:
@@ -1407,6 +1469,7 @@ class ManagedModelRuntime:
                     load_failures=residency.load_failures,
                     pinned=residency.pinned,
                     handle=residency.handle,
+                    artifact_sha256=residency.artifact_sha256,
                 )
                 changed = True
             if changed:
@@ -1526,6 +1589,7 @@ class ManagedModelRuntime:
                         last_used_at=current.last_used_at,
                         load_failures=current.load_failures,
                         pinned=current.pinned,
+                        artifact_sha256=current.artifact_sha256,
                     )
                     changed = True
             if changed:
@@ -1631,6 +1695,24 @@ class ManagedModelRuntime:
             time.sleep(0.01)
         return not self.busy
 
+    def _verify_action_artifact(self, action: MutationAction) -> str:
+        """Return the proven artifact identity required by a lifecycle command."""
+
+        if not action.artifact_sha256:
+            return ""
+        verifier = getattr(self.backend, "artifact_sha256", None)
+        if not callable(verifier):
+            raise RuntimeError(
+                "runtime backend cannot verify the requested model artifact SHA-256"
+            )
+        actual = canonical_sha256(verifier(action.model_id), "backend artifact SHA-256")
+        if actual != action.artifact_sha256:
+            raise RuntimeError(
+                f"artifact SHA-256 mismatch for {action.model_id!r}: "
+                f"expected {action.artifact_sha256}, found {actual}"
+            )
+        return actual
+
     def _execute(self, action: MutationAction) -> None:
         try:
             if action.kind == ActionKind.LOAD:
@@ -1657,6 +1739,7 @@ class ManagedModelRuntime:
             raise RuntimeError(
                 f"model weights are not cached: {action.model_id!r}; pull an immutable GGUF first"
             )
+        verified_artifact = self._verify_action_artifact(action)
         with self._lock:
             current = self._residencies.get(action.model_id)
             if (
@@ -1666,6 +1749,12 @@ class ManagedModelRuntime:
             ):
                 # LOAD only verifies weights. Never discard a live runtime handle, including an
                 # ambiguous FAILED one, because that could permit a later duplicate WARM.
+                if action.artifact_sha256 and (
+                    current.artifact_sha256 != action.artifact_sha256
+                ):
+                    raise RuntimeError(
+                        "a different artifact version is live; drain it before replacement"
+                    )
                 return
             if current and current.state in (
                 ResidencyState.READY,
@@ -1681,12 +1770,17 @@ class ManagedModelRuntime:
                 last_used_at=current.last_used_at if current else 0.0,
                 load_failures=current.load_failures if current else 0,
                 pinned=current.pinned if current else False,
+                artifact_sha256=(
+                    verified_artifact
+                    or (current.artifact_sha256 if current else "")
+                ),
             )
             self._save_locked()
 
     def _warm(self, action: MutationAction) -> None:
         if action.model_id not in self.backend.cached_models():
             raise RuntimeError(f"cannot warm uncached model {action.model_id!r}")
+        verified_artifact = self._verify_action_artifact(action)
         recovery_handle: RuntimeHandle | None = None
         with self._lock:
             if self._shutting_down:
@@ -1697,6 +1791,12 @@ class ManagedModelRuntime:
                 owned = alive and self.backend.owns(current.handle, current.model_id)
                 ready = owned and self.backend.ready(current.handle, current.model_id)
                 if ready:
+                    if action.artifact_sha256 and (
+                        current.artifact_sha256 != action.artifact_sha256
+                    ):
+                        raise RuntimeError(
+                            "a different artifact version is live; drain it before replacement"
+                        )
                     if current.state != ResidencyState.READY:
                         # Demand can rebound after DRAIN but before UNLOAD. Re-admit the proven-live
                         # process instead of starting a duplicate copy on a second port.
@@ -1709,6 +1809,7 @@ class ManagedModelRuntime:
                             load_failures=current.load_failures,
                             pinned=current.pinned,
                             handle=current.handle,
+                            artifact_sha256=current.artifact_sha256,
                         )
                         self._save_locked()
                     return
@@ -1732,6 +1833,7 @@ class ManagedModelRuntime:
                         current.load_failures,
                         current.pinned,
                         current.handle,
+                        current.artifact_sha256,
                     )
                     self._residencies[action.model_id] = current
                     self._save_locked()
@@ -1745,6 +1847,8 @@ class ManagedModelRuntime:
                         current.last_used_at,
                         current.load_failures,
                         current.pinned,
+                        None,
+                        current.artifact_sha256,
                     )
                     self._residencies[action.model_id] = current
                     self._save_locked()
@@ -1803,6 +1907,7 @@ class ManagedModelRuntime:
                             load_failures=current.load_failures,
                             pinned=current.pinned,
                             handle=recovery_handle,
+                            artifact_sha256=current.artifact_sha256,
                         )
                         self._save_locked()
                         return
@@ -1819,6 +1924,8 @@ class ManagedModelRuntime:
                         current.last_used_at,
                         current.load_failures,
                         current.pinned,
+                        None,
+                        current.artifact_sha256,
                     )
                     self._residencies[action.model_id] = current
                     self._save_locked()
@@ -1843,6 +1950,10 @@ class ManagedModelRuntime:
                 last_used_at=current.last_used_at if current else 0.0,
                 load_failures=failures,
                 pinned=current.pinned if current else False,
+                artifact_sha256=(
+                    verified_artifact
+                    or (current.artifact_sha256 if current else "")
+                ),
             )
             self._save_locked()
         with self._lock:
@@ -1860,6 +1971,10 @@ class ManagedModelRuntime:
                     load_failures=failures,
                     pinned=current.pinned if current else False,
                     handle=handle,
+                    artifact_sha256=(
+                        verified_artifact
+                        or (current.artifact_sha256 if current else "")
+                    ),
                 )
                 self._save_locked()
 
@@ -1887,6 +2002,10 @@ class ManagedModelRuntime:
                 load_failures=failures,
                 pinned=current.pinned if current else False,
                 handle=handle,
+                artifact_sha256=(
+                    verified_artifact
+                    or (current.artifact_sha256 if current else "")
+                ),
             )
             self._save_locked()
 
@@ -1895,6 +2014,12 @@ class ManagedModelRuntime:
             current = self._residencies.get(action.model_id)
             if current is None or current.state == ResidencyState.CACHED:
                 return
+            if action.artifact_sha256 and (
+                current.artifact_sha256 != action.artifact_sha256
+            ):
+                raise RuntimeError(
+                    "residency artifact changed; refusing stale drain command"
+                )
             self._residencies[action.model_id] = ManagedResidency(
                 model_id=current.model_id,
                 memory_mb=current.memory_mb,
@@ -1904,6 +2029,7 @@ class ManagedModelRuntime:
                 load_failures=current.load_failures,
                 pinned=current.pinned,
                 handle=current.handle,
+                artifact_sha256=current.artifact_sha256,
             )
             self._save_locked()
 
@@ -1914,6 +2040,12 @@ class ManagedModelRuntime:
                 current.state == ResidencyState.CACHED and current.handle is None
             ):
                 return
+            if action.artifact_sha256 and (
+                current.artifact_sha256 != action.artifact_sha256
+            ):
+                raise RuntimeError(
+                    "residency artifact changed; refusing stale unload command"
+                )
             if current.state not in (ResidencyState.DRAINING, ResidencyState.FAILED):
                 raise RuntimeError("model must be drained before unload")
             handle = current.handle
@@ -1932,6 +2064,7 @@ class ManagedModelRuntime:
                 last_used_at=current.last_used_at,
                 load_failures=current.load_failures,
                 pinned=current.pinned,
+                artifact_sha256=current.artifact_sha256,
             )
             self._save_locked()
 
@@ -1939,7 +2072,12 @@ class ManagedModelRuntime:
         message = str(exc).strip() or type(exc).__name__
         with self._lock:
             current = self._residencies.get(action.model_id)
-            if action.kind in (ActionKind.LOAD, ActionKind.WARM):
+            if action.kind in (ActionKind.LOAD, ActionKind.WARM) and not (
+                current is not None
+                and current.handle is not None
+                and action.artifact_sha256
+                and current.artifact_sha256 != action.artifact_sha256
+            ):
                 handle = current.handle if current else None
                 if handle is not None and not self._backend_alive(
                     handle, action.model_id
@@ -1959,6 +2097,11 @@ class ManagedModelRuntime:
                     load_failures=(current.load_failures if current else 0) + 1,
                     pinned=current.pinned if current else False,
                     handle=handle,
+                    artifact_sha256=(
+                        current.artifact_sha256
+                        if current is not None
+                        else action.artifact_sha256
+                    ),
                 )
             self._finish_locked(action, MutationStatus.FAILED, message)
 
@@ -2063,6 +2206,8 @@ class ManagedModelRuntime:
                         residency.last_used_at,
                         residency.load_failures + int(state == ResidencyState.FAILED),
                         residency.pinned,
+                        None,
+                        residency.artifact_sha256,
                     )
                     continue
                 if residency.handle is not None:
@@ -2086,6 +2231,8 @@ class ManagedModelRuntime:
                     residency.last_used_at,
                     residency.load_failures + int(state == ResidencyState.FAILED),
                     residency.pinned,
+                    None,
+                    residency.artifact_sha256,
                 )
             snapshot = tuple(
                 (model_id, residency)
@@ -2308,6 +2455,7 @@ def _model_residency_dict(
         "load_failures": residency.load_failures,
         "pinned": residency.pinned,
         "managed": residency.managed,
+        "artifact_sha256": residency.artifact_sha256,
     }
     if now is not None:
         payload["loaded_age_seconds"] = min(
@@ -2327,6 +2475,16 @@ def _cached_model_path(model_id: str) -> Path | None:
     return next(
         (Path(item.path) for item in model_store.list_all() if item.name == model_id),
         None,
+    )
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
     )
 
 

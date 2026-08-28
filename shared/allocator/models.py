@@ -21,6 +21,7 @@ SCHEMA_VERSION = 1
 MAX_MEMORY_MB = 1_000_000_000
 MAX_COUNTER = 1_000_000_000
 MAX_ID_LENGTH = 1_024
+SHA256_HEX_LENGTH = 64
 
 
 class NodeState(StrEnum):
@@ -69,6 +70,21 @@ def _canonical_set(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(sorted({str(value) for value in values if str(value)}))
 
 
+def canonical_sha256(value: Any, name: str = "artifact_sha256") -> str:
+    """Validate and canonicalize an optional immutable artifact identity."""
+
+    if value in (None, ""):
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a 64-character hexadecimal SHA-256")
+    normalized = value.lower()
+    if len(normalized) != SHA256_HEX_LENGTH or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        raise ValueError(f"{name} must be a 64-character hexadecimal SHA-256")
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class ModelResidency:
     model_id: str
@@ -80,6 +96,7 @@ class ModelResidency:
     pinned: bool = False
     managed: bool = True
     active_requests: int = 0
+    artifact_sha256: str = ""
 
     def __post_init__(self) -> None:
         if not self.model_id or len(self.model_id) > MAX_ID_LENGTH:
@@ -94,6 +111,11 @@ class ModelResidency:
             raise ValueError("active_requests is outside the supported range")
         if not isinstance(self.state, ResidencyState):
             object.__setattr__(self, "state", ResidencyState(self.state))
+        object.__setattr__(
+            self,
+            "artifact_sha256",
+            canonical_sha256(self.artifact_sha256),
+        )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ModelResidency:
@@ -107,6 +129,7 @@ class ModelResidency:
             pinned=bool(value.get("pinned", False)),
             managed=bool(value.get("managed", True)),
             active_requests=int(value.get("active_requests") or 0),
+            artifact_sha256=value.get("artifact_sha256") or "",
         )
 
 
@@ -377,6 +400,7 @@ class ModelProfile:
     min_failure_domains: int = 1
     min_gpu_count: int = 0
     min_gpu_memory_mb: int = 0
+    artifact_sha256: str = ""
 
     def __post_init__(self) -> None:
         if not self.model_id or len(self.model_id) > MAX_ID_LENGTH:
@@ -462,6 +486,11 @@ class ModelProfile:
             )
         if len(self.pinned_nodes) > self.max_replicas:
             raise ValueError("pinned_nodes cannot exceed max_replicas")
+        object.__setattr__(
+            self,
+            "artifact_sha256",
+            canonical_sha256(self.artifact_sha256),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {**asdict(self), "schema_version": SCHEMA_VERSION}
@@ -472,6 +501,14 @@ class ModelProfile:
         overrides = dict(self.runtime_memory_mb)
         matched = [overrides[runtime] for runtime in set(runtimes) if runtime in overrides]
         return max(matched, default=self.memory_mb)
+
+    def matches_artifact(self, residency: ModelResidency | None) -> bool:
+        """Whether a residency proves the immutable artifact requested by this profile."""
+
+        return residency is not None and (
+            not self.artifact_sha256
+            or residency.artifact_sha256 == self.artifact_sha256
+        )
 
     @property
     def maximum_memory_mb(self) -> int:
@@ -632,6 +669,7 @@ class MutationAction:
     not_before: float = 0.0
     dependencies: tuple[str, ...] = ()
     executable: bool = False
+    artifact_sha256: str = ""
 
     def __post_init__(self) -> None:
         if (
@@ -648,6 +686,11 @@ class MutationAction:
         if not isinstance(self.kind, ActionKind):
             object.__setattr__(self, "kind", ActionKind(self.kind))
         object.__setattr__(self, "dependencies", _unique(self.dependencies))
+        object.__setattr__(
+            self,
+            "artifact_sha256",
+            canonical_sha256(self.artifact_sha256),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Return the versioned command envelope sent to a managed node."""

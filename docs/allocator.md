@@ -37,8 +37,8 @@ request counts, latency, queues          host telemetry and local override
 
 The global loop consumes:
 
-- model profiles: memory, runtime/backend compatibility, replica bounds, priority, data tier,
-  placement tags, failure-domain goal, pins, and cooldowns;
+- model profiles: memory, optional immutable artifact SHA-256, runtime/backend compatibility,
+  replica bounds, priority, data tier, placement tags, failure-domain goal, pins, and cooldowns;
 - host snapshots: usable memory, reserve, runtime/backend, lifecycle state, policy tags, cached and
   resident models, concurrency, queue, measured throughput and latency, memory bandwidth, compute,
   heartbeat age, and actuator ownership;
@@ -299,7 +299,11 @@ local free-memory observation no longer satisfies the command.
 
 For now, `load` is deliberately verification-only: the requested model ID must already name a GGUF
 in Grid's model store. Run `grid pull <model>` before enabling automatic placement. The actuator
-does not infer a mutable download source from a display name.
+does not infer a mutable download source from a display name. When a profile declares
+`artifact_sha256`, `load` and `warm` hash the exact cached file before process launch. A residency
+reports the digest it proved; a same-named residency with a missing or different digest does not
+satisfy placement. Grid warms a matching replica elsewhere before draining the old version, and
+refuses an unsafe in-place replacement when no peer can preserve availability.
 
 ## Local wire contract
 
@@ -443,6 +447,7 @@ budget for one replica, not the file's compressed size:
 ```bash
 grid allocator model set <model.gguf> \
   --memory-mb 12000 \
+  --artifact-sha256 <64-hex-digest> \
   --min-replicas 1 \
   --max-replicas 3 \
   --min-failure-domains 2
@@ -451,6 +456,8 @@ grid allocator model set <model.gguf> \
 The profile command also accepts repeated `--runtime`, `--backend`, `--required-tag`,
 `--forbidden-tag`, and `--pin` constraints; data tier, target utilization, expected service time,
 latency SLO, priority, load/warm estimates, residency and scale-down cooldowns are explicit flags.
+`--artifact-sha256` is optional but recommended for managed production GGUFs; it is canonicalized
+to lowercase and becomes part of command, retry, and readiness identity.
 `--replica-concurrency` declares a conservative service-slot estimate for a newly managed replica.
 Once a single-model engine is ready, its live `max_concurrency` may prove a higher batch width; a
 multi-model engine's shared node-wide limit is never credited independently to every model. Queue,
@@ -627,9 +634,8 @@ partitioned so the harness never reports N times the physical Mac's capacity.
 - Model profiles accept a portable `memory_mb` fallback plus runtime-specific
   `runtime_memory_mb` estimates, so llama.cpp/Metal and vLLM/CUDA placements account for their
   distinct footprints. If a node advertises several matching runtimes, the planner conservatively
-  uses the largest matching estimate. Model identity is still currently a model ID plus these
-  memory requirements. Production artifact rollout
-  should additionally fence on an immutable source revision and checksum.
+  uses the largest matching estimate. Managed GGUF profiles can additionally require an immutable
+  SHA-256; remote artifact distribution and source-revision resolution remain operator-managed.
 - The planner is a transparent deterministic heuristic, not an optimal mixed-integer solver. It
   prioritizes predictable safety and understandable decisions over a mathematically minimal cost.
 - In-memory LAN node membership is rebuilt by registration after a local signaling-server restart;

@@ -175,6 +175,12 @@ def _add_allocator(sub) -> None:
     set_model.add_argument("model", help="Advertised model id; managed llama.cpp uses a cached GGUF filename.")
     set_model.add_argument("--memory-mb", type=int, required=True)
     set_model.add_argument(
+        "--artifact-sha256",
+        default="",
+        metavar="HEX",
+        help="Require this immutable GGUF SHA-256 on managed replicas.",
+    )
+    set_model.add_argument(
         "--runtime-memory-mb",
         action="append",
         default=[],

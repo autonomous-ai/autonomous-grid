@@ -89,6 +89,29 @@ def test_runtime_specific_memory_is_canonical_and_round_trips():
     assert replace(profile, memory_mb=30_000).maximum_memory_mb == 30_000
 
 
+def test_artifact_sha256_is_canonical_validated_and_round_trips():
+    profile = model(artifact_sha256="A" * 64)
+    residency = ModelResidency("qwen", 8_000, artifact_sha256="A" * 64)
+
+    assert profile.artifact_sha256 == "a" * 64
+    assert residency.artifact_sha256 == "a" * 64
+    assert profile.matches_artifact(residency)
+    assert ModelProfile.from_dict(profile.to_dict()) == profile
+    assert ModelResidency.from_dict(
+        {
+            "model_id": residency.model_id,
+            "memory_mb": residency.memory_mb,
+            "artifact_sha256": residency.artifact_sha256,
+        }
+    ) == residency
+
+
+@pytest.mark.parametrize("digest", ["short", "g" * 64, 1, True])
+def test_artifact_sha256_rejects_invalid_values(digest):
+    with pytest.raises(ValueError, match="SHA-256"):
+        model(artifact_sha256=digest)
+
+
 @pytest.mark.parametrize(
     "runtime_memory_mb",
     [
@@ -2070,6 +2093,153 @@ def test_reconciler_waits_for_replacement_before_draining_sole_replica():
     result = Reconciler().reconcile(plan, [old, target], [profile], now=100)
     assert [item.kind for item in result.actions] == [ActionKind.WARM]
     assert any(item.code == "replacement_not_ready" for item in result.deferred)
+
+
+def test_artifact_rollout_selects_only_matching_ready_replica():
+    profile = model(
+        min_replicas=1,
+        max_replicas=1,
+        artifact_sha256="b" * 64,
+    )
+    old = node(
+        "old",
+        residencies=(ready(artifact_sha256="a" * 64),),
+    )
+    current = node(
+        "current",
+        residencies=(ready(artifact_sha256="b" * 64),),
+    )
+
+    plan = PlacementPlanner().plan([old, current], [profile], now=100)
+
+    assert plan.nodes_for("qwen") == ("current",)
+    assert plan.assignments[0].existing is True
+
+
+def test_artifact_rollout_warms_replacement_before_draining_old_version():
+    profile = model(
+        min_replicas=1,
+        max_replicas=1,
+        min_residency_seconds=0,
+        artifact_sha256="b" * 64,
+    )
+    old = node(
+        "old",
+        residencies=(ready(artifact_sha256="a" * 64),),
+    )
+    target = node(
+        "target",
+        residencies=(
+            ModelResidency(
+                "qwen",
+                8_000,
+                ResidencyState.CACHED,
+                artifact_sha256="b" * 64,
+            ),
+        ),
+    )
+    plan = PlacementPlanner().plan([old, target], [profile], now=100)
+
+    waiting = Reconciler().reconcile(plan, [old, target], [profile], now=100)
+
+    assert [(item.kind, item.node_id) for item in waiting.actions] == [
+        (ActionKind.WARM, "target")
+    ]
+    assert waiting.actions[0].artifact_sha256 == "b" * 64
+    assert any(
+        item.node_id == "old" and item.code == "replacement_not_ready"
+        for item in waiting.deferred
+    )
+
+    ready_target = replace(
+        target,
+        residencies=(ready(artifact_sha256="b" * 64),),
+    )
+    converging = Reconciler().reconcile(
+        plan,
+        [old, ready_target],
+        [profile],
+        now=101,
+    )
+    assert [(item.kind, item.node_id) for item in converging.actions] == [
+        (ActionKind.DRAIN, "old")
+    ]
+    assert converging.actions[0].artifact_sha256 == "a" * 64
+
+
+def test_new_artifact_is_not_delayed_by_old_artifact_success_history():
+    profile = model(artifact_sha256="b" * 64)
+    target = node(
+        "target",
+        residencies=(
+            ModelResidency(
+                "qwen",
+                8_000,
+                ResidencyState.CACHED,
+                artifact_sha256="b" * 64,
+            ),
+        ),
+    )
+    plan = PlacementPlanner().plan([target], [profile], now=100)
+    old_success = MutationRecord(
+        "old-warm",
+        ActionKind.WARM,
+        "target",
+        "qwen",
+        MutationStatus.SUCCEEDED,
+        99,
+        completed_at=99,
+        artifact_sha256="a" * 64,
+    )
+
+    result = Reconciler().reconcile(
+        plan,
+        [target],
+        [profile],
+        [old_success],
+        now=100,
+    )
+
+    assert [(item.kind, item.artifact_sha256) for item in result.actions] == [
+        (ActionKind.WARM, "b" * 64)
+    ]
+
+
+def test_failed_process_keeps_matching_verified_artifact_cached():
+    profile = model(artifact_sha256="b" * 64)
+    target = node(
+        "target",
+        residencies=(
+            ModelResidency(
+                "qwen",
+                8_000,
+                ResidencyState.FAILED,
+                managed=True,
+                artifact_sha256="b" * 64,
+            ),
+        ),
+    )
+    plan = PlacementPlanner().plan([target], [profile], now=100)
+    prior_load = MutationRecord(
+        "prior-load",
+        ActionKind.LOAD,
+        "target",
+        "qwen",
+        MutationStatus.SUCCEEDED,
+        99,
+        completed_at=99,
+        artifact_sha256="b" * 64,
+    )
+
+    result = Reconciler().reconcile(
+        plan,
+        [target],
+        [profile],
+        [prior_load],
+        now=100,
+    )
+
+    assert [item.kind for item in result.actions] == [ActionKind.WARM]
 
 
 def test_reconciler_does_not_count_paused_ready_residency_as_replacement():

@@ -182,6 +182,8 @@ def test_model_set_sends_validated_profile_and_secret_header(monkeypatch, capsys
             "8",
             "--required-tag",
             "finance",
+            "--artifact-sha256",
+            "A" * 64,
         ]
     )
     assert args.handler(args) == 0
@@ -191,6 +193,7 @@ def test_model_set_sends_validated_profile_and_secret_header(monkeypatch, capsys
     assert captured["json"]["runtimes"] == ("llama.cpp",)
     assert captured["json"]["replica_concurrency"] == 8
     assert captured["json"]["required_tags"] == ("finance",)
+    assert captured["json"]["artifact_sha256"] == "a" * 64
     assert "secret-token" not in capsys.readouterr().out
 
 

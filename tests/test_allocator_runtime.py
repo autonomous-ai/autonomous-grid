@@ -34,6 +34,7 @@ from shared.system.hostsignals import HostSignals
 class FakeBackend:
     def __init__(self, cached: tuple[str, ...] = ("qwen.gguf",)) -> None:
         self.cached = set(cached)
+        self.artifacts = {model_id: "a" * 64 for model_id in cached}
         self.live: dict[int, tuple[str, int]] = {}
         self.starts: list[tuple[str, int]] = []
         self.stops: list[tuple[int, str]] = []
@@ -47,6 +48,9 @@ class FakeBackend:
 
     def cached_models(self) -> tuple[str, ...]:
         return tuple(sorted(self.cached))
+
+    def artifact_sha256(self, model_id: str) -> str:
+        return self.artifacts[model_id]
 
     def start(self, model_id: str, port: int) -> RuntimeHandle:
         if self.start_gate is not None:
@@ -125,6 +129,7 @@ def action(
     host_id: str = "host-a",
     generation: str = "0000000000100-plan",
     dependencies: tuple[str, ...] = (),
+    artifact_sha256: str = "",
 ) -> MutationAction:
     return MutationAction(
         action_id=action_id or f"{kind.value}-{generation}",
@@ -137,6 +142,7 @@ def action(
         created_at=100,
         dependencies=dependencies,
         executable=True,
+        artifact_sha256=artifact_sha256,
     )
 
 
@@ -163,7 +169,12 @@ def receipt_status(runtime: ManagedModelRuntime, action_id: str) -> MutationStat
 
 
 def test_mutation_action_wire_round_trip_and_schema_validation():
-    original = action(ActionKind.WARM, dependencies=("load",))
+    original = action(
+        ActionKind.WARM,
+        dependencies=("load",),
+        artifact_sha256="A" * 64,
+    )
+    assert original.artifact_sha256 == "a" * 64
     assert MutationAction.from_dict(original.to_dict()) == original
     broken = {**original.to_dict(), "schema_version": 99}
     try:
@@ -250,6 +261,64 @@ def test_load_verifies_cache_and_reports_success_once(tmp_path):
     assert managed.acknowledgements() == []
     assert managed.begin(command).status == MutationStatus.SUCCEEDED
     assert managed.acknowledgements() == acknowledgement
+
+
+def test_checksum_protected_load_and_warm_publish_proven_artifact(tmp_path):
+    managed = runtime(tmp_path)
+    load = action(ActionKind.LOAD, artifact_sha256="a" * 64)
+    managed.begin(load)
+    wait(managed)
+
+    assert receipt_status(managed, load.action_id) == MutationStatus.SUCCEEDED
+    assert managed.residencies[0].artifact_sha256 == "a" * 64
+
+    warm = action(
+        ActionKind.WARM,
+        action_id="warm-proven-artifact",
+        artifact_sha256="a" * 64,
+    )
+    managed.begin(warm)
+    wait(managed)
+
+    assert receipt_status(managed, warm.action_id) == MutationStatus.SUCCEEDED
+    assert managed.residencies[0].state == ResidencyState.READY
+    assert managed.residencies[0].artifact_sha256 == "a" * 64
+    assert managed.allocator_envelope()["residencies"][0]["artifact_sha256"] == "a" * 64
+
+
+def test_checksum_mismatch_fails_before_starting_model(tmp_path):
+    backend = FakeBackend()
+    managed = runtime(tmp_path, backend=backend)
+    command = action(ActionKind.WARM, artifact_sha256="b" * 64)
+
+    managed.begin(command)
+    wait(managed)
+
+    assert receipt_status(managed, command.action_id) == MutationStatus.FAILED
+    assert backend.starts == []
+    assert "SHA-256 mismatch" in managed.acknowledgements()[0]["message"]
+
+
+@pytest.mark.parametrize("kind", [ActionKind.DRAIN, ActionKind.UNLOAD])
+def test_stale_destructive_command_cannot_touch_newer_artifact(tmp_path, kind):
+    managed = runtime(tmp_path)
+    warm = action(ActionKind.WARM, artifact_sha256="a" * 64)
+    managed.begin(warm)
+    wait(managed)
+    assert managed.residencies[0].state == ResidencyState.READY
+
+    stale = action(
+        kind,
+        action_id=f"stale-{kind.value}",
+        artifact_sha256="b" * 64,
+    )
+    managed.begin(stale)
+    wait(managed)
+
+    assert receipt_status(managed, stale.action_id) == MutationStatus.FAILED
+    assert managed.residencies[0].state == ResidencyState.READY
+    assert managed.residencies[0].artifact_sha256 == "a" * 64
+    assert "stale" in managed.acknowledgements()[-1]["message"]
 
 
 def test_warm_receipt_reports_monotonic_duration_and_replays_it(tmp_path):
@@ -1597,6 +1666,29 @@ def test_launcher_stops_child_when_immediate_publication_fails(monkeypatch, tmp_
     assert "--slots" in commands[0]
     assert commands[0][commands[0].index("--api-key-file") + 1] == str(key_file.resolve())
     assert "engine-secret" not in commands[0]
+
+
+def test_llama_backend_hashes_exact_cached_file_and_invalidates_changed_identity(
+    monkeypatch,
+    tmp_path,
+):
+    model_path = tmp_path / "qwen.gguf"
+    model_path.write_bytes(b"first immutable model")
+    monkeypatch.setattr(
+        runtime_module.model_store,
+        "list_all",
+        lambda: (SimpleNamespace(name="qwen.gguf", path=model_path),),
+    )
+    backend = LlamaCppBackend()
+
+    first = backend.artifact_sha256("qwen.gguf")
+    assert first == runtime_module.hashlib.sha256(b"first immutable model").hexdigest()
+    assert backend.artifact_sha256("qwen.gguf") == first
+
+    model_path.write_bytes(b"second immutable model")
+    second = backend.artifact_sha256("qwen.gguf")
+    assert second == runtime_module.hashlib.sha256(b"second immutable model").hexdigest()
+    assert second != first
 
 
 def test_llama_backend_rejects_pid_reuse_and_requires_exact_argv(monkeypatch, tmp_path):

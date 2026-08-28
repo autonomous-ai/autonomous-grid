@@ -190,14 +190,8 @@ class PlacementPlanner:
                     model,
                     timestamp,
                     self.policy,
-                    for_new=(
-                        (residency := node.residency(model.model_id)) is None
-                        or residency.state
-                        in (
-                            ResidencyState.CACHED,
-                            ResidencyState.FAILED,
-                            ResidencyState.DRAINING,
-                        )
+                    for_new=_requires_new_runtime(
+                        node.residency(model.model_id), model
                     ),
                 )
                 is None
@@ -230,11 +224,7 @@ class PlacementPlanner:
                     (item for item in node_list if item.node_id == node_id), None
                 )
                 residency = node.residency(model.model_id) if node is not None else None
-                for_new = residency is None or residency.state in (
-                    ResidencyState.CACHED,
-                    ResidencyState.FAILED,
-                    ResidencyState.DRAINING,
-                )
+                for_new = _requires_new_runtime(residency, model)
                 reason = _ineligible_reason(
                     node,
                     model,
@@ -434,11 +424,7 @@ class PlacementPlanner:
                 if (placement_model.model_id, candidate_node.node_id) in assigned_pairs:
                     continue
                 residency = candidate_node.residency(placement_model.model_id)
-                for_new = residency is None or residency.state in (
-                    ResidencyState.CACHED,
-                    ResidencyState.FAILED,
-                    ResidencyState.DRAINING,
-                )
+                for_new = _requires_new_runtime(residency, placement_model)
                 if (
                     _ineligible_reason(
                         candidate_node,
@@ -669,11 +655,7 @@ class PlacementPlanner:
                 if (model.model_id, node.node_id) in assigned_pairs:
                     continue
                 residency = node.residency(model.model_id)
-                for_new = residency is None or residency.state in (
-                    ResidencyState.CACHED,
-                    ResidencyState.FAILED,
-                    ResidencyState.DRAINING,
-                )
+                for_new = _requires_new_runtime(residency, model)
                 reason = _ineligible_reason(
                     node, model, timestamp, self.policy, for_new=for_new
                 )
@@ -977,7 +959,11 @@ def desired_replica_count(
         recent = 0
         for node in nodes:
             residency = node.residency(model.model_id)
-            if residency is None or residency.state != ResidencyState.READY:
+            if (
+                residency is None
+                or residency.state != ResidencyState.READY
+                or not model.matches_artifact(residency)
+            ):
                 continue
             last_activity = max(residency.loaded_at, residency.last_used_at)
             age = timestamp - last_activity
@@ -1063,17 +1049,17 @@ def _replicas_for_service_capacity(
     ready_count = 0
     for node in nodes:
         residency = node.residency(model.model_id)
-        for_new = residency is None or residency.state in (
-            ResidencyState.CACHED,
-            ResidencyState.FAILED,
-            ResidencyState.DRAINING,
-        )
+        for_new = _requires_new_runtime(residency, model)
         if (
             _ineligible_reason(node, model, timestamp, policy, for_new=for_new)
             is not None
         ):
             continue
-        is_ready = bool(residency and residency.state == ResidencyState.READY)
+        is_ready = bool(
+            residency
+            and residency.state == ResidencyState.READY
+            and model.matches_artifact(residency)
+        )
         capacity = model.replica_concurrency
         if is_ready:
             ready_count += 1
@@ -1128,6 +1114,22 @@ def _bounded_replica_ceil(value: float, maximum: int) -> int:
     return math.ceil(value)
 
 
+def _requires_new_runtime(
+    residency: ModelResidency | None,
+    model: ModelProfile,
+) -> bool:
+    return (
+        residency is None
+        or not model.matches_artifact(residency)
+        or residency.state
+        in (
+            ResidencyState.CACHED,
+            ResidencyState.FAILED,
+            ResidencyState.DRAINING,
+        )
+    )
+
+
 def _ineligible_reason(
     node: NodeSnapshot | None,
     model: ModelProfile,
@@ -1147,6 +1149,16 @@ def _ineligible_reason(
     if policy.node_ttl_seconds and now - node.last_heartbeat > policy.node_ttl_seconds:
         return "heartbeat is stale"
     residency = node.residency(model.model_id)
+    if residency is not None and not model.matches_artifact(residency):
+        if not residency.managed:
+            return "external residency does not prove the requested artifact SHA-256"
+        if residency.state in (
+            ResidencyState.LOADING,
+            ResidencyState.WARMING,
+            ResidencyState.READY,
+            ResidencyState.DRAINING,
+        ):
+            return "a different artifact version is live and must be replaced safely"
     if (
         residency is not None
         and not residency.managed
@@ -1181,10 +1193,19 @@ def _ineligible_reason(
         return "node has a forbidden tag"
     if for_new and (node.manually_managed or "warm" not in node.actuator_capabilities):
         return "node cannot be actuated"
-    artifact_cached = model.model_id in node.cached_models or bool(
-        residency
-        and residency.managed
-        and residency.state in (ResidencyState.CACHED, ResidencyState.DRAINING)
+    artifact_cached = (
+        (not model.artifact_sha256 and model.model_id in node.cached_models)
+        or bool(
+            residency
+            and residency.managed
+            and residency.state
+            in (
+                ResidencyState.CACHED,
+                ResidencyState.DRAINING,
+                ResidencyState.FAILED,
+            )
+            and model.matches_artifact(residency)
+        )
     )
     if for_new and not artifact_cached and "load" not in node.actuator_capabilities:
         return "node cannot load uncached model weights"
@@ -1226,17 +1247,20 @@ def _candidate_score(
     residency = node.residency(model.model_id)
     startup_key = (node.node_id, model.model_id)
     warm_seconds = startup_seconds.get(startup_key, model.warm_seconds)
-    if residency and residency.state == ResidencyState.READY:
+    artifact_matches = model.matches_artifact(residency)
+    if residency and residency.state == ResidencyState.READY and artifact_matches:
         score += 100_000.0
         reasons.append("already resident and ready")
-    elif residency and residency.state in (
+    elif residency and artifact_matches and residency.state in (
         ResidencyState.LOADING,
         ResidencyState.WARMING,
     ):
         score += 75_000.0
         reasons.append("already loading")
-    elif model.model_id in node.cached_models or (
-        residency and residency.state == ResidencyState.CACHED
+    elif (not model.artifact_sha256 and model.model_id in node.cached_models) or (
+        residency
+        and artifact_matches
+        and residency.state in (ResidencyState.CACHED, ResidencyState.FAILED)
     ):
         score += 20_000.0 - min(warm_seconds, 1_000_000_000_000.0) * 20.0
         reasons.append("weights cached locally")
@@ -1246,6 +1270,7 @@ def _candidate_score(
         reasons.append("cold load required")
     if startup_key in startup_seconds and not (
         residency
+        and artifact_matches
         and residency.state
         in (ResidencyState.READY, ResidencyState.LOADING, ResidencyState.WARMING)
     ):
@@ -1388,7 +1413,11 @@ def _assignment(
         memory_mb=model.memory_for(node.runtimes),
         replica_index=index,
         score=score,
-        existing=bool(residency and residency.state == ResidencyState.READY),
+        existing=bool(
+            residency
+            and residency.state == ResidencyState.READY
+            and model.matches_artifact(residency)
+        ),
         reasons=reasons,
     )
 

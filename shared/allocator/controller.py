@@ -328,6 +328,7 @@ class AllocatorController:
                         model_id=action.model_id,
                         status=MutationStatus.PENDING,
                         attempted_at=timestamp,
+                        artifact_sha256=action.artifact_sha256,
                         failures=self._failure_streak(
                             action.kind,
                             action.node_id,
@@ -518,6 +519,7 @@ class AllocatorController:
                 duration_seconds=(duration if status in _TERMINAL else 0.0),
                 failures=failures,
                 message=message,
+                artifact_sha256=source.artifact_sha256,
             )
             self._append_record(record)
             if status in _TERMINAL:
@@ -963,6 +965,7 @@ class AllocatorController:
                 completed_at=now,
                 failures=self._failure_streak(action.kind, action.node_id, action.model_id),
                 message=message,
+                artifact_sha256=action.artifact_sha256,
             )
         )
         if (
@@ -1399,6 +1402,7 @@ def _action_from_dict(value: dict[str, Any]) -> MutationAction:
         not_before=float(value.get("not_before") or 0.0),
         dependencies=tuple(value.get("dependencies") or ()),
         executable=bool(value.get("executable", False)),
+        artifact_sha256=value.get("artifact_sha256") or "",
     )
 
 
@@ -1418,6 +1422,7 @@ def _record_from_dict(value: dict[str, Any]) -> MutationRecord:
         duration_seconds=_bounded_action_duration(value.get("duration_seconds")),
         failures=int(value.get("failures") or 0),
         message=str(value.get("message") or ""),
+        artifact_sha256=value.get("artifact_sha256") or "",
     )
 
 

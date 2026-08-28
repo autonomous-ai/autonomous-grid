@@ -23,6 +23,7 @@ from shared.allocator.models import (
     NodeState,
     PlacementPlan,
     ResidencyState,
+    canonical_sha256,
     stable_digest,
 )
 
@@ -47,6 +48,7 @@ class MutationRecord:
     duration_seconds: float = 0.0
     failures: int = 0
     message: str = ""
+    artifact_sha256: str = ""
 
     def __post_init__(self) -> None:
         if not self.action_id or not self.node_id or not self.model_id:
@@ -61,6 +63,11 @@ class MutationRecord:
                 raise ValueError(f"{name} must be finite and non-negative")
         if self.failures < 0:
             raise ValueError("failures must be non-negative")
+        object.__setattr__(
+            self,
+            "artifact_sha256",
+            canonical_sha256(self.artifact_sha256),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,9 +312,18 @@ class Reconciler:
                     )
                 )
                 continue
-            cached = profile.model_id in node.cached_models or bool(
-                residency
-                and residency.state in (ResidencyState.CACHED, ResidencyState.DRAINING)
+            cached = (
+                (not profile.artifact_sha256 and profile.model_id in node.cached_models)
+                or bool(
+                    residency
+                    and residency.state
+                    in (
+                        ResidencyState.CACHED,
+                        ResidencyState.DRAINING,
+                        ResidencyState.FAILED,
+                    )
+                    and profile.matches_artifact(residency)
+                )
             )
             readmitting_existing_residency = bool(
                 residency
@@ -553,6 +569,7 @@ class Reconciler:
                     not_before=proposal.not_before,
                     dependencies=proposal.dependencies,
                     executable=True,
+                    artifact_sha256=proposal.artifact_sha256,
                 )
                 budget -= 1
                 scheduled_by_node[proposal.node_id] = scheduled_by_node.get(proposal.node_id, 0) + 1
@@ -579,6 +596,7 @@ class Reconciler:
     ) -> MutationAction | None:
         if kind.value not in node.actuator_capabilities or node.manually_managed:
             return None
+        artifact_sha256 = _action_artifact_sha256(kind, node, profile)
         latest_matching = next(
             (
                 item
@@ -586,11 +604,13 @@ class Reconciler:
                 if item.kind == kind
                 and item.node_id == node.node_id
                 and item.model_id == profile.model_id
+                and item.artifact_sha256 == artifact_sha256
             ),
             None,
         )
         key = (kind, node.node_id, profile.model_id)
-        block_cause = blocked_causes.get(key)
+        block_applies = latest_matching is not None or not artifact_sha256
+        block_cause = blocked_causes.get(key) if block_applies else None
         observed_prior_success = bool(
             bypass_success_observation
             and (
@@ -615,6 +635,7 @@ class Reconciler:
                     kind,
                     node.node_id,
                     profile.model_id,
+                    artifact_sha256,
                     history,
                     now,
                 )
@@ -624,7 +645,11 @@ class Reconciler:
             (
                 0.0
                 if observed_prior_success
-                else blocked_until.get(key, 0.0)
+                else (
+                    blocked_until.get(key, 0.0)
+                    if block_applies
+                    else 0.0
+                )
             ),
         )
         if cooldown_until > now:
@@ -633,6 +658,7 @@ class Reconciler:
             item.kind == kind
             and item.node_id == node.node_id
             and item.model_id == profile.model_id
+            and item.artifact_sha256 == artifact_sha256
             and item.status in (MutationStatus.PENDING, MutationStatus.RUNNING)
             for item in history
         ):
@@ -643,6 +669,7 @@ class Reconciler:
             if item.kind == kind
             and item.node_id == node.node_id
             and item.model_id == profile.model_id
+            and item.artifact_sha256 == artifact_sha256
         ]
         # A plan generation is stable while its inputs are stable, but a failed/succeeded command
         # must not reuse the same action ID: node runtimes cache terminal receipts by action ID.
@@ -677,6 +704,7 @@ class Reconciler:
             not_before=cooldown_until,
             dependencies=dependencies,
             executable=mode == AllocatorMode.AUTOMATIC,
+            artifact_sha256=artifact_sha256,
         )
 
     def _history_blocked_until(
@@ -684,13 +712,17 @@ class Reconciler:
         kind: ActionKind,
         node_id: str,
         model_id: str,
+        artifact_sha256: str,
         history: list[MutationRecord],
         now: float,
     ) -> float:
         matching = [
             item
             for item in history
-            if item.kind == kind and item.node_id == node_id and item.model_id == model_id
+            if item.kind == kind
+            and item.node_id == node_id
+            and item.model_id == model_id
+            and item.artifact_sha256 == artifact_sha256
         ]
         if not matching:
             return 0.0
@@ -733,10 +765,12 @@ class Reconciler:
                     f"Node does not permit allocator action {kind.value!r}",
                 )
             ]
+        artifact_sha256 = _action_artifact_sha256(kind, node, profile)
         if any(
             item.kind == kind
             and item.node_id == node.node_id
             and item.model_id == profile.model_id
+            and item.artifact_sha256 == artifact_sha256
             and item.status in (MutationStatus.PENDING, MutationStatus.RUNNING)
             for item in history
         ):
@@ -756,11 +790,13 @@ class Reconciler:
                 if item.kind == kind
                 and item.node_id == node.node_id
                 and item.model_id == profile.model_id
+                and item.artifact_sha256 == artifact_sha256
             ),
             None,
         )
         key = (kind, node.node_id, profile.model_id)
-        block_cause = blocked_causes.get(key)
+        block_applies = latest_matching is not None or not artifact_sha256
+        block_cause = blocked_causes.get(key) if block_applies else None
         observed_prior_success = bool(
             bypass_success_observation
             and (
@@ -785,6 +821,7 @@ class Reconciler:
                     kind,
                     node.node_id,
                     profile.model_id,
+                    artifact_sha256,
                     history,
                     now,
                 )
@@ -794,7 +831,11 @@ class Reconciler:
             (
                 0.0
                 if observed_prior_success
-                else blocked_until.get(key, 0.0)
+                else (
+                    blocked_until.get(key, 0.0)
+                    if block_applies
+                    else 0.0
+                )
             ),
         )
         return [
@@ -826,12 +867,21 @@ def _destructive_safety_state(
         for node in routable_nodes
         for residency in node.residencies
         if residency.state == ResidencyState.READY
+        and (
+            (profile := profile_by_id.get(residency.model_id)) is not None
+            and profile.matches_artifact(residency)
+        )
     }
     managed_ready_pairs = {
         (node.node_id, residency.model_id)
         for node in routable_nodes
         for residency in node.residencies
-        if residency.state == ResidencyState.READY and residency.managed
+        if residency.state == ResidencyState.READY
+        and residency.managed
+        and (
+            (profile := profile_by_id.get(residency.model_id)) is not None
+            and profile.matches_artifact(residency)
+        )
     }
     domain_counts: dict[str, dict[str, int]] = {}
     domain_floors: dict[str, int] = {}
@@ -839,7 +889,11 @@ def _destructive_safety_state(
         counts: dict[str, int] = {}
         for node in routable_nodes:
             residency = node.residency(profile.model_id)
-            if residency is None or residency.state != ResidencyState.READY:
+            if (
+                residency is None
+                or residency.state != ResidencyState.READY
+                or not profile.matches_artifact(residency)
+            ):
                 continue
             domain = node.failure_domain or node.node_id
             counts[domain] = counts.get(domain, 0) + 1
@@ -852,6 +906,19 @@ def _destructive_safety_state(
         domain_counts,
         domain_floors,
     )
+
+
+def _action_artifact_sha256(
+    kind: ActionKind,
+    node: NodeSnapshot,
+    profile: ModelProfile,
+) -> str:
+    """Bind constructive work to desired weights and destructive work to observed weights."""
+
+    if kind in (ActionKind.LOAD, ActionKind.WARM):
+        return profile.artifact_sha256
+    residency = node.residency(profile.model_id)
+    return residency.artifact_sha256 if residency is not None else ""
 
 
 def _project_drain(

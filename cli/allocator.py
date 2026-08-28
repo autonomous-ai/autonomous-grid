@@ -130,6 +130,7 @@ def cmd_allocator_model_set(args: argparse.Namespace) -> int:
             min_failure_domains=args.min_failure_domains,
             min_gpu_count=args.min_gpu_count,
             min_gpu_memory_mb=args.min_gpu_memory_mb,
+            artifact_sha256=args.artifact_sha256,
         )
     except ValueError as exc:
         raise SystemExit(f"Invalid allocator model profile: {exc}") from exc

@@ -110,10 +110,12 @@ def _profile(
     cooldown_seconds: float,
     *,
     memory_mb: int = 256,
+    artifact_sha256: str = "",
 ) -> dict[str, Any]:
     return {
         # Includes ample runtime/KV overhead above this model's ~94 MB weights.
         "memory_mb": memory_mb,
+        "artifact_sha256": artifact_sha256,
         "runtimes": ["llama.cpp"],
         # Empty means CPU and Metal logical hosts can share this physical-Mac trial profile.
         "backends": [],
@@ -204,6 +206,7 @@ def _host_summary(hosts: list[LogicalHost]) -> list[dict[str, Any]]:
                         "state": item.state.value,
                         "pid": item.handle.pid if item.handle else None,
                         "port": item.handle.port if item.handle else None,
+                        "artifact_sha256": item.artifact_sha256,
                     }
                     for item in host.runtime.residencies
                 ],
@@ -331,6 +334,12 @@ def run(
     )
     claimed_memory_mb = 8_000 if scenario == "contention" else 256
     physical = collect_device_info()
+    artifact_sha256 = LlamaCppBackend().artifact_sha256(model)
+    second_artifact_sha256 = (
+        LlamaCppBackend().artifact_sha256(second_model)
+        if second_model is not None
+        else ""
+    )
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix=f"grid-logical-{nodes}-") as temporary:
         root = Path(temporary)
@@ -354,6 +363,7 @@ def run(
                     desired_replicas,
                     cooldown_seconds=max(60.0, timeout),
                     memory_mb=claimed_memory_mb,
+                    artifact_sha256=artifact_sha256,
                 ),
             )
             profile_response.raise_for_status()
@@ -366,6 +376,7 @@ def run(
                         nodes,
                         cooldown_seconds=max(60.0, timeout),
                         memory_mb=claimed_memory_mb,
+                        artifact_sha256=second_artifact_sha256,
                     ),
                 )
                 second_profile.raise_for_status()
@@ -764,6 +775,7 @@ def run(
                         desired_replicas,
                         cooldown_seconds=1.0,
                         memory_mb=claimed_memory_mb,
+                        artifact_sha256=artifact_sha256,
                     ),
                 )
                 scale_down_profile.raise_for_status()
@@ -788,6 +800,7 @@ def run(
                 return {
                     "nodes": nodes,
                     "model": model,
+                    "artifact_sha256": artifact_sha256,
                     "physical": {
                         "backend": physical.get("backend"),
                         "machine": physical.get("machine"),
