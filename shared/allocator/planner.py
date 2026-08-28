@@ -811,6 +811,7 @@ class PlacementPlanner:
                     profile_by_id,
                     timestamp,
                     self.policy,
+                    startup_by_pair,
                     excluded_nodes=preempted_nodes,
                 )
                 if not staged:
@@ -1505,6 +1506,7 @@ def _stage_priority_preemption(
     profile_by_id: Mapping[str, ModelProfile],
     now: float,
     policy: PlannerPolicy,
+    startup_seconds: Mapping[tuple[str, str], float],
     *,
     excluded_nodes: set[str],
 ) -> tuple[str, tuple[ModelResidency, ...]] | None:
@@ -1512,7 +1514,7 @@ def _stage_priority_preemption(
 
     candidates: list[
         tuple[
-            tuple[int, int, int, str],
+            tuple[int, float, int, int, str],
             NodeSnapshot,
             tuple[ModelResidency, ...],
         ]
@@ -1555,6 +1557,10 @@ def _stage_priority_preemption(
             ),
             key=lambda item: (
                 profile_by_id[item.model_id].priority,
+                startup_seconds.get(
+                    (node.node_id, item.model_id),
+                    profile_by_id[item.model_id].warm_seconds,
+                ),
                 -item.memory_mb,
                 item.model_id,
             ),
@@ -1611,6 +1617,13 @@ def _stage_priority_preemption(
                 (
                     (
                         sum(item.priority for item in victim_profiles),
+                        sum(
+                            startup_seconds.get(
+                                (node.node_id, item.model_id),
+                                profile_by_id[item.model_id].warm_seconds,
+                            )
+                            for item in selected
+                        ),
                         len(selected),
                         sum(item.memory_mb for item in selected),
                         node.node_id,

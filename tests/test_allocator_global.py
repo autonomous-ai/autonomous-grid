@@ -2108,6 +2108,48 @@ def test_higher_priority_model_stages_managed_incumbent_preemption():
     assert ready_plan.preemptions == ()
 
 
+def test_priority_preemption_prefers_the_cheapest_learned_warm_back_cost():
+    batch = model(
+        "batch",
+        8_000,
+        min_replicas=2,
+        max_replicas=2,
+        priority=10,
+        min_residency_seconds=0,
+    )
+    critical = model(
+        "critical",
+        8_000,
+        priority=1_000,
+        min_residency_seconds=0,
+    )
+    expensive = node(
+        "a-expensive",
+        8_000,
+        residencies=(ready("batch", 8_000),),
+    )
+    cheap = node(
+        "z-cheap",
+        8_000,
+        residencies=(ready("batch", 8_000),),
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (expensive, cheap),
+        (batch, critical),
+        now=10,
+        startup_seconds={
+            ("a-expensive", "batch"): 100,
+            ("z-cheap", "batch"): 1,
+        },
+    )
+
+    assert [
+        (item.node_id, item.model_id, item.for_model_id)
+        for item in plan.preemptions
+    ] == [("z-cheap", "batch", "critical")]
+
+
 def test_priority_preemption_preserves_ownership_and_minimum_residency():
     critical = model(
         "critical",
