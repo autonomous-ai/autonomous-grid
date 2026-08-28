@@ -80,6 +80,7 @@ def _managed_engine(
     host_id: str = "host-1",
     state: str = "ready",
     active_tasks: int = 0,
+    artifact_sha256: str = "",
 ):
     node_id = node_id or engine_node_id(host_id, model_id)
     response = client.put(
@@ -100,7 +101,12 @@ def _managed_engine(
                 "managed": True,
                 "state": "draining" if state == "draining" else "accepting",
                 "residencies": [
-                    {"model_id": model_id, "memory_mb": 8_000, "state": state}
+                    {
+                        "model_id": model_id,
+                        "memory_mb": 8_000,
+                        "state": state,
+                        "artifact_sha256": artifact_sha256,
+                    }
                 ],
             },
         },
@@ -2123,6 +2129,62 @@ def test_proxy_performance_keeps_multi_model_measurements_isolated(
     snapshot = server_module._allocator_snapshots(app)[0]
     assert snapshot.performance("qwen").tokens_per_second == 10
     assert snapshot.performance("other").tokens_per_second == 2
+
+
+def test_proxy_performance_resets_and_routes_only_current_artifact(
+    tmp_path,
+    monkeypatch,
+):
+    app, client, _ = _app(tmp_path)
+    old_digest = "a" * 64
+    new_digest = "b" * 64
+    _managed_engine(
+        client,
+        host_id="host-revision",
+        model_id="qwen",
+        artifact_sha256=old_digest,
+    )
+    engine = app.state.nodes[engine_node_id("host-revision", "qwen")]
+    engine.proxy_model_performance["qwen"] = server_module._ProxyModelPerformance(
+        latency_ms=100,
+        tokens_per_second=100,
+        samples=8,
+        throughput_samples=8,
+        updated_at=time.time(),
+        artifact_sha256=old_digest,
+    )
+
+    engine.allocator["residencies"][0]["artifact_sha256"] = new_digest
+    assert (
+        server_module._fresh_route_performance(
+            engine,
+            model="qwen",
+            now=time.time(),
+        )
+        is None
+    )
+    assert server_module._allocator_snapshots(app)[0].performance("qwen") is None
+
+    monkeypatch.setattr(server_module.time, "monotonic", lambda: 102.0)
+    server_module._record_engine_performance(
+        engine,
+        100.0,
+        model="qwen",
+        status_code=200,
+        completion_tokens=20,
+    )
+
+    current = engine.proxy_model_performance["qwen"]
+    assert current.artifact_sha256 == new_digest
+    assert current.samples == 1
+    assert current.throughput_samples == 1
+    assert current.latency_ms == 2_000
+    assert current.tokens_per_second == 10
+    snapshot_performance = server_module._allocator_snapshots(app)[0].performance(
+        "qwen"
+    )
+    assert snapshot_performance.artifact_sha256 == new_digest
+    assert snapshot_performance.sample_count == 1
 
 
 def test_allocator_snapshot_normalizes_remote_wall_clocks_from_model_ages(tmp_path):

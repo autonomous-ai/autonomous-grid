@@ -1399,6 +1399,15 @@ def _candidate_score(
     model_performance = node.performance(model.model_id)
     model_latency_weight = 0.0
     model_throughput_weight = 0.0
+    if (
+        model_performance is not None
+        and model.artifact_sha256
+        and model_performance.artifact_sha256 != model.artifact_sha256
+    ):
+        # A same-named model revision can have materially different kernels, quantization, and
+        # serving behavior. Never let measurements from the old immutable artifact rank the new
+        # one, even during the make-before-break transition where both revisions are visible.
+        model_performance = None
     if model_performance is not None:
         performance_age = now - model_performance.updated_at
         if not model_performance.updated_at or not (
@@ -1445,7 +1454,7 @@ def _candidate_score(
     # A node-wide metric is safe for an empty/single-model engine, and remains a useful generic
     # benchmark for a cold host. Once an engine serves several models it is not attributable: use
     # only proxy measurements tagged with this exact model, or fall back to hardware priors.
-    node_metric_is_attributable = ready_models <= 1
+    node_metric_is_attributable = ready_models <= 1 and not model.artifact_sha256
     if model_performance is not None:
         measured_tokens_per_second = (
             model_performance.tokens_per_second

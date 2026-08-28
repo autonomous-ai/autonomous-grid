@@ -40,6 +40,7 @@ from shared.allocator.models import (
     NodeSnapshot,
     NodeState,
     ResidencyState,
+    canonical_sha256,
     stable_digest,
 )
 from shared.allocator.reconcile import MutationStatus
@@ -121,10 +122,12 @@ class _ProxyModelPerformance:
     throughput_samples: int = 0
     updated_at: float = 0.0
     throughput_updated_at: float = 0.0
+    artifact_sha256: str = ""
 
     def __post_init__(self) -> None:
         if self.throughput_samples > 0 and not self.throughput_updated_at:
             self.throughput_updated_at = self.updated_at
+        self.artifact_sha256 = canonical_sha256(self.artifact_sha256)
 
 
 @dataclass
@@ -1709,9 +1712,30 @@ def _fresh_route_performance(
     performance = node.proxy_model_performance.get(model)
     if performance is None or performance.samples <= 0 or performance.latency_ms <= 0:
         return None
+    if performance.artifact_sha256 != _node_model_artifact_sha256(node, model):
+        return None
     if not _route_performance_timestamp_is_fresh(performance.updated_at, now=now):
         return None
     return performance
+
+
+def _node_model_artifact_sha256(node: Node, model: str) -> str:
+    """Return the immutable artifact currently claimed by this exact engine route."""
+
+    allocator = node.allocator if isinstance(node.allocator, dict) else {}
+    rows = allocator.get("residencies")
+    if not isinstance(rows, list):
+        return ""
+    for row in rows:
+        if not isinstance(row, Mapping) or str(row.get("model_id") or "") != model:
+            continue
+        try:
+            return canonical_sha256(row.get("artifact_sha256") or "")
+        except ValueError:
+            # Authenticated registrations reject malformed residencies. Treat an impossible
+            # in-memory mutation as unattributable legacy data instead of trusting its identity.
+            return ""
+    return ""
 
 
 def _route_performance_timestamp_is_fresh(updated_at: float, *, now: float) -> bool:
@@ -2528,11 +2552,14 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                             throughput_sample_count=performance.throughput_samples,
                             updated_at=performance.updated_at,
                             throughput_updated_at=performance.throughput_updated_at,
+                            artifact_sha256=performance.artifact_sha256,
                         )
                         for model_id, performance in sorted(
                             node.proxy_model_performance.items()
                         )
                         if model_id in node.models
+                        and performance.artifact_sha256
+                        == _node_model_artifact_sha256(node, model_id)
                     ),
                     memory_bandwidth_gbps=_nonnegative_float(
                         resources.get("memory_bandwidth_gbps")
@@ -2659,7 +2686,11 @@ def _merge_allocator_hosts(
         performance_by_model: dict[str, list[ModelPerformance]] = {}
         for member in members:
             for performance in member.model_performance:
-                if performance.model_id in residencies:
+                residency = residencies.get(performance.model_id)
+                if (
+                    residency is not None
+                    and performance.artifact_sha256 == residency.artifact_sha256
+                ):
                     performance_by_model.setdefault(
                         performance.model_id,
                         [],
@@ -2742,6 +2773,7 @@ def _merge_allocator_hosts(
                         # The merged value sums every child. It remains attributable only while
                         # every contributing measurement is fresh, so retain the oldest timestamp.
                         updated_at=min(item.updated_at for item in samples),
+                        artifact_sha256=residencies[model_id].artifact_sha256,
                     )
                     for model_id, samples in sorted(performance_by_model.items())
                 ),
@@ -2852,10 +2884,18 @@ def _record_engine_performance(
         MAX_COUNTER,
         engine.proxy_performance_samples + 1,
     )
-    model_performance = engine.proxy_model_performance.setdefault(
-        model,
-        _ProxyModelPerformance(),
-    )
+    artifact_sha256 = _node_model_artifact_sha256(engine, model)
+    model_performance = engine.proxy_model_performance.get(model)
+    if (
+        model_performance is None
+        or model_performance.artifact_sha256 != artifact_sha256
+    ):
+        # The first response from a new immutable revision starts a new estimator. Mixing it with
+        # the old revision would retain stale latency/throughput for several EWMA half-lives.
+        model_performance = _ProxyModelPerformance(
+            artifact_sha256=artifact_sha256,
+        )
+        engine.proxy_model_performance[model] = model_performance
     model_first = model_performance.samples == 0
     model_alpha = 1.0 if model_first else _ENGINE_PERFORMANCE_EWMA_ALPHA
     model_performance.latency_ms = (

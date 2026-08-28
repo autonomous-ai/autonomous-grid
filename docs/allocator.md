@@ -142,6 +142,11 @@ bounded EWMAs of end-to-end latency and completion-token throughput. Those serve
 override self-reported estimates in placement snapshots, so actual service performance eventually
 supersedes the cold hardware prior. A multi-model vLLM engine is scored only with measurements for
 the model being placed; its fast model cannot lend an unrelated slow model an inflated score.
+For a checksum-protected managed model, every measurement is also bound to the residency's exact
+artifact revision. Routing ignores the previous revision immediately after a rollout, and the first
+successful response resets that model's estimator instead of blending incompatible revisions.
+Placement likewise falls back to hardware priors until revision-matching evidence exists. External
+vLLM inventory without artifact checksums retains the backward-compatible model-scoped behavior.
 Latency and throughput each ramp to full placement authority over eight relevant samples and decay
 against their own update timestamp. A stream that exposes no token count can refresh latency without
 making an old token rate look fresh. When an OpenAI-compatible stream includes final usage metadata,

@@ -105,6 +105,14 @@ def test_artifact_sha256_is_canonical_validated_and_round_trips():
         }
     ) == residency
 
+    performance = ModelPerformance("qwen", artifact_sha256="A" * 64)
+    assert performance.artifact_sha256 == "a" * 64
+    assert ModelPerformance.from_dict(
+        {"model_id": "qwen", "artifact_sha256": "A" * 64}
+    ) == performance
+    with pytest.raises(ValueError, match="artifact_sha256"):
+        ModelPerformance("qwen", artifact_sha256="not-a-digest")
+
 
 @pytest.mark.parametrize("digest", ["short", "g" * 64, 1, True])
 def test_artifact_sha256_rejects_invalid_values(digest):
@@ -468,6 +476,51 @@ def test_multi_model_engine_uses_only_per_model_performance_for_placement():
     assert refreshed.nodes_for(profile.model_id) == ("multi-model",)
 
 
+def test_placement_uses_performance_only_from_current_artifact_revision():
+    digest = "a" * 64
+    previous = "b" * 64
+    profile = model(artifact_sha256=digest)
+    stale_fast = node(
+        "stale-fast",
+        residencies=(ready(artifact_sha256=digest), ready("other")),
+        model_performance=(
+            ModelPerformance(
+                profile.model_id,
+                tokens_per_second=1_000,
+                latency_ms=10,
+                sample_count=8,
+                throughput_sample_count=8,
+                updated_at=100,
+                artifact_sha256=previous,
+            ),
+        ),
+        tokens_per_second=2_000,
+        latency_ms=1,
+        now=100,
+    )
+    current = node(
+        "current",
+        residencies=(ready(artifact_sha256=digest), ready("other")),
+        model_performance=(
+            ModelPerformance(
+                profile.model_id,
+                tokens_per_second=200,
+                latency_ms=100,
+                sample_count=8,
+                throughput_sample_count=8,
+                updated_at=100,
+                artifact_sha256=digest,
+            ),
+        ),
+        now=100,
+    )
+
+    plan = PlacementPlanner().plan((stale_fast, current), (profile,), now=100)
+
+    assert plan.nodes_for(profile.model_id) == ("current",)
+    assert "measured throughput" in plan.assignments[0].reasons
+
+
 def test_per_model_performance_weights_sample_confidence_over_one_outlier():
     profile = model()
     noisy = node(
@@ -785,6 +838,7 @@ def test_node_snapshot_round_trip_preserves_residency_and_enum():
                 sample_count=4,
                 throughput_sample_count=4,
                 updated_at=9,
+                artifact_sha256="a" * 64,
             ),
         ),
         memory_bandwidth_gbps=400,
@@ -798,6 +852,7 @@ def test_node_snapshot_round_trip_preserves_residency_and_enum():
     assert restored.performance("qwen").throughput_sample_count == 4
     assert restored.performance("qwen").throughput_updated_at == 9
     assert restored.performance("qwen").updated_at == 9
+    assert restored.performance("qwen").artifact_sha256 == "a" * 64
 
     legacy_performance = original.to_dict()
     legacy_performance["model_performance"][0].pop("throughput_sample_count")

@@ -144,6 +144,7 @@ class ModelPerformance:
     updated_at: float = 0.0
     throughput_sample_count: int = 0
     throughput_updated_at: float = 0.0
+    artifact_sha256: str = ""
 
     def __post_init__(self) -> None:
         if not self.model_id or len(self.model_id) > MAX_ID_LENGTH:
@@ -158,6 +159,11 @@ class ModelPerformance:
             raise ValueError("throughput_sample_count is outside the supported range")
         if self.throughput_sample_count > 0 and not self.throughput_updated_at:
             object.__setattr__(self, "throughput_updated_at", self.updated_at)
+        object.__setattr__(
+            self,
+            "artifact_sha256",
+            canonical_sha256(self.artifact_sha256),
+        )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ModelPerformance:
@@ -180,6 +186,7 @@ class ModelPerformance:
             throughput_sample_count=throughput_sample_count,
             updated_at=float(value.get("updated_at") or 0.0),
             throughput_updated_at=throughput_updated_at,
+            artifact_sha256=value.get("artifact_sha256") or "",
         )
 
 
