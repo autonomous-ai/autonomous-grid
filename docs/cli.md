@@ -585,8 +585,11 @@ permissions. Use `token write` to mint an expiring, host-scoped credential into 
 before provisioning another computer.
 
 If `--runtime` is omitted, model profiles default to `llama.cpp`. Supplying one or more
-`--runtime` flags replaces that default; it does not add to it. A managed node on the same machine
-as its Grid advertises the Grid's literal loopback control address by default. Remote workers need
+`--runtime` flags replaces that default; it does not add to it. One or more
+`--runtime-memory-mb RUNTIME=MB` values override the fallback `--memory-mb` estimate on matching
+hosts; a host advertising several matching runtimes is charged the largest matching value. A
+managed node on the same machine as its Grid advertises the Grid's literal loopback control address
+by default. Remote workers need
 an explicit reachable address and end-to-end TLS.
 
 `status` is a read-only LAN status view and needs no allocator credential. Model profile changes,

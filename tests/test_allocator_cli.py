@@ -222,6 +222,59 @@ def test_model_set_explicit_runtime_replaces_llama_default(monkeypatch):
     assert body["runtimes"] == ("vllm",)
 
 
+def test_model_set_accepts_runtime_specific_memory(monkeypatch):
+    monkeypatch.setattr(config, "select_grid", lambda _value: grid_config())
+    captured: dict[str, object] = {}
+
+    def request(_method, _url, **kwargs):
+        captured.update(kwargs)
+        return response(payload={"model": kwargs["json"]})
+
+    patch_http_client(monkeypatch, request)
+    args = cli.build_parser().parse_args(
+        [
+            "allocator",
+            "model",
+            "set",
+            "qwen",
+            "--memory-mb",
+            "8000",
+            "--runtime",
+            "llama.cpp",
+            "--runtime",
+            "vllm",
+            "--runtime-memory-mb",
+            "llama.cpp=10000",
+            "--runtime-memory-mb",
+            "vllm=24000",
+        ]
+    )
+
+    assert args.handler(args) == 0
+    body = captured["json"]
+    assert isinstance(body, dict)
+    assert body["runtime_memory_mb"] == (("llama.cpp", 10_000), ("vllm", 24_000))
+
+
+def test_model_set_rejects_malformed_runtime_specific_memory(monkeypatch):
+    monkeypatch.setattr(config, "select_grid", lambda _value: grid_config())
+    args = cli.build_parser().parse_args(
+        [
+            "allocator",
+            "model",
+            "set",
+            "qwen",
+            "--memory-mb",
+            "8000",
+            "--runtime-memory-mb",
+            "vllm:24000",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="RUNTIME=MB"):
+        args.handler(args)
+
+
 def test_model_profile_cli_encodes_model_id_as_one_path_value(monkeypatch):
     monkeypatch.setattr(config, "select_grid", lambda _value: grid_config())
     urls: list[str] = []

@@ -202,7 +202,7 @@ class PlacementPlanner:
 
         pin_order = sorted(
             model_list,
-            key=lambda item: (-item.priority, -item.memory_mb, item.model_id),
+            key=lambda item: (-item.priority, -item.maximum_memory_mb, item.model_id),
         )
         pinned_successes_by_model = {model.model_id: 0 for model in model_list}
 
@@ -278,7 +278,7 @@ class PlacementPlanner:
             key=lambda item: (
                 -item.priority,
                 eligible_host_count(item),
-                -item.memory_mb,
+                -item.maximum_memory_mb,
                 item.model_id,
             ),
         )
@@ -334,13 +334,12 @@ class PlacementPlanner:
 
         def remove_regular_assignment(assignment: PlacementAssignment) -> None:
             assignment_node = node_by_id[assignment.node_id]
-            assignment_profile = profile_by_id[assignment.model_id]
             residency = assignment_node.residency(assignment.model_id)
             assignments.remove(assignment)
             assigned_pairs.remove((assignment.model_id, assignment.node_id))
             capacity[assignment.node_id] += _incremental_memory_mb(
                 residency,
-                assignment_profile.memory_mb,
+                assignment.memory_mb,
             )
             desired_model_slots[assignment.node_id] -= 1
             if _adds_model_slot(residency):
@@ -503,7 +502,7 @@ class PlacementPlanner:
                         not in profile_by_id[item.model_id].pinned_nodes
                         and _incremental_memory_mb(
                             target_node.residency(item.model_id),
-                            profile_by_id[item.model_id].memory_mb,
+                            item.memory_mb,
                         )
                         > 0
                     ),
@@ -1103,7 +1102,7 @@ def _fits(
     desired_model_slots: dict[str, int],
 ) -> bool:
     residency = node.residency(model.model_id)
-    incremental_mb = _incremental_memory_mb(residency, model.memory_mb)
+    incremental_mb = _incremental_memory_mb(residency, model.memory_for(node.runtimes))
     if capacity[node.node_id] < incremental_mb:
         return False
     adds_slot = _adds_model_slot(residency)
@@ -1158,9 +1157,10 @@ def _candidate_score(
         reasons.append("adds a failure domain")
     elif need_new_domain:
         score -= 250_000.0
-    after = remaining_mb - _incremental_memory_mb(residency, model.memory_mb)
+    model_memory_mb = model.memory_for(node.runtimes)
+    after = remaining_mb - _incremental_memory_mb(residency, model_memory_mb)
     # Best fit preserves a large contiguous-capacity host for a future large model.
-    score += 2_000.0 / (1.0 + after / max(model.memory_mb, 1))
+    score += 2_000.0 / (1.0 + after / max(model_memory_mb, 1))
     model_performance = node.performance(model.model_id)
     if model_performance is not None:
         performance_age = now - model_performance.updated_at
@@ -1229,7 +1229,7 @@ def _assignment(
     return PlacementAssignment(
         model_id=model.model_id,
         node_id=node.node_id,
-        memory_mb=model.memory_mb,
+        memory_mb=model.memory_for(node.runtimes),
         replica_index=index,
         score=score,
         existing=bool(residency and residency.state == ResidencyState.READY),

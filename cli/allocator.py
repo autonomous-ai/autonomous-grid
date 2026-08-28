@@ -98,9 +98,18 @@ def cmd_allocator_model_set(args: argparse.Namespace) -> int:
     maximum = args.max_replicas if args.max_replicas is not None else max(1, args.min_replicas)
     runtimes = tuple(args.runtimes or ("llama.cpp",))
     try:
+        runtime_memory_mb = tuple(
+            (runtime.strip(), int(memory_mb))
+            for value in args.runtime_memory_mb
+            for runtime, separator, memory_mb in (value.partition("="),)
+            if separator
+        )
+        if len(runtime_memory_mb) != len(args.runtime_memory_mb):
+            raise ValueError("--runtime-memory-mb must use RUNTIME=MB")
         profile = ModelProfile(
             model_id=args.model,
             memory_mb=args.memory_mb,
+            runtime_memory_mb=runtime_memory_mb,
             runtimes=runtimes,
             backends=tuple(args.backends),
             data_tier=args.data_tier,

@@ -163,6 +163,13 @@ def _add_allocator(sub) -> None:
     set_model.add_argument("model", help="Advertised model id; managed llama.cpp uses a cached GGUF filename.")
     set_model.add_argument("--memory-mb", type=int, required=True)
     set_model.add_argument(
+        "--runtime-memory-mb",
+        action="append",
+        default=[],
+        metavar="RUNTIME=MB",
+        help="Runtime-specific memory estimate; repeat for multiple runtimes.",
+    )
+    set_model.add_argument(
         "--runtime",
         action="append",
         dest="runtimes",

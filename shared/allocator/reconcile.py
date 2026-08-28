@@ -651,12 +651,25 @@ class Reconciler:
         attempt_ids = sorted({item.action_id for item in matching})
         attempt_identity = stable_digest(attempt_ids)[:16] if attempt_ids else "initial"
         transition = f"{plan.generation}:attempts:{attempt_identity}"
+        assignment = next(
+            (
+                item
+                for item in plan.assignments
+                if item.node_id == node.node_id and item.model_id == profile.model_id
+            ),
+            None,
+        )
+        memory_mb = (
+            assignment.memory_mb
+            if assignment is not None
+            else profile.memory_for(node.runtimes)
+        )
         return MutationAction(
             action_id=MutationAction.stable_id(kind, node.node_id, profile.model_id, transition),
             kind=kind,
             node_id=node.node_id,
             model_id=profile.model_id,
-            memory_mb=profile.memory_mb,
+            memory_mb=memory_mb,
             reason=reason,
             plan_generation=plan.generation,
             created_at=now,

@@ -71,6 +71,95 @@ def model(model_id: str = "qwen", memory_mb: int = 8_000, **kwargs) -> ModelProf
     )
 
 
+def test_runtime_specific_memory_is_canonical_and_round_trips():
+    profile = ModelProfile(
+        model_id="qwen",
+        memory_mb=8_000,
+        runtime_memory_mb=(("vllm", 24_000), ("llama.cpp", 10_000)),
+        runtimes=("vllm", "llama.cpp"),
+    )
+
+    assert profile.runtime_memory_mb == (("llama.cpp", 10_000), ("vllm", 24_000))
+    assert profile.memory_for(("llama.cpp",)) == 10_000
+    assert profile.memory_for(("vllm",)) == 24_000
+    assert profile.memory_for(("unknown",)) == 8_000
+    assert profile.memory_for(("llama.cpp", "vllm")) == 24_000
+    assert profile.maximum_memory_mb == 24_000
+    assert ModelProfile.from_dict(profile.to_dict()) == profile
+    assert replace(profile, memory_mb=30_000).maximum_memory_mb == 30_000
+
+
+@pytest.mark.parametrize(
+    "runtime_memory_mb",
+    [
+        (("vllm", 0),),
+        (("vllm", 8_000), ("vllm", 9_000)),
+        (("", 8_000),),
+        (("vllm",),),
+        (1,),
+        (("vllm", "many"),),
+        (("vllm", 8_000),),
+    ],
+)
+def test_runtime_specific_memory_rejects_invalid_entries(runtime_memory_mb):
+    with pytest.raises(ValueError, match="runtime_memory_mb"):
+        ModelProfile(
+            model_id="qwen",
+            memory_mb=8_000,
+            runtime_memory_mb=runtime_memory_mb,
+            runtimes=("llama.cpp",),
+        )
+
+
+def test_runtime_specific_memory_controls_placement_and_assignment_size():
+    profile = ModelProfile(
+        model_id="qwen",
+        memory_mb=8_000,
+        runtime_memory_mb=(("llama.cpp", 10_000), ("vllm", 24_000)),
+        runtimes=("llama.cpp", "vllm"),
+        min_replicas=1,
+        max_replicas=1,
+    )
+    llama = node("llama", capacity_mb=16_000, runtime="llama.cpp")
+    vllm = node("vllm", capacity_mb=16_000, runtime="vllm")
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (llama, vllm),
+        (profile,),
+        now=10,
+    )
+
+    assert plan.nodes_for("qwen") == ("llama",)
+    assert plan.assignments[0].memory_mb == 10_000
+
+
+def test_runtime_specific_assignment_memory_reaches_warm_action():
+    profile = ModelProfile(
+        model_id="qwen",
+        memory_mb=8_000,
+        runtime_memory_mb=(("vllm", 24_000),),
+        runtimes=("vllm",),
+    )
+    machine = node("vllm", capacity_mb=32_000, runtime="vllm", cached=("qwen",))
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        (profile,),
+        now=10,
+    )
+
+    result = Reconciler().reconcile(
+        plan,
+        (machine,),
+        (profile,),
+        mode=AllocatorMode.RECOMMEND,
+        now=10,
+    )
+
+    assert len(result.actions) == 1
+    assert result.actions[0].kind == ActionKind.WARM
+    assert result.actions[0].memory_mb == 24_000
+
+
 def test_cold_unmeasured_placement_prefers_faster_hardware_without_repacking_cache():
     profile = replace(model(), backends=())
     intel = node(

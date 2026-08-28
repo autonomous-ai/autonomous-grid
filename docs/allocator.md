@@ -557,7 +557,11 @@ partitioned so the harness never reports N times the physical Mac's capacity.
 - Capacity is refreshed by the node as stable physical capacity plus dynamic non-Grid reserve.
   Aggregate GPU totals are adequate for one shared memory pool but do not yet model every multi-GPU
   topology, tensor-parallel constraint, NUMA boundary, disk budget, or transfer-bandwidth bottleneck.
-- Model identity is currently a model ID plus a memory requirement. Production artifact rollout
+- Model profiles accept a portable `memory_mb` fallback plus runtime-specific
+  `runtime_memory_mb` estimates, so llama.cpp/Metal and vLLM/CUDA placements account for their
+  distinct footprints. If a node advertises several matching runtimes, the planner conservatively
+  uses the largest matching estimate. Model identity is still currently a model ID plus these
+  memory requirements. Production artifact rollout
   should additionally fence on an immutable source revision and checksum.
 - The planner is a transparent deterministic heuristic, not an optimal mixed-integer solver. It
   prioritizes predictable safety and understandable decisions over a mathematically minimal cost.

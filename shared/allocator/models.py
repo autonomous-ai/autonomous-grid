@@ -312,6 +312,10 @@ class NodeSnapshot:
 class ModelProfile:
     model_id: str
     memory_mb: int
+    # Runtime-specific resident-memory estimates. ``memory_mb`` remains the portable fallback for
+    # old profiles and hosts whose runtime has no override. A tuple keeps the frozen wire model
+    # deterministic while accepting ordinary JSON arrays on input.
+    runtime_memory_mb: tuple[tuple[str, int], ...] = ()
     runtimes: tuple[str, ...] = ()
     backends: tuple[str, ...] = ()
     data_tier: str = "internal"
@@ -338,6 +342,30 @@ class ModelProfile:
             raise ValueError("model_id is required")
         if self.memory_mb <= 0 or self.memory_mb > MAX_MEMORY_MB:
             raise ValueError(f"memory_mb must be in [1, {MAX_MEMORY_MB}]")
+        runtime_memory: dict[str, int] = {}
+        for item in self.runtime_memory_mb:
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                raise ValueError("runtime_memory_mb entries must be (runtime, memory_mb) pairs")
+            try:
+                runtime, memory_mb = str(item[0]), int(item[1])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "runtime_memory_mb entries must be (runtime, memory_mb) pairs"
+                ) from exc
+            if not runtime or len(runtime) > MAX_ID_LENGTH:
+                raise ValueError("runtime_memory_mb runtime names are invalid")
+            if runtime in runtime_memory:
+                raise ValueError(f"duplicate runtime_memory_mb entry for {runtime!r}")
+            if memory_mb <= 0 or memory_mb > MAX_MEMORY_MB:
+                raise ValueError(
+                    f"runtime_memory_mb values must be in [1, {MAX_MEMORY_MB}]"
+                )
+            runtime_memory[runtime] = memory_mb
+        object.__setattr__(
+            self,
+            "runtime_memory_mb",
+            tuple(sorted(runtime_memory.items())),
+        )
         if (
             self.min_replicas < 0
             or self.max_replicas < self.min_replicas
@@ -373,11 +401,30 @@ class ModelProfile:
             object.__setattr__(
                 self, field_name, _canonical_set(getattr(self, field_name))
             )
+        unknown_memory_runtimes = set(runtime_memory) - set(self.runtimes)
+        if self.runtimes and unknown_memory_runtimes:
+            names = ", ".join(sorted(unknown_memory_runtimes))
+            raise ValueError(
+                f"runtime_memory_mb has overrides outside compatible runtimes: {names}"
+            )
         if len(self.pinned_nodes) > self.max_replicas:
             raise ValueError("pinned_nodes cannot exceed max_replicas")
 
     def to_dict(self) -> dict[str, Any]:
         return {**asdict(self), "schema_version": SCHEMA_VERSION}
+
+    def memory_for(self, runtimes: Iterable[str]) -> int:
+        """Return the conservative footprint for one host's advertised runtimes."""
+
+        overrides = dict(self.runtime_memory_mb)
+        matched = [overrides[runtime] for runtime in set(runtimes) if runtime in overrides]
+        return max(matched, default=self.memory_mb)
+
+    @property
+    def maximum_memory_mb(self) -> int:
+        """Largest configured footprint, used for deterministic model placement ordering."""
+
+        return max([self.memory_mb, *(value for _, value in self.runtime_memory_mb)])
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ModelProfile:
