@@ -771,7 +771,11 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     if not isinstance(model, str) or not model:
         return _openai_error(400, "model is required", "invalid_request")
 
-    engine = _choose_engine(app, model)
+    engine = _choose_engine(
+        app,
+        model,
+        requested_output_tokens=_requested_output_tokens(body),
+    )
     if not engine:
         _observe_allocator_request(app, model, started_at, error=True, queue_depth=1)
         return _openai_error(
@@ -1305,7 +1309,13 @@ def _node_allocator_state(node: Node) -> NodeState:
         return NodeState.UNHEALTHY
 
 
-def _choose_engine(app: FastAPI, model: str, *, media: bool = False) -> Node | None:
+def _choose_engine(
+    app: FastAPI,
+    model: str,
+    *,
+    media: bool = False,
+    requested_output_tokens: int = 0,
+) -> Node | None:
     """The least-loaded live engine serving ``model``.
 
     ``media=True`` additionally requires an advertised ``media_url``. Without that filter, an engine
@@ -1328,6 +1338,7 @@ def _choose_engine(app: FastAPI, model: str, *, media: bool = False) -> Node | N
         engines = [engine for engine in engines if engine.media_url]
     now = time.time()
     latency_baseline = _route_latency_baseline(engines, model=model, now=now)
+    throughput_baseline = _route_throughput_baseline(engines, model=model, now=now)
     engines.sort(
         key=lambda engine: (
             _route_priority(engine),
@@ -1336,6 +1347,8 @@ def _choose_engine(app: FastAPI, model: str, *, media: bool = False) -> Node | N
                 model=model,
                 now=now,
                 latency_baseline_ms=latency_baseline,
+                throughput_baseline=throughput_baseline,
+                requested_output_tokens=requested_output_tokens,
             ),
             _route_load_score(engine),
             _route_lease_age(engine, now=now),
@@ -1425,6 +1438,22 @@ def _route_latency_baseline(
     return statistics.median(measurements) if measurements else 1.0
 
 
+def _route_throughput_baseline(
+    engines: list[Node],
+    *,
+    model: str,
+    now: float,
+) -> float:
+    measurements = [
+        performance.tokens_per_second
+        for engine in engines
+        if (performance := _fresh_route_performance(engine, model=model, now=now))
+        is not None
+        and performance.tokens_per_second > 0
+    ]
+    return statistics.median(measurements) if measurements else 0.0
+
+
 def _fresh_route_performance(
     node: Node,
     *,
@@ -1446,6 +1475,8 @@ def _route_expected_completion_score(
     model: str,
     now: float,
     latency_baseline_ms: float,
+    throughput_baseline: float = 0.0,
+    requested_output_tokens: int = 0,
 ) -> float:
     performance = _fresh_route_performance(node, model=model, now=now)
     estimated_latency = latency_baseline_ms
@@ -1457,10 +1488,40 @@ def _route_expected_completion_score(
         estimated_latency = (
             weight * performance.latency_ms + (1.0 - weight) * latency_baseline_ms
         )
+        if throughput_baseline > 0 and performance.tokens_per_second > 0:
+            estimated_throughput = (
+                weight * performance.tokens_per_second
+                + (1.0 - weight) * throughput_baseline
+            )
+        else:
+            estimated_throughput = throughput_baseline
+    else:
+        estimated_throughput = throughput_baseline
+    if requested_output_tokens > 0 and estimated_throughput > 0:
+        estimated_latency = max(
+            estimated_latency,
+            requested_output_tokens / estimated_throughput * 1_000.0,
+        )
     active = _load_score(node.load)
     limit = _node_concurrency_limit(node)
     service_waves = active + 1.0 if limit is None else (active + 1.0) / max(1, limit)
     return estimated_latency * service_waves
+
+
+def _requested_output_tokens(body: Mapping[str, Any]) -> int:
+    """Read a bounded generation-length hint without inspecting prompt content."""
+
+    for field_name in ("max_completion_tokens", "max_tokens"):
+        value = body.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        try:
+            tokens = int(value)
+        except (OverflowError, ValueError):
+            continue
+        if tokens == value and 0 < tokens <= MAX_COUNTER:
+            return tokens
+    return 0
 
 
 def _node_concurrency_limit(node: Node) -> int | None:

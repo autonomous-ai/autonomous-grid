@@ -1590,6 +1590,57 @@ def test_router_expires_stale_latency_and_blends_low_sample_outliers(
     )
     assert stale == pytest.approx(100 / 4)
 
+
+def test_router_uses_output_length_to_choose_latency_or_throughput_engine(
+    tmp_path,
+    monkeypatch,
+):
+    app, client, _ = _app(tmp_path)
+    _managed_engine(client, host_id="interactive", model_id="qwen")
+    _managed_engine(client, host_id="throughput", model_id="qwen")
+    interactive = app.state.nodes[engine_node_id("interactive", "qwen")]
+    throughput = app.state.nodes[engine_node_id("throughput", "qwen")]
+    for engine in (interactive, throughput):
+        engine.allocator["max_concurrency"] = 8
+        engine.last_heartbeat = 1_000
+    interactive.proxy_model_performance["qwen"] = server_module._ProxyModelPerformance(
+        latency_ms=50,
+        tokens_per_second=10,
+        samples=8,
+        updated_at=1_000,
+    )
+    throughput.proxy_model_performance["qwen"] = server_module._ProxyModelPerformance(
+        latency_ms=200,
+        tokens_per_second=100,
+        samples=8,
+        updated_at=1_000,
+    )
+    monkeypatch.setattr(server_module.time, "time", lambda: 1_000)
+
+    assert (
+        server_module._choose_engine(app, "qwen", requested_output_tokens=1)
+        is interactive
+    )
+    assert (
+        server_module._choose_engine(app, "qwen", requested_output_tokens=1_000)
+        is throughput
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({"max_completion_tokens": 512, "max_tokens": 1}, 512),
+        ({"max_tokens": 128}, 128),
+        ({"max_tokens": True}, 0),
+        ({"max_tokens": -1}, 0),
+        ({"max_tokens": float("inf")}, 0),
+        ({"max_tokens": 1_000_000_001}, 0),
+    ],
+)
+def test_requested_output_token_hint_is_bounded(body, expected):
+    assert server_module._requested_output_tokens(body) == expected
+
 def test_proxy_owned_last_used_timestamp_survives_allocator_snapshot(tmp_path):
     app, client, _ = _app(tmp_path)
     _managed_engine(client, host_id="host-used", model_id="qwen")

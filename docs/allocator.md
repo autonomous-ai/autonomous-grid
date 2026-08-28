@@ -88,6 +88,9 @@ When private proxy measurements exist for the requested model, routing minimizes
 completion time: the incoming request's service wave is multiplied by a confidence- and
 freshness-weighted latency EWMA. Weak or missing measurements blend toward the current cohort
 median, measurements for other models are ignored, and expired evidence falls back completely.
+For text generation, a bounded `max_completion_tokens` or `max_tokens` hint adds a model-throughput
+lower bound to that estimate, allowing short requests to favor low latency and long generations to
+favor high token throughput. Grid never inspects or stores prompt content for this decision.
 
 The proxy attributes each successful response to both the engine and requested model, keeping
 bounded EWMAs of end-to-end latency and completion-token throughput. Those server-owned measurements
