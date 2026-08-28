@@ -2,12 +2,15 @@
 
 VENDORED from Interns-Desktop-App/assets/scripts/additional_services_manager/media_handler.py.
 
-Two explicit edits, each bracketed by `# --- vendored edit N: ... ---`:
+Three explicit edits, each bracketed by `# --- vendored edit N: ... ---`:
   1. `_ensure_comfyui_running` - replace the desktop's HTTP POST to
      :8888 /comfyui/start (the desktop's FastAPI manager that this CLI does
      not run) with a direct call to engine.comfyui.ensure_running().
   2. `_get_output_dir` - replace the macOS / dev-only fallback paths with
      Grid paths rooted at ~/.grid/.
+  3. `_stage_input_dir` - stage uploaded images under ComfyUI's own input/
+     directory and reference them relatively, instead of writing them to an
+     arbitrary temp dir and passing absolute paths.
 
 Receives media requests from the poll worker, submits workflows to ComfyUI,
 tracks progress via WebSocket + HTTP polling, and yields SSE events back.
@@ -60,6 +63,29 @@ class MediaHandler:
         self.comfyui_url = comfyui_url
         self._temp_base = tempfile.mkdtemp(prefix="p2p_media_")
 
+    # --- vendored edit 3: stage inputs inside ComfyUI's input/ tree. ---
+    def _stage_input_dir(self) -> tuple[str, str]:
+        """Make a per-request staging dir inside ComfyUI's own input/ directory.
+
+        Returns ``(absolute_dir, token)``; workflows must name staged files as
+        ``f"{token}/{filename}"``, i.e. relative to ComfyUI's input directory.
+
+        The desktop wrote uploads to an arbitrary temp dir and handed LoadImage an
+        absolute path. That only ever worked by accident: LoadImage validates via
+        `folder_paths.exists_annotated_filepath`, which did
+        `os.path.join(input_dir, name)` — and join silently discards the base when
+        `name` is absolute. ComfyUI has since added a path-traversal guard that
+        resolves the path and rejects anything outside input/, so absolute paths now
+        fail validation and every edit/i2v request dies in `_submit_workflow`'s retry
+        loop. Staging under input/ works on both old and new ComfyUI.
+        """
+        from shared.engine import comfyui as comfyui_engine
+
+        token = str(uuid.uuid4())
+        work_dir = os.path.join(str(comfyui_engine.comfyui_dir()), "input", token)
+        os.makedirs(work_dir, exist_ok=True)
+        return work_dir, token
+
     def handle_request(self, endpoint_path: str, body: dict):
         handlers = {
             "media/image/generate": self._handle_image_generation,
@@ -100,17 +126,16 @@ class MediaHandler:
         if not input_images:
             yield f'data: {json.dumps({"error": "No input images provided"})}'
             return
-        work_dir = os.path.join(self._temp_base, str(uuid.uuid4()))
-        os.makedirs(work_dir, exist_ok=True)
+        work_dir, token = self._stage_input_dir()
         saved_paths = []
         try:
             for img_info in input_images:
                 fname = img_info.get("filename", f"input_{len(saved_paths)}.png")
                 content = base64.b64decode(img_info.get("content_base64", ""))
-                path = os.path.join(work_dir, fname)
-                with open(path, "wb") as f:
+                with open(os.path.join(work_dir, fname), "wb") as f:
                     f.write(content)
-                saved_paths.append(path)
+                # relative to ComfyUI's input dir — see _stage_input_dir
+                saved_paths.append(f"{token}/{fname}")
             self._ensure_comfyui_running()
             workflow = self._build_image_edit_workflow(prompt_text, saved_paths, steps)
             yield from self._submit_and_track(workflow, "image/png", "output_image")
@@ -129,17 +154,16 @@ class MediaHandler:
         if not input_image:
             yield f'data: {json.dumps({"error": "No input image provided"})}'
             return
-        work_dir = os.path.join(self._temp_base, str(uuid.uuid4()))
-        os.makedirs(work_dir, exist_ok=True)
+        work_dir, token = self._stage_input_dir()
         try:
             fname = input_image.get("filename", "input.png")
             content = base64.b64decode(input_image.get("content_base64", ""))
-            image_path = os.path.join(work_dir, fname)
-            with open(image_path, "wb") as f:
+            with open(os.path.join(work_dir, fname), "wb") as f:
                 f.write(content)
             self._ensure_comfyui_running()
+            # relative to ComfyUI's input dir — see _stage_input_dir
             workflow = self._build_i2v_workflow(
-                prompt_text, image_path, duration, aspect_ratio
+                prompt_text, f"{token}/{fname}", duration, aspect_ratio
             )
             yield from self._submit_and_track(workflow, "video/mp4", "output_video")
         finally:
@@ -285,13 +309,15 @@ class MediaHandler:
                 last_reported = pct
 
         output_dir = self._get_output_dir()
-        output_files = self._collect_output_files(output_dir, media_type, filename_prefix)
+        output_files, collected = self._collect_output_files(
+            output_dir, media_type, filename_prefix, prompt_id
+        )
         if not output_files:
             yield f'data: {json.dumps({"error": "No output files produced by ComfyUI"})}'
             return
         yield f'data: {json.dumps({"type": "result", "output_files": output_files})}'
         yield "data: [DONE]"
-        self._cleanup_output_dir(output_dir)
+        self._cleanup_files(collected)
 
     def _get_output_dir(self) -> str:
         """Locate ComfyUI's output directory.
@@ -318,15 +344,61 @@ class MediaHandler:
                 return path
         return candidates[0]
 
-    def _collect_output_files(self, output_dir: str, media_type: str,
-                              filename_prefix: str) -> list[dict]:
-        if not os.path.isdir(output_dir):
+    def _history_output_names(self, prompt_id: str) -> list[tuple[str, str]]:
+        """`(subfolder, filename)` for exactly the files this prompt produced.
+
+        ComfyUI's history records what each run wrote, which is the only way to tell
+        one request's outputs from another's — the shared output directory cannot.
+        """
+        try:
+            resp = httpx.get(f"{self.comfyui_url}/history/{prompt_id}", timeout=10)
+            entry = resp.json().get(prompt_id) or {}
+        except Exception as e:
+            logger.warning(f"Could not read history for {prompt_id}: {e}")
             return []
-        files = []
-        for fname in os.listdir(output_dir):
-            if not fname.startswith(filename_prefix):
-                continue
-            fpath = os.path.join(output_dir, fname)
+        names: list[tuple[str, str]] = []
+        for node_output in (entry.get("outputs") or {}).values():
+            for value in node_output.values():
+                if not isinstance(value, list):
+                    continue
+                for item in value:
+                    if isinstance(item, dict) and item.get("filename"):
+                        names.append((item.get("subfolder") or "", item["filename"]))
+        return names
+
+    def _collect_output_files(self, output_dir: str, media_type: str,
+                              filename_prefix: str,
+                              prompt_id: str | None = None) -> tuple[list[dict], list[str]]:
+        """Return `(sse_payload_files, absolute_paths_collected)`.
+
+        Prefer the filenames ComfyUI recorded for `prompt_id`. Falling back to scanning
+        the directory by prefix is only safe when a run is alone in it: the output
+        directory is shared, so a crashed run's leftovers — or a request running
+        concurrently — would otherwise be returned as part of this response.
+        """
+        if not os.path.isdir(output_dir):
+            return [], []
+
+        candidates: list[tuple[str, str]] = []
+        if prompt_id:
+            candidates = [
+                (os.path.join(output_dir, sub, name), name)
+                for sub, name in self._history_output_names(prompt_id)
+            ]
+        if not candidates:
+            if prompt_id:
+                logger.warning(
+                    f"History listed no outputs for {prompt_id}; falling back to a "
+                    f"prefix scan of {output_dir}"
+                )
+            candidates = [
+                (os.path.join(output_dir, name), name)
+                for name in sorted(os.listdir(output_dir))
+                if name.startswith(filename_prefix)
+            ]
+
+        files, paths_ = [], []
+        for fpath, fname in candidates:
             if not os.path.isfile(fpath):
                 continue
             with open(fpath, "rb") as f:
@@ -336,13 +408,12 @@ class MediaHandler:
                 "content_base64": base64.b64encode(content).decode("ascii"),
                 "media_type": media_type,
             })
-        return files
+            paths_.append(fpath)
+        return files, paths_
 
-    def _cleanup_output_dir(self, output_dir: str):
-        if not os.path.isdir(output_dir):
-            return
-        for fname in os.listdir(output_dir):
-            fpath = os.path.join(output_dir, fname)
+    def _cleanup_files(self, paths_: list[str]):
+        """Delete only what this request returned, never the whole shared directory."""
+        for fpath in paths_:
             try:
                 if os.path.isfile(fpath):
                     os.unlink(fpath)
