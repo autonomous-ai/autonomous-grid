@@ -644,6 +644,8 @@ class AllocatorController:
                 or record.status != MutationStatus.SUCCEEDED
                 or record.duration_seconds <= 0
                 or record.model_id not in self._profiles
+                or record.artifact_sha256
+                != self._profiles[record.model_id].artifact_sha256
                 or record.completed_at > now
                 or now - record.completed_at >= _STARTUP_ESTIMATE_TTL_SECONDS
             ):

@@ -83,7 +83,9 @@ Cost, latency, host priority, cold-start time, and throttling lower a candidate'
 nodes report monotonic action duration in their authenticated acknowledgements. Successful warm
 times are retained in bounded controller history and blended with the configured model estimate as
 a cold-start prior; a bounded eight-sample EWMA becomes authoritative after four samples for that
-node/model pair. Placement favors a faster cached host, while the fleet-wide predictive prewarm
+node/model/artifact revision. A checksum change starts with the configured prior instead of
+inheriting an optimistic timing from different weights. Placement favors a faster cached host,
+while the fleet-wide predictive prewarm
 horizon never falls below the configured prior and expands when a measured host is slower. Samples
 expire after 30 days so a runtime or hardware upgrade can relearn. Invalid, non-finite, negative,
 or over-one-hour reports are ignored rather than poisoning scheduling or receipt delivery. Persisted

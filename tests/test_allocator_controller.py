@@ -21,7 +21,7 @@ from shared.allocator.planner import PlannerPolicy
 from shared.allocator.reconcile import MutationStatus, ReconcilePolicy
 
 
-def profile(model_id: str = "qwen") -> ModelProfile:
+def profile(model_id: str = "qwen", **kwargs) -> ModelProfile:
     return ModelProfile(
         model_id,
         8_000,
@@ -29,6 +29,7 @@ def profile(model_id: str = "qwen") -> ModelProfile:
         min_replicas=1,
         max_replicas=1,
         min_residency_seconds=0,
+        **kwargs,
     )
 
 
@@ -38,10 +39,21 @@ def node(
     ready: bool = False,
     node_id: str = "n",
     heartbeat: float = 10,
+    artifact_sha256: str = "",
 ) -> NodeSnapshot:
     residencies = (
-        ModelResidency("qwen", 8_000, ResidencyState.READY, loaded_at=1),
-    ) if ready else ()
+        (
+            ModelResidency(
+                "qwen",
+                8_000,
+                ResidencyState.READY if ready else ResidencyState.CACHED,
+                loaded_at=1 if ready else 0,
+                artifact_sha256=artifact_sha256,
+            ),
+        )
+        if ready or artifact_sha256
+        else ()
+    )
     return NodeSnapshot(
         node_id,
         16_000,
@@ -115,6 +127,26 @@ def test_controller_learns_and_persists_bounded_warm_duration(tmp_path):
     restored = AllocatorController(state_path=state_path)
     assert restored.status(now=11)["learned_warm_seconds"] == learned
     assert restored.status(now=31 * 24 * 60 * 60)["learned_warm_seconds"] == []
+
+
+def test_controller_does_not_reuse_warm_timing_across_artifact_revisions():
+    controller = AllocatorController(mode=AllocatorMode.AUTOMATIC)
+    controller.put_profile(profile(artifact_sha256="a" * 64))
+    controller.tick([node(artifact_sha256="a" * 64)], now=10)
+    command = controller.commands_for("n", now=10)[0]
+    assert command.kind == ActionKind.WARM
+    controller.acknowledge(
+        "n",
+        command.action_id,
+        MutationStatus.SUCCEEDED,
+        duration_seconds=20,
+        now=11,
+    )
+    assert controller.status(now=11)["learned_warm_seconds"]
+
+    controller.put_profile(profile(artifact_sha256="b" * 64))
+
+    assert controller.status(now=12)["learned_warm_seconds"] == []
 
 
 @pytest.mark.parametrize("duration", ["nan", "inf", -1, 3_601, True, object()])
