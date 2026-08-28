@@ -1,7 +1,7 @@
 """Media model bundles for ComfyUI workflows.
 
 Mirrors the desktop's:
-    /image-generation/v2/models/download  -> Z-Image Turbo (image generation)
+    /image-generation/v2/models/download  -> Krea 2 Turbo (image generation)
     /image-editing/models/download         -> Qwen-Image-Edit-2511
     /i2v/models/download                   -> Wan2.2 I2V
 
@@ -28,23 +28,37 @@ class FileSpec:
     target_name: str | None = None  # override basename, mainly to flatten when source path has dirs
 
 
-# Image generation (Z-Image-Turbo): desktop /image-generation/v2/models/download
+# Image generation (Krea 2 Turbo, 4-step distilled). Replaced Z-Image-Turbo in the 2026-08 bump.
+#
+# The VAE below is byte-identical to the one IMAGE_EDITING pulls, and both resolve to the same
+# models/vae/qwen_image_vae.safetensors — so a host serving both bundles downloads it once.
+#
+# The text encoder is Qwen3-VL-4B, NOT the Qwen3-4B that Z-Image used and NOT the Qwen2.5-VL-7B
+# that IMAGE_EDITING uses. All three are distinct: ComfyUI identifies the encoder from its tensor
+# shapes (`detect_te_model`), and `CLIPLoader type="krea2"` only accepts QWEN3VL_4B. They are not
+# interchangeable, so a host serving generation + editing legitimately carries two encoders.
 IMAGE_GENERATION = (
     FileSpec(
-        "Comfy-Org/z_image_turbo",
-        "split_files/diffusion_models/z_image_turbo_bf16.safetensors",
+        "Comfy-Org/Krea-2",
+        "diffusion_models/krea2_turbo_bf16.safetensors",
         "diffusion_models",
     ),
+    # 4-step turbo LoRA. Third-party: Krea ship no distilled LoRA of their own, and this is the
+    # file the workflow's `lora_name` refers to.
     FileSpec(
-        "Comfy-Org/z_image_turbo",
-        "split_files/text_encoders/qwen_3_4b.safetensors",
+        "lvladikov/Krea2-Turbo-Distill-4step-LoRA",
+        "krea2_turbo_4step_rank_64_lora_latest_comfyui.safetensors",
+        "loras",
+    ),
+    FileSpec(
+        "Comfy-Org/Krea-2",
+        "text_encoders/qwen3vl_4b_bf16.safetensors",
         "text_encoders",
     ),
     FileSpec(
-        "Comfy-Org/z_image_turbo",
-        "split_files/vae/ae.safetensors",
+        "Comfy-Org/Krea-2",
+        "vae/qwen_image_vae.safetensors",
         "vae",
-        target_name="z_image_vae.safetensors",
     ),
 )
 

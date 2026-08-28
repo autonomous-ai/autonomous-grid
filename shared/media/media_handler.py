@@ -368,12 +368,15 @@ class MediaHandler:
 
     def _build_image_gen_workflow(self, prompt: str, width: int, height: int,
                                   steps: int) -> dict:
-        workflow = _load_workflow("image_generation_v2_workflow.json")
-        workflow["prompt"]["34:27"]["inputs"]["text"] = prompt
-        workflow["prompt"]["34:13"]["inputs"]["width"] = width
-        workflow["prompt"]["34:13"]["inputs"]["height"] = height
-        workflow["prompt"]["34:3"]["inputs"]["steps"] = steps
-        workflow["prompt"]["9"]["inputs"]["filename_prefix"] = "output_image"
+        # Krea 2 Turbo. Node ids are the workflow's own and differ from the Z-Image graph this
+        # replaced (which used the "34:*" subgraph ids): 4=CLIPTextEncode, 6=EmptyLatentImage,
+        # 7=KSampler, 10=SaveImage.
+        workflow = _load_workflow("image_generation_krea2_workflow.json")
+        workflow["prompt"]["4"]["inputs"]["text"] = prompt
+        workflow["prompt"]["6"]["inputs"]["width"] = width
+        workflow["prompt"]["6"]["inputs"]["height"] = height
+        workflow["prompt"]["7"]["inputs"]["steps"] = steps
+        workflow["prompt"]["10"]["inputs"]["filename_prefix"] = "output_image"
         return workflow
 
     def _build_image_edit_workflow(self, prompt: str, image_paths: list[str],
