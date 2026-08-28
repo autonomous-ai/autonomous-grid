@@ -2124,6 +2124,24 @@ def test_cpu_capacity_uses_stable_physical_total_and_dynamic_external_reserve():
     ) == advertised["available_mb"]
 
 
+def test_resource_collector_can_partition_one_machine_into_failure_domains():
+    advertised = _allocator_resources(
+        {
+            "usable_bytes": 8 * 1024**3,
+            "backend": "metal",
+            "machine": {"platform": "macos-arm64"},
+            "memory": {"total_gb": 8, "available_gb": 7},
+            "failure_domain": "logical-node-3",
+            "mem_bandwidth_gbps": 400,
+            "compute_gflops": 27_132,
+        }
+    )
+
+    assert advertised["failure_domain"] == "logical-node-3"
+    assert advertised["memory_bandwidth_gbps"] == 400
+    assert advertised["compute_gflops"] == 27_132
+
+
 def test_node_rejects_warm_when_local_capacity_drops_after_global_plan(
     tmp_path,
     monkeypatch,

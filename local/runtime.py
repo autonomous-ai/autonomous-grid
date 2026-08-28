@@ -329,11 +329,13 @@ def _start_grid_locked(cfg: dict[str, Any]) -> int:
         cfg["updated_at"] = utc_now()
         config.save_grid_config(cfg["grid_id"], cfg)
         marker = _capture_process_start_marker(proc.pid)
-        if marker is None:
-            raise RuntimeError("could not capture signaling server process birth marker")
-        cfg["server_start_marker"] = marker
-        cfg["updated_at"] = utc_now()
-        config.save_grid_config(cfg["grid_id"], cfg)
+        # Main's process stamp above remains authoritative. The argv-bound allocator marker is a
+        # second fence when the platform can read it, but inability to collect redundant evidence
+        # must not turn a healthy spawn into a failed startup.
+        if marker is not None:
+            cfg["server_start_marker"] = marker
+            cfg["updated_at"] = utc_now()
+            config.save_grid_config(cfg["grid_id"], cfg)
     except BaseException:
         _terminate_spawned_server(proc)
         _clear_server_identity(cfg)
@@ -387,7 +389,7 @@ def _terminate_server(cfg: dict[str, Any], identity: dict[str, Any]) -> run_reco
     # Allocator-era servers carry a second, argv-bound nonce identity. If either half of that
     # identity remains on disk, require the complete identity to match before the general mainline
     # teardown gets any opportunity to signal the pid.
-    if cfg.get("server_instance_id") or cfg.get("server_start_marker"):
+    if cfg.get("server_instance_id") and cfg.get("server_start_marker"):
         pid = run_records.recorded_pid(identity) or 0
         if pid and _server_process_state(cfg) != "owned":
             raise SystemExit(

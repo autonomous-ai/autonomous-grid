@@ -132,6 +132,8 @@ class NodeSnapshot:
     queue_depth: int = 0
     tokens_per_second: float = 0.0
     latency_ms: float = 0.0
+    memory_bandwidth_gbps: float = 0.0
+    compute_gflops: float = 0.0
     cost_per_hour: float = 0.0
     host_priority: int = 0
     last_heartbeat: float = 0.0
@@ -155,6 +157,8 @@ class NodeSnapshot:
             raise ValueError("request counts and concurrency are outside the supported range")
         _finite_nonnegative(self.tokens_per_second, "tokens_per_second")
         _finite_nonnegative(self.latency_ms, "latency_ms")
+        _finite_nonnegative(self.memory_bandwidth_gbps, "memory_bandwidth_gbps")
+        _finite_nonnegative(self.compute_gflops, "compute_gflops")
         _finite_nonnegative(self.cost_per_hour, "cost_per_hour")
         _finite_nonnegative(self.last_heartbeat, "last_heartbeat")
         _finite_nonnegative(self.mutation_cooldown_until, "mutation_cooldown_until")

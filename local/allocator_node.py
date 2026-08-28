@@ -1295,6 +1295,12 @@ def _allocator_resources(
     machine = info.get("machine") if isinstance(info.get("machine"), Mapping) else {}
     memory = info.get("memory") if isinstance(info.get("memory"), Mapping) else {}
     platform = str(machine.get("platform") or "unknown")
+    failure_domain = str(
+        info.get("failure_domain")
+        or machine.get("hostname")
+        or socket.gethostname()
+        or platform
+    )
     managed_mb = sum(
         residency.memory_mb
         for residency in residencies
@@ -1355,8 +1361,12 @@ def _allocator_resources(
         "available_mb": available_mb,
         "runtimes": ["llama.cpp"],
         "backends": [backend],
-        "failure_domain": socket.gethostname() or platform,
+        "failure_domain": failure_domain,
         "tags": [platform, backend],
+        "memory_bandwidth_gbps": _nonnegative_number(
+            info.get("mem_bandwidth_gbps")
+        ),
+        "compute_gflops": _nonnegative_number(info.get("compute_gflops")),
         "allowed_data_tiers": ["public", "internal"],
     }
 

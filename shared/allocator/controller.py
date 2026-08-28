@@ -252,6 +252,12 @@ class AllocatorController:
             now=timestamp,
         )
         plan = self._version_plan(raw_plan)
+        self._resolve_revalidated_withdrawn_destructive(
+            plan,
+            node_list,
+            profiles,
+            now=timestamp,
+        )
         if self._restored_command_ids and self._membership_recovery_started_at is None:
             self._membership_recovery_started_at = timestamp
         elif (
@@ -731,6 +737,40 @@ class AllocatorController:
                 # could race a newer warm and remove the newly admitted replica.
                 resolved = residency is None or residency.state == ResidencyState.CACHED
             if resolved:
+                self._resolve_delivered_action(action_id)
+
+    def _resolve_revalidated_withdrawn_destructive(
+        self,
+        plan: PlacementPlan,
+        nodes: tuple[NodeSnapshot, ...],
+        profiles: tuple[ModelProfile, ...],
+        *,
+        now: float,
+    ) -> None:
+        """Release uncertainty when the same destructive outcome is safe and desired again.
+
+        A withdrawn command remains dangerous while its pair has been readmitted or a current
+        reconciler guard (minimum residency, replacement readiness, active requests, diversity)
+        would reject it. Once the pair is absent from the new plan *and* those guards accept the
+        original command, late delivery and a newly issued command have the same postcondition.
+        Keeping the uncertainty fence at that point deadlocks scale-down forever because READY can
+        never satisfy DRAIN's old postcondition without receiving the command the fence blocks.
+        """
+
+        if not self._withdrawn_destructive:
+            return
+        deferred = self.reconciler.destructive_command_deferrals(
+            plan,
+            nodes,
+            profiles,
+            self._withdrawn_destructive.values(),
+            now=now,
+        )
+        desired = plan.desired_pairs
+        for action_id, action in list(self._withdrawn_destructive.items()):
+            if (action.node_id, action.model_id) in desired:
+                continue
+            if action_id not in deferred:
                 self._resolve_delivered_action(action_id)
 
     def _cancel_stale_commands(

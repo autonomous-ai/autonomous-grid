@@ -40,7 +40,8 @@ The global loop consumes:
 - model profiles: memory, runtime/backend compatibility, replica bounds, priority, data tier,
   placement tags, failure-domain goal, pins, and cooldowns;
 - host snapshots: usable memory, reserve, runtime/backend, lifecycle state, policy tags, cached and
-  resident models, concurrency, queue, throughput, latency, heartbeat age, and actuator ownership;
+  resident models, concurrency, queue, measured throughput and latency, memory bandwidth, compute,
+  heartbeat age, and actuator ownership;
 - short-horizon demand: request rate, offered concurrency, queue depth, p95 latency, errors, and
   trend.
 
@@ -53,8 +54,10 @@ permissionless inference endpoint cannot grow controller state with arbitrary na
 
 Placement is deterministic. Higher-priority and larger models place first; candidates then prefer
 an existing ready residency, local cached weights, another failure domain, measured throughput, and
-best-fit memory. Cost, latency, host priority, cold-start time, and throttling lower a candidate's
-score. Explicit pins, per-host model limits, compatibility policies, and a feasible minimum failure-
+best-fit memory. Before measured throughput exists, bounded memory-bandwidth and compute estimates
+break otherwise-cold ties; ready and cached bonuses remain much larger, so hardware estimates do
+not cause gratuitous migration. Cost, latency, host priority, cold-start time, and throttling lower
+a candidate's score. Explicit pins, per-host model limits, compatibility policies, and a feasible minimum failure-
 domain count are hard constraints. A failure-domain shortfall or capacity shortage is reported
 rather than hidden by overcommit. A throttled host exposes only its configured fraction of capacity
 for new placement. When greedy placement fragments capacity, a deterministic bounded backtracking
@@ -122,8 +125,10 @@ The planner and reconciler keep these rules even when demand, membership, or clo
    but the host/model admission gates remove it from active routing immediately. A managed control
    envelope claiming `ready` is inventory, not replacement proof: Grid reports it as `warming`
    until a live, admitted child-engine record for the same host/model corroborates the route.
-   READY residencies on draining, paused, unhealthy, or quarantined hosts are likewise excluded
-   from replacement and failure-domain evidence.
+   When a corroborated child remains live but its host is intentionally draining, paused,
+   unhealthy, or quarantined, its process state remains `ready` so reconciliation can drain and
+   unload it; the host fence still excludes it from routing, placement, replacement, and failure-
+   domain evidence.
 5. **Protect the last required replica.** An old replica is not drained until all required desired
    replacements report ready.
 6. **Drain before unload.** A draining model is not unloaded while that model residency reports
@@ -238,6 +243,8 @@ An allocator-capable node registers or updates with `PUT /nodes/{node_id}`:
     "reserved_mb": 8192,
     "runtimes": ["llama.cpp"],
     "backends": ["metal"],
+    "memory_bandwidth_gbps": 400,
+    "compute_gflops": 27132,
     "failure_domain": "floor-2",
     "tags": ["employee"]
   },
@@ -487,6 +494,25 @@ If no durable state path exists, or the requested path cannot be quarantined or 
 `automatic` mode is refused rather than running mutations with non-durable intent.
 After a valid state restore, fresh membership must re-register before destructive work resumes;
 the restart grace period prevents a temporarily incomplete fleet view from causing unloads.
+
+### Single-machine logical fleet test
+
+Before a physical multi-machine rollout, the development harness can partition one Mac into
+isolated logical hosts with separate host IDs, failure domains, durable state files, credentials,
+port ranges, capacity shares, and real llama.cpp children:
+
+```bash
+uv run python tests/e2e_allocator_logical.py --nodes 2
+uv run python tests/e2e_allocator_logical.py --nodes 4
+uv run python tests/e2e_allocator_logical.py --nodes 4 --scenario activity
+```
+
+The lifecycle runs cover demand-driven warm, real OpenAI-compatible inference, route fencing,
+drain, unload, and abrupt child recovery. The activity scenario runs three replicas with a fourth
+logical spare, marks a loaded partition user-active, and requires make-before-break evacuation.
+`--scenario contention --second-model <cached-alias.gguf>` exercises two model identities under a
+one-model-per-logical-host claimed capacity budget. Logical performance and memory telemetry are
+partitioned so the harness never reports N times the physical Mac's capacity.
 
 ## Current limits
 

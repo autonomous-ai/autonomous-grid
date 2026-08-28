@@ -70,6 +70,30 @@ def model(model_id: str = "qwen", memory_mb: int = 8_000, **kwargs) -> ModelProf
     )
 
 
+def test_cold_unmeasured_placement_prefers_faster_hardware_without_repacking_cache():
+    profile = replace(model(), backends=())
+    intel = node(
+        "intel",
+        backend="cpu",
+        memory_bandwidth_gbps=50,
+        compute_gflops=1_000,
+    )
+    m2 = node(
+        "m2",
+        memory_bandwidth_gbps=400,
+        compute_gflops=27_132,
+    )
+
+    cold = PlacementPlanner().plan((intel, m2), (profile,), now=10)
+    assert cold.assignments[0].node_id == "m2"
+    assert "hardware performance estimate" in cold.assignments[0].reasons
+
+    cached_intel = replace(intel, cached_models=(profile.model_id,))
+    stable = PlacementPlanner().plan((cached_intel, m2), (profile,), now=10)
+    assert stable.assignments[0].node_id == "intel"
+    assert "weights cached locally" in stable.assignments[0].reasons
+
+
 def ready(
     model_id: str = "qwen",
     memory_mb: int = 8_000,
@@ -86,6 +110,124 @@ def ready(
         last_used_at,
         **kwargs,
     )
+
+
+def test_current_eight_node_framework_inventory_is_usable_but_never_actuated():
+    """Mirror the live autonomous.ai fleet without granting ownership by discovery alone."""
+
+    inventory = (
+        ("firmware-engineer-daniel", "llama.cpp", "metal", ("Qwen3.6-35B-A3B",)),
+        ("video-editor-tom", "llama.cpp", "metal", ("Gemma-4-31B-it",)),
+        ("3d-artist-diego", "llama.cpp", "metal", ("Gemma-4-31B-it",)),
+        ("ml-engineer-priya", "llama.cpp", "metal", ("GLM-4.7-Flash",)),
+        (
+            "mac-studio-turtle",
+            "comfyui",
+            "mps",
+            ("comfyui:krea2", "comfyui:z_image"),
+        ),
+        ("scholes-60002-01", "vllm", "cuda", ("Qwen3.8-Flash-Next",)),
+        ("scholes-60001", "vllm", "cuda", ("DeepSeek-V4-Flash",)),
+        ("8x50902-67-qwen38-27b", "vllm", "cuda", ("Qwen3.8-27B",)),
+    )
+    machines = tuple(
+        node(
+            node_id,
+            capacity_mb=196_608 if backend in ("metal", "mps") else 768_000,
+            runtime=runtime,
+            backend=backend,
+            domain=node_id,
+            residencies=tuple(ready(model_id, 32_000, managed=False) for model_id in models),
+            manually_managed=True,
+            actuator_capabilities=(),
+        )
+        for node_id, runtime, backend, models in inventory
+    )
+    expected = {
+        model_id: tuple(
+            node_id
+            for node_id, _runtime, _backend, models in inventory
+            if model_id in models
+        )
+        for _node_id, _runtime, _backend, models in inventory
+        for model_id in models
+    }
+    profiles = tuple(
+        ModelProfile(
+            model_id=model_id,
+            memory_mb=32_000,
+            runtimes=(next(
+                runtime
+                for _node_id, runtime, _backend, models in inventory
+                if model_id in models
+            ),),
+            min_replicas=len(node_ids),
+            max_replicas=len(node_ids),
+            min_residency_seconds=0,
+        )
+        for model_id, node_ids in expected.items()
+    )
+
+    plan = PlacementPlanner().plan(machines, profiles, now=10)
+
+    assert plan.unsatisfied == ()
+    assert {profile.model_id: plan.nodes_for(profile.model_id) for profile in profiles} == {
+        model_id: tuple(sorted(node_ids)) for model_id, node_ids in expected.items()
+    }
+    result = Reconciler().reconcile(
+        plan,
+        machines,
+        profiles,
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+    assert result.actions == ()
+
+
+def test_new_text_model_can_only_land_on_explicitly_owned_llama_nodes():
+    owned_llama = tuple(
+        node(
+            f"owned-llama-{index}",
+            runtime="llama.cpp",
+            backend="metal",
+            domain=f"logical-{index}",
+        )
+        for index in range(4)
+    )
+    immutable_other_frameworks = (
+        node(
+            "comfyui-mps",
+            runtime="comfyui",
+            backend="mps",
+            manually_managed=True,
+            actuator_capabilities=(),
+        ),
+        *(node(
+            f"external-{index}",
+            runtime="vllm",
+            backend="cuda",
+            manually_managed=True,
+            actuator_capabilities=(),
+        ) for index in range(3)),
+    )
+    profile = model(
+        "new-text-model",
+        memory_mb=4_000,
+        min_replicas=4,
+        max_replicas=4,
+        min_failure_domains=4,
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (*owned_llama, *immutable_other_frameworks),
+        (profile,),
+        now=10,
+    )
+
+    assert plan.nodes_for(profile.model_id) == tuple(
+        sorted(item.node_id for item in owned_llama)
+    )
+    assert plan.unsatisfied == ()
 
 
 def test_allocator_models_validate_impossible_values():
@@ -109,6 +251,8 @@ def test_node_snapshot_round_trip_preserves_residency_and_enum():
         residencies=(ready(managed=False, pinned=True, active_requests=2),),
         cached=("other",),
         state=NodeState.THROTTLED,
+        memory_bandwidth_gbps=400,
+        compute_gflops=27_132,
     )
     restored = NodeSnapshot.from_dict(original.to_dict())
     assert restored == original
@@ -117,7 +261,12 @@ def test_node_snapshot_round_trip_preserves_residency_and_enum():
 
     legacy = original.to_dict()
     legacy["residencies"][0].pop("active_requests")
-    assert NodeSnapshot.from_dict(legacy).residency("qwen").active_requests == 0
+    legacy.pop("memory_bandwidth_gbps")
+    legacy.pop("compute_gflops")
+    restored_legacy = NodeSnapshot.from_dict(legacy)
+    assert restored_legacy.residency("qwen").active_requests == 0
+    assert restored_legacy.memory_bandwidth_gbps == 0
+    assert restored_legacy.compute_gflops == 0
 
 
 def test_node_snapshot_rejects_duplicate_model_residencies():

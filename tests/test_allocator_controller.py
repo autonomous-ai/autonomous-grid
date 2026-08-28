@@ -1211,7 +1211,6 @@ def test_withdrawn_destructive_survives_restart_and_history_compaction(tmp_path)
 
     # The unresolved qwen command must not prevent an independent model from draining.
     controller.put_profile(replace(retiring, model_id="other", memory_mb=1_000))
-    controller.put_profile(retiring)
     other_residency = ModelResidency(
         "other",
         1_000,
@@ -1226,7 +1225,8 @@ def test_withdrawn_destructive_survives_restart_and_history_compaction(tmp_path)
         ),
         now=12,
     )
-    assert any(item.code == "destructive_outcome_unresolved" for item in result.deferred)
+    assert any(item.code == "minimum_residency" for item in result.deferred)
+    assert controller.status(now=12)["withdrawn_destructive"]
     other_drain = controller.commands_for("other-node", now=12)[0]
     assert other_drain.kind == ActionKind.DRAIN
     controller.acknowledge(
@@ -1255,6 +1255,7 @@ def test_withdrawn_destructive_survives_restart_and_history_compaction(tmp_path)
         now=13,
     )
     assert restored.status(now=13)["withdrawn_destructive"] == []
+    restored.put_profile(retiring)
     restored.tick((replace(qwen_node, last_heartbeat=14),), now=14)
     replacement = restored.commands_for("qwen-node", now=14)
     assert len(replacement) == 1
@@ -1262,7 +1263,7 @@ def test_withdrawn_destructive_survives_restart_and_history_compaction(tmp_path)
     assert replacement[0].action_id != withdrawn.action_id
 
 
-def test_withdrawn_drain_resolves_only_after_authoritative_postcondition():
+def test_withdrawn_drain_revalidates_when_destructive_outcome_is_safe_again():
     controller = automatic_controller()
     retiring = replace(
         profile(),
@@ -1281,12 +1282,23 @@ def test_withdrawn_drain_resolves_only_after_authoritative_postcondition():
     assert controller.status(now=11)["withdrawn_destructive"]
 
     controller.put_profile(retiring)
-    # READY cannot settle the race, even after the original safety issue is removed.
-    blocked = controller.tick((replace(machine, last_heartbeat=12),), now=12)
-    assert controller.status(now=12)["withdrawn_destructive"]
-    assert any(item.code == "destructive_outcome_unresolved" for item in blocked.deferred)
+    # The pair is undesired again and every current destructive guard accepts the old outcome.
+    # Revalidate it: otherwise READY can never reach DRAINING because this uncertainty fence blocks
+    # the very replacement command that would establish that postcondition.
+    controller.tick((replace(machine, last_heartbeat=12),), now=12)
+    assert controller.status(now=12)["withdrawn_destructive"] == []
+    replacement = controller.commands_for("n", now=12)
+    assert len(replacement) == 1
+    assert replacement[0].kind == ActionKind.DRAIN
+    assert replacement[0].action_id != withdrawn.action_id
 
     draining = replace(ready_qwen(), state=ResidencyState.DRAINING)
+    controller.acknowledge(
+        "n",
+        replacement[0].action_id,
+        MutationStatus.SUCCEEDED,
+        now=12.5,
+    )
     controller.tick(
         (allocator_node("n", residency=draining, heartbeat=13),),
         now=13,
@@ -1295,7 +1307,7 @@ def test_withdrawn_drain_resolves_only_after_authoritative_postcondition():
     unload = controller.commands_for("n", now=13)
     assert len(unload) == 1
     assert unload[0].kind == ActionKind.UNLOAD
-    assert unload[0].action_id != withdrawn.action_id
+    assert unload[0].action_id not in (withdrawn.action_id, replacement[0].action_id)
 
 
 def test_membership_recovery_grace_rebases_after_wall_clock_rollback(tmp_path):

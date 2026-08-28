@@ -2017,6 +2017,12 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                         node.load.get("tokens_per_second")
                     ),
                     latency_ms=_nonnegative_float(node.load.get("latency_ms")),
+                    memory_bandwidth_gbps=_nonnegative_float(
+                        resources.get("memory_bandwidth_gbps")
+                    ),
+                    compute_gflops=_nonnegative_float(
+                        resources.get("compute_gflops")
+                    ),
                     cost_per_hour=_nonnegative_float(allocator.get("cost_per_hour")),
                     host_priority=_first_nonnegative_int(
                         allocator.get("host_priority")
@@ -2101,7 +2107,18 @@ def _merge_allocator_hosts(
                     and (not selected.managed or candidate.managed)
                     for record, candidate in candidates
                 )
-                if not route_proven:
+                corroborated_live_child = any(
+                    record.role in ("engine", "both")
+                    and record.safety_lease
+                    and candidate.state == ResidencyState.READY
+                    for record, candidate in candidates
+                )
+                intentionally_host_fenced = (
+                    corroborated_live_child
+                    and bool(control_members)
+                    and restrictive.state not in _ROUTABLE_NODE_STATES
+                )
+                if not route_proven and not intentionally_host_fenced:
                     # The control runtime can truthfully own a live READY process before its child
                     # route is registered. Preserve its resident memory/slot and suppress a
                     # duplicate WARM, but never use that control-only claim as replacement proof.
@@ -2166,6 +2183,11 @@ def _merge_allocator_hosts(
                     sum(member.tokens_per_second for member in members),
                 ),
                 latency_ms=max(member.latency_ms for member in members),
+                # Capacity and child records repeat physical-host capability; never add them.
+                memory_bandwidth_gbps=max(
+                    member.memory_bandwidth_gbps for member in members
+                ),
+                compute_gflops=max(member.compute_gflops for member in members),
                 # Capacity-node and child-engine records describe one physical host, so host cost
                 # is metadata rather than an additive per-record charge.
                 cost_per_hour=max(member.cost_per_hour for member in members),

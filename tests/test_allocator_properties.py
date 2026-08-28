@@ -4,6 +4,7 @@ import math
 import random
 
 from shared.allocator.models import (
+    AllocatorMode,
     DemandForecast,
     ModelProfile,
     ModelResidency,
@@ -16,6 +17,7 @@ from shared.allocator.planner import (
     PlannerPolicy,
     compatibility_reason,
 )
+from shared.allocator.reconcile import Reconciler
 
 
 def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
@@ -161,6 +163,151 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
                 )
                 if live_slots <= node.max_models:
                     assert live_slots + added_slots_by_node[node.node_id] <= node.max_models
+
+
+def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries():
+    """Soak the actual 4 llama.cpp + 1 ComfyUI + 3 vLLM fleet shape."""
+
+    rng = random.Random(0x8F1EE7)
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0.05))
+    reconciler = Reconciler()
+    profiles = (
+        ModelProfile(
+            "Qwen3.6-35B-A3B",
+            32_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=4,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=0,
+        ),
+        ModelProfile(
+            "Gemma-4-31B-it",
+            32_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=4,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=0,
+        ),
+        *(
+            ModelProfile(
+                model_id,
+                32_000,
+                runtimes=(runtime,),
+                min_replicas=1,
+                max_replicas=1,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=0,
+            )
+            for model_id, runtime in (
+                ("comfyui:krea2", "comfyui"),
+                ("comfyui:z_image", "comfyui"),
+                ("Qwen3.8-Flash-Next", "vllm"),
+                ("DeepSeek-V4-Flash", "vllm"),
+                ("Qwen3.8-27B", "vllm"),
+            )
+        ),
+    )
+    profile_by_id = {item.model_id: item for item in profiles}
+    fixed_inventory = (
+        ("comfyui-1", "comfyui", "mps", ("comfyui:krea2", "comfyui:z_image")),
+        ("vllm-1", "vllm", "cuda", ("Qwen3.8-Flash-Next",)),
+        ("vllm-2", "vllm", "cuda", ("DeepSeek-V4-Flash",)),
+        ("vllm-3", "vllm", "cuda", ("Qwen3.8-27B",)),
+    )
+
+    for _ in range(250):
+        llama_nodes = tuple(
+            NodeSnapshot(
+                node_id=f"llama-{index}",
+                capacity_mb=48_000,
+                reserved_mb=rng.choice((0, 4_000, 8_000)),
+                runtimes=("llama.cpp",),
+                backends=("metal",),
+                state=rng.choice(
+                    (NodeState.ACCEPTING, NodeState.ACCEPTING, NodeState.THROTTLED, NodeState.PAUSED)
+                ),
+                failure_domain=f"mac-{index}",
+                residencies=tuple(
+                    ModelResidency(
+                        model_id,
+                        32_000,
+                        rng.choice((ResidencyState.READY, ResidencyState.CACHED)),
+                    )
+                    for model_id in ("Qwen3.6-35B-A3B", "Gemma-4-31B-it")
+                    if rng.random() < 0.25
+                ),
+                cached_models=tuple(
+                    model_id
+                    for model_id in ("Qwen3.6-35B-A3B", "Gemma-4-31B-it")
+                    if rng.random() < 0.5
+                ),
+                last_heartbeat=100,
+            )
+            for index in range(4)
+        )
+        immutable_nodes = tuple(
+            NodeSnapshot(
+                node_id=node_id,
+                capacity_mb=196_608,
+                runtimes=(runtime,),
+                backends=(backend,),
+                state=rng.choice(
+                    (NodeState.ACCEPTING, NodeState.ACCEPTING, NodeState.PAUSED)
+                ),
+                failure_domain=node_id,
+                residencies=tuple(
+                    ModelResidency(
+                        model_id,
+                        32_000,
+                        ResidencyState.READY,
+                        managed=False,
+                    )
+                    for model_id in models
+                ),
+                manually_managed=True,
+                actuator_capabilities=(),
+                last_heartbeat=100,
+            )
+            for node_id, runtime, backend, models in fixed_inventory
+        )
+        nodes = (*llama_nodes, *immutable_nodes)
+        demand = tuple(
+            DemandForecast(
+                item.model_id,
+                offered_concurrency=rng.random() * 2,
+                queue_depth=rng.randint(0, 3),
+            )
+            for item in profiles
+        )
+
+        plan = planner.plan(nodes, profiles, demand, now=100)
+        node_by_id = {item.node_id: item for item in nodes}
+        for assignment in plan.assignments:
+            target = node_by_id[assignment.node_id]
+            selected_profile = profile_by_id[assignment.model_id]
+            assert set(target.runtimes).intersection(selected_profile.runtimes)
+            residency = target.residency(assignment.model_id)
+            if target.manually_managed:
+                assert residency is not None
+                assert residency.state == ResidencyState.READY
+                assert residency.managed is False
+
+        result = reconciler.reconcile(
+            plan,
+            nodes,
+            profiles,
+            mode=AllocatorMode.AUTOMATIC,
+            now=100,
+        )
+        assert all(action.node_id.startswith("llama-") for action in result.actions)
+        assert all(
+            profile_by_id[action.model_id].runtimes == ("llama.cpp",)
+            for action in result.actions
+        )
 
 
 def test_managed_failed_process_stays_reserved_until_reconciler_unloads_it():

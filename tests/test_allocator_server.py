@@ -739,6 +739,7 @@ def test_control_only_ready_replacement_cannot_drain_live_route(tmp_path):
     [
         ("paused", "accepting", False, None),
         ("accepting", "draining", False, None),
+        ("accepting", "draining", True, None),
         ("accepting", "accepting", True, None),
         ("accepting", "accepting", False, False),
     ],
@@ -809,12 +810,24 @@ def test_nonroutable_managed_child_cannot_supply_ready_evidence(
         child.last_heartbeat = time.time() - server_module.NODE_TTL_SECONDS - 1
 
     snapshot = server_module._allocator_snapshots(app)[0]
-    assert snapshot.residency("qwen").state == server_module.ResidencyState.WARMING
+    expected_state = (
+        server_module.ResidencyState.READY
+        if control_state == "draining" and not stale_child
+        else server_module.ResidencyState.WARMING
+    )
+    assert snapshot.residency("qwen").state == expected_state
     assert server_module._active_engines(app, "qwen") == []
 
 
-def test_host_control_state_atomically_fences_all_child_routing(tmp_path):
-    _, client, _ = _app(tmp_path)
+@pytest.mark.parametrize(
+    "control_state",
+    ("draining", "paused", "unhealthy", "quarantined"),
+)
+def test_host_control_state_atomically_fences_all_child_routing(
+    tmp_path,
+    control_state,
+):
+    app, client, _ = _app(tmp_path)
     _managed_node(client)
     _managed_engine(client, model_id="qwen")
     _managed_engine(client, model_id="llama")
@@ -828,12 +841,18 @@ def test_host_control_state_atomically_fences_all_child_routing(tmp_path):
             "allocator": {
                 "managed": True,
                 "host_id": "host-1",
-                "state": "draining",
+                "state": control_state,
             },
         },
     )
     assert response.status_code == 200, response.text
     assert client.get("/nodes/discover").json()["engines"] == []
+    # Routing state and process state are different facts. The child is still a live READY process
+    # that reconciliation must see in order to drain and unload it after a replacement is ready.
+    snapshot = server_module._allocator_snapshots(app)[0]
+    assert snapshot.state == server_module.NodeState(control_state)
+    assert snapshot.residency("qwen").state == server_module.ResidencyState.READY
+    assert snapshot.residency("llama").state == server_module.ResidencyState.READY
 
 
 def test_child_drain_does_not_poison_sibling_or_host_lifecycle(tmp_path):

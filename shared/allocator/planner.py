@@ -958,6 +958,13 @@ def _candidate_score(
     if node.tokens_per_second:
         score += min(node.tokens_per_second, 10_000.0) * 2.0
         reasons.append("measured throughput")
+    elif node.memory_bandwidth_gbps or node.compute_gflops:
+        # Model serving is usually bandwidth-bound; compute is a smaller secondary prior. These
+        # estimates only break cold/unmeasured ties: READY and cached placement bonuses above are
+        # intentionally much larger, so hardware heterogeneity never causes gratuitous migration.
+        score += min(node.memory_bandwidth_gbps, 2_000.0) * 10.0
+        score += min(math.log2(1.0 + node.compute_gflops) * 100.0, 2_000.0)
+        reasons.append("hardware performance estimate")
     if node.latency_ms:
         score -= min(node.latency_ms, 60_000.0) / 50.0
     if node.max_concurrency > 0:

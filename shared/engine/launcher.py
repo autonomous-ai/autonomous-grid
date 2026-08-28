@@ -296,7 +296,6 @@ def start_llm(
             # GET /slots to observe requests that bypass Grid's central proxy before unloading a
             # model process.
             "--slots",
-            "--jinja",
             "--n-predict",
             str(n_predict),
             "--temp",
