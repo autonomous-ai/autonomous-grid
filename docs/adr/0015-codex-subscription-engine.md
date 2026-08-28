@@ -404,7 +404,7 @@ refuses the join naming the egress-IP cause (a VPS cannot serve a seat); at serv
 CF-403 and auth-403 produce distinct operator warnings, which requires the forward seam to
 expose response headers/body to the warning path, not just the status code. The API-only
 poll-worker default of 8 does **not** apply to codex — a codex-containing union defaults to
-1 (a flat-rate seat must not be hammered eight-wide by default); an explicit
+1 (a flat-rate seat must not be hammered four-wide by default); an explicit
 `--max-concurrency` still wins.
 
 > **Amended 2026-07-16 (issue 05 — as built).** The join half landed; the deltas that bind:

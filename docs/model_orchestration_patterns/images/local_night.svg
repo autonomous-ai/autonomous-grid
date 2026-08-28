@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3162 568" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
+  <title id="t">Verified Night Shift — improve the box while it sleeps</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="3162" height="568" fill="#fff"/>
+  <text x="962" y="310" text-anchor="middle" fill="#2b2b29" font-size="23">headroom</text>
+  <text x="1205" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">yield within bound</text>
+  <text x="1446" y="384" text-anchor="middle" fill="#2b2b29" font-size="23">preempt</text>
+  <text x="1414" y="310" text-anchor="middle" fill="#2b2b29" font-size="22">complete</text>
+  <text x="2062" y="310" text-anchor="middle" fill="#2b2b29" font-size="23">exact digest</text>
+  <text x="2630" y="310" text-anchor="middle" fill="#2b2b29" font-size="23">pass</text>
+  <text x="2650" y="369" text-anchor="middle" fill="#2b2b29" font-size="23">fail</text>
+  <path d="M 303 92 C 680 92, 680 92, 1057 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1353 92 C 1490 92, 1490 92, 1627 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 355 328 C 472 328, 472 328, 588 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 868 328 C 962 328, 962 328, 1057 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1353 328 C 1205 328, 1205 92, 1057 92" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
+  <path d="M 1353 328 C 1446 328, 1446 446, 1539 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1353 328 C 1414 328, 1414 328, 1474 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1924 328 C 2062 328, 2062 328, 2199 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2347 243 C 2347 269, 2347 269, 2347 295" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2532 210 C 2649 210, 2649 328, 2765 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2495 328 C 2630 328, 2630 328, 2765 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2495 328 C 2650 328, 2650 446, 2805 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="57" y="59" width="246" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="180" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">live arrival</text>
+  <rect x="1057" y="59" width="296" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1205" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">foreground seat</text>
+  <rect x="1627" y="59" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1699" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <rect x="5" y="295" width="350" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="180" y="338" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">improvement backlog</text>
+  <rect x="588" y="295" width="279" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="728" y="338" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">idle eligible?</text>
+  <rect x="1057" y="295" width="296" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1205" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">bounded quantum</text>
+  <rect x="2162" y="177" width="370" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2347" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">trusted type policy</text>
+  <rect x="1474" y="295" width="450" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1699" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">immutable staged result</text>
+  <rect x="1539" y="413" width="320" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1699" y="456" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">checkpoint / abort</text>
+  <rect x="2199" y="295" width="296" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="2347" y="338" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">typed validator</text>
+  <rect x="2805" y="413" width="220" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="2915" y="456" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">retain live</text>
+  <rect x="2765" y="295" width="300" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2915" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">atomic promotion</text>
+</svg>

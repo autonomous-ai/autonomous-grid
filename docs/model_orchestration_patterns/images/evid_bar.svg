@@ -13,7 +13,6 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1340" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Evidence-Bar Ladder — proof threshold scales with the cost of error</text>
   <path d="M 120 210 C 178 210, 178 210, 237 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 499 210 C 636 210, 636 92, 773 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 499 210 C 628 210, 628 210, 756 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

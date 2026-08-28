@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1412 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
+  <title id="t">Keep It Warm</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1412" height="450" fill="#fff"/>
+  <path d="M 328 92 C 440 92, 440 210, 551 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 336 328 C 444 328, 444 210, 551 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 830 210 C 925 210, 925 92, 1020 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 830 210 C 929 210, 929 328, 1028 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect class="edge-label-bg" x="898" y="111" width="53" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="925" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">hot</text>
+  <rect class="edge-label-bg" x="882" y="229" width="95" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="929" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">others</text>
+  <rect x="32" y="59" width="296" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="180" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">measured demand</text>
+  <rect x="24" y="295" width="313" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="180" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">available memory</text>
+  <rect x="551" y="177" width="279" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="691" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">choose hot set</text>
+  <rect x="1020" y="59" width="296" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1168" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">resident models</text>
+  <rect x="1028" y="295" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1168" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">load on demand</text>
+</svg>

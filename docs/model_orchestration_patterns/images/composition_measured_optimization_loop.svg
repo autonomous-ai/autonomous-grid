@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1972 568" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
+  <title id="t">Measured Optimization Loop — propose broadly, promote by outcomes</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1972" height="568" fill="#fff"/>
+  <path d="M 278 210 C 312 210, 312 210, 346 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 625 210 C 701 210, 701 92, 777 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 874 125 C 874 151, 874 151, 874 177" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1048 210 C 1111 210, 1111 210, 1174 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1487 210 C 1580 210, 1580 92, 1673 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1487 210 C 1559 210, 1559 328, 1631 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1487 210 C 1576 210, 1576 446, 1664 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1487 210 C 1612 210, 1612 537, 1550 537 C 221 537, 221 210, 346 210" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <rect class="edge-label-bg" x="796" y="126" width="81" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="837" y="148" text-anchor="middle" fill="#2b2b29" font-size="23">valid</text>
+  <rect class="edge-label-bg" x="1050" y="170" width="122" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1111" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">outcomes</text>
+  <rect class="edge-label-bg" x="1546" y="111" width="67" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1580" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">wins</text>
+  <rect class="edge-label-bg" x="1491" y="229" width="136" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1559" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">uncertain</text>
+  <rect class="edge-label-bg" x="1542" y="288" width="67" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="1576" y="310" text-anchor="middle" fill="#2b2b29" font-size="23">harm</text>
+  <rect class="edge-label-bg" x="182" y="497" width="150" height="30" rx="5" fill="#fff"/>
+  <text class="edge-label" x="330" y="519" text-anchor="end" fill="#2b2b29" font-size="23">next round</text>
+  <rect x="82" y="177" width="195" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="180" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">objective</text>
+  <rect x="338" y="169" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
+  <rect x="330" y="161" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
+  <rect x="346" y="177" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="485" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">local variants</text>
+  <rect x="777" y="59" width="195" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="874" y="102" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">preflight</text>
+  <rect x="701" y="177" width="346" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="874" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">controlled traffic</text>
+  <rect x="1174" y="177" width="313" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1331" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">enough evidence?</text>
+  <rect x="1673" y="59" width="162" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1754" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">promote</text>
+  <rect x="1631" y="295" width="246" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1754" y="338" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">keep control</text>
+  <rect x="1664" y="413" width="178" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1754" y="456" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">rollback</text>
+</svg>

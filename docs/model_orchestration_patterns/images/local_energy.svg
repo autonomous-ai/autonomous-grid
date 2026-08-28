@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3138 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
+  <title id="t">Energy Envelope — spend joules, not tokens</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="3138" height="450" fill="#fff"/>
+  <text x="2621" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">measure</text>
+  <text x="2638" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">hard limit</text>
+  <path d="M 120 210 C 164 210, 164 92, 208 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 120 210 C 187 210, 187 328, 254 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 528 92 C 637 92, 637 210, 746 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 482 328 C 614 328, 614 210, 746 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1026 210 C 1146 210, 1146 92, 1266 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1026 210 C 1146 210, 1146 210, 1266 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1026 210 C 1129 210, 1129 328, 1233 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1461 92 C 1551 92, 1551 210, 1641 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1461 210 C 1551 210, 1551 210, 1641 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2001 210 C 2115 210, 2115 210, 2229 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2529 210 C 2621 210, 2621 92, 2712 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2529 210 C 2667 210, 2667 210, 2805 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2529 210 C 2638 210, 2638 328, 2747 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="208" y="59" width="320" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="368" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">host signals</text>
+  <text x="368" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">power · temp · battery</text>
+  <rect x="254" y="295" width="229" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="368" y="338" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">consequence</text>
+  <rect x="746" y="177" width="279" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="886" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">admit envelope</text>
+  <rect x="1266" y="59" width="195" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1363" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">full plan</text>
+  <rect x="1266" y="177" width="195" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1363" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">lean plan</text>
+  <rect x="1233" y="295" width="260" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1363" y="338" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">defer / refuse</text>
+  <rect x="1641" y="177" width="360" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1821" y="201" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">physical coordinator</text>
+  <text x="1821" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">reserve once · dispatch</text>
+  <rect x="2229" y="177" width="300" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2379" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">monitored execute</text>
+  <rect x="2712" y="59" width="330" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2877" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">measured feedback</text>
+  <text x="2877" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">next calibration</text>
+  <rect x="2805" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="2877" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <rect x="2747" y="295" width="260" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="2877" y="338" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">defer / refuse</text>
+</svg>
