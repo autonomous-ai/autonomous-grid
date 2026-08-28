@@ -1591,6 +1591,30 @@ def test_router_expires_stale_latency_and_blends_low_sample_outliers(
     assert stale == pytest.approx(100 / 4)
 
 
+def test_fresh_latency_does_not_refresh_stale_throughput(tmp_path):
+    app, client, _ = _app(tmp_path)
+    _managed_engine(client, host_id="candidate", model_id="qwen")
+    candidate = app.state.nodes[engine_node_id("candidate", "qwen")]
+    candidate.proxy_model_performance["qwen"] = server_module._ProxyModelPerformance(
+        latency_ms=50,
+        tokens_per_second=1_000,
+        samples=8,
+        throughput_samples=8,
+        updated_at=1_000,
+        throughput_updated_at=1,
+    )
+
+    assert server_module._route_latency_baseline(
+        [candidate], model="qwen", now=1_000
+    ) == 50
+    assert (
+        server_module._route_throughput_baseline(
+            [candidate], model="qwen", now=1_000
+        )
+        == 0
+    )
+
+
 def test_router_uses_output_length_to_choose_latency_or_throughput_engine(
     tmp_path,
     monkeypatch,
@@ -1607,12 +1631,14 @@ def test_router_uses_output_length_to_choose_latency_or_throughput_engine(
         latency_ms=50,
         tokens_per_second=10,
         samples=8,
+        throughput_samples=8,
         updated_at=1_000,
     )
     throughput.proxy_model_performance["qwen"] = server_module._ProxyModelPerformance(
         latency_ms=200,
         tokens_per_second=100,
         samples=8,
+        throughput_samples=8,
         updated_at=1_000,
     )
     monkeypatch.setattr(server_module.time, "time", lambda: 1_000)
@@ -1640,6 +1666,65 @@ def test_router_uses_output_length_to_choose_latency_or_throughput_engine(
 )
 def test_requested_output_token_hint_is_bounded(body, expected):
     assert server_module._requested_output_tokens(body) == expected
+
+
+def test_stream_usage_collector_handles_fragmented_and_multiline_sse():
+    collector = server_module._StreamUsageCollector()
+    for chunk in (
+        b'data: {"choices":[{"delta":{"content":"not retained"}}]}\r\n\r\n',
+        b'data: {"usage":\r\n',
+        b'data: {"completion_',
+        b'tokens": 37}}\r\n\r\n',
+        b'data: [DONE]\n\n',
+    ):
+        collector.feed(chunk)
+    collector.finish()
+
+    assert collector.completion_tokens == 37
+    assert not hasattr(collector, "_parts")
+
+
+def test_stream_usage_collector_ignores_malformed_and_oversized_events():
+    collector = server_module._StreamUsageCollector(limit=48)
+    collector.feed(b'data: {"usage":{"completion_tokens":true}}\n\n')
+    collector.feed(b"data: " + b"x" * 100 + b"\n\n")
+    collector.feed(b'data: {"usage":{"completion_tokens":9}}\n\n')
+    collector.finish()
+
+    assert collector.completion_tokens == 9
+
+
+def test_first_throughput_sample_is_not_diluted_by_latency_only_samples(
+    tmp_path,
+    monkeypatch,
+):
+    app, client, _ = _app(tmp_path)
+    _managed_engine(client, host_id="host-stream-perf", model_id="qwen")
+    engine = app.state.nodes[engine_node_id("host-stream-perf", "qwen")]
+    clock = iter((101.0, 102.0))
+    monkeypatch.setattr(server_module.time, "monotonic", lambda: next(clock))
+
+    server_module._record_engine_performance(
+        engine,
+        100.0,
+        model="qwen",
+        status_code=200,
+    )
+    server_module._record_engine_performance(
+        engine,
+        100.0,
+        model="qwen",
+        status_code=200,
+        completion_tokens=100,
+    )
+
+    performance = engine.proxy_model_performance["qwen"]
+    assert engine.proxy_performance_samples == 2
+    assert engine.proxy_throughput_samples == 1
+    assert engine.proxy_tokens_per_second == 50
+    assert performance.samples == 2
+    assert performance.throughput_samples == 1
+    assert performance.tokens_per_second == 50
 
 def test_proxy_owned_last_used_timestamp_survives_allocator_snapshot(tmp_path):
     app, client, _ = _app(tmp_path)

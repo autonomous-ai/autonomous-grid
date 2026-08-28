@@ -333,6 +333,7 @@ def test_multi_model_engine_uses_only_per_model_performance_for_placement():
                 tokens_per_second=300,
                 latency_ms=50,
                 sample_count=8,
+                throughput_sample_count=8,
                 updated_at=10,
             ),
         ),
@@ -375,6 +376,7 @@ def test_per_model_performance_weights_sample_confidence_over_one_outlier():
                 tokens_per_second=1_000,
                 latency_ms=10,
                 sample_count=1,
+                throughput_sample_count=1,
                 updated_at=100,
             ),
         ),
@@ -389,6 +391,7 @@ def test_per_model_performance_weights_sample_confidence_over_one_outlier():
                 tokens_per_second=200,
                 latency_ms=100,
                 sample_count=8,
+                throughput_sample_count=8,
                 updated_at=100,
             ),
         ),
@@ -412,7 +415,11 @@ def test_per_model_performance_weights_sample_confidence_over_one_outlier():
     trusted = replace(
         cold_prior,
         model_performance=(
-            replace(cold_prior.model_performance[0], sample_count=8),
+            replace(
+                cold_prior.model_performance[0],
+                sample_count=8,
+                throughput_sample_count=8,
+            ),
         ),
     )
     mature_plan = PlacementPlanner().plan((trusted,), (profile,), now=100)
@@ -432,6 +439,7 @@ def test_per_model_performance_decays_smoothly_before_expiry():
                     tokens_per_second=200,
                     latency_ms=100,
                     sample_count=8,
+                    throughput_sample_count=8,
                     updated_at=updated_at,
                 ),
             ),
@@ -456,6 +464,33 @@ def test_per_model_performance_decays_smoothly_before_expiry():
     )
     assert "measured throughput" not in boundary.assignments[0].reasons
 
+
+def test_fresh_latency_does_not_keep_stale_throughput_in_placement():
+    profile = model()
+    machine = node(
+        "stale-throughput",
+        residencies=(ready(), ready("other")),
+        model_performance=(
+            ModelPerformance(
+                profile.model_id,
+                tokens_per_second=1_000,
+                latency_ms=100,
+                sample_count=8,
+                throughput_sample_count=8,
+                updated_at=100,
+                throughput_updated_at=1,
+            ),
+        ),
+        memory_bandwidth_gbps=400,
+        now=100,
+    )
+
+    assignment = PlacementPlanner(
+        PlannerPolicy(performance_ttl_seconds=50),
+    ).plan((machine,), (profile,), now=100).assignments[0]
+
+    assert "measured throughput" not in assignment.reasons
+    assert "hardware performance estimate" in assignment.reasons
 
 def ready(
     model_id: str = "qwen",
@@ -629,6 +664,8 @@ def test_allocator_models_validate_impossible_values():
         PlannerPolicy(predictive_growth_limit=0.9)
     with pytest.raises(ValueError, match="updated_at"):
         ModelPerformance("qwen", updated_at=-1)
+    with pytest.raises(ValueError, match="throughput_sample_count"):
+        ModelPerformance("qwen", throughput_sample_count=-1)
 
 
 def test_node_snapshot_round_trip_preserves_residency_and_enum():
@@ -643,6 +680,7 @@ def test_node_snapshot_round_trip_preserves_residency_and_enum():
                 tokens_per_second=12.5,
                 latency_ms=250,
                 sample_count=4,
+                throughput_sample_count=4,
                 updated_at=9,
             ),
         ),
@@ -654,7 +692,16 @@ def test_node_snapshot_round_trip_preserves_residency_and_enum():
     assert restored.residency("qwen").managed is False
     assert restored.residency("qwen").active_requests == 2
     assert restored.performance("qwen").tokens_per_second == 12.5
+    assert restored.performance("qwen").throughput_sample_count == 4
+    assert restored.performance("qwen").throughput_updated_at == 9
     assert restored.performance("qwen").updated_at == 9
+
+    legacy_performance = original.to_dict()
+    legacy_performance["model_performance"][0].pop("throughput_sample_count")
+    legacy_performance["model_performance"][0].pop("throughput_updated_at")
+    restored_performance = NodeSnapshot.from_dict(legacy_performance).performance("qwen")
+    assert restored_performance.throughput_sample_count == 4
+    assert restored_performance.throughput_updated_at == 9
 
     legacy = original.to_dict()
     legacy["residencies"][0].pop("active_requests")

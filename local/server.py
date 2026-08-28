@@ -112,7 +112,13 @@ class _ProxyModelPerformance:
     latency_ms: float = 0.0
     tokens_per_second: float = 0.0
     samples: int = 0
+    throughput_samples: int = 0
     updated_at: float = 0.0
+    throughput_updated_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.throughput_samples > 0 and not self.throughput_updated_at:
+            self.throughput_updated_at = self.updated_at
 
 
 @dataclass
@@ -144,6 +150,7 @@ class Node:
     proxy_latency_ms: float = 0.0
     proxy_tokens_per_second: float = 0.0
     proxy_performance_samples: int = 0
+    proxy_throughput_samples: int = 0
     proxy_model_performance: dict[str, _ProxyModelPerformance] = field(
         default_factory=dict
     )
@@ -161,6 +168,7 @@ class Node:
         data.pop("proxy_latency_ms", None)
         data.pop("proxy_tokens_per_second", None)
         data.pop("proxy_performance_samples", None)
+        data.pop("proxy_throughput_samples", None)
         data.pop("proxy_model_performance", None)
         data.pop("engine_api_key", None)
         data.pop("engine_tls_ca_pem", None)
@@ -822,14 +830,17 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         # and the store happens after the last chunk has already reached the client, so nothing
         # here can slow a stream down.
         collector = _StreamCollector(body) if _capture_enabled() else None
+        usage_collector = _StreamUsageCollector()
 
         async def stream_response():
             try:
                 async for chunk in engine_response.aiter_raw():
+                    usage_collector.feed(chunk)
                     if collector is not None:
                         collector.feed(chunk)
                     yield chunk
             finally:
+                usage_collector.finish()
                 await engine_response.aclose()
                 await client.aclose()
                 _change_active_tasks(engine, -1)
@@ -844,6 +855,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
                     started_at,
                     model=model,
                     status_code=engine_response.status_code,
+                    completion_tokens=usage_collector.completion_tokens,
                 )
                 if collector is not None:
                     collector.store()
@@ -911,6 +923,8 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
 # A body larger than this is a file dump, not a training example — and parsing multi-megabyte JSON
 # a second time to look at it would be work done on a customer's request for nothing.
 _MAX_CAPTURE_BODY = 256 * 1024
+_MAX_STREAM_USAGE_EVENT_BYTES = 64 * 1024
+_MAX_STREAM_USAGE_DATA_LINES = 256
 
 
 def _capture_enabled() -> bool:
@@ -920,6 +934,85 @@ def _capture_enabled() -> bool:
         return load_policy().enabled
     except Exception:  # noqa: BLE001 — never let this decide anything about serving
         return False
+
+
+class _StreamUsageCollector:
+    """Extract final OpenAI usage from fragmented SSE without retaining generated text."""
+
+    def __init__(self, limit: int = _MAX_STREAM_USAGE_EVENT_BYTES) -> None:
+        self.completion_tokens: int | None = None
+        self._buffer = bytearray()
+        self._data_lines: list[bytes] = []
+        self._event_size = 0
+        self._limit = max(1, limit)
+        self._discard_event = False
+
+    def feed(self, chunk: bytes) -> None:
+        if not isinstance(chunk, bytes):
+            return
+        self._buffer.extend(chunk)
+        while (newline := self._buffer.find(b"\n")) >= 0:
+            line = bytes(self._buffer[:newline]).rstrip(b"\r")
+            del self._buffer[: newline + 1]
+            self._feed_line(line)
+        # A peer can send an unbounded line. Drop it and ignore the rest of that SSE event.
+        if len(self._buffer) > self._limit:
+            self._buffer.clear()
+            self._discard_event = True
+
+    def finish(self) -> None:
+        if self._buffer:
+            self._feed_line(bytes(self._buffer).rstrip(b"\r"))
+            self._buffer.clear()
+        self._dispatch_event()
+
+    def _feed_line(self, line: bytes) -> None:
+        if not line:
+            self._dispatch_event()
+            return
+        if self._discard_event or not line.startswith(b"data:"):
+            return
+        data = line[5:].lstrip(b" ")
+        projected = self._event_size + len(data) + bool(self._data_lines)
+        if (
+            projected > self._limit
+            or len(self._data_lines) >= _MAX_STREAM_USAGE_DATA_LINES
+        ):
+            self._data_lines.clear()
+            self._event_size = 0
+            self._discard_event = True
+            return
+        self._data_lines.append(data)
+        self._event_size = int(projected)
+
+    def _dispatch_event(self) -> None:
+        if self._discard_event:
+            self._reset_event()
+            return
+        payload = b"\n".join(self._data_lines).strip()
+        self._reset_event()
+        if not payload or payload == b"[DONE]":
+            return
+        try:
+            value = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return
+        usage = value.get("usage") if isinstance(value, dict) else None
+        completion_tokens = (
+            usage.get("completion_tokens") if isinstance(usage, dict) else None
+        )
+        if (
+            isinstance(completion_tokens, bool)
+            or not isinstance(completion_tokens, int)
+            or not 0 < completion_tokens <= MAX_COUNTER
+        ):
+            return
+        self.completion_tokens = completion_tokens
+
+    def _reset_event(self) -> None:
+        self._data_lines.clear()
+        self._event_size = 0
+        self._discard_event = False
 
 
 class _StreamCollector:
@@ -1449,6 +1542,11 @@ def _route_throughput_baseline(
         for engine in engines
         if (performance := _fresh_route_performance(engine, model=model, now=now))
         is not None
+        and performance.throughput_samples > 0
+        and _route_performance_timestamp_is_fresh(
+            performance.throughput_updated_at,
+            now=now,
+        )
         and performance.tokens_per_second > 0
     ]
     return statistics.median(measurements) if measurements else 0.0
@@ -1463,10 +1561,19 @@ def _fresh_route_performance(
     performance = node.proxy_model_performance.get(model)
     if performance is None or performance.samples <= 0 or performance.latency_ms <= 0:
         return None
-    age = now - performance.updated_at
-    if not -MAX_FUTURE_LEASE_SKEW_SECONDS <= age < _ROUTE_PERFORMANCE_TTL_SECONDS:
+    if not _route_performance_timestamp_is_fresh(performance.updated_at, now=now):
         return None
     return performance
+
+
+def _route_performance_timestamp_is_fresh(updated_at: float, *, now: float) -> bool:
+    age = now - updated_at
+    return (
+        updated_at > 0
+        and -MAX_FUTURE_LEASE_SKEW_SECONDS
+        <= age
+        < _ROUTE_PERFORMANCE_TTL_SECONDS
+    )
 
 
 def _route_expected_completion_score(
@@ -1482,16 +1589,39 @@ def _route_expected_completion_score(
     estimated_latency = latency_baseline_ms
     if performance is not None:
         age = max(0.0, now - performance.updated_at)
-        confidence = min(1.0, performance.samples / _ROUTE_PERFORMANCE_FULL_SAMPLES)
         freshness = max(0.0, 1.0 - age / _ROUTE_PERFORMANCE_TTL_SECONDS)
-        weight = confidence * freshness
-        estimated_latency = (
-            weight * performance.latency_ms + (1.0 - weight) * latency_baseline_ms
+        latency_weight = (
+            min(1.0, performance.samples / _ROUTE_PERFORMANCE_FULL_SAMPLES)
+            * freshness
         )
-        if throughput_baseline > 0 and performance.tokens_per_second > 0:
+        estimated_latency = (
+            latency_weight * performance.latency_ms
+            + (1.0 - latency_weight) * latency_baseline_ms
+        )
+        if (
+            throughput_baseline > 0
+            and performance.throughput_samples > 0
+            and _route_performance_timestamp_is_fresh(
+                performance.throughput_updated_at,
+                now=now,
+            )
+            and performance.tokens_per_second > 0
+        ):
+            throughput_age = max(0.0, now - performance.throughput_updated_at)
+            throughput_freshness = max(
+                0.0,
+                1.0 - throughput_age / _ROUTE_PERFORMANCE_TTL_SECONDS,
+            )
+            throughput_weight = (
+                min(
+                    1.0,
+                    performance.throughput_samples / _ROUTE_PERFORMANCE_FULL_SAMPLES,
+                )
+                * throughput_freshness
+            )
             estimated_throughput = (
-                weight * performance.tokens_per_second
-                + (1.0 - weight) * throughput_baseline
+                throughput_weight * performance.tokens_per_second
+                + (1.0 - throughput_weight) * throughput_baseline
             )
         else:
             estimated_throughput = throughput_baseline
@@ -2247,7 +2377,9 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                             latency_ms=performance.latency_ms,
                             tokens_per_second=performance.tokens_per_second,
                             sample_count=performance.samples,
+                            throughput_sample_count=performance.throughput_samples,
                             updated_at=performance.updated_at,
+                            throughput_updated_at=performance.throughput_updated_at,
                         )
                         for model_id, performance in sorted(
                             node.proxy_model_performance.items()
@@ -2447,6 +2579,18 @@ def _merge_allocator_hosts(
                             MAX_COUNTER,
                             sum(item.sample_count for item in samples),
                         ),
+                        throughput_sample_count=min(
+                            MAX_COUNTER,
+                            sum(item.throughput_sample_count for item in samples),
+                        ),
+                        throughput_updated_at=min(
+                            (
+                                item.throughput_updated_at
+                                for item in samples
+                                if item.throughput_sample_count > 0
+                            ),
+                            default=0.0,
+                        ),
                         # The merged value sums every child. It remains attributable only while
                         # every contributing measurement is fresh, so retain the oldest timestamp.
                         updated_at=min(item.updated_at for item in samples),
@@ -2541,6 +2685,7 @@ def _record_engine_performance(
     model: str,
     status_code: int,
     response: httpx.Response | None = None,
+    completion_tokens: int | None = None,
 ) -> None:
     """Attribute successful proxy work to one engine without retaining request content."""
 
@@ -2574,38 +2719,59 @@ def _record_engine_performance(
     model_performance.samples = min(MAX_COUNTER, model_performance.samples + 1)
     model_performance.updated_at = max(0.0, time.time())
 
+    if elapsed <= 0:
+        return
+    if completion_tokens is None:
+        if response is None or len(response.content) > _MAX_PERFORMANCE_RESPONSE_BYTES:
+            return
+        try:
+            payload = response.json()
+            usage = payload.get("usage") if isinstance(payload, dict) else None
+            completion_tokens = (
+                usage.get("completion_tokens") if isinstance(usage, dict) else None
+            )
+        except (TypeError, ValueError):
+            return
     if (
-        response is None
-        or elapsed <= 0
-        or len(response.content) > _MAX_PERFORMANCE_RESPONSE_BYTES
+        isinstance(completion_tokens, bool)
+        or not isinstance(completion_tokens, (int, float))
+        or not math.isfinite(float(completion_tokens))
+        or completion_tokens <= 0
+        or completion_tokens > MAX_COUNTER
     ):
         return
-    try:
-        payload = response.json()
-        usage = payload.get("usage") if isinstance(payload, dict) else None
-        completion_tokens = (
-            usage.get("completion_tokens") if isinstance(usage, dict) else None
-        )
-        if (
-            isinstance(completion_tokens, bool)
-            or not isinstance(completion_tokens, (int, float))
-            or completion_tokens <= 0
-        ):
-            return
-        measured = min(1_000_000_000_000.0, float(completion_tokens) / elapsed)
-    except (TypeError, ValueError):
-        return
+    measured = min(1_000_000_000_000.0, float(completion_tokens) / elapsed)
+    throughput_alpha = (
+        1.0
+        if engine.proxy_throughput_samples == 0
+        else _ENGINE_PERFORMANCE_EWMA_ALPHA
+    )
+    model_throughput_alpha = (
+        1.0
+        if model_performance.throughput_samples == 0
+        else _ENGINE_PERFORMANCE_EWMA_ALPHA
+    )
     engine.proxy_tokens_per_second = (
         measured
-        if engine.proxy_tokens_per_second == 0
-        else alpha * measured + (1.0 - alpha) * engine.proxy_tokens_per_second
+        if engine.proxy_throughput_samples == 0
+        else throughput_alpha * measured
+        + (1.0 - throughput_alpha) * engine.proxy_tokens_per_second
     )
     model_performance.tokens_per_second = (
         measured
-        if model_performance.tokens_per_second == 0
-        else model_alpha * measured
-        + (1.0 - model_alpha) * model_performance.tokens_per_second
+        if model_performance.throughput_samples == 0
+        else model_throughput_alpha * measured
+        + (1.0 - model_throughput_alpha) * model_performance.tokens_per_second
     )
+    engine.proxy_throughput_samples = min(
+        MAX_COUNTER,
+        engine.proxy_throughput_samples + 1,
+    )
+    model_performance.throughput_samples = min(
+        MAX_COUNTER,
+        model_performance.throughput_samples + 1,
+    )
+    model_performance.throughput_updated_at = max(0.0, time.time())
 
 
 def _change_active_tasks(node: Node, delta: int) -> None:

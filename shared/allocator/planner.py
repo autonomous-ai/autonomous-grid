@@ -1183,7 +1183,8 @@ def _candidate_score(
     # Best fit preserves a large contiguous-capacity host for a future large model.
     score += 2_000.0 / (1.0 + after / max(model_memory_mb, 1))
     model_performance = node.performance(model.model_id)
-    model_performance_weight = 0.0
+    model_latency_weight = 0.0
+    model_throughput_weight = 0.0
     if model_performance is not None:
         performance_age = now - model_performance.updated_at
         if not model_performance.updated_at or not (
@@ -1193,9 +1194,14 @@ def _candidate_score(
         ):
             model_performance = None
         else:
-            sample_confidence = min(
+            latency_confidence = min(
                 1.0,
                 model_performance.sample_count
+                / policy.performance_full_confidence_samples,
+            )
+            throughput_confidence = min(
+                1.0,
+                model_performance.throughput_sample_count
                 / policy.performance_full_confidence_samples,
             )
             freshness = (
@@ -1203,36 +1209,53 @@ def _candidate_score(
                 if policy.performance_ttl_seconds
                 else 1.0
             )
-            model_performance_weight = sample_confidence * freshness
-            if not model_performance_weight:
+            throughput_age = now - model_performance.throughput_updated_at
+            throughput_freshness = (
+                max(
+                    0.0,
+                    1.0
+                    - max(0.0, throughput_age) / policy.performance_ttl_seconds,
+                )
+                if model_performance.throughput_updated_at
+                and -policy.max_future_clock_skew_seconds
+                <= throughput_age
+                < policy.performance_ttl_seconds
+                and policy.performance_ttl_seconds
+                else 0.0
+            )
+            model_latency_weight = latency_confidence * freshness
+            model_throughput_weight = throughput_confidence * throughput_freshness
+            if not model_latency_weight and not model_throughput_weight:
                 model_performance = None
     ready_models = sum(item.state == ResidencyState.READY for item in node.residencies)
     # A node-wide metric is safe for an empty/single-model engine, and remains a useful generic
     # benchmark for a cold host. Once an engine serves several models it is not attributable: use
     # only proxy measurements tagged with this exact model, or fall back to hardware priors.
     node_metric_is_attributable = ready_models <= 1
-    measured_tokens_per_second = (
-        model_performance.tokens_per_second
-        if model_performance is not None
-        else node.tokens_per_second
-        if node_metric_is_attributable
-        else 0.0
-    )
-    measured_latency_ms = (
-        model_performance.latency_ms
-        if model_performance is not None
-        else node.latency_ms
-        if node_metric_is_attributable
-        else 0.0
-    )
-    performance_weight = model_performance_weight if model_performance is not None else 1.0
+    if model_performance is not None:
+        measured_tokens_per_second = (
+            model_performance.tokens_per_second
+            if model_throughput_weight > 0
+            else 0.0
+        )
+        measured_latency_ms = (
+            model_performance.latency_ms if model_latency_weight > 0 else 0.0
+        )
+    else:
+        measured_tokens_per_second = (
+            node.tokens_per_second if node_metric_is_attributable else 0.0
+        )
+        measured_latency_ms = node.latency_ms if node_metric_is_attributable else 0.0
     if measured_tokens_per_second:
-        score += min(measured_tokens_per_second, 10_000.0) * 2.0 * performance_weight
+        throughput_weight = (
+            model_throughput_weight if model_performance is not None else 1.0
+        )
+        score += min(measured_tokens_per_second, 10_000.0) * 2.0 * throughput_weight
         reasons.append("measured throughput")
     hardware_weight = 1.0
     if measured_tokens_per_second:
         hardware_weight = (
-            1.0 - performance_weight if model_performance is not None else 0.0
+            1.0 - model_throughput_weight if model_performance is not None else 0.0
         )
     if hardware_weight and (node.memory_bandwidth_gbps or node.compute_gflops):
         # Model serving is usually bandwidth-bound; compute is a smaller secondary prior. These
@@ -1246,7 +1269,8 @@ def _candidate_score(
         )
         reasons.append("hardware performance estimate")
     if measured_latency_ms:
-        score -= min(measured_latency_ms, 60_000.0) / 50.0 * performance_weight
+        latency_weight = model_latency_weight if model_performance is not None else 1.0
+        score -= min(measured_latency_ms, 60_000.0) / 50.0 * latency_weight
     if node.max_concurrency > 0:
         utilization = node.active_requests / node.max_concurrency
         if utilization:

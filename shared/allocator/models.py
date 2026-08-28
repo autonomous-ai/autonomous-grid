@@ -119,6 +119,8 @@ class ModelPerformance:
     latency_ms: float = 0.0
     sample_count: int = 0
     updated_at: float = 0.0
+    throughput_sample_count: int = 0
+    throughput_updated_at: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.model_id or len(self.model_id) > MAX_ID_LENGTH:
@@ -126,17 +128,35 @@ class ModelPerformance:
         _finite_nonnegative(self.tokens_per_second, "tokens_per_second")
         _finite_nonnegative(self.latency_ms, "latency_ms")
         _finite_nonnegative(self.updated_at, "updated_at")
+        _finite_nonnegative(self.throughput_updated_at, "throughput_updated_at")
         if not 0 <= self.sample_count <= MAX_COUNTER:
             raise ValueError("sample_count is outside the supported range")
+        if not 0 <= self.throughput_sample_count <= MAX_COUNTER:
+            raise ValueError("throughput_sample_count is outside the supported range")
+        if self.throughput_sample_count > 0 and not self.throughput_updated_at:
+            object.__setattr__(self, "throughput_updated_at", self.updated_at)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ModelPerformance:
+        sample_count = int(value.get("sample_count") or 0)
+        throughput_sample_count = (
+            int(value.get("throughput_sample_count") or 0)
+            if "throughput_sample_count" in value
+            else sample_count
+        )
+        throughput_updated_at = (
+            float(value.get("throughput_updated_at") or 0.0)
+            if "throughput_updated_at" in value
+            else float(value.get("updated_at") or 0.0)
+        )
         return cls(
             model_id=str(value["model_id"]),
             tokens_per_second=float(value.get("tokens_per_second") or 0.0),
             latency_ms=float(value.get("latency_ms") or 0.0),
-            sample_count=int(value.get("sample_count") or 0),
+            sample_count=sample_count,
+            throughput_sample_count=throughput_sample_count,
             updated_at=float(value.get("updated_at") or 0.0),
+            throughput_updated_at=throughput_updated_at,
         )
 
 
