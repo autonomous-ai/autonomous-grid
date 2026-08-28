@@ -69,7 +69,17 @@ ENDPOINT_MODELS: dict[str, str] = {
     "media/video/i2v": "comfyui:i2v",
 }
 
-BUILTIN_MODELS: frozenset[str] = frozenset(ENDPOINT_MODELS.values())
+# The other built-in models a route accepts. `ENDPOINT_MODELS` above says what a request gets when
+# it names nothing; this says what else it may name. Generation has two models behind one route, so
+# "is this model allowed here" stopped being "does it equal the route's default" — a question two
+# separate guards were asking, and both rejected `comfyui:z_image` on the route that serves it.
+ENDPOINT_ALTERNATES: dict[str, frozenset[str]] = {
+    "media/image/generate": frozenset({"comfyui:krea2", "comfyui:z_image"}),
+}
+
+BUILTIN_MODELS: frozenset[str] = frozenset(ENDPOINT_MODELS.values()) | frozenset(
+    model for models in ENDPOINT_ALTERNATES.values() for model in models
+)
 
 
 def endpoint_model(endpoint_path: str) -> str | None:
@@ -85,9 +95,22 @@ def is_builtin_model(model: str) -> bool:
 def endpoint_for_model(model: str) -> str | None:
     """The media route ``model`` is served on (``None`` if it is not a built-in media model)."""
     for endpoint, name in ENDPOINT_MODELS.items():
-        if name == model:
+        if name == model or model in ENDPOINT_ALTERNATES.get(endpoint, frozenset()):
             return endpoint
     return None
+
+
+def serves_endpoint(model: str, endpoint_path: str) -> bool:
+    """Whether ``model`` may be asked of ``endpoint_path``.
+
+    A built-in media model belongs to exactly one route and must be asked of that one: naming
+    ``comfyui:i2v`` on the image route would otherwise be served as whatever the route means,
+    because the engine-side handler dispatches on the route alone. Anything we do not recognise —
+    an API media model such as ``doggi:*`` — is not ours to judge; the engine either serves it or
+    the request 503s.
+    """
+    served_on = endpoint_for_model(model)
+    return served_on is None or served_on == endpoint_path.strip("/")
 
 
 def is_apple_silicon() -> bool:

@@ -16023,7 +16023,35 @@ def test_serve_handle_job_rejects_media_model_from_another_task(monkeypatch, tmp
                              "body": {"model": "comfyui:i2v"}, "is_stream": True})
 
     assert "forwarded" not in captured
-    assert "comfyui:i2v" in captured["error"] and "comfyui:image_generation" in captured["error"]
+    # Names the model refused and the route it does belong to, so the caller can fix the request.
+    assert "comfyui:i2v" in captured["error"] and "media/video/i2v" in captured["error"]
+
+
+def test_serve_handle_job_forwards_an_alternate_model_for_the_route(monkeypatch, tmp_path):
+    """A route with more than one model must accept all of them, not just the default.
+
+    `media/image/generate` serves Krea 2 and Z-Image. This guard used to compare the requested
+    model against the route's single default and refused everything else, so `comfyui:z_image` came
+    back as "does not serve endpoint 'media/image/generate'" on the very route that serves it —
+    from a host that was advertising it.
+    """
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path, media_url="http://127.0.0.1:8190")
+    state.media_models = ["comfyui:image_generation", "comfyui:krea2", "comfyui:z_image"]
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(forwarded=True))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    monkeypatch.setattr(serve, "_forward_stream",
+                        lambda *a, **k: captured.update(forwarded=True))
+
+    for model in ("comfyui:krea2", "comfyui:z_image"):
+        captured.clear()
+        serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "media/image/generate",
+                                 "body": {"model": model}, "is_stream": True})
+        assert captured.get("forwarded"), f"{model} was refused: {captured.get('error')}"
 
 
 def test_serve_handle_job_media_without_a_model_still_forwards(monkeypatch, tmp_path):

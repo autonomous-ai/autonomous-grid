@@ -2085,11 +2085,11 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
                 f"(serving: {', '.join(sorted(state.media_models)) or 'none'})",
             )
             return
-        expected = media_gating.endpoint_model(endpoint)
-        if model and expected and model != expected:
+        if model and not media_gating.serves_endpoint(model, endpoint):
             _try_submit_error(
                 state, txn,
-                f"media model {model!r} does not serve endpoint {endpoint!r} (that is {expected!r})",
+                f"media model {model!r} does not serve endpoint {endpoint!r} "
+                f"(it serves {media_gating.endpoint_for_model(model)!r})",
             )
             return
         state.enter_inference()

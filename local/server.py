@@ -480,7 +480,7 @@ async def _proxy_media(
 
     # Only a built-in name can be checked against the route; a non-builtin (an API media model) is
     # not this proxy's to validate — it either resolves to an engine below or 503s.
-    if media_gating.is_builtin_model(model) and media_gating.endpoint_for_model(model) != endpoint_path:
+    if not media_gating.serves_endpoint(model, endpoint_path):
         return _openai_error(
             400,
             f"Model {model!r} does not serve this endpoint. "
