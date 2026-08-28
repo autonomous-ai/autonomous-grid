@@ -222,6 +222,24 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
         assert len(plan.desired_pairs) == len(plan.assignments)
         node_by_id = {node.node_id: node for node in nodes}
         profile_by_id = {profile.model_id: profile for profile in profiles}
+        for preemption in plan.preemptions:
+            pair = (preemption.node_id, preemption.model_id)
+            assert pair not in plan.desired_pairs
+            node = node_by_id[preemption.node_id]
+            residency = node.residency(preemption.model_id)
+            victim = profile_by_id[preemption.model_id]
+            assert residency is not None
+            assert residency.state in {
+                ResidencyState.READY,
+                ResidencyState.DRAINING,
+                ResidencyState.FAILED,
+            }
+            assert residency.managed
+            assert not residency.pinned
+            assert not node.manually_managed
+            assert node.node_id not in victim.pinned_nodes
+            if preemption.for_model_id:
+                assert preemption.for_model_id in profile_by_id
         incremental_by_node = {node.node_id: 0 for node in nodes}
         added_slots_by_node = {node.node_id: 0 for node in nodes}
         for assignment in plan.assignments:
