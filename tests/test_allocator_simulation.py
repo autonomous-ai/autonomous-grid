@@ -480,6 +480,98 @@ def test_vllm_batch_capacity_absorbs_demand_until_observed_pressure_scales_manag
     assert all(action.node_id != "external-vllm" for action in reconciliation.actions)
 
 
+def test_equal_priority_bursts_share_nodes_then_switch_models_without_overcommit():
+    nodes = tuple(host(f"host-{index}", now=100) for index in range(4))
+    models = (
+        replace(
+            profile("alpha", 22_000, min_replicas=0, max_replicas=4),
+            scale_down_cooldown_seconds=0,
+        ),
+        replace(
+            profile("beta", 22_000, min_replicas=0, max_replicas=4),
+            scale_down_cooldown_seconds=0,
+        ),
+    )
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    burst = (
+        DemandForecast("alpha", offered_concurrency=10, updated_at=100),
+        DemandForecast("beta", offered_concurrency=10, updated_at=100),
+    )
+
+    shared = planner.plan(nodes, models, burst, now=100)
+
+    assert shared.target_for("alpha") == 4
+    assert shared.target_for("beta") == 4
+    assert len(shared.nodes_for("alpha")) == 2
+    assert len(shared.nodes_for("beta")) == 2
+    assert all(
+        action.kind in (ActionKind.LOAD, ActionKind.WARM)
+        for action in Reconciler().reconcile(
+            shared,
+            nodes,
+            models,
+            mode=AllocatorMode.AUTOMATIC,
+            now=100,
+        ).actions
+    )
+
+    resident = materialize(shared, nodes, now=100)
+    switched = planner.plan(
+        resident,
+        models,
+        (
+            DemandForecast("alpha", updated_at=101),
+            DemandForecast("beta", offered_concurrency=10, updated_at=101),
+        ),
+        now=101,
+    )
+    switch_actions = Reconciler().reconcile(
+        switched,
+        resident,
+        models,
+        mode=AllocatorMode.AUTOMATIC,
+        now=101,
+    ).actions
+
+    assert switched.nodes_for("alpha") == ()
+    assert len(switched.nodes_for("beta")) == 2
+    assert all(action.model_id == "alpha" for action in switch_actions)
+    assert all(action.kind == ActionKind.DRAIN for action in switch_actions)
+
+    after_drain = tuple(
+        replace(
+            node,
+            residencies=tuple(
+                item for item in node.residencies if item.model_id != "alpha"
+            ),
+            last_heartbeat=102,
+        )
+        for node in resident
+    )
+    expanded = planner.plan(
+        after_drain,
+        models,
+        (
+            DemandForecast("alpha", updated_at=102),
+            DemandForecast("beta", offered_concurrency=10, updated_at=102),
+        ),
+        now=102,
+    )
+
+    assert len(expanded.nodes_for("beta")) == 4
+    assert all(
+        action.model_id == "beta"
+        and action.kind in (ActionKind.LOAD, ActionKind.WARM)
+        for action in Reconciler().reconcile(
+            expanded,
+            after_drain,
+            models,
+            mode=AllocatorMode.AUTOMATIC,
+            now=102,
+        ).actions
+    )
+
+
 def test_failover_keeps_last_replica_until_replacement_is_ready_and_drained():
     model = profile("code", 12_000, max_replicas=1)
     old = host(

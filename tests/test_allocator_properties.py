@@ -75,6 +75,46 @@ def test_seeded_correlated_demand_is_bounded_deterministic_and_non_transitive():
                 assert forecast.trend_per_minute == 0
 
 
+def test_equal_priority_progressive_filling_is_max_min_fair_and_deterministic():
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    for node_count in range(1, 13):
+        for model_count in range(1, 9):
+            nodes = tuple(
+                NodeSnapshot(
+                    node_id=f"node-{index}",
+                    capacity_mb=1,
+                    runtimes=("llama.cpp",),
+                    backends=("cpu",),
+                    max_models=1,
+                    last_heartbeat=1,
+                )
+                for index in range(node_count)
+            )
+            profiles = tuple(
+                ModelProfile(
+                    model_id=f"model-{index}",
+                    memory_mb=1,
+                    runtimes=("llama.cpp",),
+                    backends=("cpu",),
+                    min_replicas=node_count,
+                    max_replicas=node_count,
+                )
+                for index in range(model_count)
+            )
+
+            plan = planner.plan(nodes, profiles, now=1)
+            reversed_plan = planner.plan(
+                tuple(reversed(nodes)),
+                tuple(reversed(profiles)),
+                now=1,
+            )
+            counts = [len(plan.nodes_for(profile.model_id)) for profile in profiles]
+
+            assert sum(counts) == node_count
+            assert max(counts) - min(counts) <= 1
+            assert plan.desired_pairs == reversed_plan.desired_pairs
+
+
 def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
     """Exercise many awkward-but-valid fleet shapes without a flaky random seed."""
 

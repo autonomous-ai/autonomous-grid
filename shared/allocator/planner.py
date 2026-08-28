@@ -293,6 +293,16 @@ class PlacementPlanner:
         )
         profile_by_id = {item.model_id: item for item in model_list}
         node_by_id = {item.node_id: item for item in node_list}
+        # Moving an assignment can change net resource use when runtimes have different model
+        # footprints or a destination already has resident weights. Only the simple homogeneous
+        # case supports aggregate no-capacity proofs; every heterogeneous case keeps the full
+        # augmenting search.
+        repacking_conserves_aggregate_resources = not any(
+            node.residencies for node in node_list
+        ) and all(
+            len({profile.memory_for(node.runtimes) for node in node_list}) <= 1
+            for profile in model_list
+        )
 
         def snapshot_placement_state() -> tuple[
             list[PlacementAssignment],
@@ -498,6 +508,38 @@ class PlacementPlanner:
                     return True
                 restore_placement_state(state)
 
+            # Relocation conserves total memory and model slots. If the fleet does not have the
+            # minimum net resource needed by this additional replica, no sequence of victim moves
+            # can help. This admissible lower bound avoids spending the full backtracking budget on
+            # a saturated fleet while leaving topology/fragmentation repairs untouched.
+            if compatible_nodes and repacking_conserves_aggregate_resources:
+                minimum_incremental_mb = min(
+                    _incremental_memory_mb(
+                        node.residency(placement_model.model_id),
+                        placement_model.memory_for(node.runtimes),
+                    )
+                    for node in compatible_nodes
+                )
+                if sum(capacity.values()) < minimum_incremental_mb:
+                    return False
+                if all(
+                    _adds_model_slot(node.residency(placement_model.model_id))
+                    for node in compatible_nodes
+                ) and all(node.max_models is not None for node in node_list):
+                    available_model_slots = sum(
+                        max(
+                            0,
+                            min(
+                                int(node.max_models)
+                                - desired_model_slots[node.node_id],
+                                int(node.max_models) - occupied_models[node.node_id],
+                            ),
+                        )
+                        for node in node_list
+                    )
+                    if available_model_slots < 1:
+                        return False
+
             for target_node in sorted(compatible_nodes, key=lambda item: item.node_id):
                 victims = sorted(
                     (
@@ -609,113 +651,142 @@ class PlacementPlanner:
                         restore_placement_state(state)
             return False
 
-        for model in order:
+        def placement_goal(model: ModelProfile) -> int:
+            target = desired_by_model[model.model_id]
+            regular_slots = max(0, target - len(model.pinned_nodes))
+            return pinned_successes_by_model[model.model_id] + regular_slots
+
+        def place_next_replica(model: ModelProfile) -> bool:
             target = desired_by_model[model.model_id]
             domains = assigned_domains.setdefault(model.model_id, set())
-            pinned_successes = pinned_successes_by_model[model.model_id]
-
-            # A failed hard pin consumes its desired slot; silently substituting another node would
-            # violate the administrator's placement policy. Replicas beyond the explicit pins may
-            # still be placed normally.
-            regular_slots = max(0, target - len(model.pinned_nodes))
-            placement_goal = pinned_successes + regular_slots
-            while (
-                sum(1 for item in assignments if item.model_id == model.model_id)
-                < placement_goal
-            ):
-                domains = assigned_domains.setdefault(model.model_id, set())
-                candidates: list[tuple[float, str, NodeSnapshot, tuple[str, ...]]] = []
-                compatible_new_domain_exists = False
-                for node in node_list:
-                    if (model.model_id, node.node_id) in assigned_pairs:
-                        continue
-                    residency = node.residency(model.model_id)
-                    for_new = residency is None or residency.state in (
-                        ResidencyState.CACHED,
-                        ResidencyState.FAILED,
-                        ResidencyState.DRAINING,
-                    )
-                    reason = _ineligible_reason(
-                        node, model, timestamp, self.policy, for_new=for_new
-                    )
-                    if reason is not None:
-                        continue
-                    if (node.failure_domain or node.node_id) not in domains:
-                        compatible_new_domain_exists = True
-                    if not _fits(
-                        node,
-                        model,
-                        capacity,
-                        occupied_models,
-                        desired_model_slots,
-                    ):
-                        continue
-                    score, reasons = _candidate_score(
-                        node,
-                        model,
-                        capacity[node.node_id],
-                        domains,
-                        self.policy,
-                        now=timestamp,
-                        need_new_domain=(
-                            len(domains) < min(model.min_failure_domains, target)
-                        ),
-                    )
-                    candidates.append((score, node.node_id, node, reasons))
-                needed_domains = min(model.min_failure_domains, target)
-                needs_new_domain = len(domains) < needed_domains
-                if needs_new_domain:
-                    new_domain_candidates = [
-                        candidate
-                        for candidate in candidates
-                        if (candidate[2].failure_domain or candidate[2].node_id)
-                        not in domains
-                    ]
-                    if new_domain_candidates:
-                        candidates = new_domain_candidates
-                    elif compatible_new_domain_exists:
-                        # A fitting same-domain host is only a capacity fallback. First give the
-                        # bounded backtracker a chance to open one additional required domain by
-                        # relocating equal-priority, non-pinned work. Requiring only the next
-                        # incremental domain keeps a three-domain target achievable one replica at
-                        # a time instead of demanding all three from the second placement.
-                        index = sum(
-                            1 for item in assignments if item.model_id == model.model_id
-                        )
-                        if try_place_with_repacking(
-                            model,
-                            index,
-                            required_domain_floor=min(needed_domains, len(domains) + 1),
-                        ):
-                            continue
-                if not candidates:
-                    index = sum(
-                        1 for item in assignments if item.model_id == model.model_id
-                    )
-                    if try_place_with_repacking(model, index):
-                        continue
-                    break
-                # Highest score wins; node_id ascending is the deterministic final tie-break.
-                score, _, node, reasons = min(
-                    candidates, key=lambda item: (-item[0], item[1])
+            candidates: list[tuple[float, str, NodeSnapshot, tuple[str, ...]]] = []
+            compatible_new_domain_exists = False
+            for node in node_list:
+                if (model.model_id, node.node_id) in assigned_pairs:
+                    continue
+                residency = node.residency(model.model_id)
+                for_new = residency is None or residency.state in (
+                    ResidencyState.CACHED,
+                    ResidencyState.FAILED,
+                    ResidencyState.DRAINING,
                 )
-                index = sum(
-                    1 for item in assignments if item.model_id == model.model_id
+                reason = _ineligible_reason(
+                    node, model, timestamp, self.policy, for_new=for_new
                 )
-                assignment = _assignment(
-                    model, node, index=index, score=score, reasons=reasons
-                )
-                _place(
-                    assignment,
+                if reason is not None:
+                    continue
+                if (node.failure_domain or node.node_id) not in domains:
+                    compatible_new_domain_exists = True
+                if not _fits(
                     node,
-                    assignments,
-                    assigned_pairs,
-                    domains,
+                    model,
                     capacity,
                     occupied_models,
                     desired_model_slots,
+                ):
+                    continue
+                score, reasons = _candidate_score(
+                    node,
+                    model,
+                    capacity[node.node_id],
+                    domains,
+                    self.policy,
+                    now=timestamp,
+                    need_new_domain=(
+                        len(domains) < min(model.min_failure_domains, target)
+                    ),
                 )
+                candidates.append((score, node.node_id, node, reasons))
+            needed_domains = min(model.min_failure_domains, target)
+            needs_new_domain = len(domains) < needed_domains
+            if needs_new_domain:
+                new_domain_candidates = [
+                    candidate
+                    for candidate in candidates
+                    if (candidate[2].failure_domain or candidate[2].node_id)
+                    not in domains
+                ]
+                if new_domain_candidates:
+                    candidates = new_domain_candidates
+                elif compatible_new_domain_exists:
+                    # A fitting same-domain host is only a capacity fallback. First give the
+                    # bounded backtracker a chance to open one additional required domain by
+                    # relocating equal-priority, non-pinned work. Requiring only the next
+                    # incremental domain keeps a three-domain target achievable one replica at
+                    # a time instead of demanding all three from the second placement.
+                    index = sum(
+                        1 for item in assignments if item.model_id == model.model_id
+                    )
+                    if try_place_with_repacking(
+                        model,
+                        index,
+                        required_domain_floor=min(needed_domains, len(domains) + 1),
+                    ):
+                        return True
+            if not candidates:
+                index = sum(
+                    1 for item in assignments if item.model_id == model.model_id
+                )
+                return try_place_with_repacking(model, index)
+            # Highest score wins; node_id ascending is the deterministic final tie-break.
+            score, _, node, reasons = min(
+                candidates, key=lambda item: (-item[0], item[1])
+            )
+            index = sum(1 for item in assignments if item.model_id == model.model_id)
+            assignment = _assignment(
+                model, node, index=index, score=score, reasons=reasons
+            )
+            _place(
+                assignment,
+                node,
+                assignments,
+                assigned_pairs,
+                domains,
+                capacity,
+                occupied_models,
+                desired_model_slots,
+            )
+            return True
 
+        priorities = sorted({model.priority for model in order}, reverse=True)
+        for priority in priorities:
+            priority_models = [model for model in order if model.priority == priority]
+            blocked: set[str] = set()
+            while True:
+                placed_by_model = {
+                    model.model_id: sum(
+                        1 for item in assignments if item.model_id == model.model_id
+                    )
+                    for model in priority_models
+                }
+                unfinished = [
+                    model
+                    for model in priority_models
+                    if model.model_id not in blocked
+                    and placed_by_model[model.model_id] < placement_goal(model)
+                ]
+                if not unfinished:
+                    break
+                minimum_placed = min(
+                    placed_by_model[model.model_id] for model in unfinished
+                )
+                current_level = [
+                    model
+                    for model in unfinished
+                    if placed_by_model[model.model_id] == minimum_placed
+                ]
+                progress = False
+                for model in current_level:
+                    progress = place_next_replica(model) or progress
+                if not progress:
+                    # A model with no feasible next placement must not strand capacity usable by an
+                    # equally important peer. Adding other replicas cannot create net resources;
+                    # bounded repacking already exhausted every admissible rearrangement here.
+                    blocked.update(model.model_id for model in current_level)
+
+        for model in order:
+            target = desired_by_model[model.model_id]
+            regular_slots = max(0, target - len(model.pinned_nodes))
             placed = sum(1 for item in assignments if item.model_id == model.model_id)
             regular_placed = sum(
                 1

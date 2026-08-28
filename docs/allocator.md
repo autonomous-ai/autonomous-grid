@@ -61,20 +61,27 @@ transitively. Old peer-local queue, latency, and error evidence is not refreshed
 Only configured, non-retiring model IDs create demand series, so the permissionless inference
 endpoint cannot grow controller state with arbitrary names.
 
-Placement is deterministic. Higher-priority and larger models place first; candidates then prefer
-an existing ready residency, local cached weights, another failure domain, measured throughput, and
-best-fit memory. Before measured throughput exists, bounded memory-bandwidth and compute estimates
-break otherwise-cold ties; ready and cached bonuses remain much larger, so hardware estimates do
-not cause gratuitous migration. Cost, latency, host priority, cold-start time, and throttling lower
-a candidate's score. Persisted failed warm/load attempts apply a bounded per-model penalty, allowing
-a healthy peer to be tried after backoff instead of selecting the same broken cache forever; the
-failed node remains a fallback when it is the only feasible target. Explicit pins, per-host model
-limits, compatibility policies, and a feasible minimum failure-
+Placement is deterministic. Hard pins are reserved first and higher-priority classes fill before
+lower-priority work. Within one priority class, constrained and larger models define each round's
+order, but placement progresses one replica per model per round. Scarce capacity is therefore
+max-min fair among equally important compatible models instead of being monopolized by the first
+model ID before its peers receive a baseline. Candidates prefer an existing ready residency, local
+cached weights, another failure domain, measured throughput, and best-fit memory. Before measured
+throughput exists, bounded memory-bandwidth and compute estimates break otherwise-cold ties; ready
+and cached bonuses remain much larger, so hardware estimates do not cause gratuitous migration.
+Cost, latency, host priority, cold-start time, and throttling lower a candidate's score. Persisted
+failed warm/load attempts apply a bounded per-model penalty, allowing a healthy peer to be tried
+after backoff instead of selecting the same broken cache forever; the failed node remains a fallback
+when it is the only feasible target. Explicit pins, per-host model limits, compatibility policies,
+and a feasible minimum failure-
 domain count are hard constraints. A failure-domain shortfall or capacity shortage is reported
 rather than hidden by overcommit. A throttled host exposes only its configured fraction of capacity
 for new placement. When greedy placement fragments capacity, a deterministic bounded backtracking
 repair can evacuate and re-place several equal-priority replicas; unrelated or ineligible inventory
-does not change that search budget or its result.
+does not change that search budget or its result. On homogeneous empty-residency fleets—where moves
+provably preserve resource use—aggregate free memory and model slots provide an admissible lower
+bound, so an already saturated fleet fails fast. Runtime-specific memory and existing-residency
+cases retain the full repair search because relocation can change their net footprint.
 
 Request routing uses the same heterogeneous capacity evidence after placement. Among engines in the
 same host-protection class that already serve the requested model, Grid compares active requests as
@@ -97,14 +104,14 @@ bounded EWMAs of end-to-end latency and completion-token throughput. Those serve
 override self-reported estimates in placement snapshots, so actual service performance eventually
 supersedes the cold hardware prior. A multi-model vLLM engine is scored only with measurements for
 the model being placed; its fast model cannot lend an unrelated slow model an inflated score.
-Per-model evidence ramps to full placement authority over eight successful samples and then decays
-with age, preventing one fast outlier or an almost-expired benchmark from dominating a mature
-measurement. Current engine-reported node telemetry remains fully weighted.
-Streaming responses still contribute latency even when their wire format does not expose token
-usage. The measurements are private: discovery does not expose them, managed heartbeats cannot
-overwrite them, and no prompt or response content is retained for allocator telemetry. A bounded
-freshness window prevents an old benchmark from surviving an engine reload or long idle period;
-expired measurements fall back to current hardware priors until new requests refresh them.
+Latency and throughput each ramp to full placement authority over eight relevant samples and decay
+against their own update timestamp. A stream that exposes no token count can refresh latency without
+making an old token rate look fresh. When an OpenAI-compatible stream includes final usage metadata,
+a bounded fragmentation-safe SSE parser extracts only its completion-token count; malformed and
+oversized events are ignored. Streaming responses without usage still contribute latency. The
+measurements are private: discovery does not expose them, managed heartbeats cannot overwrite them,
+and no prompt or response content is retained for allocator telemetry. Expired measurements fall
+back to current hardware priors until relevant new requests refresh them.
 
 Recent ready replicas and a recently persisted demand watermark remain desired during the model's
 scale-down cooldown. This is the global hysteresis that prevents a quiet minute—or a signaling-

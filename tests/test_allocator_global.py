@@ -1590,6 +1590,71 @@ def test_planner_respects_node_model_limit():
     assert len(plan.assignments) == 1
 
 
+def test_same_priority_models_share_scarce_capacity_before_scaling_out():
+    machines = [
+        node(f"n{index}", capacity_mb=8_000, max_models=1)
+        for index in range(3)
+    ]
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        machines,
+        [
+            model("alpha", min_replicas=3, max_replicas=3),
+            model("beta", min_replicas=1, max_replicas=1),
+        ],
+        now=10,
+    )
+
+    assert len(plan.nodes_for("alpha")) == 2
+    assert len(plan.nodes_for("beta")) == 1
+    assert any(
+        item.model_id == "alpha"
+        and item.code == "insufficient_capacity"
+        and item.missing_replicas == 1
+        for item in plan.unsatisfied
+    )
+
+
+def test_hard_pins_count_toward_equal_priority_fair_share():
+    machines = [
+        node(f"n{index}", capacity_mb=8_000, max_models=1)
+        for index in range(4)
+    ]
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        machines,
+        [
+            model(
+                "pinned",
+                min_replicas=4,
+                max_replicas=4,
+                pinned_nodes=("n0", "n1"),
+            ),
+            model("peer", min_replicas=4, max_replicas=4),
+        ],
+        now=10,
+    )
+
+    assert len(plan.nodes_for("pinned")) == 2
+    assert len(plan.nodes_for("peer")) == 2
+
+
+def test_higher_priority_model_can_use_all_scarce_capacity():
+    machines = [
+        node(f"n{index}", capacity_mb=8_000, max_models=1)
+        for index in range(2)
+    ]
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        machines,
+        [
+            model("critical", min_replicas=2, max_replicas=2, priority=100),
+            model("batch", min_replicas=1, max_replicas=1, priority=1),
+        ],
+        now=10,
+    )
+
+    assert len(plan.nodes_for("critical")) == 2
+    assert plan.nodes_for("batch") == ()
+
+
 def test_planner_converges_when_model_limit_is_lowered_below_existing_inventory():
     machine = node(
         "n",
