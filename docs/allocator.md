@@ -474,6 +474,7 @@ grid allocator model set <model.gguf> \
   --memory-mb 12000 \
   --artifact-sha256 <64-hex-digest> \
   --max-colocated-models 1 \
+  --colocation-exclude <interfering-model.gguf> \
   --min-replicas 1 \
   --max-replicas 3 \
   --min-failure-domains 2
@@ -493,6 +494,10 @@ managed host already violates a tightened ceiling, Grid deterministically elects
 new work. Existing manually managed vLLM inventory that violates a profile remains visible but is
 reported unsatisfied; the constraint never grants Grid authority to resize or stop the external
 engine.
+For a narrower policy, repeat `--colocation-exclude <model>` to name only measured bad pairings.
+Exclusions are reciprocal even if declared by one profile: neither placement order can put the pair
+together. Compatible peers may still share the host, and the same managed-only staged convergence
+applies if a pair is already live when the policy is added.
 `--replica-concurrency` declares a conservative service-slot estimate for a newly managed replica.
 Once a single-model engine is ready, its live `max_concurrency` may prove a higher batch width; a
 multi-model engine's shared node-wide limit is never credited independently to every model. Queue,
@@ -678,8 +683,8 @@ drain/unload of every incumbent before the second model is warmed and served.
   SHA-256; remote artifact distribution and source-revision resolution remain operator-managed.
 - The planner is a transparent deterministic heuristic, not an optimal mixed-integer solver. It
   prioritizes predictable safety and understandable decisions over a mathematically minimal cost.
-- Inter-model interference is currently controlled through the explicit per-profile
-  `max_colocated_models` ceiling. Grid does not yet infer a pairwise interference matrix from
+- Inter-model interference is controlled through the per-profile `max_colocated_models` ceiling and
+  explicit reciprocal `colocation_excludes` pairs. Grid does not yet infer those pairs from
   production co-run experiments or partition GPU execution resources such as CUDA MPS/MIG.
 - In-memory LAN node membership is rebuilt by registration after a local signaling-server restart;
   durable controller state does not make a stale node eligible without a fresh heartbeat.

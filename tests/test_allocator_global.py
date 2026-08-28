@@ -137,6 +137,35 @@ def test_max_colocated_models_rejects_invalid_values(value):
         model(max_colocated_models=value)
 
 
+def test_pairwise_colocation_exclusions_are_reciprocal_and_selective():
+    alpha = model("alpha", colocation_excludes=("beta",))
+    beta = model("beta")
+    compatible = model("compatible")
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (node("one", 16_000), node("two", 16_000)),
+        (beta, compatible, alpha),
+        now=10,
+    )
+
+    assert plan.unsatisfied == ()
+    assert len(plan.assignments) == 3
+    assert not any(
+        {"alpha", "beta"}.issubset(plan.models_for(node_id))
+        for node_id in ("one", "two")
+    )
+    assert any(
+        "compatible" in plan.models_for(node_id)
+        and len(plan.models_for(node_id)) == 2
+        for node_id in ("one", "two")
+    )
+    assert ModelProfile.from_dict(alpha.to_dict()) == alpha
+
+
+def test_pairwise_colocation_exclusions_reject_self_reference():
+    with pytest.raises(ValueError, match="profile model"):
+        model("alpha", colocation_excludes=("alpha",))
+
+
 @pytest.mark.parametrize(
     ("exclusive_priority", "shared_priority"),
     [(200, 100), (100, 200)],
@@ -268,6 +297,48 @@ def test_managed_colocation_violation_stages_deterministic_convergence(
     converged = planner.plan((converged_node,), (exclusive, batch), now=11)
     assert converged.nodes_for(beneficiary) == ("managed",)
     assert converged.preemptions == ()
+
+
+def test_managed_pairwise_colocation_violation_converges_but_external_does_not():
+    alpha = model(
+        "alpha",
+        colocation_excludes=("beta",),
+        min_residency_seconds=0,
+    )
+    beta = model("beta", min_residency_seconds=0)
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    managed = node("managed", residencies=(ready("alpha"), ready("beta")))
+
+    staged = planner.plan((managed,), (alpha, beta), now=10)
+    assert [
+        (item.model_id, item.for_model_id) for item in staged.preemptions
+    ] == [("beta", "alpha")]
+    result = Reconciler().reconcile(
+        staged,
+        (managed,),
+        (alpha, beta),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+    assert [item.model_id for item in result.executable_actions] == ["beta"]
+
+    external = replace(
+        managed,
+        node_id="external-vllm",
+        residencies=(ready("alpha", managed=False), ready("beta", managed=False)),
+        manually_managed=True,
+        actuator_capabilities=(),
+    )
+    external_plan = planner.plan((external,), (alpha, beta), now=10)
+    external_result = Reconciler().reconcile(
+        external_plan,
+        (external,),
+        (alpha, beta),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+    assert external_plan.preemptions == ()
+    assert external_result.actions == ()
 
 
 @pytest.mark.parametrize(

@@ -236,6 +236,14 @@ def _add_allocator(sub) -> None:
         metavar="N",
         help="Limit distinct live models per host; 1 requests exclusive serving (default: unlimited).",
     )
+    set_model.add_argument(
+        "--colocation-exclude",
+        action="append",
+        dest="colocation_excludes",
+        default=[],
+        metavar="MODEL",
+        help="Forbid sharing a host with this model; repeat for multiple pairwise exclusions.",
+    )
     _add_allocator_grid(set_model, token=True)
     set_model.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     set_model.set_defaults(handler=cmd_allocator_model_set)

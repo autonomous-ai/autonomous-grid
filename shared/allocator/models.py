@@ -409,6 +409,7 @@ class ModelProfile:
     min_gpu_memory_mb: int = 0
     artifact_sha256: str = ""
     max_colocated_models: int = 0
+    colocation_excludes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.model_id or len(self.model_id) > MAX_ID_LENGTH:
@@ -490,6 +491,7 @@ class ModelProfile:
             "required_tags",
             "forbidden_tags",
             "pinned_nodes",
+            "colocation_excludes",
         ):
             object.__setattr__(
                 self, field_name, _canonical_set(getattr(self, field_name))
@@ -502,6 +504,10 @@ class ModelProfile:
             )
         if len(self.pinned_nodes) > self.max_replicas:
             raise ValueError("pinned_nodes cannot exceed max_replicas")
+        if self.model_id in self.colocation_excludes:
+            raise ValueError("colocation_excludes cannot contain the profile model")
+        if any(len(model_id) > MAX_ID_LENGTH for model_id in self.colocation_excludes):
+            raise ValueError("colocation_excludes contains an invalid model ID")
         object.__setattr__(
             self,
             "artifact_sha256",

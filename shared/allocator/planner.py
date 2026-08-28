@@ -914,6 +914,7 @@ class PlacementPlanner:
                         key=lambda item: (
                             -item.priority,
                             item.max_colocated_models or MAX_COUNTER,
+                            -len(item.colocation_excludes),
                             -item.maximum_memory_mb,
                             item.model_id,
                         ),
@@ -1685,6 +1686,8 @@ def _colocation_allowed(
         if assignment.node_id == node.node_id and assignment.model_id != model.model_id
     )
     colocated_count = len(other_models) + 1
+    if set(model.colocation_excludes).intersection(other_models):
+        return False
     if (
         model.max_colocated_models
         and colocated_count > model.max_colocated_models
@@ -1694,8 +1697,13 @@ def _colocation_allowed(
         peer = profile_by_id.get(other_model)
         if (
             peer is not None
-            and peer.max_colocated_models
-            and colocated_count > peer.max_colocated_models
+            and (
+                model.model_id in peer.colocation_excludes
+                or (
+                    peer.max_colocated_models
+                    and colocated_count > peer.max_colocated_models
+                )
+            )
         ):
             return False
     return True
