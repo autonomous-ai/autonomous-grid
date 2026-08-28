@@ -2093,6 +2093,8 @@ def test_cuda_capacity_is_stable_and_excludes_managed_usage_from_external_reserv
     assert initial["capacity_mb"] == 16_000
     assert initial["reserved_mb"] == 2_000
     assert initial["available_mb"] == 6_000
+    assert initial["gpu_count"] == 1
+    assert initial["gpu_memory_mb"] == [16_000]
     assert busier["capacity_mb"] == 16_000
     assert busier["reserved_mb"] == 4_000
     assert busier["available_mb"] == 4_000
@@ -2140,6 +2142,8 @@ def test_resource_collector_can_partition_one_machine_into_failure_domains():
     assert advertised["failure_domain"] == "logical-node-3"
     assert advertised["memory_bandwidth_gbps"] == 400
     assert advertised["compute_gflops"] == 27_132
+    assert advertised["gpu_count"] == 1
+    assert advertised["gpu_memory_mb"] == [advertised["capacity_mb"]]
 
 
 def test_node_rejects_warm_when_local_capacity_drops_after_global_plan(

@@ -247,6 +247,10 @@ def test_model_set_accepts_runtime_specific_memory(monkeypatch):
             "llama.cpp=10000",
             "--runtime-memory-mb",
             "vllm=24000",
+            "--min-gpu-count",
+            "2",
+            "--min-gpu-memory-mb",
+            "48000",
         ]
     )
 
@@ -254,6 +258,8 @@ def test_model_set_accepts_runtime_specific_memory(monkeypatch):
     body = captured["json"]
     assert isinstance(body, dict)
     assert body["runtime_memory_mb"] == (("llama.cpp", 10_000), ("vllm", 24_000))
+    assert body["min_gpu_count"] == 2
+    assert body["min_gpu_memory_mb"] == 48_000
 
 
 def test_model_set_rejects_malformed_runtime_specific_memory(monkeypatch):

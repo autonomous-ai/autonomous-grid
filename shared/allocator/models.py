@@ -165,6 +165,8 @@ class NodeSnapshot:
     model_performance: tuple[ModelPerformance, ...] = ()
     memory_bandwidth_gbps: float = 0.0
     compute_gflops: float = 0.0
+    gpu_count: int = 0
+    gpu_memory_mb: tuple[int, ...] = ()
     cost_per_hour: float = 0.0
     host_priority: int = 0
     last_heartbeat: float = 0.0
@@ -200,6 +202,23 @@ class NodeSnapshot:
         _finite_nonnegative(self.cost_per_hour, "cost_per_hour")
         _finite_nonnegative(self.last_heartbeat, "last_heartbeat")
         _finite_nonnegative(self.mutation_cooldown_until, "mutation_cooldown_until")
+        if (
+            isinstance(self.gpu_count, bool)
+            or not isinstance(self.gpu_count, int)
+            or not 0 <= self.gpu_count <= MAX_COUNTER
+        ):
+            raise ValueError(f"gpu_count must be in [0, {MAX_COUNTER}]")
+        try:
+            gpu_memory = tuple(
+                sorted((int(value) for value in self.gpu_memory_mb), reverse=True)
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("gpu_memory_mb values must be positive integers") from exc
+        if any(value <= 0 or value > MAX_MEMORY_MB for value in gpu_memory):
+            raise ValueError(f"gpu_memory_mb values must be in [1, {MAX_MEMORY_MB}]")
+        object.__setattr__(self, "gpu_memory_mb", gpu_memory)
+        if len(gpu_memory) > self.gpu_count:
+            object.__setattr__(self, "gpu_count", len(gpu_memory))
         if not isinstance(self.state, NodeState):
             object.__setattr__(self, "state", NodeState(self.state))
         for field_name in (
@@ -336,6 +355,8 @@ class ModelProfile:
     min_residency_seconds: float = 300.0
     scale_down_cooldown_seconds: float = 900.0
     min_failure_domains: int = 1
+    min_gpu_count: int = 0
+    min_gpu_memory_mb: int = 0
 
     def __post_init__(self) -> None:
         if not self.model_id or len(self.model_id) > MAX_ID_LENGTH:
@@ -382,6 +403,18 @@ class ModelProfile:
             raise ValueError(f"replica_concurrency must be in [1, {MAX_COUNTER}]")
         if self.priority < 0 or self.min_failure_domains < 1:
             raise ValueError("priority/domain values are invalid")
+        if (
+            isinstance(self.min_gpu_count, bool)
+            or not isinstance(self.min_gpu_count, int)
+            or not 0 <= self.min_gpu_count <= MAX_COUNTER
+        ):
+            raise ValueError(f"min_gpu_count must be in [0, {MAX_COUNTER}]")
+        if (
+            isinstance(self.min_gpu_memory_mb, bool)
+            or not isinstance(self.min_gpu_memory_mb, int)
+            or not 0 <= self.min_gpu_memory_mb <= MAX_MEMORY_MB
+        ):
+            raise ValueError(f"min_gpu_memory_mb must be in [0, {MAX_MEMORY_MB}]")
         for name in (
             "expected_service_seconds",
             "latency_slo_ms",

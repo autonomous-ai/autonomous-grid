@@ -2000,6 +2000,7 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
             MAX_MEMORY_MB,
             max(capacity_mb, reserved_mb + resident_memory),
         )
+        gpu_memory_mb = _gpu_memory_tuple(resources)
         state_value = allocator.get("state")
         decision = allocator.get("decision")
         if isinstance(decision, dict):
@@ -2095,6 +2096,14 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                         resources.get("memory_bandwidth_gbps")
                     ),
                     compute_gflops=_nonnegative_float(resources.get("compute_gflops")),
+                    gpu_count=max(
+                        len(gpu_memory_mb),
+                        _first_nonnegative_int(
+                            resources.get("gpu_count"),
+                            node.load.get("gpu_count"),
+                        ),
+                    ),
+                    gpu_memory_mb=gpu_memory_mb,
                     cost_per_hour=_nonnegative_float(allocator.get("cost_per_hour")),
                     host_priority=_first_nonnegative_int(
                         allocator.get("host_priority")
@@ -2287,6 +2296,11 @@ def _merge_allocator_hosts(
                     member.memory_bandwidth_gbps for member in members
                 ),
                 compute_gflops=max(member.compute_gflops for member in members),
+                gpu_count=max(member.gpu_count for member in members),
+                gpu_memory_mb=max(
+                    (member.gpu_memory_mb for member in members),
+                    key=lambda values: (len(values), sum(values), values),
+                ),
                 # Capacity-node and child-engine records describe one physical host, so host cost
                 # is metadata rather than an additive per-record charge.
                 cost_per_hour=max(member.cost_per_hour for member in members),
@@ -2496,6 +2510,23 @@ def _first_nonnegative_int(*values: Any) -> int:
 
 def _positive_int(*values: Any) -> int:
     return max(1, _first_nonnegative_int(*values))
+
+
+def _gpu_memory_tuple(resources: Mapping[str, Any]) -> tuple[int, ...]:
+    values = resources.get("gpu_memory_mb")
+    if not isinstance(values, (list, tuple)):
+        gpus = resources.get("gpus")
+        values = (
+            [item.get("memory_total_mb") for item in gpus if isinstance(item, Mapping)]
+            if isinstance(gpus, list)
+            else []
+        )
+    parsed = []
+    for value in values:
+        memory_mb = _first_nonnegative_int(value)
+        if 0 < memory_mb <= MAX_MEMORY_MB:
+            parsed.append(memory_mb)
+    return tuple(sorted(parsed, reverse=True))
 
 
 def _optional_nonnegative_int(value: Any) -> int | None:

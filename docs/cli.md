@@ -588,6 +588,8 @@ If `--runtime` is omitted, model profiles default to `llama.cpp`. Supplying one 
 `--runtime` flags replaces that default; it does not add to it. One or more
 `--runtime-memory-mb RUNTIME=MB` values override the fallback `--memory-mb` estimate on matching
 hosts; a host advertising several matching runtimes is charged the largest matching value. A
+profile can also require a physical topology with `--min-gpu-count` and
+`--min-gpu-memory-mb`; nodes without enough reported per-device VRAM fail that constraint closed. A
 managed node on the same machine as its Grid advertises the Grid's literal loopback control address
 by default. Remote workers need
 an explicit reachable address and end-to-end TLS.
@@ -602,6 +604,16 @@ non-loopback plaintext. The node-start spelling is accepted for compatibility on
 relax that rule. Use HTTPS between computers. See
 [Dynamic resource allocator](allocator.md) for placement rules, safety invariants, and the wire
 contract.
+
+An external vLLM endpoint can declare homogeneous topology without changing lifecycle ownership:
+
+```bash
+grid join --at http://gpu-host:8000/v1 -m Qwen3.8-Flash-Next --kind vllm \
+  --gpu-count 2 --gpu-memory-mb 98304
+```
+
+Repeat `--gpu-memory-mb` once per device for heterogeneous GPUs. This metadata is placement and
+routing evidence only; Grid still never starts, drains, or stops an externally owned vLLM process.
 
 ## Use
 

@@ -1078,6 +1078,18 @@ def _ineligible_reason(
         return "runtime is incompatible"
     if model.backends and not set(model.backends).intersection(node.backends):
         return "backend is incompatible"
+    if node.gpu_count < model.min_gpu_count:
+        return f"requires at least {model.min_gpu_count} GPUs"
+    if model.min_gpu_memory_mb:
+        required_devices = max(1, model.min_gpu_count)
+        matching_devices = sum(
+            memory_mb >= model.min_gpu_memory_mb for memory_mb in node.gpu_memory_mb
+        )
+        if matching_devices < required_devices:
+            return (
+                f"requires {required_devices} GPU(s) with at least "
+                f"{model.min_gpu_memory_mb} MB each"
+            )
     if not set(model.required_tags).issubset(node.tags):
         return "required node tags are missing"
     if set(model.forbidden_tags).intersection(node.tags):

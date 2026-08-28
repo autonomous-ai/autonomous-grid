@@ -98,6 +98,18 @@ def _positive_concurrency(raw: str) -> int:
     return count
 
 
+def _positive_gpu_memory_mb(raw: str) -> int:
+    try:
+        memory_mb = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a whole MB value") from None
+    if not 1 <= memory_mb <= 1_000_000_000:
+        raise argparse.ArgumentTypeError(
+            f"{raw!r} must be between 1 and 1000000000 MB"
+        )
+    return memory_mb
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="grid",
@@ -199,6 +211,18 @@ def _add_allocator(sub) -> None:
     set_model.add_argument("--min-residency-seconds", type=float, default=300.0)
     set_model.add_argument("--scale-down-cooldown-seconds", type=float, default=900.0)
     set_model.add_argument("--min-failure-domains", type=int, default=1)
+    set_model.add_argument(
+        "--min-gpu-count",
+        type=int,
+        default=0,
+        help="Require at least this many GPUs on a placement target.",
+    )
+    set_model.add_argument(
+        "--min-gpu-memory-mb",
+        type=int,
+        default=0,
+        help="Require each needed GPU to have at least this much physical VRAM.",
+    )
     _add_allocator_grid(set_model, token=True)
     set_model.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     set_model.set_defaults(handler=cmd_allocator_model_set)
@@ -463,6 +487,24 @@ def _add_engines(sub) -> None:
         default=None,
         metavar="N",
         help="Maximum simultaneous requests admitted to this engine (default: 1).",
+    )
+    choose.add_argument(
+        "--gpu-count",
+        type=_positive_concurrency,
+        default=None,
+        metavar="N",
+        help="Physical GPU count reported as allocator topology evidence (local mode).",
+    )
+    choose.add_argument(
+        "--gpu-memory-mb",
+        action="append",
+        type=_positive_gpu_memory_mb,
+        default=[],
+        metavar="MB",
+        help=(
+            "Physical VRAM per GPU; repeat for heterogeneous devices, or combine one value "
+            "with --gpu-count for homogeneous GPUs (local mode)."
+        ),
     )
     choose.add_argument(
         "--api",

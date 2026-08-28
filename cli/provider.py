@@ -107,6 +107,19 @@ def _apply_inline_aliases(args: argparse.Namespace) -> None:
 
 def cmd_join(args: argparse.Namespace) -> int:
     _reject_remote_only_flags(args)
+    gpu_memory_mb = list(getattr(args, "gpu_memory_mb", []) or [])
+    gpu_count = getattr(args, "gpu_count", None)
+    if gpu_count is None and gpu_memory_mb:
+        gpu_count = len(gpu_memory_mb)
+    if gpu_count and len(gpu_memory_mb) == 1:
+        gpu_memory_mb *= gpu_count
+    if gpu_memory_mb and len(gpu_memory_mb) != gpu_count:
+        raise SystemExit(
+            "Repeat --gpu-memory-mb once per heterogeneous GPU, or provide one value "
+            "for a homogeneous --gpu-count."
+        )
+    args.gpu_count = gpu_count
+    args.gpu_memory_mb = gpu_memory_mb
     if args.serve and args.models:
         raise SystemExit("--serve serves one built-in model; drop -m/--model (alias a built-in with --advertise-as).")
     _apply_inline_aliases(args)
@@ -457,6 +470,8 @@ def _spawn_engine(
         # process remains manually managed even though its runtime is now available to placement.
         "runtime_kind": runtime_kind,
         "max_concurrency": getattr(args, "max_concurrency", None),
+        "gpu_count": getattr(args, "gpu_count", None),
+        "gpu_memory_mb": list(getattr(args, "gpu_memory_mb", []) or []),
         "advertise_as": list(getattr(args, "advertise_as", []) or []),
         "media": bool(media),
         "media_bundles": list(getattr(args, "bundles", []) or []),
@@ -844,6 +859,8 @@ def run_engine_from_record(grid_id: str, engine_id: str) -> int:
         reasoning_budget=record.get("reasoning_budget"),
         runtime_kind=record.get("runtime_kind"),
         max_concurrency=record.get("max_concurrency"),
+        gpu_count=record.get("gpu_count"),
+        gpu_memory_mb=list(record.get("gpu_memory_mb") or []),
         api_kind=record.get("api_kind"),
         api_base_url=record.get("api_base_url"),
         api_media_port=record.get("api_media_port", 8190),
@@ -1024,8 +1041,14 @@ def _run_engine(args: SimpleNamespace) -> int:
                 if runtime
             )
         )
-        if runtimes:
-            payload["resources"] = {"runtimes": runtimes}
+        gpu_memory_mb = list(getattr(args, "gpu_memory_mb", []) or [])
+        gpu_count = int(getattr(args, "gpu_count", None) or len(gpu_memory_mb))
+        if runtimes or gpu_count or gpu_memory_mb:
+            payload["resources"] = {
+                **({"runtimes": runtimes} if runtimes else {}),
+                **({"gpu_count": gpu_count} if gpu_count else {}),
+                **({"gpu_memory_mb": gpu_memory_mb} if gpu_memory_mb else {}),
+            }
         _register_engine(grid_url, node_id, payload)
         registered = True
         print(f"Engine {node_id} advertised on {grid_url}")

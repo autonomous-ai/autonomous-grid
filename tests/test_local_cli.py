@@ -65,6 +65,8 @@ def _engine_args(**overrides) -> SimpleNamespace:
         reasoning_budget=None,
         runtime_kind=None,
         max_concurrency=None,
+        gpu_count=None,
+        gpu_memory_mb=[],
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -3718,6 +3720,74 @@ def test_run_engine_endpoint_url_skips_local_llama_server(monkeypatch, tmp_path)
     assert calls["payload"]["endpoint_url"] == "http://192.168.1.50:8081/v1"
     assert calls["payload"]["resources"] == {"runtimes": ["vllm"]}
     assert calls["payload"]["load"]["max_concurrency"] == 16
+
+
+def test_run_engine_external_preserves_declared_gpu_topology(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = {}
+    monkeypatch.setattr(
+        launcher,
+        "start_llm",
+        lambda *args, **kwargs: pytest.fail("external engine must not launch llama.cpp"),
+    )
+    monkeypatch.setattr(
+        cli.provider,
+        "_register_engine",
+        lambda _url, _node_id, payload: calls.setdefault("payload", payload),
+    )
+    monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    args = _engine_args(
+        models=["qwen"],
+        endpoint_url="http://192.168.1.50:8000/v1",
+        runtime_kind="vllm",
+        gpu_count=2,
+        gpu_memory_mb=[96_000, 96_000],
+    )
+
+    assert cli.provider._run_engine(args) == 0
+    assert calls["payload"]["resources"] == {
+        "runtimes": ["vllm"],
+        "gpu_count": 2,
+        "gpu_memory_mb": [96_000, 96_000],
+    }
+
+
+def test_join_normalizes_homogeneous_gpu_topology_before_spawn(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_grid_config(name="home", port=8090)
+    captured = {}
+    monkeypatch.setattr(
+        cli.provider,
+        "_spawn_engine",
+        lambda _cfg, args, **kwargs: captured.update(args=vars(args), kwargs=kwargs) or 0,
+    )
+
+    args = cli.build_parser().parse_args(
+        [
+            "join",
+            "home",
+            "--at",
+            "http://192.168.1.50:8000/v1",
+            "-m",
+            "qwen",
+            "--kind",
+            "vllm",
+            "--gpu-count",
+            "2",
+            "--gpu-memory-mb",
+            "96000",
+        ]
+    )
+
+    assert cli.cmd_join(args) == 0
+    assert captured["args"]["gpu_count"] == 2
+    assert captured["args"]["gpu_memory_mb"] == [96_000, 96_000]
 
 
 def test_run_engine_external_advertise_as_maps_upstream(monkeypatch, tmp_path):

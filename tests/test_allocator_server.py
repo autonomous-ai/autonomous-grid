@@ -626,6 +626,8 @@ def test_external_vllm_runtime_hint_is_routable_but_never_grants_management(tmp_
                 "capacity_mb": 16_000,
                 "runtimes": ["vllm"],
                 "backends": ["cuda"],
+                "gpu_count": 2,
+                "gpu_memory_mb": [96_000, 96_000],
             },
             "load": {"active_tasks": 0, "max_concurrency": 16},
         },
@@ -640,6 +642,8 @@ def test_external_vllm_runtime_hint_is_routable_but_never_grants_management(tmp_
     assert node["manually_managed"] is True
     assert node["actuator_capabilities"] == []
     assert node["max_concurrency"] == 16
+    assert node["gpu_count"] == 2
+    assert node["gpu_memory_mb"] == [96_000, 96_000]
     assert node["residencies"][0]["state"] == "ready"
     assert node["residencies"][0]["managed"] is False
     discovered = client.get("/nodes/discover", params={"model": "qwen"}).json()[

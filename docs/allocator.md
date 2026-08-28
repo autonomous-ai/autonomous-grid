@@ -555,8 +555,10 @@ partitioned so the harness never reports N times the physical Mac's capacity.
 - The llama.cpp `load` action verifies an already cached GGUF; it does not download one. Artifact
   distribution remains an explicit `grid pull` operation.
 - Capacity is refreshed by the node as stable physical capacity plus dynamic non-Grid reserve.
-  Aggregate GPU totals are adequate for one shared memory pool but do not yet model every multi-GPU
-  topology, tensor-parallel constraint, NUMA boundary, disk budget, or transfer-bandwidth bottleneck.
+  Device count and per-device VRAM are preserved, and profiles may fail closed with
+  `min_gpu_count` and `min_gpu_memory_mb` constraints. This covers basic tensor-parallel
+  feasibility but does not yet model GPU interconnect bandwidth, heterogeneous sharding, NUMA
+  boundaries, disk budgets, or transfer-bandwidth bottlenecks.
 - Model profiles accept a portable `memory_mb` fallback plus runtime-specific
   `runtime_memory_mb` estimates, so llama.cpp/Metal and vLLM/CUDA placements account for their
   distinct footprints. If a node advertises several matching runtimes, the planner conservatively

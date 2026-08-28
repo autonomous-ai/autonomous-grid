@@ -160,6 +160,75 @@ def test_runtime_specific_assignment_memory_reaches_warm_action():
     assert result.actions[0].memory_mb == 24_000
 
 
+def test_gpu_topology_constraints_distinguish_device_count_and_per_device_vram():
+    profile = ModelProfile(
+        model_id="qwen",
+        memory_mb=64_000,
+        runtimes=("vllm",),
+        backends=("cuda",),
+        min_gpu_count=2,
+        min_gpu_memory_mb=48_000,
+    )
+    two_blackwell = node(
+        "two-blackwell",
+        capacity_mb=192_000,
+        runtime="vllm",
+        backend="cuda",
+        gpu_count=2,
+        gpu_memory_mb=(96_000, 96_000),
+    )
+    eight_5090 = node(
+        "eight-5090",
+        capacity_mb=192_000,
+        runtime="vllm",
+        backend="cuda",
+        gpu_count=8,
+        gpu_memory_mb=(24_000,) * 8,
+    )
+    unknown_topology = node(
+        "unknown",
+        capacity_mb=192_000,
+        runtime="vllm",
+        backend="cuda",
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (eight_5090, unknown_topology, two_blackwell),
+        (profile,),
+        now=10,
+    )
+
+    assert plan.nodes_for("qwen") == ("two-blackwell",)
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"gpu_count": -1}, "gpu_count"),
+        ({"gpu_count": True}, "gpu_count"),
+        ({"gpu_memory_mb": (0,)}, "gpu_memory_mb"),
+        ({"gpu_memory_mb": (float("inf"),)}, "gpu_memory_mb"),
+    ],
+)
+def test_gpu_topology_rejects_malformed_node_values(updates, message):
+    with pytest.raises(ValueError, match=message):
+        node("bad", **updates)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"min_gpu_count": -1},
+        {"min_gpu_count": True},
+        {"min_gpu_memory_mb": -1},
+        {"min_gpu_memory_mb": True},
+    ],
+)
+def test_gpu_topology_rejects_malformed_profile_values(updates):
+    with pytest.raises(ValueError, match="min_gpu"):
+        model(**updates)
+
+
 def test_cold_unmeasured_placement_prefers_faster_hardware_without_repacking_cache():
     profile = replace(model(), backends=())
     intel = node(

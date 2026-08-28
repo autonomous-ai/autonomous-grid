@@ -1353,6 +1353,21 @@ def _allocator_resources(
                     0,
                     capacity_mb - reserved_mb - managed_mb,
                 )
+    gpu_memory_mb = tuple(
+        int(memory_mb)
+        for gpu in (
+            info.get("gpus") if isinstance(info.get("gpus"), list) else []
+        )
+        if isinstance(gpu, Mapping)
+        and (memory_mb := _nonnegative_number(gpu.get("memory_total_mb"))) > 0
+    )
+    gpu_count = len(gpu_memory_mb)
+    if backend == "metal":
+        # Apple GPUs share the system memory pool. Represent that topology as one accelerator with
+        # the same conservative usable capacity already enforced by the allocator.
+        gpu_count = max(1, gpu_count)
+        if not gpu_memory_mb and capacity_mb > 0:
+            gpu_memory_mb = (capacity_mb,)
     return {
         "capacity_mb": capacity_mb,
         "reserved_mb": min(reserved_mb, capacity_mb),
@@ -1361,6 +1376,8 @@ def _allocator_resources(
         "available_mb": available_mb,
         "runtimes": ["llama.cpp"],
         "backends": [backend],
+        "gpu_count": gpu_count,
+        "gpu_memory_mb": list(gpu_memory_mb),
         "failure_domain": failure_domain,
         "tags": [platform, backend],
         "memory_bandwidth_gbps": _nonnegative_number(
