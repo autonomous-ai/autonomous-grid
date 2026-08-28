@@ -149,6 +149,88 @@ def test_controller_does_not_reuse_warm_timing_across_artifact_revisions():
     assert controller.status(now=12)["learned_warm_seconds"] == []
 
 
+def test_controller_learned_warm_cost_selects_preemption_victim():
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        planner_policy=PlannerPolicy(memory_headroom_fraction=0),
+    )
+    batch = ModelProfile(
+        "batch",
+        8_000,
+        runtimes=("llama.cpp",),
+        min_replicas=2,
+        max_replicas=2,
+        priority=10,
+        min_residency_seconds=0,
+    )
+    controller.put_profile(batch)
+
+    def batch_node(node_id: str, *, ready: bool) -> NodeSnapshot:
+        return NodeSnapshot(
+            node_id,
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            cached_models=("batch",),
+            residencies=(
+                (
+                    ModelResidency(
+                        "batch",
+                        8_000,
+                        ResidencyState.READY,
+                        loaded_at=1,
+                    ),
+                )
+                if ready
+                else ()
+            ),
+            last_heartbeat=10,
+        )
+
+    cold = (batch_node("a-expensive", ready=False), batch_node("z-cheap", ready=False))
+    controller.tick(cold, now=10)
+    commands = {
+        command.node_id: command
+        for node_id in ("a-expensive", "z-cheap")
+        for command in controller.commands_for(node_id, now=10)
+        if command.kind == ActionKind.WARM
+    }
+    assert set(commands) == {"a-expensive", "z-cheap"}
+    controller.acknowledge(
+        "a-expensive",
+        commands["a-expensive"].action_id,
+        MutationStatus.SUCCEEDED,
+        duration_seconds=100,
+        now=11,
+    )
+    controller.acknowledge(
+        "z-cheap",
+        commands["z-cheap"].action_id,
+        MutationStatus.SUCCEEDED,
+        duration_seconds=1,
+        now=11,
+    )
+
+    controller.put_profile(
+        ModelProfile(
+            "critical",
+            8_000,
+            runtimes=("llama.cpp",),
+            priority=1_000,
+            min_residency_seconds=0,
+        )
+    )
+    controller.tick(
+        (batch_node("a-expensive", ready=True), batch_node("z-cheap", ready=True)),
+        now=12,
+    )
+
+    assert [
+        (item.node_id, item.model_id, item.for_model_id)
+        for item in controller.last_plan.preemptions
+    ] == [("z-cheap", "batch", "critical")]
+
+
 @pytest.mark.parametrize("duration", ["nan", "inf", -1, 3_601, True, object()])
 def test_controller_ignores_untrusted_action_durations(duration):
     controller = AllocatorController(mode=AllocatorMode.AUTOMATIC)
