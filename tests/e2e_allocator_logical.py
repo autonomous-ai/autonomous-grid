@@ -233,6 +233,46 @@ def _require_measured_performance(client: TestClient) -> dict[str, dict[str, flo
     return measured
 
 
+def _stream_real_completion(client: TestClient, model: str) -> dict[str, Any]:
+    """Exercise real fragmented SSE and require the runtime's final usage record."""
+
+    completion: dict[str, Any] = {}
+    completion_tokens = 0
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "max_tokens": 8,
+            "temperature": 0,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+    ) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            chunk = json.loads(payload)
+            if not isinstance(chunk, dict):
+                continue
+            for field_name in ("id", "model"):
+                if chunk.get(field_name):
+                    completion[field_name] = chunk[field_name]
+            usage = chunk.get("usage")
+            value = usage.get("completion_tokens") if isinstance(usage, dict) else 0
+            if isinstance(value, int) and not isinstance(value, bool):
+                completion_tokens = max(completion_tokens, value)
+    if completion_tokens <= 0:
+        raise RuntimeError("real streamed inference returned no completion-token usage")
+    completion["completion_tokens"] = completion_tokens
+    return completion
+
+
 def run(
     nodes: int,
     model: str,
@@ -488,19 +528,7 @@ def run(
                         label="first model offloaded before second model expands",
                     )
 
-                    inference = client.post(
-                        "/v1/chat/completions",
-                        json={
-                            "model": second_model,
-                            "messages": [
-                                {"role": "user", "content": "Reply with OK."}
-                            ],
-                            "max_tokens": 8,
-                            "temperature": 0,
-                        },
-                    )
-                    inference.raise_for_status()
-                    completion = inference.json()
+                    completion = _stream_real_completion(client, second_model)
                     measured_performance = _require_measured_performance(client)
 
                     retire_second = client.delete(
@@ -529,6 +557,9 @@ def run(
                         "actions": actions,
                         "completion_id": completion.get("id"),
                         "completion_model": completion.get("model"),
+                        "stream_completion_tokens": completion.get(
+                            "completion_tokens"
+                        ),
                         "measured_performance": measured_performance,
                         "hosts": _host_summary(hosts),
                         "elapsed_seconds": round(time.monotonic() - started, 3),
@@ -637,17 +668,7 @@ def run(
                         "recovery_cycles": recovery_cycles,
                     }
 
-                inference = client.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": "Reply with OK."}],
-                        "max_tokens": 8,
-                        "temperature": 0,
-                    },
-                )
-                inference.raise_for_status()
-                completion = inference.json()
+                completion = _stream_real_completion(client, model)
                 measured_performance = _require_measured_performance(client)
 
                 # Demand and per-residency cooldowns are both one second. Let them expire, then
@@ -697,6 +718,7 @@ def run(
                     "actions": actions,
                     "completion_id": completion.get("id"),
                     "completion_model": completion.get("model"),
+                    "stream_completion_tokens": completion.get("completion_tokens"),
                     "measured_performance": measured_performance,
                     "hosts": _host_summary(hosts),
                     "elapsed_seconds": round(time.monotonic() - started, 3),
