@@ -632,6 +632,8 @@ uv run python tests/e2e_allocator_logical.py --nodes 2
 uv run python tests/e2e_allocator_logical.py --nodes 4
 uv run python tests/e2e_allocator_logical.py --nodes 4 --scenario activity
 uv run python tests/e2e_allocator_logical.py --nodes 2 --scenario restart
+uv run python tests/e2e_allocator_logical.py --nodes 4 --scenario preemption \
+  --second-model <cached-alias.gguf>
 ```
 
 The lifecycle runs cover demand-driven warm, real OpenAI-compatible inference, route fencing,
@@ -642,6 +644,9 @@ the exact live llama.cpp PID before proving that the adopted process can still d
 `--scenario contention --second-model <cached-alias.gguf>` exercises two model identities under a
 one-model-per-logical-host claimed capacity budget. Logical performance and memory telemetry are
 partitioned so the harness never reports N times the physical Mac's capacity.
+`--scenario preemption --second-model <cached-alias.gguf>` keeps demand for a low-priority model
+active on every logical host, injects a high-priority burst for the second model, and requires real
+drain/unload of every incumbent before the second model is warmed and served.
 
 ## Current limits
 

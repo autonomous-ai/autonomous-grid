@@ -112,6 +112,7 @@ def _profile(
     memory_mb: int = 256,
     artifact_sha256: str = "",
     max_colocated_models: int = 0,
+    priority: int = 100,
 ) -> dict[str, Any]:
     return {
         # Includes ample runtime/KV overhead above this model's ~94 MB weights.
@@ -126,6 +127,7 @@ def _profile(
         "target_utilization": 0.70,
         "expected_service_seconds": 5,
         "latency_slo_ms": 10_000,
+        "priority": priority,
         "min_residency_seconds": 0,
         "scale_down_cooldown_seconds": cooldown_seconds,
         "min_failure_domains": replicas,
@@ -327,6 +329,8 @@ def run(
         raise ValueError("activity evacuation requires at least two logical nodes")
     if scenario == "contention" and (nodes < 4 or not second_model):
         raise ValueError("contention requires four nodes and --second-model")
+    if scenario == "preemption" and not second_model:
+        raise ValueError("preemption requires --second-model")
     desired_replicas = (
         nodes - 1
         if scenario == "activity"
@@ -334,7 +338,9 @@ def run(
         if scenario == "contention"
         else nodes
     )
-    claimed_memory_mb = 8_000 if scenario == "contention" else 256
+    claimed_memory_mb = (
+        8_000 if scenario in ("contention", "preemption") else 256
+    )
     physical = collect_device_info()
     artifact_sha256 = LlamaCppBackend().artifact_sha256(model)
     second_artifact_sha256 = (
@@ -366,11 +372,14 @@ def run(
                     cooldown_seconds=max(60.0, timeout),
                     memory_mb=claimed_memory_mb,
                     artifact_sha256=artifact_sha256,
-                    max_colocated_models=1 if scenario == "contention" else 0,
+                    max_colocated_models=(
+                        1 if scenario in ("contention", "preemption") else 0
+                    ),
+                    priority=10 if scenario == "preemption" else 100,
                 ),
             )
             profile_response.raise_for_status()
-            if scenario == "contention":
+            if scenario in ("contention", "preemption"):
                 second_profile = client.put(
                     f"/allocator/models/{second_model}",
                     headers=headers,
@@ -381,6 +390,7 @@ def run(
                         memory_mb=claimed_memory_mb,
                         artifact_sha256=second_artifact_sha256,
                         max_colocated_models=1,
+                        priority=1_000 if scenario == "preemption" else 100,
                     ),
                 )
                 second_profile.raise_for_status()
@@ -459,6 +469,76 @@ def run(
                     model=model,
                     replicas=desired_replicas,
                 )
+
+                if scenario == "preemption":
+                    assert second_model is not None
+                    for _ in range(60):
+                        assert app.state.allocator.observe(
+                            second_model,
+                            service_seconds=5.0,
+                            latency_ms=5_000,
+                        )
+                    preemption_cycles = _drive_until(
+                        client,
+                        hosts,
+                        lambda: _unloaded(hosts, model)
+                        and len(_ready_hosts(hosts, second_model)) == nodes,
+                        timeout=timeout,
+                        label="critical model preempts every batch logical residency",
+                    )
+                    learned_warm_seconds = [
+                        *learned_warm_seconds,
+                        *_require_learned_warm_times(
+                            client,
+                            model=second_model,
+                            replicas=nodes,
+                        ),
+                    ]
+                    completion = _stream_real_completion(client, second_model)
+                    measured_performance = _require_measured_performance(client)
+
+                    retire_first = client.delete(
+                        f"/allocator/models/{model}",
+                        headers=headers,
+                    )
+                    retire_first.raise_for_status()
+                    retire_second = client.delete(
+                        f"/allocator/models/{second_model}",
+                        headers=headers,
+                    )
+                    retire_second.raise_for_status()
+                    unload_cycles = _drive_until(
+                        client,
+                        hosts,
+                        lambda: _unloaded(hosts, model)
+                        and _unloaded(hosts, second_model),
+                        timeout=timeout,
+                        label="preemption trial models fully offloaded",
+                    )
+                    status = client.get("/allocator/status").json()
+                    actions = [row["kind"] for row in status.get("history") or []]
+                    if not {"warm", "drain", "unload"}.issubset(actions):
+                        raise RuntimeError(
+                            f"incomplete preemption lifecycle history: {actions}"
+                        )
+                    return {
+                        "nodes": nodes,
+                        "scenario": scenario,
+                        "batch_model": model,
+                        "critical_model": second_model,
+                        "preemption_cycles": preemption_cycles,
+                        "unload_cycles": unload_cycles,
+                        "actions": actions,
+                        "completion_id": completion.get("id"),
+                        "completion_model": completion.get("model"),
+                        "stream_completion_tokens": completion.get(
+                            "completion_tokens"
+                        ),
+                        "learned_warm_seconds": learned_warm_seconds,
+                        "measured_performance": measured_performance,
+                        "hosts": _host_summary(hosts),
+                        "elapsed_seconds": round(time.monotonic() - started, 3),
+                    }
 
                 restart_adoption: dict[str, Any] | None = None
                 if scenario == "restart":
@@ -780,7 +860,9 @@ def run(
                         cooldown_seconds=1.0,
                         memory_mb=claimed_memory_mb,
                         artifact_sha256=artifact_sha256,
-                        max_colocated_models=1 if scenario == "contention" else 0,
+                        max_colocated_models=(
+                            1 if scenario in ("contention", "preemption") else 0
+                        ),
                     ),
                 )
                 scale_down_profile.raise_for_status()
@@ -847,7 +929,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument(
         "--scenario",
-        choices=("lifecycle", "activity", "contention", "restart"),
+        choices=("lifecycle", "activity", "contention", "preemption", "restart"),
         default="lifecycle",
     )
     parser.add_argument("--second-model")
