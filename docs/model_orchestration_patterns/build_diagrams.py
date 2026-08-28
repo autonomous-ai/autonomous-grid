@@ -31,7 +31,7 @@ H      = 66          # every node is this tall (docs/STYLE.md)
 PAD    = 22          # horizontal padding inside a node (per side)
 ROW    = 118         # vertical pitch between stacked rows
 STAGE  = 198         # horizontal pitch between stage columns
-M_L, M_R, M_T, M_B = 70, 96, 92, 88   # margins
+M_L, M_R, M_T, M_B = 70, 96, 92, 88   # margins; README supplies each figure caption
 NODE_FS = 28         # label inside a node
 EDGE_FS = 23         # label on an edge
 MIN_EDGE_FS = 12      # floor for auto-fit, so long labels stay readable
@@ -47,13 +47,14 @@ def esc(s):
 
 # --- the layout --------------------------------------------------------------
 class Diagram:
-    def __init__(self, title=None, m_l=None):
+    def __init__(self, title=None, m_l=None, stage_gap=None):
         self.nodes = {}
         self.edges = []
         self._stage = 0
         self._row = 0
         self.title = title
         self.m_l = M_L if m_l is None else m_l   # left margin (widen if a stage-0 node is wide)
+        self.stage_gap = STAGE if stage_gap is None else stage_gap
 
     def next(self, stage=None, row=None):
         """Advance cursor; returns (stage,row)."""
@@ -67,7 +68,10 @@ class Diagram:
               sub=None, note=None):
         row = self._row if row is None else row
         stage = self._stage if stage is None else stage
-        w = w or node_w(label)
+        # A split dot is an 18px circle, not an invisible 100px node. Keeping
+        # the default node width made every fan's arrows stop 41px away from
+        # the visible dot even when verify() reported a clean diagram.
+        w = w or (18 if kind == "dot" else node_w(label))
         self.nodes[nid] = dict(label=label, kind=kind, row=row, stage=stage,
                                w=w, sub=sub, note=note)
         return nid
@@ -87,7 +91,7 @@ class Diagram:
         x, cx = {}, self.m_l
         for st in stages:
             x[st] = cx
-            cx += stage_w[st] + STAGE
+            cx += stage_w[st] + self.stage_gap
         rows = sorted({n["row"] for n in ns.values()})
         y, cy = {}, M_T
         for r in rows:
@@ -99,8 +103,6 @@ class Diagram:
             if n.get("note"):
                 right = max(right, x[n["stage"]] + text_w(n["note"], EDGE_FS - 2) / 2 + 24)
         bottom = max(y[r] + H / 2 for r in rows) + M_B
-        if self.title:
-            right = max(right, text_w(self.title, EDGE_FS) + 2 * self.m_l)
         W = int(round(right))
         Hh = int(round(bottom))
         W += W % 2
@@ -112,8 +114,11 @@ class Diagram:
     def cy(self, nid): return self._y[self.nodes[nid]["row"]]
     def top(self, nid): return self.cy(nid) - H / 2
     def bottom(self, nid): return self.cy(nid) + H / 2
-    def xl(self, nid): return self.cx(nid) - self.w(nid) / 2
-    def xr(self, nid): return self.cx(nid) + self.w(nid) / 2
+    def visual_w(self, nid):
+        """Rendered width; a dot may reserve more layout width than it draws."""
+        return 18 if self.nodes[nid]["kind"] == "dot" else self.w(nid)
+    def xl(self, nid): return self.cx(nid) - self.visual_w(nid) / 2
+    def xr(self, nid): return self.cx(nid) + self.visual_w(nid) / 2
 
     # --- render -------------------------------------------------------------
     def render(self):
@@ -137,10 +142,6 @@ class Diagram:
             marker("H" + tag, color, 19, 3.0, 15)
         p.append("  </defs>")
         p.append(f'  <rect width="{W}" height="{Hh}" fill="#fff"/>')
-        if self.title:
-            p.append(f'  <text x="{self.m_l}" y="{M_T - 58}" text-anchor="start" '
-                     f'fill="{INK}" font-size="{EDGE_FS}" font-weight="700">'
-                     f'{esc(self.title)}</text>')
         lbl = self._label_boxes(W, Hh)
         for i, e in enumerate(self.edges):
             if e["label"]:
@@ -258,8 +259,15 @@ class Diagram:
             else:
                 mx, my = (x1 + x2) / 2, (y1 + y2) / 2
                 anchor = "middle"
+            # Keep the visible baseline where the old renderer put it, but
+            # model the box around the glyphs rather than around that baseline.
+            # A font's ink is mostly above its baseline; treating the baseline
+            # as the vertical centre made verify() miss real border collisions.
             baseline = my - 18
-            boxes.append([mx, baseline, text_w(e["label"], fs) + 8, 26, anchor, fs, a, b])
+            glyph_h = fs * 1.15
+            glyph_cy = baseline - fs * 0.30
+            boxes.append([mx, glyph_cy, text_w(e["label"], fs) + 8,
+                          glyph_h, anchor, fs, a, b])
 
         def lrange(box):
             """(x0, x1) the label really occupies, honouring its anchor."""
@@ -412,7 +420,8 @@ class Diagram:
 
     def _elabel(self, p, e, box):
         lab = e["label"]
-        mx, baseline, anchor, fs = box[0], box[1], box[4], box[5]
+        mx, glyph_cy, anchor, fs = box[0], box[1], box[4], box[5]
+        baseline = glyph_cy + fs * 0.30
         p.append(f'  <text x="{mx:.0f}" y="{baseline:.0f}" text-anchor="{anchor}" '
                  f'fill="{INK}" font-size="{fs}">{esc(lab)}</text>')
 
@@ -576,34 +585,44 @@ def adversarial():
     return d
 
 def strategy():
-    d = Diagram("Strategy — each request chooses a pattern")
+    d = Diagram("Strategy — compile a compatible orchestration plan")
     d.place("job", "job", "terminal", row=1, stage=0)
-    d.place("ch", "choose plan", "decide", row=1, stage=1)
-    d.place("l1", "1 model", "work", row=0, stage=2)
-    d.place("l2", "N models", "work", row=1, stage=2)
-    d.place("l3", "debate", "work", row=2, stage=2)
-    d.place("ans", "answer", "terminal", row=1, stage=3)
-    d.edge("job", "ch", "each request")
-    d.edge("ch", "l1", "cost × speed × needs", lp=(490, 74))
-    d.edge("ch", "l2")
-    d.edge("ch", "l3")
-    d.edge("l1", "ans")
-    d.edge("l2", "ans")
-    d.edge("l3", "ans")
+    d.place("compile", "compile plan", "decide", row=1, stage=1)
+    d.place("graph", "typed graph", "decide", row=1, stage=2,
+            sub="guards · budget · topology", w=410,
+            note="population · pool · verify")
+    d.place("run", "execute", "work", row=1, stage=3)
+    d.place("answer", "answer", "terminal", row=0, stage=4)
+    d.place("refuse", "refuse", "terminal", row=1, stage=4)
+    d.place("escalate", "escalate", "terminal", row=2, stage=4)
+    d.edge("job", "compile", "request × live state")
+    d.edge("compile", "graph", "validate types + order")
+    d.edge("graph", "run", "policy_round")
+    d.edge("run", "answer")
+    d.edge("run", "refuse")
+    d.edge("run", "escalate")
     return d
 
 def brute():
-    d = Diagram("Brute-Force — many identical tries, keep the best")
+    d = Diagram("Brute-Force — many approaches, keep the best")
     d.place("job", "job", "terminal", row=1, stage=0)
     d.place("dot", "", "dot", row=1, stage=1)
-    d.place("deck", "same rough draft", "deck", row=1, stage=2, sub="N identical",
-            note="a stack — many of the same")
-    d.place("best", "best", "decide", row=1, stage=3)
-    d.place("ans", "answer", "terminal", row=1, stage=4)
-    d.edge("job", "dot")
-    d.edge("dot", "deck", "same prompt")
-    d.edge("deck", "best", "a pick, not a judgment")
-    d.edge("best", "ans")
+    d.place("a", "direct", "work", row=0, stage=2, sub="minimal change", w=270)
+    d.place("b", "decompose", "work", row=1, stage=2, sub="split problem", w=270)
+    d.place("c", "search + test", "work", row=2, stage=2, sub="counterexample", w=270)
+    d.place("best", "test + select", "decide", row=1, stage=3,
+            note="one deterministic gate")
+    d.place("ans", "verified answer", "terminal", row=0, stage=4, w=300)
+    d.place("stop", "defer / refuse", "terminal", row=2, stage=4, w=280)
+    d.edge("job", "dot", "same goal")
+    d.edge("dot", "a")
+    d.edge("dot", "b")
+    d.edge("dot", "c")
+    d.edge("a", "best")
+    d.edge("b", "best")
+    d.edge("c", "best")
+    d.edge("best", "ans", "one verified winner")
+    d.edge("best", "stop", "none pass")
     return d
 
 def verify():
@@ -959,9 +978,9 @@ def thompson():
 
 BUILDERS = {
     "mate": mate, "fanout": fanout, "master": master, "adversarial": adversarial,
-    "strategy": strategy, "brute": brute, "verify": verify, "debate": debate,
-    "handoff": handoff, "ensemble": ensemble, "markov": markov,
-    "negative": negative, "pid": pid, "pheromone": pheromone,
+    "strategy": strategy, "brute": brute, "ensemble": ensemble, "verify": verify,
+    "debate": debate, "handoff": handoff, "negative": negative, "markov": markov,
+    "pid": pid, "pheromone": pheromone,
     "byzantine": byzantine, "straggler": straggler, "materialized": materialized,
     "canary": canary, "cvar": cvar, "circuit": circuit, "delphi": delphi,
     "trial_seq": trial_seq, "evid_bar": evid_bar, "screening": screening,
@@ -974,14 +993,14 @@ INDEX_ROWS = [
     ("Fan-Out", "same prompt, N answers, a vote"),
     ("Master / Slave", "a planner splits the job"),
     ("Adversarial", "two careful reads, a judge"),
-    ("Strategy", "each request chooses a pattern"),
-    ("Brute-Force", "many identical tries, keep the best"),
+    ("Strategy", "compile compatible stages into one plan"),
+    ("Brute-Force", "many approaches, keep the best"),
+    ("Ensemble", "same prompt, keep the average"),
     ("Verifier Gate", "one draft, a check, retry on fail"),
     ("Debate", "two reads that loop until they agree"),
     ("Pipeline", "each step consumes the last"),
-    ("Ensemble", "same prompt, keep the average"),
-    ("Markowitz Ensemble", "correlation-weighted, not just averaged"),
     ("Negative Selection", "force divergence before you judge"),
+    ("Markowitz Ensemble", "correlation-weighted, not just averaged"),
     ("PID Confidence Loop", "a budget that tracks error, history, trend"),
     ("Pheromone Router", "learn which shape wins, with decay"),
     ("Byzantine Adjudicator", "dose spend by the shape of doubt"),
@@ -1010,14 +1029,17 @@ def build_index():
     import re
     body = []
     cursor = 40
-    for name, svg in svgs:
+    for (name, svg), (label, tagline) in zip(svgs, INDEX_ROWS):
         m = re.search(r'viewBox="0 0 (\d+) (\d+)"', svg)
         h = int(m.group(2))
-        body.append(f'<g transform="translate(30,{cursor})">')
+        body.append(f'<text x="40" y="{cursor + 25}" fill="{INK}" '
+                    f'font-size="{NODE_FS}" font-weight="700">{esc(label)}</text>')
+        body.append(f'<text x="40" y="{cursor + 57}" fill="{INK}" '
+                    f'font-size="{EDGE_FS}">{esc(tagline)}</text>')
+        body.append(f'<g transform="translate(30,{cursor + 78})">')
         body.append(_strip(svg))
         body.append('</g>')
-        end = cursor + h
-        # title block to the left handled inside strip; advance
+        end = cursor + 78 + h
         cursor = end + gap
     total_h = cursor + 40
     widths = []

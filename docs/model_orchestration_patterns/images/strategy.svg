@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1340 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
-  <title id="t">Strategy — each request chooses a pattern</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1964 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
+  <title id="t">Strategy — compile a compatible orchestration plan</title>
   <defs>
     <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
@@ -12,27 +12,30 @@
     <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
-  <rect width="1340" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Strategy — each request chooses a pattern</text>
-  <text x="187" y="192" text-anchor="middle" fill="#2b2b29" font-size="16">each request</text>
-  <text x="490" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">cost × speed × needs</text>
-  <path d="M 120 210 C 187 210, 187 210, 254 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 482 210 C 598 210, 598 92, 714 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 482 210 C 594 210, 594 210, 706 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 482 210 C 602 210, 602 328, 722 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 876 92 C 987 92, 987 210, 1099 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 884 210 C 991 210, 991 210, 1099 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 867 328 C 983 328, 983 210, 1099 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect width="1964" height="450" fill="#fff"/>
+  <text x="199" y="164" text-anchor="middle" fill="#2b2b29" font-size="12">request × live state</text>
+  <text x="549" y="164" text-anchor="middle" fill="#2b2b29" font-size="12">validate types + order</text>
+  <text x="1178" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">policy_round</text>
+  <path d="M 120 210 C 183 210, 183 210, 245 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 491 210 C 549 210, 549 210, 607 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1017 210 C 1178 210, 1178 210, 1339 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1500 210 C 1604 210, 1604 92, 1707 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1500 210 C 1604 210, 1604 210, 1707 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1500 210 C 1595 210, 1595 328, 1690 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
-  <rect x="254" y="177" width="229" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="368" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">choose plan</text>
-  <rect x="714" y="59" width="162" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="795" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">1 model</text>
-  <rect x="706" y="177" width="178" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="795" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">N models</text>
-  <rect x="722" y="295" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="795" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">debate</text>
-  <rect x="1099" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1171" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <rect x="245" y="177" width="246" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="368" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">compile plan</text>
+  <rect x="607" y="177" width="410" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="812" y="201" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">typed graph</text>
+  <text x="812" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">guards · budget · topology</text>
+  <text x="812" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">population · pool · verify</text>
+  <rect x="1339" y="177" width="162" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1420" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">execute</text>
+  <rect x="1707" y="59" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1779" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <rect x="1707" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1779" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">refuse</text>
+  <rect x="1690" y="295" width="178" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1779" y="338" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">escalate</text>
 </svg>

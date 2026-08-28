@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2156 922" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
+  <title id="t">Owned local inference exposes three levers and seven entry patterns</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="2156" height="922" fill="#fff"/>
+  <path d="M 410 446 C 600 446, 600 446, 789 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 807 446 C 854 446, 854 92, 901 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 807 446 C 864 446, 864 446, 921 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 807 446 C 832 446, 832 682, 856 682" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1371 92 C 1560 92, 1560 92, 1749 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1371 92 C 1550 92, 1550 210, 1729 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1351 446 C 1552 446, 1552 328, 1754 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1351 446 C 1552 446, 1552 446, 1754 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1416 682 C 1578 682, 1578 564, 1739 564" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1416 682 C 1572 682, 1572 682, 1729 682" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1416 682 C 1578 682, 1578 800, 1739 800" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="30" y="413" width="380" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="220" y="456" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">owned local runtime</text>
+  <circle cx="798" cy="446" r="9" fill="#2b2b29"/>
+  <rect x="901" y="59" width="470" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1136" y="83" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">inference abundance</text>
+  <text x="1136" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">no API meter · no vendor quota</text>
+  <rect x="1749" y="59" width="290" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1894" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Brute Force</text>
+  <rect x="1729" y="177" width="330" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1894" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Check and Retry</text>
+  <rect x="921" y="413" width="430" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1136" y="437" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">owned substrate</text>
+  <text x="1136" y="469" text-anchor="middle" fill="#2b2b29" font-size="23">idle cycles · visible memory</text>
+  <rect x="1754" y="295" width="280" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1894" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Idle Worker</text>
+  <rect x="1754" y="413" width="280" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1894" y="456" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Fit the Box</text>
+  <rect x="856" y="649" width="560" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1136" y="673" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">sovereign path</text>
+  <text x="1136" y="705" text-anchor="middle" fill="#2b2b29" font-size="23">local default · private data · offline</text>
+  <rect x="1739" y="531" width="310" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1894" y="574" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Local Cascade</text>
+  <rect x="1729" y="649" width="330" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1894" y="692" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Data Stays Put</text>
+  <rect x="1739" y="767" width="310" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1894" y="810" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Offline Island</text>
+</svg>

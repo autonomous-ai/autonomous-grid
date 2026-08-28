@@ -64,8 +64,14 @@ def _catalog_api(args: argparse.Namespace) -> int:
     # proxy, which held only while every row had some; a credential-only row (ADR 0015 D-c: codex
     # ships its credential path before issue 05's per-tier model table) made the proxy disagree with
     # the real predicate and print "Unknown API kind 'codex'. Supported: codex, openai".
-    if whitelist is None:
-        supported = ", ".join(api_catalog.supported_kinds())
+    # A kind nobody can join has no catalog to show: this command answers "what would `grid join
+    # --api <kind>` serve me?", and for a grid-run kind the answer is "you cannot run that join".
+    # Refused as UNKNOWN rather than with a reason of its own — a distinct refusal would confirm the
+    # kind exists, which is the one thing `member_joinable=False` is there to avoid.
+    if whitelist is None or not whitelist.member_joinable:
+        # `joinable_kinds`, not `supported_kinds`: this line answers "which did you mean?",
+        # and a kind nobody can join is not one of the answers (see ApiWhitelist).
+        supported = ", ".join(api_catalog.joinable_kinds())
         raise SystemExit(f"Unknown API kind {kind!r}. Supported: {supported}")
 
     # A tier-keyed kind prints per tier — its flat `entries` (the tier union) exists for the

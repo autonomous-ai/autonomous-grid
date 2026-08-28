@@ -13,9 +13,8 @@
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
   <rect width="1716" height="450" fill="#fff"/>
-  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Trial Sequential Analysis — the learner only wins once N is met</text>
   <text x="186" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">same class</text>
-  <text x="1393" y="192" text-anchor="middle" fill="#2b2b29" font-size="17">only at the threshold</text>
+  <text x="1393" y="190" text-anchor="middle" fill="#2b2b29" font-size="17">only at the threshold</text>
   <path d="M 120 210 C 191 210, 191 92, 262 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 195 210, 195 328, 270 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 474 92 C 573 92, 573 210, 672 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

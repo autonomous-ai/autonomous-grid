@@ -119,7 +119,10 @@ def _reject_api_conflicts(args: argparse.Namespace) -> None:
     optional: omitted, the join serves the whole whitelist the key can see (zero-config default)."""
     kind = args.api
     if kind not in api_catalog.WHITELISTS:
-        supported = ", ".join(api_catalog.supported_kinds())
+        # See `_catalog_api` in cli/models.py: the OFFER is `joinable_kinds`, while the membership
+        # test above stays the WHOLE table — `grid join --api openrouter` is what the control plane
+        # runs for every grid it creates, and narrowing this line would refuse it.
+        supported = ", ".join(api_catalog.joinable_kinds())
         raise SystemExit(f"Unknown API kind {kind!r}. Supported: {supported}")
     conflicts = (
         ("serve", "--serve"),

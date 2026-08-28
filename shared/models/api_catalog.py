@@ -51,13 +51,30 @@ class ApiWhitelist:
     credential: str = "key"
     # A flat-rate subscription seat: one operator's personal allowance, so the default poll-worker
     # count is pinned to 1 rather than the API-engine default of 8 (ADR 0015 D-f). Draining a
-    # personal allowance eight-wide by default is the harm; it is a property of being flat-rate,
+    # personal allowance four-wide by default is the harm; it is a property of being flat-rate,
     # not of being codex.
     flat_rate: bool = False
     # Non-None => this kind's "engine" is a LOCAL process on this box (a CLI seat), served behind a
     # loopback server on this default port. Also what makes the kind joinable in local mode. Each
     # seat needs a DIFFERENT default so two seats can run on one box without colliding.
     local_seat_port: int | None = None
+    # Whether a person can join with this kind at all. False for a kind the GRID stands up on a
+    # member's behalf, holding a credential the member never sees — only `openrouter` today.
+    #
+    # ONE field because two surfaces turn on the same fact and must not drift apart:
+    #
+    #   * `joinable_kinds` — what `--api` offers when somebody names a kind that doesn't exist. A
+    #     kind nobody can join is not an answer to "which did you mean?".
+    #   * `advertised_name` — a joinable kind's models are namespaced `<kind>:<vendor>`; this one's
+    #     are advertised BARE. The prefix would print the name of a supplier the member has no
+    #     relationship with on every surface carrying a model id: the picker, `GET /v1/models`, and
+    #     the client config they copy out of the app — which must carry the wire id verbatim and so
+    #     cannot be relabelled by any display layer.
+    #
+    # Bare ids are safe *because* of the first fact and not otherwise: a bare id can collide with a
+    # hardware engine's model name, and only a kind whose model set the grid itself chooses can
+    # promise it doesn't.
+    member_joinable: bool = True
 
 # Verified against https://platform.openai.com/docs/models (which 301-redirects to
 # https://developers.openai.com/api/docs/models) on 2026-07-08.
@@ -140,6 +157,74 @@ DOGGI_WHITELIST: tuple[ApiModelEntry, ...] = (
         supports_structured_outputs=False,
         notes="Image-to-video. Resolutions: 480p, 580p, 720p. "
               "Aspect ratios: auto, 21:9, 16:9, 4:3, 1:1, 3:4, 9:16.",
+    ),
+)
+
+# Taken 2026-08-26 from the LIVE feed (`GET https://openrouter.ai/api/v1/models`, 417 models), not
+# from prose docs — the exact command is beside OPENROUTER_WHITELIST below.
+OPENROUTER_LAST_VERIFIED = "2026-08-26"
+
+# The service-kind key. Named here beside the whitelist so the CLI and the tests spell it once.
+OPENROUTER_KIND = "openrouter"
+
+# The two models a hosted grid's first provider serves. Unlike every other kind here, the credential
+# is NOT the vendor's — `openrouter` reaches OpenRouter through the control plane's own passthrough
+# (`--at <control-plane>/v1/grid/internal/openrouter`), which holds the real `OPENROUTER_API_KEY` and
+# never hands it out. What the provider stores is the passthrough's own token, so a provider box that
+# is compromised cannot spend the operator's vendor account anywhere but through that one route.
+#
+# `base_url` is deliberately None: there is no fixed vendor endpoint for this kind, because the
+# endpoint is whichever control plane this box belongs to. `--at` is therefore required, and the join
+# refuses without it rather than defaulting to a URL that would send the passthrough token straight
+# to OpenRouter.
+#
+# The capability rows are DERIVED from the vendor's own machine-readable feed, not hand-copied.
+# Re-take them with one command when `last_verified` goes stale — OpenRouter is one of the few
+# vendors that publishes this, which is why these rows can be checked rather than believed:
+#
+#     curl -s https://openrouter.ai/api/v1/models | python3 -c 'import json,sys
+#     for m in json.load(sys.stdin)["data"]:
+#         if m["id"] in ("deepseek/deepseek-v4-flash-0731", "qwen/qwen3.8-27b"):
+#             sp = m.get("supported_parameters") or []
+#             print(m["id"], m["top_provider"]["context_length"],
+#                   "tools" in sp, "image" in m["architecture"]["input_modalities"],
+#                   "response_format" in sp, "structured_outputs" in sp)'
+#
+# The mapping, spelled out because two of the four are not the obvious field:
+#   context_window            <- top_provider.context_length          (NOT the top-level one)
+#   supports_tools            <- "tools" in supported_parameters
+#   supports_vision           <- "image" in architecture.input_modalities
+#   supports_json_mode        <- "response_format" in supported_parameters
+#   supports_structured_outputs <- "structured_outputs" in supported_parameters
+#
+# ⚠️ `context_window` is `top_provider.context_length`, deliberately the SMALLER of the two numbers
+# the feed carries. The top-level `context_length` is the largest any upstream provider offers
+# (deepseek: 1,310,720) while `top_provider` is what OpenRouter's own default routing actually
+# serves (1,048,576). Advertising the larger one is the fail-OPEN direction: the relay would route a
+# 1.2M-token request here on the strength of a number no request can reach, and the vendor would
+# refuse it after it had already been queued and dispatched.
+OPENROUTER_WHITELIST: tuple[ApiModelEntry, ...] = (
+    ApiModelEntry(
+        vendor_name="deepseek/deepseek-v4-flash-0731",
+        context_window=1_048_576,
+        supports_tools=True,
+        supports_vision=False,  # architecture: text->text
+        supports_json_mode=True,
+        supports_structured_outputs=True,
+        notes="Fast general-purpose text model; the default for a hosted grid's first provider.",
+    ),
+    ApiModelEntry(
+        vendor_name="qwen/qwen3.8-27b",
+        context_window=1_000_000,
+        supports_tools=True,
+        # architecture: text+image+video->text. The passthrough forwards the body verbatim, so image
+        # parts ride through untouched and this is honest to advertise — it is also what lets the
+        # auto-router put a vision request on a hosted grid at all.
+        supports_vision=True,
+        supports_json_mode=True,
+        supports_structured_outputs=True,
+        notes="Multimodal general-purpose model (text + image + video in); the second seat on a "
+              "hosted grid's first provider.",
     ),
 )
 
@@ -422,7 +507,7 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         # `/chat/completions` and `/messages`), so both dialects are advertised here.
         endpoints=("chat/completions", "messages"),
         credential="none",   # the `claude` CLI authenticates itself; the grid holds nothing
-        flat_rate=True,      # a personal subscription — never polled eight-wide by default
+        flat_rate=True,      # a personal subscription — never polled four-wide by default
         local_seat_port=8099,
     ),
     "codex-cli": ApiWhitelist(
@@ -436,6 +521,38 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         flat_rate=True,
         local_seat_port=8098,
     ),
+    OPENROUTER_KIND: ApiWhitelist(
+        last_verified=OPENROUTER_LAST_VERIFIED,
+        # None on purpose — see OPENROUTER_WHITELIST. The endpoint is the control plane's
+        # passthrough, which differs per deployment, so `--at` is required.
+        base_url=None,
+        # The passthrough's own token, NOT an OpenRouter key. Named so an operator standing a
+        # provider up by hand exports the same variable the control plane hands its own.
+        env_var="GRID_OPENROUTER_PROXY_TOKEN",
+        entries=OPENROUTER_WHITELIST,
+        # The passthrough forwards `GET /models`, so the join's key check and the whitelist ∩
+        # visible filter both work unchanged — that is what makes a retired vendor id a loud
+        # refusal at join time instead of a 404 on the first real request.
+        supports_model_listing=True,
+        # BOTH dialects. The vendor serves a Responses route beside its chat one (probed
+        # 2026-08-27: `POST /api/v1/responses` answers 401 — the route exists and wants a key —
+        # where an invented path answers a 404 HTML page), and the control plane's passthrough
+        # mounts a `responses` half beside its `chat/completions` one. Chat alone is what made a
+        # hosted grid answer *no* to Codex: the relay folds `advertises_responses` from the
+        # per-model `endpoints` capability, so a grid whose only provider was this one told the app
+        # it served no dialect Codex speaks.
+        #
+        # ⚠️ This is a LOCKSTEP row, and it did not used to be one. `responses` here means the
+        # provider will POST `{--at}/responses`; absent on the passthrough that is a bare 404 on
+        # every Codex turn. **Roll the control plane out BEFORE this provider release.** The
+        # opposite order is free: a passthrough serving a route nobody asks for costs nothing.
+        endpoints=("chat/completions", "responses"),
+        # Nobody joins with this kind: the grid stands the provider up itself, on a passthrough
+        # token no member holds. So it is absent from `joinable_kinds` and its models are
+        # advertised BARE — `deepseek/deepseek-v4-flash-0731`, never `openrouter:deepseek/…`. See
+        # `ApiWhitelist.member_joinable` for why the two are one field.
+        member_joinable=False,
+    ),
     "doggi": ApiWhitelist(
         last_verified=DOGGI_LAST_VERIFIED,
         base_url=None,  # user supplies endpoint via --at
@@ -447,7 +564,23 @@ WHITELISTS: dict[str, ApiWhitelist] = {
 
 
 def supported_kinds() -> tuple[str, ...]:
+    """Every kind this build knows, joinable or not — the set `--api` VALIDATES against.
+
+    Deliberately the whole table: narrowing this is how `--api openrouter` would start being
+    refused for the one caller that has a token for it. What a person is OFFERED is
+    `joinable_kinds`, and the two are different questions.
+    """
     return tuple(sorted(WHITELISTS))
+
+
+def joinable_kinds() -> tuple[str, ...]:
+    """The kinds a person can name on `--api` — what an unknown-kind refusal lists.
+
+    See `ApiWhitelist.member_joinable`: a kind the grid stands up on a member's behalf is not an
+    answer to "which did you mean?", and naming it there tells every member who mistypes a flag
+    which upstream service their grid buys from.
+    """
+    return tuple(sorted(k for k, w in WHITELISTS.items() if w.member_joinable))
 
 
 def advertised_name(kind: str, entry: ApiModelEntry) -> str:
@@ -458,7 +591,16 @@ def advertised_name(kind: str, entry: ApiModelEntry) -> str:
     prefix. Nothing in its catalog changes that (`tool_mode`, `use_responses_lite` and
     `multi_agent_version` were all patched in its own cache, still 0), so the prefix is the only
     thing that keeps those models usable at all.
+
+    A kind whose row sets ``member_joinable=False`` is advertised BARE, and that is the one case
+    where the reasoning above does not apply: nothing on the far end recognises the id, and the
+    prefix's only remaining effect is to name the upstream service to every member of every grid.
+    An unknown kind namespaces — the fail-safe direction, since a bare id can collide with a
+    hardware engine's model name while a namespaced one cannot.
     """
+    whitelist = WHITELISTS.get(kind)
+    if whitelist is not None and not whitelist.member_joinable:
+        return entry.vendor_name
     return f"{kind}:{entry.vendor_name}"
 
 
@@ -574,7 +716,10 @@ def _discovered_codex_cli_entries() -> tuple[ApiModelEntry, ...]:
 def find_advertised(kind: str, advertised: str) -> ApiModelEntry | None:
     """The whitelist entry advertised under ``advertised`` (e.g. ``openai:gpt-5.5``), or None.
 
-    Only the namespaced form resolves — a bare vendor name is not an advertised name.
+    Only this kind's OWN advertised spelling resolves: the namespaced form for a namespaced kind,
+    the bare vendor name for one whose row sets ``namespaced=False``. It compares what
+    ``advertised_name`` produces rather than re-deriving the shape, so the two cannot disagree —
+    and a bare vendor name is still not an advertised name for a namespaced kind.
     """
     whitelist = WHITELISTS.get(kind)
     if whitelist is None:

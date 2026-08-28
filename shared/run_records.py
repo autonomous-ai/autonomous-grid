@@ -270,7 +270,7 @@ def media_signature(record: dict[str, Any]) -> tuple[bool, tuple[str, ...], int,
 # Poll-worker default for an identity that serves ONLY API engines: the upstream is a hosted API,
 # so several consumers must not queue behind one worker while it sits idle (ADR 0012). Any hardware
 # engine (or media) in the union keeps the conservative default of 1.
-API_ONLY_DEFAULT_CONCURRENCY = 8
+API_ONLY_DEFAULT_CONCURRENCY = 4
 
 
 def effective_max_concurrency(record: dict[str, Any]) -> int:
@@ -280,7 +280,7 @@ def effective_max_concurrency(record: dict[str, Any]) -> int:
     default is derived from the union: 8 when every engine spec is an API engine and the identity
     serves no media — **unless the union contains a FLAT-RATE seat (codex, or a CLI seat), which pins it to 1**
     (ADR 0015 D-f: a codex seat is a flat-rate subscription; eight workers would drain the
-    operator's personal monthly allowance eight-wide by default) — else 1. Like
+    operator's personal monthly allowance four-wide by default) — else 1. Like
     ``media_signature``, this is the ONE definition shared by the CLI's hot-reload-vs-respawn
     choice and the serve loop's startup, so the two can never desync (ADR 0010 C3). A legacy flat
     record (no ``engines`` field) keeps the default of 1.
@@ -290,7 +290,7 @@ def effective_max_concurrency(record: dict[str, Any]) -> int:
         return int(explicit)
     engines = record.get("engines") or []
     if any(api_catalog.kind_is_flat_rate(str(spec.get("api_kind") or "")) for spec in engines):
-        return 1  # a flat-rate seat is never hammered eight-wide by default (ADR 0015 D-f)
+        return 1  # a flat-rate seat is never hammered four-wide by default (ADR 0015 D-f)
     api_only = bool(engines) and all(spec.get("api_kind") for spec in engines)
     return API_ONLY_DEFAULT_CONCURRENCY if api_only and not record.get("media") else 1
 
