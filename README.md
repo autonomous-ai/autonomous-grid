@@ -589,8 +589,9 @@ Grid can plan which configured models belong on which computers as demand and ho
 change. It protects employee machines locally, preserves required replicas, drains before unload,
 and defaults to recommendation-only operation. Runtime discovery and lifecycle ownership are
 separate: existing llama.cpp, ComfyUI, and vLLM/OpenAI-compatible engines remain usable inventory
-without granting Grid permission to restart them. See the [allocator architecture, safety contract,
-and local API](docs/allocator.md).
+without granting Grid permission to restart them. An engine reported as `external` can still have a
+known framework such as vLLM; `external` describes ownership, not its implementation. See the
+[allocator architecture, safety contract, and local API](docs/allocator.md).
 
 ---
 

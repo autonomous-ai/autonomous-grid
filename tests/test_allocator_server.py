@@ -1400,6 +1400,76 @@ def test_proxy_owned_last_used_timestamp_survives_allocator_snapshot(tmp_path):
     assert residency.last_used_at == engine.model_last_used_at["qwen"]
 
 
+def test_proxy_performance_ewma_is_private_and_overrides_reported_estimates(
+    tmp_path,
+    monkeypatch,
+):
+    app, client, _ = _app(tmp_path)
+    _managed_engine(client, host_id="host-perf", model_id="qwen")
+    child_id = engine_node_id("host-perf", "qwen")
+    engine = app.state.nodes[child_id]
+    clock = iter((102.0, 104.0))
+    with monkeypatch.context() as context:
+        context.setattr(server_module.time, "monotonic", lambda: next(clock))
+        server_module._record_engine_performance(
+            engine,
+            100.0,
+            status_code=200,
+            response=httpx.Response(200, json={"usage": {"completion_tokens": 20}}),
+        )
+        server_module._record_engine_performance(
+            engine,
+            100.0,
+            status_code=200,
+            response=httpx.Response(200, json={"usage": {"completion_tokens": 80}}),
+        )
+
+    assert engine.proxy_performance_samples == 2
+    assert engine.proxy_latency_ms == pytest.approx(2_400)
+    assert engine.proxy_tokens_per_second == pytest.approx(12)
+    public = engine.public_dict()
+    assert "proxy_latency_ms" not in public
+    assert "proxy_tokens_per_second" not in public
+    assert "proxy_performance_samples" not in public
+
+    heartbeat = client.post(
+        "/nodes/heartbeat",
+        headers=_node_auth("host-perf"),
+        json={
+            "node_id": child_id,
+            "load": {"latency_ms": 99_000, "tokens_per_second": 1},
+        },
+    )
+    assert heartbeat.status_code == 200
+    snapshot = server_module._allocator_snapshots(app)[0]
+    assert snapshot.latency_ms == pytest.approx(2_400)
+    assert snapshot.tokens_per_second == pytest.approx(12)
+
+
+def test_proxy_performance_ignores_errors_and_unusable_usage(tmp_path, monkeypatch):
+    app, client, _ = _app(tmp_path)
+    _managed_engine(client, host_id="host-perf", model_id="qwen")
+    engine = app.state.nodes[engine_node_id("host-perf", "qwen")]
+    monkeypatch.setattr(server_module.time, "monotonic", lambda: 105.0)
+
+    server_module._record_engine_performance(
+        engine,
+        100.0,
+        status_code=500,
+        response=httpx.Response(500, json={"usage": {"completion_tokens": 100}}),
+    )
+    server_module._record_engine_performance(
+        engine,
+        100.0,
+        status_code=200,
+        response=httpx.Response(200, json={"usage": {"completion_tokens": True}}),
+    )
+
+    assert engine.proxy_performance_samples == 1
+    assert engine.proxy_latency_ms == 5_000
+    assert engine.proxy_tokens_per_second == 0
+
+
 def test_allocator_snapshot_normalizes_remote_wall_clocks_from_model_ages(tmp_path):
     app, _, _ = _app(tmp_path)
     received_at = time.time()

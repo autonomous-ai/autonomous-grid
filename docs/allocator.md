@@ -64,6 +64,14 @@ for new placement. When greedy placement fragments capacity, a deterministic bou
 repair can evacuate and re-place several equal-priority replicas; unrelated or ineligible inventory
 does not change that search budget or its result.
 
+The proxy attributes each successful non-streaming response to the engine that served it and keeps
+bounded EWMAs of end-to-end latency and completion-token throughput. Those server-owned measurements
+override self-reported estimates in placement snapshots, so actual service performance eventually
+supersedes the cold hardware prior. Streaming responses still contribute latency even when their
+wire format does not expose token usage. The measurements are aggregate and private: discovery does
+not expose them, managed heartbeats cannot overwrite them, and no prompt or response content is
+retained for allocator telemetry.
+
 Recent ready replicas and a recently persisted demand watermark remain desired during the model's
 scale-down cooldown. This is the global hysteresis that prevents a quiet minute—or a signaling-
 server restart—from unloading a model that was just used.
@@ -525,6 +533,10 @@ partitioned so the harness never reports N times the physical Mac's capacity.
 - The first managed process boundary is Grid-owned model runtimes. External Ollama, vLLM, LM Studio,
   API, and manually started engines are inventory and routing sources, not processes the allocator
   may stop.
+- The current autonomous.ai NVIDIA engines are vLLM/CUDA even though live discovery labels their
+  ownership class `external`. Framework identity and lifecycle ownership are independent: those
+  engines participate in routing and placement evidence, but discovery alone does not grant Grid
+  permission to start, drain, or stop them.
 - The llama.cpp `load` action verifies an already cached GGUF; it does not download one. Artifact
   distribution remains an explicit `grid pull` operation.
 - Capacity is refreshed by the node as stable physical capacity plus dynamic non-Grid reserve.

@@ -94,6 +94,34 @@ def test_cold_unmeasured_placement_prefers_faster_hardware_without_repacking_cac
     assert "weights cached locally" in stable.assignments[0].reasons
 
 
+def test_measured_engine_performance_supersedes_hardware_prior_for_cold_placement():
+    profile = replace(model(), backends=())
+    high_spec_slow = node(
+        "high-spec-slow",
+        tokens_per_second=10,
+        latency_ms=1_000,
+        memory_bandwidth_gbps=800,
+        compute_gflops=100_000,
+    )
+    measured_fast = node(
+        "measured-fast",
+        tokens_per_second=100,
+        latency_ms=100,
+        memory_bandwidth_gbps=50,
+        compute_gflops=1_000,
+    )
+
+    plan = PlacementPlanner().plan(
+        (high_spec_slow, measured_fast),
+        (profile,),
+        now=10,
+    )
+
+    assert plan.assignments[0].node_id == "measured-fast"
+    assert "measured throughput" in plan.assignments[0].reasons
+    assert "hardware performance estimate" not in plan.assignments[0].reasons
+
+
 def ready(
     model_id: str = "qwen",
     memory_mb: int = 8_000,
@@ -113,7 +141,7 @@ def ready(
 
 
 def test_current_eight_node_framework_inventory_is_usable_but_never_actuated():
-    """Mirror the live autonomous.ai fleet without granting ownership by discovery alone."""
+    """Mirror the live fleet: its external-discovery NVIDIA engines are known vLLM."""
 
     inventory = (
         ("firmware-engineer-daniel", "llama.cpp", "metal", ("Qwen3.6-35B-A3B",)),

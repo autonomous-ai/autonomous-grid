@@ -129,6 +129,11 @@ class Node:
     # already includes requests routed through this proxy, so the public load is the maximum of the
     # sampled runtime count and the exact live proxy count (not their double-counted sum).
     reported_active_tasks: int = 0
+    # Server-measured, bounded performance EWMAs. These are allocator inputs, not public engine
+    # metadata: a managed heartbeat cannot overwrite them, and discovery never exposes them.
+    proxy_latency_ms: float = 0.0
+    proxy_tokens_per_second: float = 0.0
+    proxy_performance_samples: int = 0
     # Server-owned request timestamps. Managed heartbeats must not overwrite these with a runtime
     # timestamp that predates work the proxy has already routed.
     model_last_used_at: dict[str, float] = field(default_factory=dict)
@@ -140,6 +145,9 @@ class Node:
         data.pop("model_last_used_at", None)
         data.pop("proxy_active_tasks", None)
         data.pop("reported_active_tasks", None)
+        data.pop("proxy_latency_ms", None)
+        data.pop("proxy_tokens_per_second", None)
+        data.pop("proxy_performance_samples", None)
         data.pop("engine_api_key", None)
         data.pop("engine_tls_ca_pem", None)
         data["last_heartbeat_at"] = datetime.fromtimestamp(
@@ -817,6 +825,11 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
                     started_at,
                     error=_allocator_capacity_error(engine_response.status_code),
                 )
+                _record_engine_performance(
+                    engine,
+                    started_at,
+                    status_code=engine_response.status_code,
+                )
                 if collector is not None:
                     collector.store()
 
@@ -848,6 +861,12 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         model,
         started_at,
         error=_allocator_capacity_error(engine_response.status_code),
+    )
+    _record_engine_performance(
+        engine,
+        started_at,
+        status_code=engine_response.status_code,
+        response=engine_response,
     )
 
     headers_out = {}
@@ -2013,10 +2032,14 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                         1 if node.role in ("engine", "both") else 0,
                     ),
                     queue_depth=_first_nonnegative_int(node.load.get("queue_depth")),
-                    tokens_per_second=_nonnegative_float(
-                        node.load.get("tokens_per_second")
+                    tokens_per_second=(
+                        node.proxy_tokens_per_second
+                        or _nonnegative_float(node.load.get("tokens_per_second"))
                     ),
-                    latency_ms=_nonnegative_float(node.load.get("latency_ms")),
+                    latency_ms=(
+                        node.proxy_latency_ms
+                        or _nonnegative_float(node.load.get("latency_ms"))
+                    ),
                     memory_bandwidth_gbps=_nonnegative_float(
                         resources.get("memory_bandwidth_gbps")
                     ),
@@ -2253,6 +2276,58 @@ def _allocator_capacity_error(status_code: int) -> bool:
     """Only retryable saturation/server failures should increase replica pressure."""
 
     return status_code == 429 or status_code >= 500
+
+
+_ENGINE_PERFORMANCE_EWMA_ALPHA = 0.20
+_MAX_PERFORMANCE_RESPONSE_BYTES = 1_000_000
+
+
+def _record_engine_performance(
+    engine: Node,
+    started_at: float,
+    *,
+    status_code: int,
+    response: httpx.Response | None = None,
+) -> None:
+    """Attribute successful proxy work to one engine without retaining request content."""
+
+    if status_code < 200 or status_code >= 300:
+        return
+    elapsed = max(0.0, time.monotonic() - started_at)
+    latency_ms = min(1_000_000_000_000.0, elapsed * 1_000.0)
+    first = engine.proxy_performance_samples == 0
+    alpha = 1.0 if first else _ENGINE_PERFORMANCE_EWMA_ALPHA
+    engine.proxy_latency_ms = (
+        latency_ms
+        if first
+        else alpha * latency_ms + (1.0 - alpha) * engine.proxy_latency_ms
+    )
+    engine.proxy_performance_samples = min(
+        MAX_COUNTER,
+        engine.proxy_performance_samples + 1,
+    )
+
+    if response is None or elapsed <= 0 or len(response.content) > _MAX_PERFORMANCE_RESPONSE_BYTES:
+        return
+    try:
+        payload = response.json()
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+        if (
+            isinstance(completion_tokens, bool)
+            or not isinstance(completion_tokens, (int, float))
+            or completion_tokens <= 0
+        ):
+            return
+        measured = min(1_000_000_000_000.0, float(completion_tokens) / elapsed)
+    except (TypeError, ValueError):
+        return
+    engine.proxy_tokens_per_second = (
+        measured
+        if engine.proxy_tokens_per_second == 0
+        else alpha * measured
+        + (1.0 - alpha) * engine.proxy_tokens_per_second
+    )
 
 
 def _change_active_tasks(node: Node, delta: int) -> None:

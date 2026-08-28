@@ -212,6 +212,27 @@ def _host_summary(hosts: list[LogicalHost]) -> list[dict[str, Any]]:
     return rows
 
 
+def _performance_summary(client: TestClient) -> dict[str, dict[str, float]]:
+    return {
+        row["node_id"]: {
+            "latency_ms": float(row.get("latency_ms") or 0),
+            "tokens_per_second": float(row.get("tokens_per_second") or 0),
+        }
+        for row in client.get("/allocator/status").json().get("nodes") or []
+        if row.get("latency_ms") or row.get("tokens_per_second")
+    }
+
+
+def _require_measured_performance(client: TestClient) -> dict[str, dict[str, float]]:
+    measured = _performance_summary(client)
+    if not any(
+        row["latency_ms"] > 0 and row["tokens_per_second"] > 0
+        for row in measured.values()
+    ):
+        raise RuntimeError(f"real inference produced no allocator performance signal: {measured}")
+    return measured
+
+
 def run(
     nodes: int,
     model: str,
@@ -480,6 +501,7 @@ def run(
                     )
                     inference.raise_for_status()
                     completion = inference.json()
+                    measured_performance = _require_measured_performance(client)
 
                     retire_second = client.delete(
                         f"/allocator/models/{second_model}",
@@ -507,6 +529,7 @@ def run(
                         "actions": actions,
                         "completion_id": completion.get("id"),
                         "completion_model": completion.get("model"),
+                        "measured_performance": measured_performance,
                         "hosts": _host_summary(hosts),
                         "elapsed_seconds": round(time.monotonic() - started, 3),
                     }
@@ -625,6 +648,7 @@ def run(
                 )
                 inference.raise_for_status()
                 completion = inference.json()
+                measured_performance = _require_measured_performance(client)
 
                 # Demand and per-residency cooldowns are both one second. Let them expire, then
                 # exercise route fencing, drain, direct-slot idleness, and real process teardown.
@@ -673,6 +697,7 @@ def run(
                     "actions": actions,
                     "completion_id": completion.get("id"),
                     "completion_model": completion.get("model"),
+                    "measured_performance": measured_performance,
                     "hosts": _host_summary(hosts),
                     "elapsed_seconds": round(time.monotonic() - started, 3),
                 }
