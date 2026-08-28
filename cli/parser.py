@@ -86,6 +86,18 @@ def _positive_task_count(raw: str) -> int:
     return count
 
 
+def _positive_concurrency(raw: str) -> int:
+    """Bound one explicitly advertised engine width before it reaches either control plane."""
+
+    try:
+        count = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a whole concurrency value") from None
+    if not 1 <= count <= 256:
+        raise argparse.ArgumentTypeError(f"{raw!r} must be between 1 and 256")
+    return count
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="grid",
@@ -166,6 +178,12 @@ def _add_allocator(sub) -> None:
     set_model.add_argument("--min-replicas", type=int, default=1)
     set_model.add_argument("--max-replicas", type=int, default=None)
     set_model.add_argument("--target-utilization", type=float, default=0.70)
+    set_model.add_argument(
+        "--replica-concurrency",
+        type=int,
+        default=1,
+        help="Conservative request slots per newly placed replica (default: 1).",
+    )
     set_model.add_argument("--service-seconds", type=float, default=5.0)
     set_model.add_argument("--latency-slo-ms", type=float, default=5_000.0)
     set_model.add_argument("--priority", type=int, default=100)
@@ -433,6 +451,13 @@ def _add_engines(sub) -> None:
                         help="Join only the detected engine of this kind (e.g. ollama, vllm); "
                              "with --at, record that runtime kind for placement.")
     choose.add_argument(
+        "--max-concurrency",
+        type=_positive_concurrency,
+        default=None,
+        metavar="N",
+        help="Maximum simultaneous requests admitted to this engine (default: 1).",
+    )
+    choose.add_argument(
         "--api",
         metavar="KIND",
         default=None,
@@ -524,16 +549,14 @@ def _add_engines(sub) -> None:
                              help="Deprecated — use `grid price set`. (No longer advertises a price.)")
     remote_only.add_argument("--pricing-output", type=float, default=None,
                              help="Deprecated — use `grid price set`. (No longer advertises a price.)")
-    remote_only.add_argument("--max-concurrency", type=int, default=None,
-                             help="How many requests this engine serves at once (remote only).")
     # `default=None`, not the `store_true` default of False: `provider._reject_remote_only_flags`
     # decides "was this flag used" with `is not None`, so a False default would reject every LOCAL
     # `grid join`. Every flag in this group defaults to None for that reason.
     remote_only.add_argument("--respawn", action="store_true", default=None,
                              help="Stop the engine already serving this grid and start a fresh one, "
                                   "instead of no-opping an identical re-join (remote only).")
-    # Task serving (ADR 0032). Remote-only for the same structural reason as `--max-concurrency`:
-    # a task is claimed from the relay, and local mode has no relay. `default=None` throughout, per
+    # Task serving (ADR 0032). A task is claimed from the relay, and local mode has no relay.
+    # `default=None` throughout, per
     # the group's comment above — `--tasks` in particular, because a `store_true` defaulting to
     # False would make `_reject_remote_only_flags` refuse every LOCAL join.
     remote_only.add_argument("--tasks", action="store_true", default=None,

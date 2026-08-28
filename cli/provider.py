@@ -40,11 +40,10 @@ _REMOTE_ONLY_JOIN_FLAGS = (
     ("engine_label", "--engine-label"),
     ("pricing_input", "--pricing-input"),
     ("pricing_output", "--pricing-output"),
-    ("max_concurrency", "--max-concurrency"),
     ("respawn", "--respawn"),
     # Task serving (ADR 0032, issue 61). A task is claimed from the relay, and local mode has no
-    # relay — the same structural reason `--max-concurrency` is here. ⚠️ All three default to
-    # `None`, `--tasks` included: the predicate below is `is not None`, so a `store_true` flag
+    # relay. ⚠️ All three default to `None`, `--tasks` included: the predicate below is `is not
+    # None`, so a `store_true` flag
     # defaulting to False would refuse every LOCAL join.
     ("tasks", "--tasks"),
     ("max_tasks", "--max-tasks"),
@@ -292,7 +291,10 @@ def _run_cli_seat_engine(args: SimpleNamespace, cfg: dict[str, Any], grid_url: s
         "name": args.name,
         "pricing": {},
         "capabilities": {},
-        "load": {"active_tasks": 0},
+        "load": {
+            "active_tasks": 0,
+            "max_concurrency": max(1, int(getattr(args, "max_concurrency", None) or 1)),
+        },
         "upstream": {model: model for model in models},
     }
     return _advertise_until_terminated(
@@ -323,7 +325,12 @@ def _advertise_until_terminated(
         while True:
             time.sleep(max(1.0, float(args.heartbeat_interval)))
             try:
-                _heartbeat(grid_url, node_id, {"active_tasks": 0}, payload)
+                _heartbeat(
+                    grid_url,
+                    node_id,
+                    dict(payload.get("load") or {"active_tasks": 0}),
+                    payload,
+                )
             except httpx.RequestError as exc:
                 print(f"Heartbeat failed: {exc}", file=sys.stderr)
     except KeyboardInterrupt:
@@ -449,6 +456,7 @@ def _spawn_engine(
         # Serving implementation is independent from ownership. In particular, an external vLLM
         # process remains manually managed even though its runtime is now available to placement.
         "runtime_kind": runtime_kind,
+        "max_concurrency": getattr(args, "max_concurrency", None),
         "advertise_as": list(getattr(args, "advertise_as", []) or []),
         "media": bool(media),
         "media_bundles": list(getattr(args, "bundles", []) or []),
@@ -834,6 +842,8 @@ def run_engine_from_record(grid_id: str, engine_id: str) -> int:
         mmproj=record.get("mmproj"),
         temp=record.get("temp"),
         reasoning_budget=record.get("reasoning_budget"),
+        runtime_kind=record.get("runtime_kind"),
+        max_concurrency=record.get("max_concurrency"),
         api_kind=record.get("api_kind"),
         api_base_url=record.get("api_base_url"),
         api_media_port=record.get("api_media_port", 8190),
@@ -974,6 +984,11 @@ def _run_engine(args: SimpleNamespace) -> int:
                 # shared with another media engine or already running when we joined.
                 run_records.update_record(args.grid, args.name, comfyui_started=True)
 
+        max_concurrency = max(1, int(getattr(args, "max_concurrency", None) or 1))
+        reported_load = {
+            "active_tasks": 0,
+            "max_concurrency": max_concurrency,
+        }
         payload = {
             "role": "engine",
             "models": advertised_models,
@@ -990,7 +1005,7 @@ def _run_engine(args: SimpleNamespace) -> int:
                 ) if text_advertised_models else {},
                 _media_capabilities(advertised_models) if args.enable_media else {},
             ),
-            "load": {"active_tasks": 0},
+            "load": reported_load,
             "upstream": upstream,
         }
         # Old built-in records predate ``runtime_kind``; their missing endpoint is still definitive
@@ -1023,7 +1038,7 @@ def _run_engine(args: SimpleNamespace) -> int:
         while True:
             time.sleep(max(1.0, float(args.heartbeat_interval)))
             try:
-                _heartbeat(grid_url, node_id, {"active_tasks": 0}, payload)
+                _heartbeat(grid_url, node_id, reported_load, payload)
             except httpx.RequestError as exc:
                 print(f"Heartbeat failed: {exc}", file=sys.stderr)
     except KeyboardInterrupt:
@@ -1147,7 +1162,10 @@ def _run_api_media_engine(args: SimpleNamespace, cfg: dict[str, Any], grid_url: 
         "name": args.name,
         "pricing": {},
         "capabilities": _api_media_capabilities(models),
-        "load": {"active_tasks": 0},
+        "load": {
+            "active_tasks": 0,
+            "max_concurrency": max(1, int(getattr(args, "max_concurrency", None) or 1)),
+        },
         "upstream": {},
     }
     print(f"media_url={payload['media_url']} ({args.api_kind} -> {args.api_base_url})")
@@ -1280,4 +1298,3 @@ def _record_alive(grid_id: str, engine_id: str) -> bool:
     reaper — made this refuse a re-join of an engine that had already died."""
     record = run_records.read_records(grid_id).get(engine_id)
     return bool(record and run_records.record_alive(record))
-

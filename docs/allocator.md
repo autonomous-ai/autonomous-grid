@@ -377,6 +377,10 @@ grid allocator model set <model.gguf> \
 The profile command also accepts repeated `--runtime`, `--backend`, `--required-tag`,
 `--forbidden-tag`, and `--pin` constraints; data tier, target utilization, expected service time,
 latency SLO, priority, load/warm estimates, residency and scale-down cooldowns are explicit flags.
+`--replica-concurrency` declares a conservative service-slot estimate for a newly managed replica.
+Once a single-model engine is ready, its live `max_concurrency` may prove a higher batch width; a
+multi-model engine's shared node-wide limit is never credited independently to every model. Queue,
+latency, or error pressure still requests at least one replica beyond the current ready set.
 If `--runtime` is omitted, it defaults to `llama.cpp`. Once the flag is present, only the listed
 runtimes are eligible.
 

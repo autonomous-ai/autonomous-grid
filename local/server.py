@@ -1314,6 +1314,7 @@ def _choose_engine(app: FastAPI, model: str, *, media: bool = False) -> Node | N
 def _engine_dict(node: Node) -> dict[str, Any]:
     data = node.public_dict()
     data.pop("last_heartbeat", None)
+    data["max_concurrency"] = _node_concurrency_limit(node)
     return data
 
 
@@ -1342,7 +1343,7 @@ def _route_priority(node: Node) -> float:
 
 def _node_concurrency_limit(node: Node) -> int | None:
     allocator = node.allocator if isinstance(node.allocator, dict) else {}
-    value = allocator.get("max_concurrency")
+    value = allocator.get("max_concurrency", node.load.get("max_concurrency"))
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:

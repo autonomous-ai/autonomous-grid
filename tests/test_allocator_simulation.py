@@ -398,6 +398,88 @@ def test_multi_model_spike_obeys_global_and_per_host_mutation_budgets():
     )
 
 
+def test_vllm_batch_capacity_absorbs_demand_until_observed_pressure_scales_managed_llama():
+    model = ModelProfile(
+        model_id="assistant",
+        memory_mb=8_000,
+        runtimes=("llama.cpp", "vllm"),
+        backends=("cuda", "metal"),
+        min_replicas=0,
+        max_replicas=2,
+        target_utilization=0.75,
+        latency_slo_ms=1_000,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=0,
+        min_failure_domains=2,
+    )
+    external_vllm = NodeSnapshot(
+        node_id="external-vllm",
+        capacity_mb=64_000,
+        backends=("cuda",),
+        runtimes=("vllm",),
+        failure_domain="gpu-rack",
+        residencies=(
+            replace(ready("assistant", 8_000, now=100), managed=False),
+        ),
+        max_concurrency=16,
+        last_heartbeat=100,
+        actuator_capabilities=(),
+        manually_managed=True,
+    )
+    managed_llama = host(
+        "managed-llama",
+        cached=("assistant",),
+        domain="mac-studio",
+        now=100,
+    )
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+
+    normal = planner.plan(
+        (external_vllm, managed_llama),
+        (model,),
+        (DemandForecast("assistant", offered_concurrency=6, updated_at=100),),
+        now=100,
+    )
+    assert normal.target_for("assistant") == 1
+    assert normal.nodes_for("assistant") == ("external-vllm",)
+    assert Reconciler().reconcile(
+        normal,
+        (external_vllm, managed_llama),
+        (model,),
+        mode=AllocatorMode.AUTOMATIC,
+        now=100,
+    ).actions == ()
+
+    pressured = planner.plan(
+        (external_vllm, managed_llama),
+        (model,),
+        (
+            DemandForecast(
+                "assistant",
+                offered_concurrency=6,
+                queue_depth=1,
+                p95_latency_ms=1_100,
+                updated_at=101,
+            ),
+        ),
+        now=101,
+    )
+    assert pressured.target_for("assistant") == 2
+    assert pressured.nodes_for("assistant") == ("external-vllm", "managed-llama")
+
+    reconciliation = Reconciler().reconcile(
+        pressured,
+        (external_vllm, replace(managed_llama, last_heartbeat=101)),
+        (model,),
+        mode=AllocatorMode.AUTOMATIC,
+        now=101,
+    )
+    assert [(action.kind, action.node_id) for action in reconciliation.actions] == [
+        (ActionKind.WARM, "managed-llama")
+    ]
+    assert all(action.node_id != "external-vllm" for action in reconciliation.actions)
+
+
 def test_failover_keeps_last_replica_until_replacement_is_ready_and_drained():
     model = profile("code", 12_000, max_replicas=1)
     old = host(

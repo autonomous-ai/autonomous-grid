@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from itertools import combinations
 
 from shared.allocator.models import (
+    MAX_COUNTER,
     DemandForecast,
     ModelProfile,
     ModelResidency,
@@ -762,16 +763,16 @@ def desired_replica_count(
                 forecast.requests_per_minute / 60.0 * model.expected_service_seconds
             )
         concurrency = offered_concurrency * (1.0 + policy.demand_headroom_fraction)
-        target = _bounded_replica_ceil(
+        required_capacity = _bounded_replica_ceil(
             concurrency / model.target_utilization,
-            model.max_replicas,
+            MAX_COUNTER,
         )
         if forecast.queue_depth:
-            target = max(
-                target,
+            required_capacity = max(
+                required_capacity,
                 _bounded_replica_ceil(
                     forecast.queue_depth / policy.queue_items_per_replica,
-                    model.max_replicas,
+                    MAX_COUNTER,
                 ),
             )
         if model.latency_slo_ms and forecast.p95_latency_ms > model.latency_slo_ms:
@@ -779,16 +780,38 @@ def desired_replica_count(
                 policy.latency_pressure_limit,
                 forecast.p95_latency_ms / model.latency_slo_ms,
             )
-            target = max(
-                target,
-                _bounded_replica_ceil(max(1, target) * pressure, model.max_replicas),
+            required_capacity = max(
+                required_capacity,
+                _bounded_replica_ceil(
+                    max(1, required_capacity) * pressure,
+                    MAX_COUNTER,
+                ),
             )
         if forecast.error_rate:
             pressure = 1.0 + min(policy.error_pressure_limit, forecast.error_rate)
-            target = max(
-                target,
-                _bounded_replica_ceil(max(1, target) * pressure, model.max_replicas),
+            required_capacity = max(
+                required_capacity,
+                _bounded_replica_ceil(
+                    max(1, required_capacity) * pressure,
+                    MAX_COUNTER,
+                ),
             )
+        target, ready_replicas = _replicas_for_service_capacity(
+            model,
+            required_capacity,
+            nodes,
+            timestamp,
+            policy,
+        )
+        # A queue or degraded service level is direct evidence that the current ready set is not
+        # meeting demand, even if one engine advertises a wide theoretical batch. Add one replica
+        # instead of allowing a generous max_concurrency declaration to mask observed pressure.
+        if ready_replicas and (
+            forecast.queue_depth
+            or (model.latency_slo_ms and forecast.p95_latency_ms > model.latency_slo_ms)
+            or forecast.error_rate
+        ):
+            target = max(target, min(model.max_replicas, ready_replicas + 1))
         target = max(model.min_replicas, target)
 
     # Recently-used ready replicas are retained even after a traffic dip.  This is the global
@@ -820,6 +843,63 @@ def desired_replica_count(
     # its own target and would weaken replacement/failure-domain safety checks in reconciliation.
     target = max(target, len(model.pinned_nodes))
     return min(model.max_replicas, target)
+
+
+def _replicas_for_service_capacity(
+    model: ModelProfile,
+    required_capacity: int,
+    nodes: Iterable[NodeSnapshot],
+    timestamp: float,
+    policy: PlannerPolicy,
+) -> tuple[int, int]:
+    """Convert demand slots to replicas using only conservative, model-scoped evidence.
+
+    A single-model ready engine may apply its advertised batch width. Multi-model engines retain a
+    capacity of one because their node-wide limit is shared and cannot safely be credited to every
+    model. Newly managed replicas use the explicit profile value. Missing physical candidates do
+    not shrink desired state: virtual profile-capacity slots preserve the existing visible
+    ``insufficient_capacity`` signal during outages.
+    """
+
+    if required_capacity <= 0:
+        return 0, 0
+    capacities: list[tuple[bool, int, str]] = []
+    ready_count = 0
+    for node in nodes:
+        residency = node.residency(model.model_id)
+        for_new = residency is None or residency.state in (
+            ResidencyState.CACHED,
+            ResidencyState.FAILED,
+            ResidencyState.DRAINING,
+        )
+        if _ineligible_reason(node, model, timestamp, policy, for_new=for_new) is not None:
+            continue
+        is_ready = bool(residency and residency.state == ResidencyState.READY)
+        capacity = model.replica_concurrency
+        if is_ready:
+            ready_count += 1
+            ready_models = sum(
+                item.state == ResidencyState.READY for item in node.residencies
+            )
+            if ready_models == 1 and node.max_concurrency > 0:
+                capacity = max(capacity, node.max_concurrency)
+        capacities.append((is_ready, capacity, node.node_id))
+
+    # Prefer already-ready capacity, matching the planner's much larger ready-residency bonus. Use
+    # the narrowest ready engine first: target calculation must be safe for any ready replica the
+    # later scorer can retain, rather than depending on it coincidentally choosing the widest one.
+    capacities.sort(key=lambda item: (not item[0], item[1], item[2]))
+    replicas = 0
+    supplied = 0
+    for _is_ready, capacity, _node_id in capacities:
+        if replicas >= model.max_replicas or supplied >= required_capacity:
+            break
+        replicas += 1
+        supplied = min(MAX_COUNTER, supplied + capacity)
+    while replicas < model.max_replicas and supplied < required_capacity:
+        replicas += 1
+        supplied = min(MAX_COUNTER, supplied + model.replica_concurrency)
+    return replicas, ready_count
 
 
 def compatibility_reason(

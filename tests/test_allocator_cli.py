@@ -178,6 +178,8 @@ def test_model_set_sends_validated_profile_and_secret_header(monkeypatch, capsys
             "2",
             "--backend",
             "metal",
+            "--replica-concurrency",
+            "8",
             "--required-tag",
             "finance",
         ]
@@ -187,6 +189,7 @@ def test_model_set_sends_validated_profile_and_secret_header(monkeypatch, capsys
     assert captured["headers"] == {"X-Grid-Allocator-Token": "secret-token"}
     assert captured["json"]["model_id"] == "qwen.gguf"
     assert captured["json"]["runtimes"] == ("llama.cpp",)
+    assert captured["json"]["replica_concurrency"] == 8
     assert captured["json"]["required_tags"] == ("finance",)
     assert "secret-token" not in capsys.readouterr().out
 

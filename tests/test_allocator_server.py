@@ -597,7 +597,7 @@ def test_managed_reregistration_preserves_proxy_owned_load(tmp_path):
 
 
 def test_external_vllm_runtime_hint_is_routable_but_never_grants_management(tmp_path):
-    _, client, _ = _app(tmp_path)
+    app, client, _ = _app(tmp_path)
     response = client.put(
         "/nodes/legacy",
         json={
@@ -609,6 +609,7 @@ def test_external_vllm_runtime_hint_is_routable_but_never_grants_management(tmp_
                 "runtimes": ["vllm"],
                 "backends": ["cuda"],
             },
+            "load": {"active_tasks": 0, "max_concurrency": 16},
         },
     )
     assert response.status_code == 200
@@ -620,8 +621,15 @@ def test_external_vllm_runtime_hint_is_routable_but_never_grants_management(tmp_
     assert node["backends"] == ["cuda"]
     assert node["manually_managed"] is True
     assert node["actuator_capabilities"] == []
+    assert node["max_concurrency"] == 16
     assert node["residencies"][0]["state"] == "ready"
     assert node["residencies"][0]["managed"] is False
+    discovered = client.get("/nodes/discover", params={"model": "qwen"}).json()["engines"][0]
+    assert discovered["max_concurrency"] == 16
+    engine = app.state.nodes["legacy"]
+    assert server_module._choose_engine(app, "qwen") is engine
+    server_module._change_active_tasks(engine, 16)
+    assert server_module._choose_engine(app, "qwen") is None
 
 
 @pytest.mark.parametrize("state", ["draining", "paused", "unhealthy", "quarantined"])

@@ -63,6 +63,8 @@ def _engine_args(**overrides) -> SimpleNamespace:
         flash_attn=None,
         temp=None,
         reasoning_budget=None,
+        runtime_kind=None,
+        max_concurrency=None,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -3709,11 +3711,13 @@ def test_run_engine_endpoint_url_skips_local_llama_server(monkeypatch, tmp_path)
         models=["custom-model"],
         endpoint_url="http://192.168.1.50:8081/v1",
         runtime_kind="vllm",
+        max_concurrency=16,
     )
 
     assert cli.provider._run_engine(args) == 0
     assert calls["payload"]["endpoint_url"] == "http://192.168.1.50:8081/v1"
     assert calls["payload"]["resources"] == {"runtimes": ["vllm"]}
+    assert calls["payload"]["load"]["max_concurrency"] == 16
 
 
 def test_run_engine_external_advertise_as_maps_upstream(monkeypatch, tmp_path):
@@ -3983,13 +3987,30 @@ def test_join_parser_accepts_unified_remote_flags(monkeypatch, tmp_path):
     assert args.endpoint_port == 9001  # --llama-port is an alias for --endpoint-port
 
 
-def test_join_local_rejects_remote_only_flags(monkeypatch, tmp_path):
+def test_join_local_persists_max_concurrency_for_engine_admission(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    runtime.init_grid_config(name="home", port=8090)
-    args = cli.build_parser().parse_args(["join", "home", "--serve", "m", "--max-concurrency", "4"])
-    with pytest.raises(SystemExit) as exc:
-        cli.cmd_join(args)  # local handler rejects a remote-only flag before doing any work
-    assert "--max-concurrency" in str(exc.value) and "remote" in str(exc.value).lower()
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    monkeypatch.setattr(
+        cli.provider.subprocess,
+        "Popen",
+        lambda _cmd, **_kwargs: type("P", (), {"pid": 4321})(),
+    )
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *_args: "registered")
+
+    args = cli.build_parser().parse_args(
+        ["join", "home", "--serve", "m", "--max-concurrency", "4"]
+    )
+    assert cli.cmd_join(args) == 0
+    record = next(iter(cli.provider._read_records(grid_id).values()))
+    assert record["max_concurrency"] == 4
+
+
+@pytest.mark.parametrize("value", ("0", "257", "not-a-number"))
+def test_join_rejects_invalid_max_concurrency(value):
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["join", "--serve", "m", "--max-concurrency", value]
+        )
 
 
 def test_join_parser_accepts_api_kind(monkeypatch, tmp_path):
@@ -5101,7 +5122,7 @@ def test_engines_json_lists_joined_engines(monkeypatch, tmp_path, capsys):
 
 
 def test_engines_shows_max_concurrency(monkeypatch, tmp_path, capsys):
-    """`grid engines` surfaces the advertised max_concurrency (remote-only): in --json always (null
+    """`grid engines` surfaces advertised max_concurrency: in --json always (null
     when the engine didn't advertise it), and in the table only for engines that report it."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     runtime.init_grid_config(name="home", port=8090)

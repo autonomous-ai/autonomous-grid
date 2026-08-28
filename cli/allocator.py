@@ -110,6 +110,7 @@ def cmd_allocator_model_set(args: argparse.Namespace) -> int:
             min_replicas=args.min_replicas,
             max_replicas=maximum,
             target_utilization=args.target_utilization,
+            replica_concurrency=args.replica_concurrency,
             expected_service_seconds=args.service_seconds,
             latency_slo_ms=args.latency_slo_ms,
             priority=args.priority,

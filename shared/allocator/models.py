@@ -251,6 +251,9 @@ class ModelProfile:
     min_replicas: int = 1
     max_replicas: int = 1
     target_utilization: float = 0.70
+    # Conservative service slots supplied by a newly placed replica before engine-specific live
+    # telemetry exists. A ready single-model engine may prove a higher value via max_concurrency.
+    replica_concurrency: int = 1
     expected_service_seconds: float = 5.0
     latency_slo_ms: float = 5_000.0
     priority: int = 100
@@ -273,6 +276,12 @@ class ModelProfile:
             raise ValueError("replica bounds are invalid")
         if not 0 < self.target_utilization <= 1:
             raise ValueError("target_utilization must be in (0, 1]")
+        if (
+            isinstance(self.replica_concurrency, bool)
+            or not isinstance(self.replica_concurrency, int)
+            or not 1 <= self.replica_concurrency <= MAX_COUNTER
+        ):
+            raise ValueError(f"replica_concurrency must be in [1, {MAX_COUNTER}]")
         if self.priority < 0 or self.min_failure_domains < 1:
             raise ValueError("priority/domain values are invalid")
         for name in (

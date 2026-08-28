@@ -265,6 +265,10 @@ def test_allocator_models_validate_impossible_values():
         node("n", 10, reserved_mb=11)
     with pytest.raises(ValueError, match="replica bounds"):
         model(min_replicas=2, max_replicas=1)
+    with pytest.raises(ValueError, match="replica_concurrency"):
+        model(replica_concurrency=0)
+    with pytest.raises(ValueError, match="replica_concurrency"):
+        model(replica_concurrency=True)
     with pytest.raises(ValueError, match="pinned_nodes"):
         model(pinned_nodes=("a", "b"), max_replicas=1)
     with pytest.raises(ValueError, match="finite"):
@@ -465,6 +469,131 @@ def test_replica_count_uses_offered_concurrency_headroom_and_bounds():
     assert desired_replica_count(profile, forecast, now=100) == 3
     huge = DemandForecast("qwen", offered_concurrency=100)
     assert desired_replica_count(profile, huge, now=100) == 5
+
+
+def test_replica_count_credits_a_single_model_vllm_batcher():
+    profile = replace(
+        model(min_replicas=0, max_replicas=10, target_utilization=0.75),
+        runtimes=("vllm",),
+        backends=("cuda",),
+    )
+    batcher = node(
+        "vllm-batcher",
+        runtime="vllm",
+        backend="cuda",
+        max_concurrency=16,
+        manually_managed=True,
+        actuator_capabilities=(),
+        residencies=(ready(managed=False),),
+    )
+
+    assert desired_replica_count(
+        profile,
+        DemandForecast("qwen", offered_concurrency=6),
+        nodes=(batcher,),
+        now=10,
+    ) == 1
+
+
+def test_replica_count_does_not_depend_on_selecting_the_widest_ready_engine():
+    profile = replace(
+        model(min_replicas=0, max_replicas=10, target_utilization=0.75),
+        runtimes=("vllm",),
+        backends=("cuda",),
+    )
+    narrow = node(
+        "narrow",
+        runtime="vllm",
+        backend="cuda",
+        max_concurrency=1,
+        manually_managed=True,
+        actuator_capabilities=(),
+        residencies=(ready(managed=False),),
+    )
+    wide = node(
+        "wide",
+        runtime="vllm",
+        backend="cuda",
+        max_concurrency=16,
+        manually_managed=True,
+        actuator_capabilities=(),
+        residencies=(ready(managed=False),),
+    )
+
+    assert desired_replica_count(
+        profile,
+        DemandForecast("qwen", offered_concurrency=6),
+        nodes=(narrow, wide),
+        now=10,
+    ) == 2
+
+
+def test_replica_count_does_not_multiply_shared_multi_model_batch_capacity():
+    profile = replace(
+        model(min_replicas=0, max_replicas=10, target_utilization=0.5),
+        runtimes=("vllm",),
+        backends=("cuda",),
+    )
+    shared_batcher = node(
+        "shared-vllm",
+        runtime="vllm",
+        backend="cuda",
+        max_concurrency=32,
+        manually_managed=True,
+        actuator_capabilities=(),
+        residencies=(ready(managed=False), ready("other", managed=False)),
+    )
+
+    assert desired_replica_count(
+        profile,
+        DemandForecast("qwen", offered_concurrency=1),
+        nodes=(shared_batcher,),
+        now=10,
+    ) == 3
+
+
+def test_observed_pressure_scales_beyond_a_wide_ready_batcher():
+    profile = replace(
+        model(min_replicas=0, max_replicas=4, latency_slo_ms=1_000),
+        runtimes=("vllm",),
+        backends=("cuda",),
+    )
+    batcher = node(
+        "vllm-batcher",
+        runtime="vllm",
+        backend="cuda",
+        max_concurrency=64,
+        manually_managed=True,
+        actuator_capabilities=(),
+        residencies=(ready(managed=False),),
+    )
+
+    assert desired_replica_count(
+        profile,
+        DemandForecast(
+            "qwen",
+            offered_concurrency=1,
+            queue_depth=1,
+            p95_latency_ms=2_000,
+        ),
+        nodes=(batcher,),
+        now=10,
+    ) == 2
+
+
+def test_profile_replica_concurrency_sizes_not_yet_ready_capacity():
+    profile = model(
+        min_replicas=0,
+        max_replicas=10,
+        target_utilization=0.5,
+        replica_concurrency=4,
+    )
+
+    assert desired_replica_count(
+        profile,
+        DemandForecast("qwen", offered_concurrency=1),
+        now=10,
+    ) == 1
 
 
 def test_recent_demand_watermark_preserves_one_replica_across_registry_restart():

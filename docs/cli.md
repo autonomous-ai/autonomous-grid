@@ -224,7 +224,7 @@ See [ADR 0003](./adr/0003-remote-grid-lifecycle.md).
 ```
 grid join [grid]                                      # auto-detect local engines
 grid join [grid] --all                                # join every detected engine
-grid join [grid] --at <url> -m <model>... [--kind <runtime>] [--name <id>]
+grid join [grid] --at <url> -m <model>... [--kind <runtime>] [--max-concurrency <n>] [--name <id>]
 grid join [grid] --serve <model> [--name <id>]
 grid join [grid] --media [--bundle <bundle>]... [--name <id>]
 grid join [grid] --api <kind> [-m <model>...]         # join a third-party API engine (openai, codex, doggi)
@@ -420,6 +420,7 @@ The `grid join` flag set is the union of both modes, gated by mode:
 
 - **Both modes:** `--at` / `--serve` / `-m,--model` / `--kind <kind>` (alias `--engine`) / `--name`
   / `--all`, `--advertise-as` (or inline `-m real=pub`), `--endpoint-port` (alias `--llama-port`),
+  `--max-concurrency` (the engine's real simultaneous-request/batch admission limit),
   the llama tuning flags (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`),
   `--heartbeat-interval` (seconds between heartbeats, default 15), `--api-key <key>` (overrides the
   env var and the key store, and warns that it is visible in shell history), and the media flags
@@ -431,9 +432,9 @@ The `grid join` flag set is the union of both modes, gated by mode:
   (`doggi`) also joins in `local` mode, where it bridges to the vendor gateway exactly where ComfyUI
   would sit. `-m` optionally narrows the whitelist (omitted = every whitelisted model the key can
   see), `--no-browser` (the codex OAuth
-  sign-in's paste flow for headless boxes; inert elsewhere, with a note), and `--max-concurrency`
-  (how many requests this engine serves at once; the provider runs one poll worker per slot —
-  default 1, or 8 when the identity serves only API engines, pinned back to **1** when any of
+  sign-in's paste flow for headless boxes; inert elsewhere, with a note). In remote mode the
+  provider runs one poll worker per concurrency slot — default 1, or 4 when the identity serves
+  only API engines, pinned back to **1** when any of
   them is a `codex` seat: a flat-rate subscription is never hammered four-wide by default).
   Match it to the engine's own batch width — llama.cpp `--parallel`, vLLM `max_num_seqs` — or the
   extra slots queue behind a batch that was never widened to take them. Finally, `--respawn` (stop
