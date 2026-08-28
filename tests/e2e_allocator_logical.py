@@ -233,6 +233,27 @@ def _require_measured_performance(client: TestClient) -> dict[str, dict[str, flo
     return measured
 
 
+def _require_learned_warm_times(
+    client: TestClient,
+    *,
+    model: str,
+    replicas: int,
+) -> list[dict[str, Any]]:
+    learned = [
+        row
+        for row in client.get("/allocator/status").json().get(
+            "learned_warm_seconds"
+        )
+        or []
+        if row.get("model_id") == model
+    ]
+    if len(learned) != replicas or any(
+        float(row.get("seconds") or 0) <= 0 for row in learned
+    ):
+        raise RuntimeError(f"real warm actions produced invalid timing signals: {learned}")
+    return learned
+
+
 def _stream_real_completion(client: TestClient, model: str) -> dict[str, Any]:
     """Exercise real fragmented SSE and require the runtime's final usage record."""
 
@@ -403,6 +424,11 @@ def run(
                     timeout=timeout,
                     label=f"{desired_replicas} ready replicas",
                 )
+                learned_warm_seconds = _require_learned_warm_times(
+                    client,
+                    model=model,
+                    replicas=desired_replicas,
+                )
 
                 restart_adoption: dict[str, Any] | None = None
                 if scenario == "restart":
@@ -560,6 +586,7 @@ def run(
                         "stream_completion_tokens": completion.get(
                             "completion_tokens"
                         ),
+                        "learned_warm_seconds": learned_warm_seconds,
                         "measured_performance": measured_performance,
                         "hosts": _host_summary(hosts),
                         "elapsed_seconds": round(time.monotonic() - started, 3),
@@ -719,6 +746,7 @@ def run(
                     "completion_id": completion.get("id"),
                     "completion_model": completion.get("model"),
                     "stream_completion_tokens": completion.get("completion_tokens"),
+                    "learned_warm_seconds": learned_warm_seconds,
                     "measured_performance": measured_performance,
                     "hosts": _host_summary(hosts),
                     "elapsed_seconds": round(time.monotonic() - started, 3),

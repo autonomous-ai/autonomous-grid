@@ -89,6 +89,53 @@ def test_controller_automatic_queues_repeats_and_acknowledges_action():
     ) == done
 
 
+def test_controller_learns_and_persists_bounded_warm_duration(tmp_path):
+    state_path = tmp_path / "controller.json"
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        state_path=state_path,
+    )
+    controller.put_profile(profile())
+    controller.tick([node(cached=True)], now=10)
+    command = controller.commands_for("n", now=10)[0]
+
+    record = controller.acknowledge(
+        "n",
+        command.action_id,
+        MutationStatus.SUCCEEDED,
+        duration_seconds=20,
+        now=11,
+    )
+
+    assert record.duration_seconds == 20
+    learned = controller.status(now=11)["learned_warm_seconds"]
+    assert learned == [
+        {"node_id": "n", "model_id": "qwen", "seconds": 8.75, "samples": 1}
+    ]
+    restored = AllocatorController(state_path=state_path)
+    assert restored.status(now=11)["learned_warm_seconds"] == learned
+    assert restored.status(now=31 * 24 * 60 * 60)["learned_warm_seconds"] == []
+
+
+@pytest.mark.parametrize("duration", ["nan", "inf", -1, 3_601, True, object()])
+def test_controller_ignores_untrusted_action_durations(duration):
+    controller = AllocatorController(mode=AllocatorMode.AUTOMATIC)
+    controller.put_profile(profile())
+    controller.tick([node(cached=True)], now=10)
+    command = controller.commands_for("n", now=10)[0]
+
+    record = controller.acknowledge(
+        "n",
+        command.action_id,
+        MutationStatus.SUCCEEDED,
+        duration_seconds=duration,
+        now=11,
+    )
+
+    assert record.duration_seconds == 0
+    assert controller.status(now=11)["learned_warm_seconds"] == []
+
+
 def test_controller_rejects_action_ack_from_the_wrong_node():
     controller = AllocatorController(mode=AllocatorMode.AUTOMATIC)
     controller.put_profile(profile())

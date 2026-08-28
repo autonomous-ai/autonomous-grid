@@ -210,6 +210,7 @@ class ActionReceipt:
     updated_at: float
     reported_status: MutationStatus | None = None
     sequence: int = 0
+    duration_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.action_id or not self.plan_generation:
@@ -226,6 +227,8 @@ class ActionReceipt:
             raise ValueError("receipt time must be non-negative")
         if self.sequence < 0:
             raise ValueError("receipt sequence must be non-negative")
+        if not math.isfinite(self.duration_seconds) or self.duration_seconds < 0:
+            raise ValueError("receipt duration must be finite and non-negative")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -238,6 +241,7 @@ class ActionReceipt:
             if self.reported_status
             else None,
             "sequence": self.sequence,
+            "duration_seconds": self.duration_seconds,
         }
 
     @classmethod
@@ -251,6 +255,7 @@ class ActionReceipt:
             updated_at=float(value.get("updated_at") or 0.0),
             reported_status=MutationStatus(reported) if reported else None,
             sequence=int(value.get("sequence") or 0),
+            duration_seconds=float(value.get("duration_seconds") or 0.0),
         )
 
 
@@ -725,6 +730,7 @@ class ManagedModelRuntime:
         host_id: str | None = None,
         backend: ModelRuntimeBackend | None = None,
         clock: Callable[[], float] = time.time,
+        monotonic_clock: Callable[[], float] = time.monotonic,
         signal_collector: HostSignalCollector | None = None,
         protection_loop: LocalHostProtectionLoop | None = None,
         override_path: Path | None = None,
@@ -738,6 +744,7 @@ class ManagedModelRuntime:
         self.backend = backend or LlamaCppBackend()
         self._engine_api_key = secrets.token_urlsafe(32)
         self.clock = clock
+        self.monotonic_clock = monotonic_clock
         self.signal_collector = signal_collector or HostSignalCollector(clock=clock)
         self.protection_loop = protection_loop or LocalHostProtectionLoop()
         self.override_path = override_path or local_override_path(state_path)
@@ -757,6 +764,7 @@ class ManagedModelRuntime:
         self._receipts: dict[str, ActionReceipt] = {}
         self._next_receipt_sequence = 1
         self._active_action_id: str | None = None
+        self._active_action_started_at: float | None = None
         self._shutting_down = False
         self._latest_plan_generation = ""
         self._superseded_plan_epochs: set[str] = set()
@@ -831,6 +839,7 @@ class ManagedModelRuntime:
         with self._lock:
             prior_receipts = dict(self._receipts)
             prior_active_action_id = self._active_action_id
+            prior_active_action_started_at = self._active_action_started_at
             prior_latest_generation = self._latest_plan_generation
             prior_superseded_epochs = set(self._superseded_plan_epochs)
             prior_next_receipt_sequence = self._next_receipt_sequence
@@ -848,6 +857,7 @@ class ManagedModelRuntime:
                         existing.plan_generation,
                         existing.updated_at,
                         sequence=existing.sequence,
+                        duration_seconds=existing.duration_seconds,
                     )
                     self._receipts[action.action_id] = existing
                     self._save_locked()
@@ -903,6 +913,7 @@ class ManagedModelRuntime:
                     f"local host protection is {self._decision.state.value}",
                     now,
                 )
+            started_at = max(0.0, float(self.monotonic_clock()))
             receipt = ActionReceipt(
                 action.action_id,
                 MutationStatus.RUNNING,
@@ -913,6 +924,7 @@ class ManagedModelRuntime:
             )
             self._receipts[action.action_id] = receipt
             self._active_action_id = action.action_id
+            self._active_action_started_at = started_at
             self._trim_receipts_locked()
             try:
                 self._save_locked()
@@ -932,11 +944,13 @@ class ManagedModelRuntime:
                 )
                 self._receipts[action.action_id] = failed
                 self._active_action_id = prior_active_action_id
+                self._active_action_started_at = prior_active_action_started_at
                 self._save_locked()
                 return failed
             except BaseException:
                 self._receipts = prior_receipts
                 self._active_action_id = prior_active_action_id
+                self._active_action_started_at = prior_active_action_started_at
                 self._latest_plan_generation = prior_latest_generation
                 self._superseded_plan_epochs = prior_superseded_epochs
                 self._next_receipt_sequence = prior_next_receipt_sequence
@@ -963,6 +977,7 @@ class ManagedModelRuntime:
                     )
                 if self._active_action_id == action.action_id:
                     self._active_action_id = None
+                    self._active_action_started_at = None
                 try:
                     self._save_locked()
                 except Exception as persistence_error:  # noqa: BLE001
@@ -1006,6 +1021,7 @@ class ManagedModelRuntime:
                         existing.plan_generation,
                         existing.updated_at,
                         sequence=existing.sequence,
+                        duration_seconds=existing.duration_seconds,
                     )
                     self._receipts[action.action_id] = existing
                     self._save_locked()
@@ -1030,13 +1046,14 @@ class ManagedModelRuntime:
                 now,
             )
 
-    def acknowledgements(self) -> list[dict[str, str]]:
+    def acknowledgements(self) -> list[dict[str, Any]]:
         with self._lock:
             return [
                 {
                     "action_id": receipt.action_id,
                     "status": receipt.status.value,
                     "message": receipt.message,
+                    "duration_seconds": receipt.duration_seconds,
                 }
                 for receipt in sorted(
                     self._receipts.values(), key=lambda item: item.sequence
@@ -1066,6 +1083,7 @@ class ManagedModelRuntime:
                     receipt.updated_at,
                     reported_status=receipt.status,
                     sequence=receipt.sequence,
+                    duration_seconds=receipt.duration_seconds,
                 )
                 changed = True
             if changed:
@@ -1957,6 +1975,15 @@ class ManagedModelRuntime:
         message: str,
     ) -> None:
         existing = self._receipts.get(action.action_id)
+        duration_seconds = 0.0
+        if (
+            self._active_action_id == action.action_id
+            and self._active_action_started_at is not None
+        ):
+            duration_seconds = max(
+                0.0,
+                float(self.monotonic_clock()) - self._active_action_started_at,
+            )
         self._receipts[action.action_id] = ActionReceipt(
             action.action_id,
             status,
@@ -1968,9 +1995,11 @@ class ManagedModelRuntime:
                 if existing is not None
                 else self._allocate_receipt_sequence_locked()
             ),
+            duration_seconds=duration_seconds,
         )
         if self._active_action_id == action.action_id:
             self._active_action_id = None
+            self._active_action_started_at = None
         self._trim_receipts_locked()
         self._save_locked()
 
@@ -2064,6 +2093,7 @@ class ManagedModelRuntime:
                 if residency.handle is not None
             )
             self._active_action_id = None
+            self._active_action_started_at = None
         observations = self._probe_process_health(
             snapshot,
             deadline=time.monotonic() + RECOVERY_HEALTH_DEADLINE_SECONDS,
@@ -2219,6 +2249,7 @@ class ManagedModelRuntime:
                     item.updated_at,
                     reported_status=item.reported_status,
                     sequence=self._next_receipt_sequence,
+                    duration_seconds=item.duration_seconds,
                 )
             self._receipts[item.action_id] = item
             self._next_receipt_sequence = max(

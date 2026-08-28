@@ -1433,6 +1433,39 @@ def test_planner_prefers_existing_then_cached_then_cold():
     assert plan.nodes_for("qwen") == ("cached",)
 
 
+def test_planner_uses_learned_warm_time_to_choose_between_cached_hosts():
+    slow = node("a-slow", cached=("qwen",))
+    fast = node("z-fast", cached=("qwen",))
+    profile = model(min_replicas=1, max_replicas=1, warm_seconds=10)
+    planner = PlacementPlanner()
+
+    baseline = planner.plan((slow, fast), (profile,), now=10)
+    learned = planner.plan(
+        (slow, fast),
+        (profile,),
+        now=10,
+        startup_seconds={
+            (slow.node_id, profile.model_id): 40,
+            (fast.node_id, profile.model_id): 2,
+        },
+    )
+
+    assert baseline.assignments[0].node_id == slow.node_id
+    assert learned.assignments[0].node_id == fast.node_id
+    assert "learned warm-start estimate" in learned.assignments[0].reasons
+
+
+@pytest.mark.parametrize("duration", [float("nan"), float("inf"), -1, True])
+def test_planner_rejects_invalid_startup_estimates(duration):
+    with pytest.raises(ValueError, match="startup estimates"):
+        PlacementPlanner().plan(
+            (node("n", cached=("qwen",)),),
+            (model(),),
+            now=10,
+            startup_seconds={("n", "qwen"): duration},
+        )
+
+
 def test_planner_avoids_a_loaded_or_queued_host_when_equivalent_capacity_is_idle():
     busy = node("busy", active_requests=1, max_concurrency=1, queue_depth=2)
     idle = node("idle", active_requests=0, max_concurrency=1)

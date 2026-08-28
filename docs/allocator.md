@@ -71,7 +71,14 @@ model ID before its peers receive a baseline. Candidates prefer an existing read
 cached weights, another failure domain, measured throughput, and best-fit memory. Before measured
 throughput exists, bounded memory-bandwidth and compute estimates break otherwise-cold ties; ready
 and cached bonuses remain much larger, so hardware estimates do not cause gratuitous migration.
-Cost, latency, host priority, cold-start time, and throttling lower a candidate's score. Persisted
+Cost, latency, host priority, cold-start time, and throttling lower a candidate's score. Managed
+nodes report monotonic action duration in their authenticated acknowledgements. Successful warm
+times are retained in bounded controller history and blended with the configured model estimate as
+a cold-start prior; a bounded eight-sample EWMA becomes authoritative after four samples for that
+node/model pair. Placement favors a faster cached host, while the fleet-wide predictive prewarm
+horizon never falls below the configured prior and expands when a measured host is slower. Samples
+expire after 30 days so a runtime or hardware upgrade can relearn. Invalid, non-finite, negative,
+or over-one-hour reports are ignored rather than poisoning scheduling or receipt delivery. Persisted
 failed warm/load attempts apply a bounded per-model penalty, allowing a healthy peer to be tried
 after backoff instead of selecting the same broken cache forever; the failed node remains a fallback
 when it is the only feasible target. Explicit pins, per-host model limits, compatibility policies,
@@ -337,7 +344,12 @@ Heartbeat requests may update `load`, `resources`, and `allocator`, and may ackn
   "allocator": {"schema_version": 1, "state": "accepting", "residencies": []},
   "request_commands": true,
   "acknowledgements": [
-    {"action_id": "8ccf...", "status": "succeeded", "message": "ready"}
+    {
+      "action_id": "8ccf...",
+      "status": "succeeded",
+      "message": "ready",
+      "duration_seconds": 12.5
+    }
   ]
 }
 ```

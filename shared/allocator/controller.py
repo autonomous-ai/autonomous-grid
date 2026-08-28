@@ -39,6 +39,11 @@ from shared.allocator.reconcile import (
 )
 
 _TERMINAL = {MutationStatus.SUCCEEDED, MutationStatus.FAILED, MutationStatus.CANCELLED}
+_MAX_REPORTED_ACTION_DURATION_SECONDS = 3_600.0
+_STARTUP_ESTIMATE_SAMPLES = 8
+_STARTUP_ESTIMATE_FULL_CONFIDENCE_SAMPLES = 4
+_STARTUP_ESTIMATE_EWMA_ALPHA = 0.25
+_STARTUP_ESTIMATE_TTL_SECONDS = 30 * 24 * 60 * 60
 
 
 class AllocatorController:
@@ -244,12 +249,32 @@ class AllocatorController:
         self._mutation_block_causes = bounded_causes
         forecasts = self._forecasts(timestamp)
         profiles = self.profiles
+        startup_estimates, _ = self._learned_warm_estimates(now=timestamp)
+        learned_by_model = {
+            profile.model_id: profile.warm_seconds for profile in profiles
+        }
+        for (_, model_id), estimate in startup_estimates.items():
+            learned_by_model[model_id] = max(
+                learned_by_model.get(model_id, 0.0),
+                estimate,
+            )
+        effective_profiles = tuple(
+            replace(
+                profile,
+                warm_seconds=learned_by_model.get(
+                    profile.model_id,
+                    profile.warm_seconds,
+                ),
+            )
+            for profile in profiles
+        )
         self._resolve_withdrawn_destructive(node_list)
         raw_plan = self.planner.plan(
             node_list,
-            profiles,
+            effective_profiles,
             forecasts,
             now=timestamp,
+            startup_seconds=startup_estimates,
         )
         plan = self._version_plan(raw_plan)
         self._resolve_revalidated_withdrawn_destructive(
@@ -427,6 +452,7 @@ class AllocatorController:
         status: MutationStatus,
         *,
         message: str = "",
+        duration_seconds: Any = 0.0,
         now: float | None = None,
     ) -> MutationRecord:
         timestamp = time.time() if now is None else float(now)
@@ -436,6 +462,7 @@ class AllocatorController:
         # Nothing after this point may reject caller-controlled scalar input after mutating retry
         # state.
         message = str(message)[:500]
+        duration = _bounded_action_duration(duration_seconds)
         status = MutationStatus(status)
         with self._lock:
             checkpoint = self._checkpoint()
@@ -488,6 +515,7 @@ class AllocatorController:
                     else (action.created_at if action is not None else timestamp)
                 ),
                 completed_at=(timestamp if status in _TERMINAL else 0.0),
+                duration_seconds=(duration if status in _TERMINAL else 0.0),
                 failures=failures,
                 message=message,
             )
@@ -512,6 +540,9 @@ class AllocatorController:
         timestamp = time.time() if now is None else float(now)
         with self._lock:
             forecasts = self._forecasts(timestamp)
+            startup_estimates, startup_samples = self._learned_warm_estimates(
+                now=timestamp
+            )
             return {
                 "schema_version": SCHEMA_VERSION,
                 "mode": self.mode.value,
@@ -528,6 +559,17 @@ class AllocatorController:
                 ],
                 "retiring_models": sorted(self._retiring),
                 "forecasts": [asdict(item) for item in forecasts],
+                "learned_warm_seconds": [
+                    {
+                        "node_id": node_id,
+                        "model_id": model_id,
+                        "seconds": estimate,
+                        "samples": startup_samples[(node_id, model_id)],
+                    }
+                    for (node_id, model_id), estimate in sorted(
+                        startup_estimates.items()
+                    )
+                ],
                 "plan": self._last_plan.to_dict() if self._last_plan else None,
                 "reconciliation": _result_dict(self._last_result),
                 "pending_commands": [_action_dict(item) for item in self._commands.values()],
@@ -582,6 +624,48 @@ class AllocatorController:
         )
         with self._demand_lock:
             return self.demand.forecasts(active_models, now=now)
+
+    def _learned_warm_estimates(
+        self,
+        *,
+        now: float,
+    ) -> tuple[
+        dict[tuple[str, str], float],
+        dict[tuple[str, str], int],
+    ]:
+        """Blend bounded successful warm timings with each model's configured prior."""
+
+        samples: dict[tuple[str, str], list[float]] = {}
+        for record in self._history:
+            if (
+                record.kind != ActionKind.WARM
+                or record.status != MutationStatus.SUCCEEDED
+                or record.duration_seconds <= 0
+                or record.model_id not in self._profiles
+                or record.completed_at > now
+                or now - record.completed_at >= _STARTUP_ESTIMATE_TTL_SECONDS
+            ):
+                continue
+            key = (record.node_id, record.model_id)
+            values = samples.setdefault(key, [])
+            values.append(record.duration_seconds)
+            if len(values) > _STARTUP_ESTIMATE_SAMPLES:
+                del values[0]
+
+        estimates: dict[tuple[str, str], float] = {}
+        counts: dict[tuple[str, str], int] = {}
+        for key, values in samples.items():
+            observed = values[0]
+            for value in values[1:]:
+                observed += _STARTUP_ESTIMATE_EWMA_ALPHA * (value - observed)
+            confidence = min(
+                1.0,
+                len(values) / _STARTUP_ESTIMATE_FULL_CONFIDENCE_SAMPLES,
+            )
+            prior = self._profiles[key[1]].warm_seconds
+            estimates[key] = (1.0 - confidence) * prior + confidence * observed
+            counts[key] = len(values)
+        return estimates, counts
 
     def _refresh_observable_models_locked(self) -> None:
         """Publish the configured non-retiring demand keys without blocking inference on plans."""
@@ -1331,9 +1415,26 @@ def _record_from_dict(value: dict[str, Any]) -> MutationRecord:
         status=MutationStatus(value["status"]),
         attempted_at=float(value["attempted_at"]),
         completed_at=float(value.get("completed_at") or 0.0),
+        duration_seconds=_bounded_action_duration(value.get("duration_seconds")),
         failures=int(value.get("failures") or 0),
         message=str(value.get("message") or ""),
     )
+
+
+def _bounded_action_duration(value: Any) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        duration = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if (
+        not math.isfinite(duration)
+        or duration <= 0
+        or duration > _MAX_REPORTED_ACTION_DURATION_SECONDS
+    ):
+        return 0.0
+    return duration
 
 
 def _result_dict(result: ReconcileResult | None) -> dict[str, Any] | None:

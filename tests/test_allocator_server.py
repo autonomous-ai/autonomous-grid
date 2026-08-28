@@ -333,6 +333,32 @@ def test_automatic_commands_are_visible_only_to_authenticated_host(tmp_path):
     history = client.get("/allocator/status").json()["history"]
     assert history[-1]["status"] == "running"
 
+    completed = client.post(
+        "/nodes/heartbeat",
+        headers=_node_auth("host-1"),
+        json={
+            "node_id": CONTROL_NODE_ID,
+            "acknowledgements": [
+                {
+                    "action_id": commands[0]["action_id"],
+                    "status": "succeeded",
+                    "duration_seconds": 12.5,
+                }
+            ],
+        },
+    )
+    assert completed.status_code == 200, completed.text
+    status = client.get("/allocator/status").json()
+    assert status["history"][-1]["duration_seconds"] == 12.5
+    assert status["learned_warm_seconds"] == [
+        {
+            "node_id": "host-1",
+            "model_id": "qwen",
+            "seconds": 6.875,
+            "samples": 1,
+        }
+    ]
+
 
 def test_stale_ack_is_ignored_without_poisoning_later_receipts(tmp_path):
     _, client, _ = _app(tmp_path)

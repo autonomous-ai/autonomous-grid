@@ -252,6 +252,31 @@ def test_load_verifies_cache_and_reports_success_once(tmp_path):
     assert managed.acknowledgements() == acknowledgement
 
 
+def test_warm_receipt_reports_monotonic_duration_and_replays_it(tmp_path):
+    backend = FakeBackend()
+    backend.start_gate = threading.Event()
+    monotonic = Clock(10)
+    managed = runtime(
+        tmp_path,
+        backend=backend,
+        monotonic_clock=monotonic,
+    )
+    command = action(ActionKind.WARM)
+
+    managed.begin(command)
+    assert backend.spawned.wait(1)
+    monotonic.value = 17.5
+    backend.start_gate.set()
+    wait(managed)
+    acknowledgement = managed.acknowledgements()[0]
+
+    assert acknowledgement["status"] == "succeeded"
+    assert acknowledgement["duration_seconds"] == 7.5
+    managed.mark_acknowledged([acknowledgement])
+    assert managed.begin(command).duration_seconds == 7.5
+    assert managed.acknowledgements()[0]["duration_seconds"] == 7.5
+
+
 def test_uncached_load_fails_without_downloading_and_tracks_failure(tmp_path):
     managed = runtime(tmp_path, backend=FakeBackend(cached=()))
     command = action(ActionKind.LOAD)

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from itertools import combinations
 
@@ -129,6 +129,7 @@ class PlacementPlanner:
         forecasts: Iterable[DemandForecast] = (),
         *,
         now: float | None = None,
+        startup_seconds: Mapping[tuple[str, str], float] | None = None,
     ) -> PlacementPlan:
         timestamp = time.time() if now is None else float(now)
         if not math.isfinite(timestamp) or timestamp < 0:
@@ -140,6 +141,7 @@ class PlacementPlanner:
         forecast_list = sorted(forecasts, key=lambda item: item.model_id)
         _require_unique((item.model_id for item in forecast_list), "forecast model")
         forecast_by_model = {item.model_id: item for item in forecast_list}
+        startup_by_pair = _validated_startup_seconds(startup_seconds)
         capacity = {}
         for node in node_list:
             usable = (node.capacity_mb - node.reserved_mb) * (
@@ -472,6 +474,7 @@ class PlacementPlanner:
                     need_new_domain=(
                         len(domains) < min(placement_model.min_failure_domains, target)
                     ),
+                    startup_seconds=startup_by_pair,
                 )
                 candidates.append(
                     (score, candidate_node.node_id, candidate_node, reasons)
@@ -620,6 +623,7 @@ class PlacementPlanner:
                                 len(placement_domains)
                                 < min(placement_model.min_failure_domains, target)
                             ),
+                            startup_seconds=startup_by_pair,
                         )
                         _place(
                             _assignment(
@@ -695,6 +699,7 @@ class PlacementPlanner:
                     need_new_domain=(
                         len(domains) < min(model.min_failure_domains, target)
                     ),
+                    startup_seconds=startup_by_pair,
                 )
                 candidates.append((score, node.node_id, node, reasons))
             needed_domains = min(model.min_failure_domains, target)
@@ -1214,10 +1219,13 @@ def _candidate_score(
     *,
     now: float,
     need_new_domain: bool,
+    startup_seconds: Mapping[tuple[str, str], float],
 ) -> tuple[float, tuple[str, ...]]:
     score = 0.0
     reasons: list[str] = []
     residency = node.residency(model.model_id)
+    startup_key = (node.node_id, model.model_id)
+    warm_seconds = startup_seconds.get(startup_key, model.warm_seconds)
     if residency and residency.state == ResidencyState.READY:
         score += 100_000.0
         reasons.append("already resident and ready")
@@ -1230,11 +1238,18 @@ def _candidate_score(
     elif model.model_id in node.cached_models or (
         residency and residency.state == ResidencyState.CACHED
     ):
-        score += 20_000.0
+        score += 20_000.0 - min(warm_seconds, 1_000_000_000_000.0) * 20.0
         reasons.append("weights cached locally")
     else:
-        score -= min(model.load_seconds, 1_000_000_000_000.0) * 20.0
+        cold_seconds = model.load_seconds + warm_seconds
+        score -= min(cold_seconds, 1_000_000_000_000.0) * 20.0
         reasons.append("cold load required")
+    if startup_key in startup_seconds and not (
+        residency
+        and residency.state
+        in (ResidencyState.READY, ResidencyState.LOADING, ResidencyState.WARMING)
+    ):
+        reasons.append("learned warm-start estimate")
     if (
         residency
         and residency.state == ResidencyState.FAILED
@@ -1426,6 +1441,26 @@ def _require_unique(values: Iterable[str], kind: str) -> None:
     items = list(values)
     if len(items) != len(set(items)):
         raise ValueError(f"duplicate {kind} IDs are not allowed")
+
+
+def _validated_startup_seconds(
+    values: Mapping[tuple[str, str], float] | None,
+) -> dict[tuple[str, str], float]:
+    result: dict[tuple[str, str], float] = {}
+    for key, raw_duration in (values or {}).items():
+        if (
+            not isinstance(key, tuple)
+            or len(key) != 2
+            or not all(isinstance(item, str) and item for item in key)
+        ):
+            raise ValueError("startup estimate keys must contain node and model IDs")
+        if isinstance(raw_duration, bool):
+            raise ValueError("startup estimates must be finite and non-negative")
+        duration = float(raw_duration)
+        if not math.isfinite(duration) or duration < 0:
+            raise ValueError("startup estimates must be finite and non-negative")
+        result[key] = duration
+    return result
 
 
 def _input_digest(

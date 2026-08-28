@@ -44,6 +44,7 @@ class MutationRecord:
     status: MutationStatus
     attempted_at: float
     completed_at: float = 0.0
+    duration_seconds: float = 0.0
     failures: int = 0
     message: str = ""
 
@@ -54,7 +55,7 @@ class MutationRecord:
             object.__setattr__(self, "kind", ActionKind(self.kind))
         if not isinstance(self.status, MutationStatus):
             object.__setattr__(self, "status", MutationStatus(self.status))
-        for name in ("attempted_at", "completed_at"):
+        for name in ("attempted_at", "completed_at", "duration_seconds"):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and non-negative")
