@@ -197,8 +197,28 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
             )
             for profile in profiles
         )
+        startup_seconds = {
+            (node.node_id, profile.model_id): rng.uniform(0.01, 120.0)
+            for node in nodes
+            for profile in profiles
+            if rng.random() < 0.4
+        }
 
-        plan = planner.plan(nodes, profiles, forecasts, now=100)
+        plan = planner.plan(
+            nodes,
+            profiles,
+            forecasts,
+            now=100,
+            startup_seconds=startup_seconds,
+        )
+        reordered = planner.plan(
+            tuple(reversed(nodes)),
+            tuple(reversed(profiles)),
+            tuple(reversed(forecasts)),
+            now=100,
+            startup_seconds=dict(reversed(tuple(startup_seconds.items()))),
+        )
+        assert reordered == plan
         assert len(plan.desired_pairs) == len(plan.assignments)
         node_by_id = {node.node_id: node for node in nodes}
         profile_by_id = {profile.model_id: profile for profile in profiles}
