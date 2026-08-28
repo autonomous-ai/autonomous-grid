@@ -191,6 +191,12 @@ merely ranked — an effect stronger than the word "prefer" suggests. And a memb
 grid-run model **by name** in the picker still reaches it; ordering has nothing to say about a
 request that named its model.
 
+**Amended by D-n.** That second caveat was written as a limit and turned out to be the larger half of
+the bill: this key is keyed on a MODEL's providers, so it is silent both for a named request and for
+a model a member's engine merely serves *too*. D-n adds the same key one tier down, where those two
+cases are decided. What survives here unchanged is the shortlist caveat, which is genuinely about
+this tier.
+
 ### D-j — The nudge is per member; the ceiling is per grid
 
 The prompt to contribute an engine or invite people appears on a member's own fifth turn, once. The
@@ -225,6 +231,46 @@ They are chosen, not measured — and D-l is what will eventually replace them w
 50 turns per five hours is about ten an hour, and with retirement it caps a grid's entire life at
 roughly 240 turns.
 
+### D-n — Node selection prefers the engine the operator does not pay for, ahead of speed and price
+
+A leading key on `relay._selection_sort_key`, spelled exactly as D-i's: `1` for a node
+`starter_engine.is_starter_engine` recognises, `0` for everyone else, so a grid running no engine of
+its own sorts byte-for-byte as it did before. It is the node-level twin of D-i, and it exists because
+D-i cannot reach the two cases that actually move the bill.
+
+D-i's key is keyed on a **model's** providers (`all(...)`). So it says nothing when a member's engine
+serves the same model — the candidate keys `0` and is never demoted — and nothing at all about a
+request that **named** its model, which never reaches the model tier. Both fall through to
+`_select_provider`, which ranked on measured speed and spare slots and never on who pays. Measured on
+the dev grid: an outside Ollama box and the starter engine both advertising `qwen/qwen3.8-27b`, both
+healthy, and the starter engine served every request. Nothing had to break for the bill to grow.
+
+**It leads `cost` as well.** `cost` is the price the *consumer* is charged (`price_score`, present in
+the key only while `grid_pricing_enabled` is on); this key is about what the *operator* pays. Two
+different questions, and `order_candidates` already puts the same key ahead of `price_score`, so the
+two tiers now say one thing rather than two.
+
+⚠️ **It also outranks `perf`, including `perf`'s unmeasured guard, and that is the trade rather than
+an oversight.** `perf` sorts an unmeasured (node, model) pairing last on purpose — a cold start on the
+reference grid was 57s against 0.67s warm — so from here on `perf` separates member boxes from each
+other and starter engines from each other, never a member box from a starter engine. A member box
+that measures nine times slower still takes the request, and an unproven one takes it before it has
+been measured at all; `_schedule_warm` then measures the winner at the relay's expense. Ranking the
+two on speed instead is precisely the resting state that grew the bill.
+
+**Floor, not default, exactly as D-i is.** The sort runs over `available_providers` — already filtered
+to nodes with a free slot — and the caller walks the sorted list, so the starter engine is still
+reached the moment no member box has room. Nobody waits for one. The queueable path deliberately
+keeps `fill` ahead of this whole tuple (`busy_sort_key`): when every engine is full the choice is
+which *queue* to join, and sending a person to a longer one to save money is the thing D-i refused.
+
+A three-way key preserving the cold-start guard — measured member, then starter engine, then
+unmeasured member — was designed and **rejected**: `_schedule_warm` returns early unless
+`endpoint_path == "chat/completions"`, so on `/responses` and the Anthropic `/messages` wire an
+unmeasured member box would never be warmed *and* never receive real traffic, and would sit behind
+the starter engine permanently. A self-perpetuating, silent cost leak is a worse failure than a slow
+first request.
+
 ## Consequences
 
 - **Creating a second grid buys a second allowance.** There is no cross-grid ceiling per account; the
@@ -249,6 +295,9 @@ roughly 240 turns.
   the grid still works (D-h).
 - **No order for the recognition rule.** `meta.engine` already arrives from the CLI in production
   (D-c).
+- **No order for the node-level preference** (D-n). It is relay-internal, reads a value the CLI
+  already sends, and adds no wire value in either direction — a relay without it simply keeps
+  spending, which is today's behaviour.
 - **No order for the sweep.** It is control-plane-internal and touches no wire value (D-f).
 - **The passthrough's usage log is independent** and should land first, because it is the only thing
   that can tell anyone whether D-m's numbers were right.
