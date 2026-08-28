@@ -429,11 +429,11 @@ grid use <grid-name>
 `grid ls` prints one row per grid you can reach — name, id, type — and marks the active one with `*`:
 
 ```
-  research   net-4f9c2a   permissioned-providers
-  team-lab   net-8b1e07   permissioned-public
+  <your-grid-name>     <grid-id>   permissioned-providers
+  <another-grid-name>  <grid-id>   permissioned-public
 ```
 
-After `grid use research` that first row comes back as `* research`.
+After `grid use <your-grid-name>` that row comes back with a `*` in front of it.
 
 - The mode is remembered. `--local` / `--remote` overrides one command.
 - `grid login` opens a browser. `--no-browser` prints a code to type instead.
