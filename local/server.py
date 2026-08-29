@@ -1509,15 +1509,19 @@ def _choose_engine(
         )
         for engine in engines
     }
-    engines.sort(
-        key=lambda engine: (
+    def route_key(engine: Node) -> tuple[float, float, float, float, str]:
+        return (
             _route_priority(engine),
             completion_scores[engine.node_id],
             _route_load_score(engine),
             _route_lease_age(engine, now=now),
             engine.node_id,
         )
-    )
+    if affinity_digest is None:
+        # A non-affinity request needs only the exact best engine. Avoid an O(n log n) full sort
+        # across large external fleets while preserving the complete deterministic tie-break key.
+        return min(engines, key=route_key, default=None)
+    engines.sort(key=route_key)
     if engines and affinity_digest is not None:
         best_priority = _route_priority(engines[0])
         same_protection = [
