@@ -31642,6 +31642,45 @@ def test_launch_refusals_distinguish_a_dead_credential_from_a_broken_control_pla
         assert seen["spawns"] == [], "nothing is started on a refusal"
 
 
+def test_launch_never_tells_a_403_that_re_syncing_cannot_restore_the_membership(monkeypatch,
+                                                                                tmp_path):
+    """The one piece of advice in this file that is INVERTED on `os-community` grids (ADR 0039 D-e).
+
+    A 403 on the refresh exchange says the membership the refresh credential names is not currently
+    good. On every grid type that predates OS grids that membership is a stored row somebody else
+    controls, so `grid login` re-mints from the same row and re-signing in really is a circle — which
+    is what this message used to state flatly. On an OS grid there is no row at all: membership is
+    re-derived on every request from the `os=` claim that ONLY the token fetch sends, so
+    `grid sync` / `grid login` is the *whole* repair, and a machine told "signing in will not change
+    it" is a machine told to give up on the one thing that works.
+
+    So the message may not promise either outcome. It names the cheap thing to try and says what it
+    means when that does not work, which is true on both kinds of grid — and stays out of the
+    business of guessing which one this is, because a local `network_type` is a snapshot from the
+    last sync and a fourth copy of a cross-repo literal this repository deliberately does not hold.
+    """
+    from remote import control_plane
+
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(-86400)}))
+    _mock_token_refresh(monkeypatch, error=control_plane.ControlPlaneError(
+        "POST https://api.example/v1/grid/tokens/n1 failed (403): "
+        '{"detail": "Not allowed on this Grid network"}', status=403))
+    _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+    message = str(exc.value)
+    assert "grid sync" in message, (
+        "the refusal must name the command that re-makes the OS claim, which is the only repair "
+        f"there is on an OS grid: {message}")
+    assert "will not change it" not in message, (
+        "the flat denial is false on an `os-community` grid, where re-syncing is the whole repair: "
+        f"{message}")
+    # The 401/403 split still has to survive the rewording: a 403 is not "your sign-in expired", and
+    # a message that read that way would send the user to a browser for a membership problem.
+    assert "not your sign-in" in message, message
+
+
 def test_launch_warns_and_launches_when_a_still_valid_token_cannot_be_renewed(monkeypatch, tmp_path,
                                                                               capsys):
     """The clause that bounds failing open: never cost the user a launch **that would have worked**.

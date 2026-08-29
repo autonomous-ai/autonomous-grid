@@ -297,3 +297,178 @@ def test_the_control_plane_admits_the_type_as_a_valid_one():
     assert OS_COMMUNITY in members, (
         f"{OS_COMMUNITY} is missing from grid-apis' VALID_NETWORK_TYPES, so `normalize_network_type` "
         f"raises on every OS grid row the store reads")
+
+
+# --- the `os=` query parameter's NAME, this slice's SECOND cross-repo value -----------------------
+# The type literal above is not the only value the OS gate hand-duplicates across a repository
+# boundary. The claim itself rides as a query parameter on `GET /v1/grid/tokens`, and its name is
+# written independently in two places with no import between them: `params["os"]` in this
+# repository's `remote/control_plane.fetch_tokens`, and `alias="os"` on grid-apis'
+# `grid_networks/handler.get_tokens`.
+#
+# ⚠️ **It degrades SILENTLY, which is why it needs a pin rather than an argument.** An unknown query
+# parameter is not an error to any HTTP framework — it is dropped. So a rename on one side alone
+# leaves both repositories green (each repo's own test asserts what that repo does, and both are
+# still right), every request succeeds, every other grid is issued exactly as before, and the only
+# symptom is that no machine is ever admitted to an OS grid. Nothing is red and nothing is loud.
+#
+# ⚠️ **The rollout order is NONE, in either direction — derived, not copied from the rows above.**
+# The type literal a few tests up rolls grid-src first because grid-apis SHELLS OUT to it; this value
+# has no such asymmetry. It is a new key on an EXISTING endpoint, and both halves already treat
+# "no claim" as an ordinary answer: an old control plane ignores what a new CLI sends, and a new
+# control plane facing an old CLI reads the absent parameter as a machine claiming nothing. Either
+# way the caller keeps every grid it already had and simply gets no OS grid (ADR 0039 D-j).
+
+_APIS_HANDLER = "grid_networks/handler.py"
+
+# The route the claim rides on, named by its DECORATOR and not by the Python function's name: what
+# has to keep agreeing is the endpoint, and a handler renamed while `GET /tokens` stays put is not
+# drift. `_APIS_ROUTER` is the module-level `APIRouter` every route in that file is hung off.
+_APIS_ROUTER = "router"
+_TOKENS_METHOD = "get"
+_TOKENS_PATH = "/tokens"
+
+# The parameter that has ridden on this call since long before OS grids — the positive control. It is
+# also the one that proves the two readers below are looking at the same request: the CLI sends it
+# beside the OS claim and the control plane declares it beside the OS parameter.
+_CONTROL_PARAMETER = "device_id"
+
+
+def _apis_route(method, path):
+    """The function grid-apis hangs off ``@router.<method>("<path>")``, or an assertion.
+
+    Found by decorator rather than by name so that renaming the handler — an ordinary refactor that
+    breaks no seam — does not read as drift, while moving or deleting the ROUTE does.
+    """
+    tree = _apis_module(_APIS_HANDLER)
+    matches = [
+        node for node in tree.body
+        # ⚠️ BOTH function kinds. `async def` is an `ast.AsyncFunctionDef`, a separate node type that
+        # is NOT a subclass of `ast.FunctionDef` — and grid-apis' handler module already spells 15 of
+        # its routes that way. Matching only the sync kind meant that converting this one handler to
+        # `async def` — an ordinary refactor that moves no route and breaks no seam — emptied the
+        # match list and fired the assertion below, reporting drift that had not happened. A pin that
+        # cries wolf on a legitimate refactor is a pin somebody deletes.
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for decorator in node.decorator_list
+        if isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Attribute) and decorator.func.attr == method
+        and getattr(decorator.func.value, "id", None) == _APIS_ROUTER
+        and decorator.args and isinstance(decorator.args[0], ast.Constant)
+        and decorator.args[0].value == path
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one @{_APIS_ROUTER}.{method}({path!r}) handler in grid-apis' "
+        f"{_APIS_HANDLER}, found {len(matches)} — the route moved or was split, so teach this check "
+        f"where it went rather than letting the pin read the wrong function")
+    return matches[0]
+
+
+def _query_parameter_names(function):
+    """Every query parameter a FastAPI handler accepts, as ``{python name: wire name}``.
+
+    FastAPI takes the wire name from ``Query(alias=…)`` when there is one and from the Python
+    parameter's own name when there is not: `device_id` is the second kind, `os` the first — a
+    parameter actually *called* ``os`` would shadow the stdlib module for the whole function, which
+    is why the alias exists at all and why the two names differ here.
+
+    ``Header``-defaulted parameters are deliberately excluded: they are the same ``Call`` shape with
+    the same ``alias=`` keyword, and folding them in would let ``Authorization`` satisfy a check
+    about the query string.
+
+    Every shape this cannot read raises rather than being skipped over. A lockstep helper that
+    returns a plausible subset is worse than no helper at all, because what it guards fails silently
+    too — the same rule `_resolve` and `_collection` follow above.
+    """
+    spec = function.args
+    # `defaults` covers the TAIL of the positional parameters; `kw_defaults` is one-for-one with the
+    # keyword-only ones and holds None where there is no default. Handling both means a handler that
+    # is later given a `*` separator keeps being read instead of quietly emptying this dict.
+    pairs = list(zip(spec.args[len(spec.args) - len(spec.defaults):], spec.defaults))
+    pairs += [(arg, default)
+              for arg, default in zip(spec.kwonlyargs, spec.kw_defaults) if default is not None]
+
+    names = {}
+    for arg, default in pairs:
+        if not isinstance(default, ast.Call):
+            continue  # a plain Python default — not a FastAPI parameter declaration at all
+        kind = getattr(default.func, "id", None) or getattr(default.func, "attr", None)
+        if kind != "Query":
+            continue
+        alias = next((kw.value for kw in default.keywords if kw.arg == "alias"), None)
+        if alias is None:
+            names[arg.arg] = arg.arg
+            continue
+        assert isinstance(alias, ast.Constant) and isinstance(alias.value, str), (
+            f"grid-apis' {arg.arg} declares an alias this check cannot read "
+            f"({type(alias).__name__}); teach it the new shape rather than deleting the check")
+        names[arg.arg] = alias.value
+    return names
+
+
+def _os_parameter_the_cli_sends(monkeypatch, tmp_path):
+    """The query-parameter name this CLI actually puts on the wire, read off a real request.
+
+    Read from the request rather than from the source, because what the control plane has to
+    recognise is the string that reaches it — `params["os"]` is one refactor away from being built
+    somewhere else, and a pin that parsed this repository's source would then be pinning a spelling
+    nobody sends.
+    """
+    import platform
+
+    import httpx
+
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # A fixed system, so the claim is present whatever this developer's own machine runs: a machine
+    # outside the closed token set sends no `os=` at all (ADR 0039 D-c), and a suite that skipped on
+    # a BSD laptop would be a pin that quietly stopped pinning.
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    seen = {}
+
+    def handler(request):
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"networks": []})
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        control_plane.httpx,
+        "Client",
+        lambda *a, **k: real_client(*a, **{**k, "transport": httpx.MockTransport(handler)}),
+    )
+    control_plane.fetch_tokens("sess-tok", "dev-1")
+
+    params = seen.get("params") or {}
+    assert _CONTROL_PARAMETER in params, (
+        f"positive control: `fetch_tokens` sent {sorted(params)} and not even {_CONTROL_PARAMETER}, "
+        f"so its answer about the OS claim means nothing — fix the harness")
+    claim = set(params) - {_CONTROL_PARAMETER}
+    assert len(claim) == 1, (
+        f"`fetch_tokens` put {sorted(params)} on the wire, so this check cannot tell which parameter "
+        f"carries the OS claim — teach it the new shape rather than deleting the pin")
+    return claim.pop()
+
+
+def test_the_os_claims_parameter_is_spelled_the_same_on_both_sides_of_the_call(monkeypatch,
+                                                                               tmp_path):
+    """The name the CLI sends and the name the control plane declares, compared against each other.
+
+    Neither repository can catch this alone, and that is the whole point of writing it here: this
+    repository's `test_fetch_tokens_sends_the_os_token_of_the_machine_it_runs_on` asserts what the
+    CLI sends, grid-apis' own suite asserts what it accepts, and a developer renaming the parameter
+    would update the test on their side along with the code. Both suites stay green, the parameter
+    stops being recognised, and no machine is admitted to an OS grid — silently, because an unknown
+    query parameter is dropped rather than refused.
+    """
+    accepted = _query_parameter_names(_apis_route(_TOKENS_METHOD, _TOKENS_PATH))
+    assert _CONTROL_PARAMETER in accepted.values(), (
+        f"positive control: grid-apis' {_TOKENS_METHOD.upper()} {_TOKENS_PATH} does not appear to "
+        f"take {_CONTROL_PARAMETER} either, so this check is reading the wrong thing — fix the "
+        f"harness before believing its verdict")
+
+    sent = _os_parameter_the_cli_sends(monkeypatch, tmp_path)
+    assert sent in accepted.values(), (
+        f"this CLI sends the OS claim as {sent!r}, but grid-apis' {_TOKENS_METHOD.upper()} "
+        f"{_TOKENS_PATH} accepts {sorted(accepted.values())} — the parameter is dropped, so nobody "
+        f"is ever issued an OS grid and nothing anywhere goes red (ADR 0039 D-e); edit BOTH sides")
