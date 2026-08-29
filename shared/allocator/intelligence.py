@@ -40,6 +40,10 @@ _MAX_FEATURE_UNITS = 1_000_000_000
 _TOKEN = re.compile(r"[a-z0-9_+#.-]+")
 _TENANT_CLASS_PATTERN = re.compile(r"cohort-(?:0[0-9]|1[0-5])\Z")
 _ACTIVE_COHORT_SECONDS = 300.0
+_OUTCOME_HALF_LIFE_SECONDS = 7 * 24 * 60 * 60.0
+_OUTCOME_FULL_CONFIDENCE_REQUESTS = 20.0
+_QUALITY_FULL_CONFIDENCE_SAMPLES = 8.0
+_MAX_EXPLORATION_BONUS = 0.06
 _GRADUATION_COHORTS = 3
 _GRADUATION_SAMPLES = 12
 _GRADUATION_SAMPLES_PER_COHORT = 4
@@ -331,6 +335,7 @@ class WorkloadIntelligence:
                         profile,
                         workload,
                         placement_hints,
+                        now=now,
                     ),
                     -profile.maximum_memory_mb,
                     -(profile.load_seconds + profile.warm_seconds),
@@ -420,6 +425,7 @@ class WorkloadIntelligence:
                             workload,
                             placement_hints,
                             self,
+                            now=timestamp,
                         ),
                     }
                 )
@@ -431,6 +437,7 @@ class WorkloadIntelligence:
                         profile,
                         workload,
                         placement_hints,
+                        now=timestamp,
                     ),
                     -profile.maximum_memory_mb,
                     profile.model_id,
@@ -439,6 +446,11 @@ class WorkloadIntelligence:
             cohort_summary = self._cohort_summary(
                 workload,
                 latency_slo_ms=chosen.latency_slo_ms,
+                now=timestamp,
+            )
+            chosen_evidence = self._outcome_evidence(
+                chosen.model_id,
+                workload,
                 now=timestamp,
             )
             rows.append(
@@ -452,6 +464,7 @@ class WorkloadIntelligence:
                         chosen,
                         workload,
                         placement_hints,
+                        now=timestamp,
                     ),
                     "placement": dict((placement_hints or {}).get(chosen.model_id) or {}),
                     "candidates": _candidate_rows(
@@ -459,6 +472,7 @@ class WorkloadIntelligence:
                         workload,
                         placement_hints,
                         self,
+                        now=timestamp,
                     ),
                     "cohort_evidence": cohort_summary,
                     "reason": (
@@ -472,9 +486,12 @@ class WorkloadIntelligence:
                             )
                         )
                         else (
-                            "portfolio canary"
-                            if forecast.sample_count >= self.portfolio_min_samples
-                            else f"learning ({forecast.sample_count}/{self.portfolio_min_samples} samples)"
+                            (
+                                "confidence-aware canary; "
+                                f"{chosen_evidence['effective_requests']:.1f} effective samples"
+                            )
+                            if chosen_evidence["exploration_bonus"] > 0
+                            else "evidence-backed portfolio choice"
                         )
                     ),
                 }
@@ -663,19 +680,65 @@ class WorkloadIntelligence:
             updated_at=timestamp,
         )
 
-    def _portfolio_score(self, profile: ModelProfile, workload: str) -> float:
+    def _outcome_evidence(
+        self,
+        model_id: str,
+        workload: str,
+        *,
+        now: float,
+    ) -> dict[str, float]:
+        outcome = self._outcomes.get((model_id, workload))
+        if outcome is None or not outcome.requests:
+            return {
+                "age_seconds": 0.0,
+                "freshness": 0.0,
+                "effective_requests": 0.0,
+                "confidence": 0.0,
+                "quality_confidence": 0.0,
+                "exploration_bonus": _MAX_EXPLORATION_BONUS,
+            }
+        age = max(0.0, now - outcome.updated_at)
+        freshness = math.pow(0.5, age / _OUTCOME_HALF_LIFE_SECONDS)
+        effective_requests = outcome.requests * freshness
+        confidence = min(1.0, effective_requests / _OUTCOME_FULL_CONFIDENCE_REQUESTS)
+        quality_confidence = min(
+            confidence,
+            outcome.quality_samples * freshness / _QUALITY_FULL_CONFIDENCE_SAMPLES,
+        )
+        return {
+            "age_seconds": age,
+            "freshness": freshness,
+            "effective_requests": effective_requests,
+            "confidence": confidence,
+            "quality_confidence": quality_confidence,
+            "exploration_bonus": _MAX_EXPLORATION_BONUS * (1.0 - confidence),
+        }
+
+    def _portfolio_score(
+        self,
+        profile: ModelProfile,
+        workload: str,
+        *,
+        now: float,
+    ) -> float:
         score = profile.workload_score(workload)
         outcome = self._outcomes.get((profile.model_id, workload))
+        evidence = self._outcome_evidence(profile.model_id, workload, now=now)
         if outcome and outcome.requests:
-            confidence = min(1.0, outcome.requests / 20.0)
-            success = 1.0 - outcome.errors / outcome.requests
+            confidence = evidence["confidence"]
+            success = (outcome.requests - outcome.errors + 1.0) / (outcome.requests + 2.0)
             quality = outcome.quality if outcome.quality_samples else 0.5
-            score += confidence * (0.15 * (success - 0.5) + 0.20 * (quality - 0.5))
+            score += confidence * 0.15 * (success - 0.5)
+            score += evidence["quality_confidence"] * 0.20 * (quality - 0.5)
             if profile.latency_slo_ms > 0 and outcome.latency_ms > 0:
                 # Quality remains dominant, but two similarly capable candidates should not tie
                 # when one consistently consumes much more of the workload's latency budget.
                 latency_ratio = outcome.latency_ms / profile.latency_slo_ms
                 score -= confidence * min(0.05, latency_ratio * 0.02)
+        # Optimism under uncertainty lets a feasible cold arm earn a bounded canary. It decays to
+        # zero after twenty fresh observations and cannot overcome a substantial configured
+        # suitability difference.
+        score += evidence["exploration_bonus"]
         # Small deterministic pressure toward efficient canaries. Configured suitability remains
         # dominant; this does not turn memory size into a semantic request router.
         score -= min(0.10, math.log2(max(1, profile.maximum_memory_mb)) / 200.0)
@@ -687,8 +750,10 @@ class WorkloadIntelligence:
         profile: ModelProfile,
         workload: str,
         placement_hints: Mapping[str, Mapping[str, Any]] | None,
+        *,
+        now: float,
     ) -> float:
-        score = self._portfolio_score(profile, workload)
+        score = self._portfolio_score(profile, workload, now=now)
         if placement_hints is None:
             return score
         hint = placement_hints.get(profile.model_id) or {}
@@ -700,6 +765,12 @@ class WorkloadIntelligence:
             # Quality and configured suitability remain dominant. This bounded term distinguishes
             # similarly effective candidates by the cheapest node that can actually host them.
             score -= min(0.10, 0.02 * math.log1p(cost_per_hour))
+        if hint.get("feasible_after_preemption") is True and not (
+            hint.get("feasible_now") is True or hint.get("feasible") is True
+        ):
+            # Exploration is canary authority, not eviction authority. A preemption-only arm must
+            # earn a material evidence advantage before replacing a currently feasible model.
+            score -= 0.08
         return score
 
 
@@ -751,6 +822,8 @@ def _candidate_rows(
     workload: str,
     placement_hints: Mapping[str, Mapping[str, Any]] | None,
     intelligence: WorkloadIntelligence,
+    *,
+    now: float,
 ) -> list[dict[str, Any]]:
     rows = [
         {
@@ -759,6 +832,12 @@ def _candidate_rows(
                 profile,
                 workload,
                 placement_hints,
+                now=now,
+            ),
+            "evidence": intelligence._outcome_evidence(
+                profile.model_id,
+                workload,
+                now=now,
             ),
             "feasible": _placement_feasible(profile.model_id, placement_hints),
             "placement": dict((placement_hints or {}).get(profile.model_id) or {}),

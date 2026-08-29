@@ -55,6 +55,16 @@ allocator projects sustained workload demand onto configured models using each p
 scores, compatibility and resource cost, cold-start time, and measured outcomes. This lets an
 inactive specialist receive a bounded canary without creating a loaded-only feedback loop.
 
+Measured model/workload outcomes use confidence that reaches full weight after twenty fresh
+requests; separately labeled quality reaches full weight after eight fresh evaluations. Both decay
+with a seven-day half-life, so an early benchmark or obsolete artifact-era result cannot permanently
+lock the portfolio. A six-point bounded optimism bonus lets an equally suitable, currently feasible
+cold candidate earn a canary, then falls to zero as fresh evidence accumulates. The bonus is smaller
+than meaningful configured-suitability differences and a preemption-only candidate pays a larger
+penalty, so uncertainty can spend spare capacity but cannot manufacture eviction authority. Status
+reports evidence age, freshness, effective sample count, confidence, quality confidence, and the
+remaining exploration bonus for every candidate.
+
 Portfolio selection first scans the current fleet with the same hard runtime, backend, GPU, tag,
 data-tier, artifact, memory-headroom, model-slot, and colocation rules used by placement. An
 attractive model that no live node can host is excluded instead of suppressing a usable fallback.

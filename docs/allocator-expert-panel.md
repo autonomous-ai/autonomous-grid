@@ -44,11 +44,15 @@ budgets matter, but correctness boundaries must come first.
    leader per term, rejects expired or lower-term work before a side effect, and preserves that
    fence across restart. Tests cover lease contention, renewal, expiry, takeover, conflicting
    leaders, reordered delivery, restart, and same-action receipt replay.
+5. **Outcome evidence never expired and selection had no exploration pressure.** Model/workload
+   confidence now decays with a seven-day half-life, quality and request evidence have separate
+   sample thresholds, and an uncertainty bonus grants bounded canaries to feasible cold peers. The
+   bonus decays to zero with evidence and is smaller than the penalty for a preemption-only arm.
 
 ### Open panel priorities
 
-1. Add confidence-aware, freshness-decayed portfolio exploration and optimize a joint model set,
-   rather than independently choosing one greedy winner per workload.
+1. Extend the new confidence-aware exploration from one selected model per workload to a jointly
+   optimized model set with an explicit exploration budget.
 2. Add explicit fleet cost budgets, unknown-cost handling, spend forecasts, and budget-constrained
    capacity recommendations.
 3. Expand model utility evaluation beyond tiny exact-answer coding probes and exercise real vLLM,

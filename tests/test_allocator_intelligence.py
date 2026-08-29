@@ -220,6 +220,91 @@ def test_measured_quality_and_latency_choose_between_equal_portfolio_candidates(
     assert projection[0].model_id == "fast-correct"
 
 
+def test_uncertainty_bonus_explores_cold_peer_but_yields_to_strong_fresh_evidence():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    incumbent = profile("z-incumbent", 8_000, ("coding", 1.0))
+    cold = profile("a-cold", 8_000, ("coding", 1.0))
+
+    intelligence.observe(
+        RequestFeatures("chat/completions", "z-incumbent", "coding"),
+        served_model="z-incumbent",
+        timestamp=1,
+    )
+    intelligence.observe(
+        RequestFeatures("chat/completions", "auto", "coding"),
+        portfolio_unbound=True,
+        timestamp=100,
+    )
+    assert intelligence.portfolio_forecasts((incumbent, cold), (), now=100)[0].model_id == (
+        "a-cold"
+    )
+
+    for timestamp in range(2, 21):
+        intelligence.observe(
+            RequestFeatures("chat/completions", "z-incumbent", "coding"),
+            served_model="z-incumbent",
+            timestamp=timestamp,
+        )
+    assert intelligence.portfolio_forecasts((incumbent, cold), (), now=100)[0].model_id == (
+        "z-incumbent"
+    )
+
+
+def test_stale_outcomes_decay_and_candidate_status_explains_effective_evidence():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    stale = profile("stale-perfect", 8_000, ("coding", 1.0))
+    recent = profile("recent-good", 8_000, ("coding", 1.0))
+    now = 8 * 7 * 24 * 60 * 60.0
+    for _ in range(20):
+        intelligence.observe_model_evaluation(
+            "stale-perfect", "coding", quality=1.0, latency_ms=100, timestamp=0
+        )
+    for _ in range(4):
+        intelligence.observe_model_evaluation(
+            "recent-good", "coding", quality=0.7, latency_ms=100, timestamp=now - 1
+        )
+    intelligence.observe(
+        RequestFeatures("chat/completions", "auto", "coding"),
+        portfolio_unbound=True,
+        timestamp=now,
+    )
+
+    projection = intelligence.projections((stale, recent), now=now)[0]
+    candidates = {row["model_id"]: row for row in projection["candidates"]}
+    assert projection["chosen_model"] == "recent-good"
+    assert candidates["stale-perfect"]["evidence"]["freshness"] == pytest.approx(
+        1 / 256
+    )
+    assert candidates["stale-perfect"]["evidence"]["effective_requests"] == (
+        pytest.approx(20 / 256)
+    )
+    assert candidates["recent-good"]["evidence"]["confidence"] > candidates[
+        "stale-perfect"
+    ]["evidence"]["confidence"]
+
+
+def test_uncertain_preemption_only_candidate_pays_more_than_exploration_bonus():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    feasible = profile("a-feasible", 8_000, ("coding", 1.0))
+    preempting = profile("z-preempting", 8_000, ("coding", 1.0))
+    hints = {
+        "a-feasible": {"feasible": True, "feasible_now": True},
+        "z-preempting": {
+            "feasible": False,
+            "feasible_now": False,
+            "feasible_after_preemption": True,
+        },
+    }
+
+    feasible_score = intelligence._portfolio_score_with_placement(
+        feasible, "coding", hints, now=100
+    )
+    preempting_score = intelligence._portfolio_score_with_placement(
+        preempting, "coding", hints, now=100
+    )
+    assert feasible_score > preempting_score
+
+
 def test_portfolio_falls_back_from_preferred_but_infeasible_model():
     intelligence = WorkloadIntelligence(portfolio_min_samples=1)
     candidates = (
