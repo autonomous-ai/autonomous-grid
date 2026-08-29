@@ -248,11 +248,13 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
             if preemption.for_model_id:
                 assert preemption.for_model_id in profile_by_id
         incremental_by_node = {node.node_id: 0 for node in nodes}
+        desired_memory_by_node = {node.node_id: 0 for node in nodes}
         added_slots_by_node = {node.node_id: 0 for node in nodes}
         for assignment in plan.assignments:
             node = node_by_id[assignment.node_id]
             profile = profile_by_id[assignment.model_id]
             residency = node.residency(assignment.model_id)
+            desired_memory_by_node[node.node_id] += assignment.memory_mb
             for_new = residency is None or residency.state in {
                 ResidencyState.CACHED,
                 ResidencyState.FAILED,
@@ -283,6 +285,12 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
                 )
 
         for node in nodes:
+            placement_budget = node.capacity_mb - node.reserved_mb
+            if node.state == NodeState.THROTTLED:
+                placement_budget = math.floor(
+                    placement_budget * policy.throttled_capacity_fraction
+                )
+            assert desired_memory_by_node[node.node_id] <= placement_budget
             budget = math.floor(
                 (node.capacity_mb - node.reserved_mb)
                 * (1.0 - policy.memory_headroom_fraction)
