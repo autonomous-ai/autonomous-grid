@@ -67,6 +67,15 @@ or newer for Codex; Claude has its own measured resume floor). Installation is n
 image generation, browser control, an MCP server, or a privileged API is configured. Unknown
 required capabilities leave the Goal queued rather than spending attempts on unsuitable workers.
 
+Business HTTP tools use the same matching rule. The relay canonicalizes every manifest origin and
+adds an opaque `tool_origin.<hash>` requirement. A Codex provider advertises that capability only
+for exact origins in its operator-controlled `GRID_GOAL_TOOL_ORIGINS` allowlist. This binds both
+authorization and reachability to scheduling: a node which cannot call the API never claims the
+Goal. User-authored manifests cannot request Grid authentication, headers, relative URLs, or the
+relay's reserved internal action name. Only a relay-authored tool marker unlocks a relative action
+against the exact selected relay origin. Workers enforce these rules again because a mixed-version
+fleet must fail closed even when an older relay accepted an unsafe manifest.
+
 ### Native Goal mechanisms remain authoritative progress loops
 
 Grid invokes Codex's native Goal API and Claude Code's native `/goal`; it does not reproduce their

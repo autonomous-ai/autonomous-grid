@@ -30,6 +30,9 @@ AGENT_DIR = Path(".grid") / "agent" / "codex"
 STATE_FILE = "goal-state.json"
 HOME_DIR = "home"
 _MAX_TOOL_RESULT = 64 * 1024
+_MAX_TOOL_ARGUMENT_BYTES = 64 * 1024
+_MAX_TOOL_HTTP_BYTES = 64 * 1024
+_MAX_ALLOWED_TOOL_ORIGINS = 32
 _MAX_RECORDED_TOOL_VALUE = 24 * 1024
 _SECRET_FIELD_PARTS = ("authorization", "api_key", "apikey", "password", "secret", "token")
 # Oldest binary measured against the stable thread/goal/{set,get,clear} and thread/resume contract.
@@ -39,6 +42,54 @@ MIN_DISTRIBUTED_GOAL_VERSION = (0, 150, 1)
 _VERSION_PATTERN = re.compile(r"\Acodex-cli (\d+)\.(\d+)\.(\d+)")
 _VERSION_TIMEOUT_SECONDS = 10
 _VERSION_CACHE: dict[tuple[str, int, int], tuple[int, int, int]] = {}
+_INTERNAL_GOAL_TOOLS = frozenset({"grid_spawn_subgoal"})
+
+
+def _http_origin(value: str) -> str | None:
+    """Return a normalized exact HTTP origin, excluding ambient URL credentials."""
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if (scheme not in ("http", "https") or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None):
+        return None
+    try:
+        host = parsed.hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = 80 if scheme == "http" else 443
+    suffix = f":{port}" if port is not None and port != default_port else ""
+    return f"{scheme}://{host}{suffix}"
+
+
+def _allowed_goal_tool_origins() -> frozenset[str]:
+    """Parse operator-approved business API origins; invalid/path entries fail closed."""
+    answer: set[str] = set()
+    for value in os.getenv("GRID_GOAL_TOOL_ORIGINS", "").split(","):
+        candidate = value.strip()
+        if not candidate:
+            continue
+        parsed = urlparse(candidate)
+        origin = _http_origin(candidate)
+        if (origin is not None and parsed.path in ("", "/")
+                and not parsed.params and not parsed.query and not parsed.fragment):
+            answer.add(origin)
+            if len(answer) >= _MAX_ALLOWED_TOOL_ORIGINS:
+                break
+    return frozenset(answer)
+
+
+def goal_tool_origin_capabilities() -> set[str]:
+    """Opaque claim capabilities bind scheduling to this node's exact API allowlist."""
+    return {
+        "tool_origin." + hashlib.sha256(origin.encode("utf-8")).hexdigest()[:32]
+        for origin in _allowed_goal_tool_origins()
+    }
 
 
 def _recorded_tool_value(value: Any) -> Any:
@@ -256,10 +307,23 @@ class ToolExecutor:
 
     def __init__(self, tools: list[dict[str, Any]], *, publish: Callable[..., None],
                  inference: GridInference, scope: str):
-        self.tools = {str(tool.get("name")): tool for tool in tools if isinstance(tool, dict)}
+        self.tools: dict[str, dict[str, Any]] = {}
+        invalid_names: set[str] = set()
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            name = str(tool.get("name") or "")
+            if not name or name in invalid_names:
+                continue
+            if name in self.tools:
+                self.tools.pop(name)
+                invalid_names.add(name)
+                continue
+            self.tools[name] = tool
         self.publish = publish
         self.inference = inference
         self.scope = scope
+        self.allowed_origins = _allowed_goal_tool_origins()
 
     def specs(self) -> list[dict[str, Any]]:
         answer = []
@@ -280,20 +344,53 @@ class ToolExecutor:
         tool = self.tools.get(name)
         if tool is None or not isinstance(arguments, dict):
             return self._result(False, {"error": "tool is not allowed or arguments are not an object"})
+        try:
+            encoded_arguments = json.dumps(
+                arguments, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False).encode("utf-8")
+        except (TypeError, ValueError):
+            return self._result(False, {"error": "tool arguments are not valid JSON"})
+        if len(encoded_arguments) > _MAX_TOOL_ARGUMENT_BYTES:
+            return self._result(False, {
+                "error": f"tool arguments exceed {_MAX_TOOL_ARGUMENT_BYTES} bytes",
+            })
         mode = str(tool.get("mode") or "")
         http = tool.get("http") if isinstance(tool.get("http"), dict) else {}
         url = str(http.get("url") or "")
         method = str(http.get("method") or "POST").upper()
-        if not url or method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+        if (mode not in ("observe", "act", "verify") or not url
+                or method not in ("GET", "POST", "PUT", "PATCH", "DELETE")):
             return self._result(False, {"error": "tool HTTP configuration is invalid"})
-        if url.startswith("/"):
+        if ((mode in ("observe", "verify") and method != "GET")
+                or (mode == "act" and method == "GET")):
+            return self._result(False, {"error": "tool mode and HTTP method are inconsistent"})
+
+        internal = tool.get("grid_internal") is True
+        parsed = urlparse(url)
+        if internal:
+            if (name not in _INTERNAL_GOAL_TOOLS or http.get("auth") != "grid"
+                    or not url.startswith("/") or url.startswith("//")
+                    or parsed.query or parsed.fragment):
+                return self._result(False, {"error": "internal Grid tool configuration is invalid"})
             url = urljoin(self.inference.base_url.rstrip("/") + "/", url.lstrip("/"))
+            if _http_origin(url) != _http_origin(self.inference.base_url):
+                return self._result(False, {"error": "internal Grid tool escaped the selected relay"})
+        else:
+            if http.get("auth") is not None or http.get("headers") is not None:
+                return self._result(False, {"error": "business tools cannot use Grid credentials"})
+            origin = _http_origin(url)
+            if (origin is None or parsed.params or parsed.query or parsed.fragment
+                    or (parsed.path and not parsed.path.startswith("/"))):
+                return self._result(False, {"error": "business tool URL is invalid"})
+            if origin not in self.allowed_origins:
+                return self._result(False, {
+                    "error": "business tool origin is not approved by this Grid node",
+                })
+
         headers = {"Accept": "application/json"}
-        # A Grid credential may only be sent back to the same relay origin. Arbitrary internal HTTP
-        # tools are supported without auth; external secret distribution is not smuggled through git.
-        if http.get("auth") == "grid":
-            if urlparse(url).netloc != urlparse(self.inference.base_url).netloc:
-                return self._result(False, {"error": "grid auth is restricted to the selected relay"})
+        # A Grid credential may only be sent to a relay-authored internal action on the exact relay
+        # origin. Business API credentials are never smuggled through the Goal manifest or Git.
+        if internal:
             headers["Authorization"] = f"Bearer {self.inference.token}"
             configured_headers = http.get("headers")
             if isinstance(configured_headers, dict):
@@ -307,25 +404,47 @@ class ToolExecutor:
             canonical = json.dumps([self.scope, name, arguments], sort_keys=True,
                                    separators=(",", ":"), ensure_ascii=False).encode()
             headers["Idempotency-Key"] = "grid-goal-" + hashlib.sha256(canonical).hexdigest()
+        raw_timeout = http.get("timeout_seconds", 30)
+        if (isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float))
+                or not 0.1 <= raw_timeout <= 300):
+            return self._result(False, {"error": "tool HTTP timeout is invalid"})
         record_full = tool.get("record") == "full"
         self.publish(
             f"goal.{mode}.request", tool=name, call_id=call_id,
             **({"arguments": _recorded_tool_value(arguments)} if record_full else {}))
         try:
-            timeout = float(http.get("timeout_seconds") or 30)
-            with httpx.Client(timeout=min(300.0, max(0.1, timeout))) as client:
-                response = client.request(method, url,
-                                          params=arguments if method == "GET" else None,
-                                          json=None if method == "GET" else arguments,
-                                          headers=headers)
-            try:
-                body: Any = response.json()
-            except ValueError:
-                body = response.text[:_MAX_TOOL_RESULT]
-            result = {"status_code": response.status_code, "body": body}
-            success = 200 <= response.status_code < 300
-        except httpx.HTTPError as exc:
-            success, result = False, {"error": str(exc)}
+            with httpx.Client(
+                    timeout=float(raw_timeout), trust_env=False, follow_redirects=False) as client:
+                with client.stream(
+                        method, url, params=arguments if method == "GET" else None,
+                        json=None if method == "GET" else arguments, headers=headers) as response:
+                    status_code = response.status_code
+                    chunks: list[bytes] = []
+                    size = 0
+                    oversized = False
+                    for chunk in response.iter_bytes():
+                        size += len(chunk)
+                        if size > _MAX_TOOL_HTTP_BYTES:
+                            oversized = True
+                            break
+                        chunks.append(chunk)
+            if oversized:
+                success, result = False, {
+                    "status_code": status_code,
+                    "error": f"tool response exceeds {_MAX_TOOL_HTTP_BYTES} bytes",
+                }
+            else:
+                raw_body = b"".join(chunks)
+                try:
+                    body: Any = json.loads(raw_body) if raw_body else None
+                except (UnicodeDecodeError, ValueError):
+                    body = raw_body.decode("utf-8", "replace")
+                result = {"status_code": status_code, "body": body}
+                success = 200 <= status_code < 300
+        except (httpx.HTTPError, ValueError):
+            # HTTP client exception strings commonly contain the fully expanded GET URL. Do not
+            # leak argument values into an unstructured error that evades field-name redaction.
+            success, result = False, {"error": "tool HTTP request failed"}
         self.publish(
             f"goal.{mode}.result", tool=name, call_id=call_id, success=success,
             **({"result": _recorded_tool_value(result)} if record_full else {}))

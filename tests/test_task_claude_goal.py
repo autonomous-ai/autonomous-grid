@@ -148,9 +148,15 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
     class Response:
         status_code = 201
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
         @staticmethod
-        def json():
-            return {"id": "child-goal"}
+        def iter_bytes():
+            yield b'{"id":"child-goal"}'
 
     class Client:
         def __init__(self, **_kwargs):
@@ -162,13 +168,13 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
         def __exit__(self, *_args):
             return None
 
-        def request(self, method, url, **kwargs):
+        def stream(self, method, url, **kwargs):
             captured.append({"method": method, "url": url, **kwargs})
             return Response()
 
     monkeypatch.setattr(task_codex.httpx, "Client", Client)
     executor = task_codex.ToolExecutor([{
-        "name": "grid_spawn_subgoal", "mode": "act",
+        "name": "grid_spawn_subgoal", "grid_internal": True, "mode": "act",
         "http": {
             "method": "POST", "url": "/relay/v1/goals/parent/children", "auth": "grid",
             "headers": {"X-Grid-Goal-Turn": "turn-1", "X-Not-Allowed": "secret"},
@@ -212,15 +218,36 @@ def test_claude_profile_cannot_claim_grid_runner_capabilities_it_does_not_wire(m
     },)
 
 
+def test_codex_profile_advertises_only_operator_approved_tool_origins(monkeypatch):
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setenv(
+        "GRID_GOAL_TOOL_ORIGINS",
+        "https://SUPPORT.example:443/,http://finance.internal:8080,https://bad.example/path")
+    monkeypatch.setattr(task_codex, "available", lambda: True)
+    capabilities = set(tasks._agent_profiles()[0]["capabilities"])
+    assert {"native_goal", "dynamic_tools", "subgoals"} <= capabilities
+    assert task_codex.goal_tool_origin_capabilities() <= capabilities
+    assert len([item for item in capabilities if item.startswith("tool_origin.")]) == 2
+
+
 def test_full_tool_recording_captures_training_payloads_but_redacts_secrets(monkeypatch):
     events = []
+    monkeypatch.setenv("GRID_GOAL_TOOL_ORIGINS", "https://support.example")
 
     class Response:
         status_code = 200
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
         @staticmethod
-        def json():
-            return {"ticket": {"text": "customer needs help", "access_token": "response-secret"}}
+        def iter_bytes():
+            yield json.dumps({
+                "ticket": {"text": "customer needs help", "access_token": "response-secret"},
+            }).encode()
 
     class Client:
         def __init__(self, **_kwargs):
@@ -232,7 +259,7 @@ def test_full_tool_recording_captures_training_payloads_but_redacts_secrets(monk
         def __exit__(self, *_args):
             return None
 
-        def request(self, *_args, **_kwargs):
+        def stream(self, *_args, **_kwargs):
             return Response()
 
     monkeypatch.setattr(task_codex.httpx, "Client", Client)
@@ -250,3 +277,99 @@ def test_full_tool_recording_captures_training_payloads_but_redacts_secrets(monk
         "text": "customer needs help", "access_token": "[REDACTED]"}
     assert "argument-secret" not in repr(events)
     assert "response-secret" not in repr(events)
+
+
+def test_business_tools_fail_closed_without_an_exact_operator_approved_origin(monkeypatch):
+    calls = []
+
+    class Client:
+        def __init__(self, **_kwargs):
+            calls.append("constructed")
+
+    monkeypatch.setattr(task_codex.httpx, "Client", Client)
+    monkeypatch.setenv("GRID_GOAL_TOOL_ORIGINS", "https://support.example")
+    tools = [{
+        "name": "read_ticket", "mode": "observe",
+        "http": {"method": "GET", "url": "https://evil.support.example/ticket"},
+    }]
+    executor = task_codex.ToolExecutor(
+        tools, publish=lambda *_a, **_k: None,
+        inference=task_codex.GridInference("https://grid.example", "grid-secret"), scope="goal:1")
+    result = executor.call("read_ticket", {"ticket_id": "T-1"}, "call-1")
+    assert result["success"] is False
+    assert "not approved" in result["contentItems"][0]["text"]
+    assert calls == []
+
+
+def test_user_tool_cannot_borrow_grid_auth_or_a_relative_relay_url(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        task_codex.httpx, "Client", lambda **_kwargs: calls.append("constructed"))
+    executor = task_codex.ToolExecutor([{
+        "name": "steal", "mode": "observe",
+        "http": {"method": "GET", "url": "/relay/v1/goals", "auth": "grid"},
+    }], publish=lambda *_a, **_k: None,
+        inference=task_codex.GridInference("https://grid.example", "grid-secret"), scope="goal:1")
+    result = executor.call("steal", {}, "call-1")
+    assert result["success"] is False
+    assert calls == []
+    assert "grid-secret" not in repr(result)
+
+
+def test_duplicate_tool_names_are_not_exposed_to_codex():
+    executor = task_codex.ToolExecutor([
+        {"name": "same", "mode": "observe", "http": {
+            "method": "GET", "url": "https://one.example/read"}},
+        {"name": "same", "mode": "act", "http": {
+            "method": "POST", "url": "https://two.example/write"}},
+    ], publish=lambda *_a, **_k: None,
+        inference=task_codex.GridInference("https://grid.example", "grid-secret"), scope="goal:1")
+    assert executor.specs() == []
+    assert executor.call("same", {}, "call-1")["success"] is False
+
+
+def test_tool_arguments_and_response_bodies_are_hard_bounded(monkeypatch):
+    monkeypatch.setenv("GRID_GOAL_TOOL_ORIGINS", "https://support.example")
+    calls = []
+
+    class Response:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def iter_bytes():
+            yield b"x" * task_codex._MAX_TOOL_HTTP_BYTES
+            yield b"overflow"
+
+    class Client:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(task_codex.httpx, "Client", Client)
+    executor = task_codex.ToolExecutor([{
+        "name": "read_ticket", "mode": "observe",
+        "http": {"method": "GET", "url": "https://support.example/ticket"},
+    }], publish=lambda *_a, **_k: None,
+        inference=task_codex.GridInference("https://grid.example", "grid-secret"), scope="goal:1")
+    too_large = executor.call(
+        "read_ticket", {"value": "x" * task_codex._MAX_TOOL_ARGUMENT_BYTES}, "call-1")
+    assert too_large["success"] is False and calls == []
+    oversized_response = executor.call("read_ticket", {"ticket_id": "T-1"}, "call-2")
+    assert oversized_response["success"] is False
+    assert "response exceeds" in oversized_response["contentItems"][0]["text"]
+    assert calls[0]["trust_env"] is False
+    assert calls[0]["follow_redirects"] is False

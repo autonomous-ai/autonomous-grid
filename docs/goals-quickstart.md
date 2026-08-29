@@ -37,6 +37,10 @@ machine serving the model may be different computers.
 ## Run and control a Goal
 
 ```bash
+# Set this in the service environment of every Codex node allowed to call the API. Exact origins
+# only: no wildcards or paths. A node without this origin cannot claim the Goal.
+export GRID_GOAL_TOOL_ORIGINS=http://support.internal
+
 grid goal run --project <project-id> \
   --objective "Build a small playable browser click game" \
   --done-when "index.html, game.js, style.css and README.md exist and the game works" \
@@ -233,17 +237,25 @@ grid goal run --project <project-id> \
   --model <model-name> --tools ./support-tools.json
 ```
 
-Allowed modes are `observe`, `act` and `verify`. Grid emits an audit event for every request and
-result. By default those events contain tool/call identity and success metadata only. Set
+Allowed modes are `observe`, `act` and `verify`. `observe` and `verify` are GET-only; `act` uses a
+mutating method and receives an idempotency key. User manifests require absolute HTTP(S) URLs and
+cannot contain headers, credentials, query strings, redirects, relative relay paths, or Grid's
+reserved internal tool name. Grid emits an audit event for every request and result. By default
+those events contain tool/call identity and success metadata only. Set
 `"record": "full"` when the arguments and returned observation should become local Goal evidence
 and future training data; credential-shaped object fields are recursively redacted and each stored
-value is hard-bounded. `act` calls carry a deterministic idempotency key scoped to the Goal turn, so
-the receiving API can reject a duplicate after a worker failure. Grid credentials are never placed
-in Codex's environment or stored in Git.
+value is hard-bounded. Requests do not inherit proxy or `.netrc` credentials, redirects are not
+followed, and arguments and response bodies are capped at 64 KiB. `act` calls carry a deterministic
+idempotency key scoped to the Goal turn, so the receiving API can reject a duplicate after a worker
+failure. Grid credentials are never placed in Codex's environment or stored in Git.
 
-The first MVP intentionally does not distribute arbitrary third-party secrets. A tool can request
-Grid authentication only for a URL on the selected relay origin; other internal endpoints must
-handle their own network-local authentication.
+`GRID_GOAL_TOOL_ORIGINS` is a comma-separated, exact-origin allowlist controlled by each node
+operator. It defaults to deny-all. Grid turns every manifest origin into an opaque scheduling
+capability, so a Goal stays queued instead of being claimed by a node that cannot reach or is not
+authorized for its business APIs. Configure the origin on every node eligible for failover. The
+first MVP intentionally does not distribute arbitrary third-party secrets; business endpoints must
+use network-local authentication or an operator-managed gateway. Only relay-authored built-ins,
+such as `grid_spawn_subgoal`, may use the worker's Grid credential and relative relay URLs.
 
 ## Distributed handoff acceptance test
 

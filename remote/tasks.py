@@ -301,6 +301,7 @@ def _agent_profiles() -> tuple[dict[str, Any], ...]:
         profiles.append({
             "kind": "codex",
             "capabilities": sorted({"native_goal", "dynamic_tools", "subgoals"}
+                                   | task_codex.goal_tool_origin_capabilities()
                                    | _declared_capabilities("GRID_CODEX_GOAL_CAPABILITIES")),
         })
     return tuple(profiles)

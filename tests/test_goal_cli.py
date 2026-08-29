@@ -33,7 +33,8 @@ def test_goal_run_loads_tools_and_posts_the_resolved_project(monkeypatch, tmp_pa
 
     manifest = tmp_path / "tools.json"
     manifest.write_text(json.dumps({"version": 1, "tools": [{
-        "name": "tickets", "mode": "observe", "http": {"url": "/tickets"},
+        "name": "tickets", "mode": "observe",
+        "http": {"method": "GET", "url": "https://support.example/tickets"},
     }]}))
     eval_manifest = tmp_path / "evals.json"
     eval_manifest.write_text(json.dumps({"version": 1, "evals": [{
@@ -58,7 +59,8 @@ def test_goal_run_loads_tools_and_posts_the_resolved_project(monkeypatch, tmp_pa
     assert captured == {
         "project_id": "project-id", "objective": "Resolve tickets",
         "done_when": "Backlog is zero", "model": "grid-model", "token_budget": 1234,
-        "tools": [{"name": "tickets", "mode": "observe", "http": {"url": "/tickets"}}],
+        "tools": [{"name": "tickets", "mode": "observe",
+                   "http": {"method": "GET", "url": "https://support.example/tickets"}}],
         "name": "support", "agents": ["codex"], "required_capabilities": [],
         "evals": [{"type": "file", "name": "README exists", "path": "README.md"}],
         "allow_subgoals": False,
