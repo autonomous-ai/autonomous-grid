@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from itertools import pairwise
 from pathlib import Path
@@ -110,6 +111,85 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
 
     attempt_events = (record.get("attempt_events")
                       if isinstance(record.get("attempt_events"), list) else [])
+
+    # Tool events are durable training evidence, so their worker/attempt boundary must be explicit
+    # and relay-authenticated. Sequence order cannot recover that boundary after a dead provider's
+    # lease is reclaimed by another machine on the same turn.
+    tool_types = {
+        f"goal.{mode}.{phase}"
+        for mode in ("observe", "act", "verify")
+        for phase in ("request", "result")
+    }
+    tool_events: list[tuple[str, str, str, int, str, str, str | None]] = []
+    for index, item in enumerate(attempt_events, 1):
+        if not isinstance(item, dict) or not isinstance(item.get("event"), dict):
+            continue
+        event = item["event"]
+        event_type = event.get("type")
+        if event_type not in tool_types:
+            continue
+        turn_id = item.get("turn_id")
+        provider_node_id = event.get("provider_node_id")
+        attempt = event.get("attempt")
+        tool = event.get("tool")
+        call_id = event.get("call_id")
+        valid = True
+        for field, value in (
+                ("turn_id", turn_id), ("provider_node_id", provider_node_id),
+                ("tool", tool), ("call_id", call_id)):
+            if not isinstance(value, str) or not value:
+                failures.append(f"tool event {index} ({event_type}) has no valid {field}")
+                valid = False
+        if (not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0):
+            failures.append(f"tool event {index} ({event_type}) has no valid attempt")
+            valid = False
+        key = event.get("idempotency_key") if event_type.startswith("goal.act.") else None
+        if event_type.startswith("goal.act.") and (
+                not isinstance(key, str)
+                or re.fullmatch(r"grid-goal-[0-9a-f]{64}", key) is None):
+            failures.append(
+                f"tool event {index} ({event_type}) has no valid idempotency_key")
+            valid = False
+        if valid:
+            tool_events.append((
+                event_type, turn_id, provider_node_id, attempt, tool, call_id, key))
+
+    safe_requests = {
+        (event_type.removesuffix(".request"), turn_id, provider, attempt, tool, call_id)
+        for event_type, turn_id, provider, attempt, tool, call_id, _key in tool_events
+        if event_type in ("goal.observe.request", "goal.verify.request")
+    }
+    for event_type, turn_id, provider, attempt, tool, call_id, _key in tool_events:
+        if event_type not in ("goal.observe.result", "goal.verify.result"):
+            continue
+        identity = (
+            event_type.removesuffix(".result"), turn_id, provider, attempt, tool, call_id)
+        if identity not in safe_requests:
+            failures.append(
+                f"{event_type} for {tool}/{call_id} has no matching request on the same attempt")
+
+    action_requests = {
+        (turn_id, provider, attempt, tool, call_id, key)
+        for event_type, turn_id, provider, attempt, tool, call_id, key in tool_events
+        if event_type == "goal.act.request"
+    }
+    action_results = {
+        (turn_id, provider, attempt, tool, call_id, key)
+        for event_type, turn_id, provider, attempt, tool, call_id, key in tool_events
+        if event_type == "goal.act.result"
+    }
+    result_keys = {identity[-1] for identity in action_results}
+    for identity in sorted(action_results):
+        if identity not in action_requests:
+            _turn, _provider, _attempt, tool, call_id, _key = identity
+            failures.append(
+                f"goal.act.result for {tool}/{call_id} has no matching request on the same attempt")
+    for identity in sorted(action_requests):
+        if identity not in action_results and identity[-1] not in result_keys:
+            _turn, _provider, _attempt, tool, call_id, _key = identity
+            failures.append(
+                f"goal.act.request for {tool}/{call_id} has no durable result or idempotent "
+                "reconciliation")
 
     for index, turn in enumerate(turns, 1):
         if not isinstance(turn, dict):

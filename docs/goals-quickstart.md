@@ -256,7 +256,10 @@ the request record before contacting the API. If that record cannot land, it doe
 call. It flushes the result before returning it to Codex; if the API may have committed but the
 result cannot be recorded, the turn fails and a replacement replays it with the same idempotency
 key. This closes the crash window between a business side effect and the training/audit trajectory.
-The relay evidence records that non-secret key on both action events so a verifier can join retries.
+The relay overwrites every Goal tool event with the authenticated lease holder and live attempt; a
+worker cannot claim another machine's action. Evidence records the non-secret key on both action
+events so `grid goal evidence --verify` can require an exact request/result pair or prove that an
+interrupted request was reconciled by a later attempt with the same key.
 
 `GRID_GOAL_TOOL_ORIGINS` is a comma-separated, exact-origin allowlist controlled by each node
 operator. It defaults to deny-all. Grid turns every manifest origin into an opaque scheduling
@@ -299,4 +302,4 @@ Git/checkpoint and eval protocols deterministically rather than model quality. T
 scenario additionally proves an unauthorized but otherwise healthy node spends zero attempts, the
 authorized successor restores Codex's dynamic tools, and all three writes (the failed attempt, its
 lease retry, and the eval-repair turn) carry one identical idempotency key while the API performs
-exactly one side effect.
+exactly one side effect. It also verifies each action event's relay-stamped turn, node and attempt.

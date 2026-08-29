@@ -388,12 +388,24 @@ def test_business_goal_matches_api_origin_and_replays_action_across_nodes(
 
     evidence = relay_client.get_goal_evidence(relay, owner_token, conversation_id)
     _assert_transcript_chain(evidence, 3, min_nodes=2)
-    action_requests = [item["event"] for item in evidence["attempt_events"]
+    request_records = [item for item in evidence["attempt_events"]
                        if item["event"].get("type") == "goal.act.request"]
-    action_results = [item["event"] for item in evidence["attempt_events"]
+    result_records = [item for item in evidence["attempt_events"]
                       if item["event"].get("type") == "goal.act.result"]
+    action_requests = [item["event"] for item in request_records]
+    action_results = [item["event"] for item in result_records]
     assert len(action_requests) == 3 and len(action_results) == 3
     assert all(item["success"] for item in action_results)
+    expected_attribution = {
+        (second_turn, node_b.node_id, 1),
+        (second_turn, node_c.node_id, 2),
+        (rows[2]["id"], node_c.node_id, 1),
+    }
+    for records in (request_records, result_records):
+        assert {
+            (item["turn_id"], item["event"]["provider_node_id"], item["event"]["attempt"])
+            for item in records
+        } == expected_attribution
     evidence_keys = {item["idempotency_key"] for item in action_requests + action_results}
     assert evidence_keys == {business_api["write_requests"][0]["key"]}
     assert any(run["passed"] is False for run in evidence["eval_runs"])

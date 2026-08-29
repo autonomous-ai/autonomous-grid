@@ -270,6 +270,101 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
                for item in _verify_evidence(record, min_execution_nodes=2))
 
 
+def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
+    from cli.goal import _verify_evidence
+
+    key = "grid-goal-" + "a" * 64
+    record = {
+        "schema_version": 1,
+        "goal": {"status": "complete", "evals": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
+        "turns": [{
+            "id": "turn-1", "attempt": 2, "state": "completed", "agent_kind": "codex",
+            "provider_node_id": "node-C", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [
+            {"turn_id": "turn-1", "event": {
+                "type": "task.retry", "attempt": 1, "previous_provider_id": "node-B",
+            }},
+            {"turn_id": "turn-1", "event": {
+                "type": "goal.observe.request", "provider_node_id": "node-B", "attempt": 1,
+                "tool": "read_ticket", "call_id": "read-1",
+            }},
+            {"turn_id": "turn-1", "event": {
+                "type": "goal.observe.result", "provider_node_id": "node-B", "attempt": 1,
+                "tool": "read_ticket", "call_id": "read-1",
+            }},
+            # B disappears after its durable request. C safely reconciles the same logical action
+            # under a different native call id and the Goal-wide idempotency key.
+            {"turn_id": "turn-1", "event": {
+                "type": "goal.act.request", "provider_node_id": "node-B", "attempt": 1,
+                "tool": "send_reply", "call_id": "act-B", "idempotency_key": key,
+            }},
+            {"turn_id": "turn-1", "event": {
+                "type": "goal.act.request", "provider_node_id": "node-C", "attempt": 2,
+                "tool": "send_reply", "call_id": "act-C", "idempotency_key": key,
+            }},
+            {"turn_id": "turn-1", "event": {
+                "type": "goal.act.result", "provider_node_id": "node-C", "attempt": 2,
+                "tool": "send_reply", "call_id": "act-C", "idempotency_key": key,
+            }},
+            # A killed read is safe to repeat, so an unmatched observe/verify request is valid.
+            {"turn_id": "turn-1", "event": {
+                "type": "goal.verify.request", "provider_node_id": "node-C", "attempt": 2,
+                "tool": "check_ticket", "call_id": "verify-1",
+            }},
+        ],
+        "eval_runs": [],
+    }
+    assert _verify_evidence(record, min_execution_nodes=2) == []
+
+
+def test_goal_evidence_refuses_ambiguous_or_unattributed_tool_events():
+    from cli.goal import _verify_evidence
+
+    key = "grid-goal-" + "b" * 64
+    record = {
+        "schema_version": 1,
+        "goal": {"status": "complete", "evals": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
+        "turns": [{
+            "id": "turn-1", "attempt": 1, "state": "completed", "agent_kind": "codex",
+            "provider_node_id": "node-A", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [
+            {"turn_id": "turn-1", "event": {
+                "type": "goal.act.request", "tool": "missing-attribution", "call_id": "bad",
+                "idempotency_key": "spoofed",
+            }},
+            {"turn_id": "turn-1", "event": {
+                "type": "goal.act.request", "provider_node_id": "node-A", "attempt": 1,
+                "tool": "unresolved", "call_id": "act-1", "idempotency_key": key,
+            }},
+            {"turn_id": "turn-1", "event": {
+                "type": "goal.act.result", "provider_node_id": "node-A", "attempt": 1,
+                "tool": "orphan", "call_id": "act-2",
+                "idempotency_key": "grid-goal-" + "c" * 64,
+            }},
+            {"turn_id": "turn-1", "event": {
+                "type": "goal.observe.result", "provider_node_id": "node-A", "attempt": 1,
+                "tool": "read_ticket", "call_id": "read-1",
+            }},
+        ],
+        "eval_runs": [],
+    }
+    failures = _verify_evidence(record)
+    assert any("has no valid provider_node_id" in item for item in failures)
+    assert any("has no valid attempt" in item for item in failures)
+    assert any("has no valid idempotency_key" in item for item in failures)
+    assert any("orphan/act-2 has no matching request" in item for item in failures)
+    assert any("unresolved/act-1 has no durable result" in item for item in failures)
+    assert any("read_ticket/read-1 has no matching request" in item for item in failures)
+
+
 def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
     from cli.goal import _verify_evidence
 

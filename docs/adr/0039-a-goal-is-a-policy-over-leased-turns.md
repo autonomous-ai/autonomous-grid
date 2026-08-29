@@ -84,7 +84,11 @@ committed outcome without repeating the mutation. External keys are scoped to Go
 canonical arguments, which also prevents a later independent-eval repair turn from repeating the
 same mutation. Relay-internal actions remain turn-scoped because their authority belongs to the
 lease. This yields a durable action trajectory even across the otherwise unavoidable crash window
-after a remote commit.
+after a remote commit. The relay overwrites provider-supplied Goal event attribution with the
+authenticated live lease holder and attempt. The evidence verifier rejects orphan results,
+unresolved mutations, malformed idempotency keys, and tool events without that attribution; a
+killed attempt's unmatched action request is valid only when a later result reconciles the same
+Goal-wide key.
 
 ### Native Goal mechanisms remain authoritative progress loops
 
