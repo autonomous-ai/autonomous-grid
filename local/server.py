@@ -1620,6 +1620,20 @@ def _load_score(load: dict[str, Any]) -> float:
     return 0.0
 
 
+def _queue_depth_score(load: dict[str, Any]) -> float:
+    """Return bounded engine-queued work without trusting malformed telemetry."""
+
+    queued = load.get("queue_depth")
+    if (
+        not isinstance(queued, bool)
+        and isinstance(queued, (int, float))
+        and math.isfinite(queued)
+        and queued >= 0
+    ):
+        return min(float(queued), float(MAX_COUNTER))
+    return 0.0
+
+
 def _route_priority(node: Node) -> float:
     """Prefer fully accepting hosts while still using throttled capacity when needed."""
 
@@ -1805,8 +1819,13 @@ def _route_expected_completion_score(
             requested_output_tokens / estimated_throughput * 1_000.0,
         )
     active = _load_score(node.load)
+    queued = _queue_depth_score(node.load)
     limit = _node_concurrency_limit(node)
-    service_waves = active + 1.0 if limit is None else (active + 1.0) / max(1, limit)
+    service_waves = (
+        active + queued + 1.0
+        if limit is None
+        else (active + queued + 1.0) / max(1, limit)
+    )
     return estimated_latency * service_waves
 
 

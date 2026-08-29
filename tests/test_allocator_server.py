@@ -1490,6 +1490,36 @@ def test_router_normalizes_load_by_heterogeneous_engine_capacity(tmp_path):
     assert server_module._choose_engine(app, "qwen") is narrow
 
 
+def test_router_accounts_for_engine_queue_in_expected_completion(tmp_path):
+    app, client, _ = _app(tmp_path)
+    _managed_engine(client, host_id="a-queued", model_id="qwen", active_tasks=0)
+    _managed_engine(client, host_id="z-clear", model_id="qwen", active_tasks=0)
+    queued = app.state.nodes[engine_node_id("a-queued", "qwen")]
+    clear = app.state.nodes[engine_node_id("z-clear", "qwen")]
+    queued.allocator["max_concurrency"] = 4
+    clear.allocator["max_concurrency"] = 4
+    queued.load["queue_depth"] = 8
+
+    assert server_module._choose_engine(app, "qwen") is clear
+    assert server_module._route_expected_completion_score(
+        queued,
+        model="qwen",
+        now=1_000,
+        latency_baseline_ms=100,
+    ) == pytest.approx(225)
+    assert server_module._route_expected_completion_score(
+        clear,
+        model="qwen",
+        now=1_000,
+        latency_baseline_ms=100,
+    ) == pytest.approx(25)
+
+    # Invalid or hostile telemetry is neutral rather than poisoning routing with NaN/inf.
+    for invalid in (True, -1, float("nan"), float("inf"), "8"):
+        queued.load["queue_depth"] = invalid
+        assert server_module._queue_depth_score(queued.load) == 0
+
+
 def test_router_keeps_unknown_capacity_conservative_and_zero_capacity_closed(tmp_path):
     app, client, _ = _app(tmp_path)
     _managed_engine(client, host_id="unknown", model_id="qwen", active_tasks=1)
