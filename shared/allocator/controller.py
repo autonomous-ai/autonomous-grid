@@ -375,7 +375,10 @@ class AllocatorController:
                 action
                 for action in sorted(
                     self._commands.values(),
-                    key=lambda item: (item.not_before, item.created_at, item.action_id),
+                    # Python's stable sort retains the controller queue's insertion order for
+                    # same-tick commands. That order is the reconciler's service priority; a
+                    # content-hashed action ID must not randomly invert it at delivery.
+                    key=lambda item: (item.not_before, item.created_at),
                 )
                 if action.node_id == node_id
                 and action.not_before <= timestamp

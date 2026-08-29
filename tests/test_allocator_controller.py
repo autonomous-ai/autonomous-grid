@@ -194,6 +194,56 @@ def test_higher_priority_service_replaces_undelivered_pending_warm():
     )
 
 
+def test_command_delivery_preserves_reconciler_priority_for_same_tick(
+    monkeypatch,
+    tmp_path,
+):
+    state_path = tmp_path / "controller.json"
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        state_path=state_path,
+        reconcile_policy=ReconcilePolicy(
+            max_concurrent_mutations=2,
+            max_mutations_per_node=2,
+        ),
+    )
+    controller.put_profile(
+        profile("low", pinned_nodes=("shared",), priority=1)
+    )
+    controller.put_profile(
+        profile("high", pinned_nodes=("shared",), priority=1_000)
+    )
+    machine = NodeSnapshot(
+        "shared",
+        32_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        cached_models=("high", "low"),
+        last_heartbeat=10,
+    )
+    original_stable_id = MutationAction.stable_id
+
+    def inverted_stable_id(kind, node_id, model_id, transition=""):
+        if "controller-attempt-v1" in transition:
+            return "a-low" if model_id == "low" else "z-high"
+        return original_stable_id(kind, node_id, model_id, transition)
+
+    monkeypatch.setattr(MutationAction, "stable_id", inverted_stable_id)
+
+    result = controller.tick((machine,), now=10)
+    delivered = controller.commands_for("shared", now=10)
+
+    assert [action.model_id for action in result.executable_actions] == [
+        "high",
+        "low",
+    ]
+    assert [action.action_id for action in delivered] == ["z-high", "a-low"]
+    restored = AllocatorController(state_path=state_path)
+    assert [
+        action.action_id for action in restored.commands_for("shared", now=10)
+    ] == ["z-high", "a-low"]
+
+
 def test_higher_priority_service_does_not_cancel_delivered_pending_warm():
     controller = AllocatorController(
         mode=AllocatorMode.AUTOMATIC,
