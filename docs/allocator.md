@@ -267,7 +267,8 @@ Budget and host-price mutations acquire the same durable controller term/lease u
 allocation before changing state. A second live control-plane process sharing the state path gets
 HTTP 409 and cannot last-writer-win the active leader's economics, including while both controllers
 are still in recommend mode. After release or lease expiry, takeover advances the term before the
-successor writes.
+successor reloads the latest durable prices, budget, demand, and command state, then writes. This
+prevents an older standby snapshot from erasing changes made during the departed leader's term.
 
 An operator may also set a durable hard fleet ceiling with
 `grid allocator budget --max-hourly-cost USD`. Cost is charged once per selected physical host,

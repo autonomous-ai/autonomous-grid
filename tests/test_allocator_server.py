@@ -673,7 +673,10 @@ def test_economics_writes_are_single_leader_even_before_automatic_mode(tmp_path)
         headers=AUTH,
     )
     assert takeover.status_code == 200, takeover.text
-    assert second_client.get("/allocator/status").json()["authority"]["term"] == 2
+    status = second_client.get("/allocator/status").json()
+    assert status["authority"]["term"] == 2
+    assert status["cost"]["operator_host_prices"] == {"host-1": 0.1}
+    assert status["planner_policy"]["max_hourly_cost"] == 1.0
 
 
 def test_stale_ack_is_ignored_without_poisoning_later_receipts(tmp_path):

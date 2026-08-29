@@ -158,6 +158,11 @@ class AllocatorController:
             return self._last_plan
 
     @property
+    def controller_term(self) -> int:
+        with self._lock:
+            return self._controller_term
+
+    @property
     def host_prices(self) -> dict[str, float]:
         """Return a copy of controller-owned physical-host prices."""
 

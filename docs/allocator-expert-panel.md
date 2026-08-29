@@ -104,7 +104,9 @@ Two subsequent changes closed more of the follow-up. Equal-share scarcity ties n
 cohort/SLO harm and measured load rather than model-name order (`39a27ba`), with a name-swap
 metamorphic test. Budget and price writes also acquire the durable controller authority lease before
 mutation, so a live standby receives HTTP 409 and takeover advances the term even if both processes
-have not yet entered automatic mode.
+have not yet entered automatic mode. A higher-term successor reloads the last durable controller
+state before persisting its term, preventing stale standby memory from erasing the former leader's
+host prices or budget.
 
 Open findings are CAS-versioned economics transactions across stale post-takeover controller state,
 durable acknowledgement audit records, and richer per-cohort loss previews. Those are the next

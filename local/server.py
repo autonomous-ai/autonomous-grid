@@ -2626,7 +2626,18 @@ def _ensure_allocator_authority(app: FastAPI) -> None:
         )
         app.state.allocator_authority = authority
     grant = authority.ensure()
-    _allocator(app).update_authority(
+    controller = _allocator(app)
+    if grant.term > controller.controller_term:
+        # A standby may have been constructed before the former leader's latest writes. The
+        # higher authority term proves exclusive succession, so reload the durable state before
+        # persisting the new term; otherwise stale in-memory policy could overwrite the departed
+        # leader's prices, budget, demand, or pending commands during takeover.
+        state_path = controller.state_path
+        if state_path is None:
+            raise RuntimeError("allocator authority takeover requires durable controller state")
+        controller = AllocatorController(state_path=state_path)
+        app.state.allocator = controller
+    controller.update_authority(
         grant.term,
         grant.leader_id,
         grant.expires_at,
