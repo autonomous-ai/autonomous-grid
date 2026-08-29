@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 from collections import defaultdict
 from dataclasses import replace
 
@@ -234,6 +235,93 @@ def test_workday_ramp_and_spike_scale_out_without_overcommit_or_reshuffle():
         now=1_120,
     )
     assert reordered == spike
+
+
+def test_seeded_four_node_evolution_preserves_raw_and_incremental_memory_safety():
+    """Continuously perturb logical hosts instead of testing only isolated snapshots."""
+
+    rng = random.Random(0x4A110CA7E)
+    policy = PlannerPolicy(memory_headroom_fraction=0.05, node_ttl_seconds=90)
+    planner = PlacementPlanner(policy)
+    models = (
+        profile("assistant", 8_000, max_replicas=4, priority=300),
+        profile("code", 12_000, max_replicas=3, priority=400),
+        profile("embeddings", 4_000, max_replicas=3, priority=100),
+    )
+    nodes = tuple(
+        host(
+            f"logical-{index}",
+            capacity_mb=32_000,
+            cached=("assistant", "code", "embeddings"),
+            now=1_000,
+        )
+        for index in range(4)
+    )
+
+    for cycle in range(500):
+        now = 1_000 + cycle
+        evolved = tuple(
+            replace(
+                node,
+                reserved_mb=rng.choice((2_000, 6_000, 10_000, 14_000)),
+                state=rng.choices(
+                    (NodeState.ACCEPTING, NodeState.THROTTLED, NodeState.PAUSED),
+                    weights=(8, 2, 1),
+                )[0],
+                last_heartbeat=now,
+            )
+            for node in nodes
+        )
+        demand = forecasts(
+            now,
+            assistant=rng.uniform(0, 2.5),
+            code=rng.uniform(0, 2.0),
+            embeddings=rng.uniform(0, 1.5),
+        )
+
+        plan = planner.plan(evolved, models, demand, now=now)
+        reordered = planner.plan(
+            tuple(reversed(evolved)),
+            tuple(reversed(models)),
+            tuple(reversed(demand)),
+            now=now,
+        )
+
+        assert plan == reordered
+        assert not plan.desired_pairs.intersection(plan.preempted_pairs)
+        desired_memory: dict[str, int] = defaultdict(int)
+        incremental_memory: dict[str, int] = defaultdict(int)
+        node_by_id = {node.node_id: node for node in evolved}
+        for assignment in plan.assignments:
+            desired_memory[assignment.node_id] += assignment.memory_mb
+            residency = node_by_id[assignment.node_id].residency(assignment.model_id)
+            incremental_memory[assignment.node_id] += (
+                assignment.memory_mb
+                if residency is None or residency.state == ResidencyState.CACHED
+                else max(0, assignment.memory_mb - residency.memory_mb)
+            )
+        for node in evolved:
+            raw_budget = node.capacity_mb - node.reserved_mb
+            admission_budget = raw_budget * (1 - policy.memory_headroom_fraction)
+            if node.state == NodeState.THROTTLED:
+                raw_budget = math.floor(
+                    raw_budget * policy.throttled_capacity_fraction
+                )
+                admission_budget *= policy.throttled_capacity_fraction
+            assert desired_memory[node.node_id] <= raw_budget
+            live_memory = sum(
+                residency.memory_mb
+                for residency in node.residencies
+                if residency.state != ResidencyState.CACHED
+            )
+            assert incremental_memory[node.node_id] <= max(
+                0,
+                math.floor(admission_budget) - live_memory,
+            )
+
+        # Advance actual state only after checking the transition plan. This repeatedly feeds
+        # ready incumbents back through later reserve growth and host-state changes.
+        nodes = materialize(plan, evolved, now=now)
 
 
 def test_scale_down_hysteresis_holds_recent_replicas_then_releases_them():
