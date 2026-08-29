@@ -126,6 +126,24 @@ def _verify_evidence(record: dict) -> list[str]:
 
     evals = goal.get("evals") if isinstance(goal.get("evals"), list) else []
     runs = record.get("eval_runs") if isinstance(record.get("eval_runs"), list) else []
+    attempt_events = (record.get("attempt_events")
+                      if isinstance(record.get("attempt_events"), list) else [])
+    for index, turn in enumerate(turns, 1):
+        if not isinstance(turn, dict):
+            continue
+        attempt = turn.get("attempt")
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 1:
+            continue
+        retry = [item for item in attempt_events if isinstance(item, dict)
+                 and item.get("turn_id") == turn.get("id")
+                 and isinstance(item.get("event"), dict)
+                 and item["event"].get("type") == "task.retry"
+                 and item["event"].get("attempt") == attempt - 1
+                 and item["event"].get("previous_provider_id")]
+        if not retry:
+            failures.append(
+                f"turn {index} attempt {attempt} has no authoritative retry event naming the "
+                "previous provider")
     final_commit = turns[-1].get("result_commit") if isinstance(turns[-1], dict) else None
     for spec in evals:
         if not isinstance(spec, dict):

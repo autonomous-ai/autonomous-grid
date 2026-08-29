@@ -173,6 +173,31 @@ def test_goal_evidence_verify_refuses_pruned_training_objects():
     assert any("turn branches have been pruned" in item for item in failures)
 
 
+def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
+    from cli.goal import _verify_evidence
+
+    record = {
+        "goal": {"status": "complete", "evals": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
+        "turns": [{
+            "id": "turn-1", "attempt": 2, "state": "completed", "agent_kind": "codex",
+            "provider_node_id": "node-B", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [],
+        "eval_runs": [],
+    }
+    assert any("no authoritative retry event" in item for item in _verify_evidence(record))
+
+    record["attempt_events"].append({
+        "turn_id": "turn-1",
+        "event": {"type": "task.retry", "attempt": 1,
+                  "previous_provider_id": "node-A", "reason": "lease_expired"},
+    })
+    assert _verify_evidence(record) == []
+
+
 def test_goal_status_shows_budget_blocker_and_distributed_children(capsys):
     from cli.goal import _show
 
