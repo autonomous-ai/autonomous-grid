@@ -22,8 +22,11 @@ from typing import Any
 from urllib.parse import urlsplit
 
 NODE_TOKEN_PREFIX = "grid-node-v1"
+TENANT_ATTESTATION_PREFIX = "grid-tenant-v1"
 DEFAULT_NODE_TOKEN_TTL_SECONDS = 365 * 24 * 60 * 60
+DEFAULT_TENANT_ATTESTATION_TTL_SECONDS = 300
 _SIGNING_CONTEXT = b"autonomous-grid allocator node credential v1\0"
+_TENANT_SIGNING_CONTEXT = b"autonomous-grid allocator tenant attestation v1\0"
 _HOST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}\Z")
 
 
@@ -116,6 +119,86 @@ def verify_node_token(
     return credential
 
 
+def mint_tenant_attestation(
+    operator_token: str,
+    affinity_digest: bytes,
+    *,
+    ttl_seconds: int = DEFAULT_TENANT_ATTESTATION_TTL_SECONDS,
+    now: float | None = None,
+) -> str:
+    """Attest one opaque affinity digest without disclosing or persisting an identity.
+
+    Only a trusted ingress that already authenticated a tenant should mint this short-lived proof.
+    The allocator uses it solely to decide whether anonymous breadth evidence may reclaim capacity;
+    ordinary caller-chosen affinity keys remain useful for sticky routing and diagnostics but never
+    gain that authority.
+    """
+
+    secret = _operator_secret(operator_token)
+    digest = _tenant_digest(affinity_digest)
+    issued_at = _whole_time(time.time() if now is None else now)
+    if (
+        isinstance(ttl_seconds, bool)
+        or not isinstance(ttl_seconds, int)
+        or not 1 <= ttl_seconds <= DEFAULT_TENANT_ATTESTATION_TTL_SECONDS
+    ):
+        raise ValueError(
+            "tenant attestation TTL must be a positive integer no greater than "
+            f"{DEFAULT_TENANT_ATTESTATION_TTL_SECONDS} seconds"
+        )
+    expires_at = issued_at + ttl_seconds
+    payload = _encode_payload({"expires_at": expires_at, "issued_at": issued_at})
+    signature = hmac.new(
+        secret,
+        _TENANT_SIGNING_CONTEXT + digest + b"\0" + payload.encode(),
+        hashlib.sha256,
+    ).digest()
+    return f"{TENANT_ATTESTATION_PREFIX}.{payload}.{_base64url(signature)}"
+
+
+def verify_tenant_attestation(
+    attestation: str,
+    operator_token: str,
+    affinity_digest: bytes,
+    *,
+    now: float | None = None,
+) -> None:
+    """Verify that trusted ingress attested this exact opaque affinity digest."""
+
+    secret = _operator_secret(operator_token)
+    digest = _tenant_digest(affinity_digest)
+    prefix, payload, supplied_signature = _attestation_parts(attestation)
+    del prefix
+    expected_signature = _base64url(
+        hmac.new(
+            secret,
+            _TENANT_SIGNING_CONTEXT + digest + b"\0" + payload.encode(),
+            hashlib.sha256,
+        ).digest()
+    )
+    if not hmac.compare_digest(supplied_signature, expected_signature):
+        raise ValueError("tenant attestation signature is invalid")
+    try:
+        decoded: Any = json.loads(
+            base64.urlsafe_b64decode(_padding(payload)).decode("utf-8")
+        )
+        if not isinstance(decoded, dict):
+            raise TypeError
+        issued_at = int(decoded["issued_at"])
+        expires_at = int(decoded["expires_at"])
+    except (KeyError, TypeError, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("tenant attestation payload is invalid") from exc
+    timestamp = _whole_time(time.time() if now is None else now)
+    if (
+        issued_at < 0
+        or expires_at <= issued_at
+        or expires_at - issued_at > DEFAULT_TENANT_ATTESTATION_TTL_SECONDS
+    ):
+        raise ValueError("tenant attestation has an invalid lifetime")
+    if timestamp < issued_at or timestamp >= expires_at:
+        raise ValueError("tenant attestation is not currently valid")
+
+
 def secure_control_transport(url: str) -> bool:
     """Return whether bearer credentials can safely be sent to ``url`` by default."""
 
@@ -174,6 +257,26 @@ def _token_parts(token: str) -> tuple[str, str, str]:
     if len(parts) != 3 or parts[0] != NODE_TOKEN_PREFIX or not parts[1] or not parts[2]:
         raise ValueError("allocator node credential format is invalid")
     return parts[0], parts[1], parts[2]
+
+
+def _attestation_parts(value: str) -> tuple[str, str, str]:
+    if not isinstance(value, str):
+        raise TypeError("tenant attestation must be text")
+    parts = value.strip().split(".")
+    if (
+        len(parts) != 3
+        or parts[0] != TENANT_ATTESTATION_PREFIX
+        or not parts[1]
+        or not parts[2]
+    ):
+        raise ValueError("tenant attestation format is invalid")
+    return parts[0], parts[1], parts[2]
+
+
+def _tenant_digest(value: bytes) -> bytes:
+    if not isinstance(value, bytes) or len(value) != hashlib.sha256().digest_size:
+        raise ValueError("tenant attestation requires a SHA-256 affinity digest")
+    return value
 
 
 def _encode_payload(value: dict[str, Any]) -> str:

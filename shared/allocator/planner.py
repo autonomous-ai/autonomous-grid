@@ -175,6 +175,8 @@ class PlacementPlanner:
         for model in model_list:
             rejected: Counter[str] = Counter()
             eligible: list[tuple[float, float, str]] = []
+            preemptible: list[tuple[float, float, str, tuple[str, ...]]] = []
+            hard_compatible_nodes = 0
             if model.max_replicas <= 0:
                 rejected["model is disabled"] += 1
             else:
@@ -192,87 +194,125 @@ class PlacementPlanner:
                     if node.state == NodeState.THROTTLED:
                         allocatable *= self.policy.throttled_capacity_fraction
                     allocatable = max(0, math.floor(allocatable))
-                    usable = max(
-                        0,
-                        math.floor(
-                            allocatable * (1.0 - self.policy.memory_headroom_fraction)
-                        ),
-                    )
-                    live_memory = sum(
-                        item.memory_mb
-                        for item in node.residencies
-                        if not _adds_model_slot(item)
-                    )
-                    incremental = _incremental_memory_mb(
-                        residency,
-                        model.memory_for(node.runtimes),
-                    )
-                    occupied = sum(
-                        not _adds_model_slot(item) for item in node.residencies
-                    )
-                    adds_slot = _adds_model_slot(residency)
                     if reason is None and model.memory_for(node.runtimes) > allocatable:
                         reason = "model exceeds allocatable memory"
-                    if reason is None and incremental > max(0, usable - live_memory):
-                        reason = "insufficient current memory headroom"
                     if (
                         reason is None
                         and node.max_models is not None
-                        and (
-                            node.max_models == 0
-                            or (adds_slot and occupied >= node.max_models)
-                        )
+                        and node.max_models == 0
                     ):
-                        reason = "model slots are full"
-                    if reason is None and not _colocation_allowed(
-                        node,
-                        model,
-                        (),
-                        profile_by_id,
-                    ):
-                        reason = "colocation policy rejects the model"
+                        reason = "model slots are disabled"
                     if reason is not None:
                         rejected[reason] += 1
                         continue
+                    hard_compatible_nodes += 1
 
-                    if (
-                        residency is not None
-                        and residency.state == ResidencyState.READY
-                        and model.matches_artifact(residency)
-                    ):
-                        startup_seconds = 0.0
-                    elif (
-                        residency is not None
-                        and model.matches_artifact(residency)
-                        and residency.state
-                        in (
-                            ResidencyState.CACHED,
-                            ResidencyState.LOADING,
-                            ResidencyState.WARMING,
-                            ResidencyState.DRAINING,
-                        )
-                    ):
-                        startup_seconds = model.warm_seconds
-                    else:
-                        startup_seconds = model.load_seconds + model.warm_seconds
-                    eligible.append(
-                        (
-                            float(node.cost_per_hour),
-                            float(startup_seconds),
-                            node.node_id,
-                        )
+                    reason = _portfolio_dynamic_fit_reason(
+                        node,
+                        model,
+                        profile_by_id,
+                        self.policy,
                     )
+
+                    startup_seconds = _portfolio_startup_seconds(residency, model)
+                    if reason is None:
+                        eligible.append(
+                            (
+                                float(node.cost_per_hour),
+                                float(startup_seconds),
+                                node.node_id,
+                            )
+                        )
+                        continue
+                    rejected[reason] += 1
+
+                    removable = sorted(
+                        (
+                            item
+                            for item in node.residencies
+                            if item.model_id != model.model_id
+                            and not _adds_model_slot(item)
+                            and item.state
+                            in (
+                                ResidencyState.READY,
+                                ResidencyState.DRAINING,
+                                ResidencyState.FAILED,
+                            )
+                            and item.managed
+                            and not item.pinned
+                            and not node.manually_managed
+                            and (victim := profile_by_id.get(item.model_id)) is not None
+                            and victim.min_replicas == 0
+                            and not victim.pinned_nodes
+                            and victim.priority <= model.priority
+                        ),
+                        key=lambda item: (
+                            profile_by_id[item.model_id].priority,
+                            item.active_requests,
+                            _preemption_state_cost(item.state),
+                            -item.memory_mb,
+                            item.model_id,
+                        ),
+                    )
+                    selected: list[ModelResidency] = []
+                    for victim_residency in removable:
+                        selected.append(victim_residency)
+                        projected = replace(
+                            node,
+                            residencies=tuple(
+                                item for item in node.residencies if item not in selected
+                            ),
+                        )
+                        if (
+                            _portfolio_dynamic_fit_reason(
+                                projected,
+                                model,
+                                profile_by_id,
+                                self.policy,
+                            )
+                            is None
+                        ):
+                            preemptible.append(
+                                (
+                                    float(node.cost_per_hour),
+                                    float(startup_seconds),
+                                    node.node_id,
+                                    tuple(item.model_id for item in selected),
+                                )
+                            )
+                            break
 
             if eligible:
                 cost, startup_seconds, node_id = min(eligible)
                 hints[model.model_id] = {
                     "model_id": model.model_id,
                     "feasible": True,
+                    "feasible_now": True,
+                    "hard_compatible": True,
+                    "feasible_after_preemption": False,
                     "eligible_nodes": len(eligible),
                     "best_node_id": node_id,
                     "cost_per_hour": cost,
                     "startup_seconds": startup_seconds,
                     "reason": "fleet-feasible",
+                }
+            elif preemptible:
+                cost, startup_seconds, node_id, victims = min(preemptible)
+                hints[model.model_id] = {
+                    "model_id": model.model_id,
+                    # Preserve the old field as current-headroom feasibility. Callers must opt in
+                    # to the separately explained preemption path.
+                    "feasible": False,
+                    "feasible_now": False,
+                    "hard_compatible": True,
+                    "feasible_after_preemption": True,
+                    "eligible_nodes": 0,
+                    "preemption_eligible_nodes": len(preemptible),
+                    "best_node_id": node_id,
+                    "cost_per_hour": cost,
+                    "startup_seconds": startup_seconds,
+                    "preemption_victims": list(victims),
+                    "reason": "fleet-feasible after planner-authorized preemption",
                 }
             else:
                 reason = "no live node is currently eligible"
@@ -287,6 +327,9 @@ class PlacementPlanner:
                 hints[model.model_id] = {
                     "model_id": model.model_id,
                     "feasible": False,
+                    "feasible_now": False,
+                    "hard_compatible": bool(hard_compatible_nodes),
+                    "feasible_after_preemption": False,
                     "eligible_nodes": 0,
                     "best_node_id": "",
                     "cost_per_hour": 0.0,
@@ -1677,6 +1720,69 @@ class PlacementPlanner:
         )
 
 
+def _portfolio_dynamic_fit_reason(
+    node: NodeSnapshot,
+    model: ModelProfile,
+    profile_by_id: Mapping[str, ModelProfile],
+    policy: PlannerPolicy,
+) -> str | None:
+    """Check occupancy-dependent fit after hard node compatibility already passed."""
+
+    allocatable = node.capacity_mb - node.reserved_mb
+    if node.state == NodeState.THROTTLED:
+        allocatable *= policy.throttled_capacity_fraction
+    allocatable = max(0, math.floor(allocatable))
+    usable = max(
+        0,
+        math.floor(allocatable * (1.0 - policy.memory_headroom_fraction)),
+    )
+    residency = node.residency(model.model_id)
+    live_memory = sum(
+        item.memory_mb for item in node.residencies if not _adds_model_slot(item)
+    )
+    incremental = _incremental_memory_mb(
+        residency,
+        model.memory_for(node.runtimes),
+    )
+    if incremental > max(0, usable - live_memory):
+        return "insufficient current memory headroom"
+    occupied = sum(not _adds_model_slot(item) for item in node.residencies)
+    if (
+        node.max_models is not None
+        and _adds_model_slot(residency)
+        and occupied >= node.max_models
+    ):
+        return "model slots are full"
+    if not _colocation_allowed(node, model, (), profile_by_id):
+        return "colocation policy rejects the model"
+    return None
+
+
+def _portfolio_startup_seconds(
+    residency: ModelResidency | None,
+    model: ModelProfile,
+) -> float:
+    if (
+        residency is not None
+        and residency.state == ResidencyState.READY
+        and model.matches_artifact(residency)
+    ):
+        return 0.0
+    if (
+        residency is not None
+        and model.matches_artifact(residency)
+        and residency.state
+        in (
+            ResidencyState.CACHED,
+            ResidencyState.LOADING,
+            ResidencyState.WARMING,
+            ResidencyState.DRAINING,
+        )
+    ):
+        return model.warm_seconds
+    return model.load_seconds + model.warm_seconds
+
+
 def _placement_demand_urgency(
     model: ModelProfile,
     forecast: DemandForecast | None,
@@ -1702,13 +1808,11 @@ def _placement_demand_urgency(
         return 2
     if (
         forecast.correlation_sources
-        and forecast.active_cohorts >= 3
-        and forecast.sample_count >= 12
-        and forecast.cohort_slo_breach_rate >= 0.50
+        and forecast.trusted_cohort_graduated
     ):
-        # Broad, sustained SLO failure across anonymous affinity cohorts is real service pressure,
-        # not a speculative correlation. It may unlock idle/lower-urgency capacity, while one
-        # caller or anonymous traffic remains a non-destructive portfolio canary.
+        # Only short-lived evidence signed by trusted ingress can turn broad cohort SLO failure
+        # into ordinary service pressure. Caller-selected affinity buckets remain useful bounded
+        # telemetry but can never gain destructive preemption authority.
         return 2
     if forecast.correlation_sources and forecast.correlated_requests_per_minute > 0:
         return 1

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import ssl
 import threading
@@ -15,7 +16,13 @@ from cli import _main as cli_main
 from local import config, runtime
 from local import server as server_module
 from local.server import create_app
-from shared.allocator.auth import control_node_id, engine_node_id, mint_node_token
+from shared.allocator.auth import (
+    control_node_id,
+    engine_node_id,
+    mint_node_token,
+    mint_tenant_attestation,
+)
+from shared.allocator.intelligence import anonymous_tenant_cohort
 
 TOKEN = "allocator-test-token"
 AUTH = {"X-Grid-Allocator-Token": TOKEN}
@@ -133,7 +140,60 @@ def test_allocator_observes_only_anonymous_fixed_affinity_cohorts(tmp_path):
     status = client.get("/allocator/status").json()
     assert status["cohort_summaries"][0]["workload"] == "coding"
     assert status["cohort_summaries"][0]["active_cohorts"] == 1
+    assert status["cohort_summaries"][0]["trusted_active_cohorts"] == 0
+    assert status["cohort_summaries"][0]["graduated_allocation_pressure"] is False
     assert private_affinity not in json.dumps(status)
+
+
+def test_only_control_signed_affinity_cohorts_graduate_allocator_pressure(tmp_path):
+    _, client, _ = _app(tmp_path)
+    principals: list[tuple[str, bytes]] = []
+    cohorts: set[str] = set()
+    index = 0
+    while len(principals) < 3:
+        affinity = f"authenticated-principal-{index}"
+        digest = hashlib.sha256(affinity.encode()).digest()
+        cohort = anonymous_tenant_cohort(digest)
+        if cohort not in cohorts:
+            principals.append((affinity, digest))
+            cohorts.add(cohort)
+        index += 1
+
+    for affinity, digest in principals:
+        attestation = mint_tenant_attestation(TOKEN, digest)
+        for _ in range(4):
+            response = client.post(
+                "/v1/chat/completions",
+                headers={
+                    "X-Grid-Affinity-Key": affinity,
+                    "X-Grid-Tenant-Attestation": attestation,
+                },
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "debug this code"}],
+                },
+            )
+            assert response.status_code == 503
+
+    status = client.get("/allocator/status").json()
+    summary = status["cohort_summaries"][0]
+    assert summary["active_cohorts"] == 3
+    assert summary["trusted_active_cohorts"] == 3
+    assert summary["trusted_qualifying_cohorts"] == 3
+    assert summary["graduated_allocation_pressure"] is True
+    assert all(affinity not in json.dumps(status) for affinity, _ in principals)
+
+    bad = client.post(
+        "/v1/chat/completions",
+        headers={
+            "X-Grid-Affinity-Key": principals[0][0],
+            "X-Grid-Tenant-Attestation": mint_tenant_attestation(
+                "wrong-control-token", principals[0][1]
+            ),
+        },
+        json={"model": "auto", "messages": []},
+    )
+    assert bad.status_code == 403
 
 
 def _queue_pinned_replacement_drain(app, client: TestClient):

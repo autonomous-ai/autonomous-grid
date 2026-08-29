@@ -788,7 +788,15 @@ class AllocatorController:
                     now=timestamp,
                     placement_hints=placement_hints,
                 )
-                cohort_summaries = self.intelligence.cohort_summaries(now=timestamp)
+                projected_cohorts = {
+                    str(row.get("workload") or ""): dict(row["cohort_evidence"])
+                    for row in portfolio_projections
+                    if row.get("workload") and row.get("cohort_evidence")
+                }
+                cohort_summaries = tuple(
+                    projected_cohorts.get(str(row.get("workload") or ""), row)
+                    for row in self.intelligence.cohort_summaries(now=timestamp)
+                )
                 model_workload_outcomes = self.intelligence.outcomes
             return {
                 "schema_version": SCHEMA_VERSION,

@@ -42,6 +42,7 @@ _TENANT_CLASS_PATTERN = re.compile(r"cohort-(?:0[0-9]|1[0-5])\Z")
 _ACTIVE_COHORT_SECONDS = 300.0
 _GRADUATION_COHORTS = 3
 _GRADUATION_SAMPLES = 12
+_GRADUATION_SAMPLES_PER_COHORT = 4
 _GRADUATION_BREACH_RATE = 0.50
 _KEYWORDS = {
     "coding": frozenset(
@@ -88,6 +89,7 @@ class RequestFeatures:
     input_units: int = 0
     requested_output_units: int = 0
     tenant_class: str = "default"
+    tenant_attested: bool = False
 
     def __post_init__(self) -> None:
         if not self.endpoint or len(self.endpoint) > 256:
@@ -110,6 +112,8 @@ class RequestFeatures:
         ):
             raise ValueError("tenant_class must be an anonymous bounded cohort")
         object.__setattr__(self, "tenant_class", tenant)
+        if not isinstance(self.tenant_attested, bool):
+            raise ValueError("tenant_attested must be a boolean")
 
 
 def anonymous_tenant_cohort(digest: bytes | None) -> str:
@@ -195,7 +199,11 @@ class WorkloadIntelligence:
             timestamp=observed_at,
         )
         self.cohort_demand.observe(
-            _cohort_key(features.workload, features.tenant_class),
+            _cohort_key(
+                features.workload,
+                features.tenant_class,
+                attested=features.tenant_attested,
+            ),
             service_seconds=service_seconds,
             latency_ms=measured_latency,
             queue_depth=queue_depth,
@@ -302,7 +310,17 @@ class WorkloadIntelligence:
                 for profile in profile_list
                 if profile.max_replicas > 0
                 and profile.workload_score(workload) > 0
-                and _placement_feasible(profile.model_id, placement_hints)
+                and _placement_feasible(
+                    profile.model_id,
+                    placement_hints,
+                    allow_preemption=bool(
+                        self._cohort_summary(
+                            workload,
+                            latency_slo_ms=profile.latency_slo_ms,
+                            now=now,
+                        )["graduated_allocation_pressure"]
+                    ),
+                )
             ]
             if not candidates:
                 continue
@@ -341,6 +359,13 @@ class WorkloadIntelligence:
                 active_cohorts=int(cohort_summary["active_cohorts"]),
                 cohort_slo_breach_rate=float(cohort_summary["slo_breach_rate"]),
                 cohort_fairness=float(cohort_summary["fairness"]),
+                trusted_active_cohorts=int(cohort_summary["trusted_active_cohorts"]),
+                trusted_cohort_slo_breach_rate=float(
+                    cohort_summary["trusted_slo_breach_rate"]
+                ),
+                trusted_cohort_graduated=bool(
+                    cohort_summary["graduated_allocation_pressure"]
+                ),
             )
             merged[chosen.model_id] = _merge_forecasts(merged.get(chosen.model_id), projected)
         return tuple(merged[key] for key in sorted(merged))
@@ -366,7 +391,17 @@ class WorkloadIntelligence:
             candidates = [
                 profile
                 for profile in configured_candidates
-                if _placement_feasible(profile.model_id, placement_hints)
+                if _placement_feasible(
+                    profile.model_id,
+                    placement_hints,
+                    allow_preemption=bool(
+                        self._cohort_summary(
+                            workload,
+                            latency_slo_ms=profile.latency_slo_ms,
+                            now=timestamp,
+                        )["graduated_allocation_pressure"]
+                    ),
+                )
             ]
             if not candidates:
                 rows.append(
@@ -427,9 +462,20 @@ class WorkloadIntelligence:
                     ),
                     "cohort_evidence": cohort_summary,
                     "reason": (
-                        "portfolio canary"
-                        if forecast.sample_count >= self.portfolio_min_samples
-                        else f"learning ({forecast.sample_count}/{self.portfolio_min_samples} samples)"
+                        "trusted service pressure; planner must authorize preemption"
+                        if (
+                            cohort_summary["graduated_allocation_pressure"]
+                            and bool(
+                                ((placement_hints or {}).get(chosen.model_id) or {}).get(
+                                    "feasible_after_preemption"
+                                )
+                            )
+                        )
+                        else (
+                            "portfolio canary"
+                            if forecast.sample_count >= self.portfolio_min_samples
+                            else f"learning ({forecast.sample_count}/{self.portfolio_min_samples} samples)"
+                        )
                     ),
                 }
             )
@@ -485,7 +531,7 @@ class WorkloadIntelligence:
         now: float,
     ) -> dict[str, Any]:
         prefix = f"{workload}:"
-        rows: list[DemandForecast] = []
+        rows: list[tuple[str, DemandForecast, bool]] = []
         for key in sorted((self.cohort_demand.to_dict().get("models") or {})):
             if not key.startswith(prefix):
                 continue
@@ -496,27 +542,63 @@ class WorkloadIntelligence:
                 and forecast.sample_count > 0
                 and age < _ACTIVE_COHORT_SECONDS
             ):
-                rows.append(forecast)
+                rows.append((_cohort_key_name(key), forecast, _cohort_key_attested(key)))
+        grouped: dict[str, list[DemandForecast]] = {}
+        for cohort, forecast, _ in rows:
+            grouped.setdefault(cohort, []).append(forecast)
         attainments: list[float] = []
         breaches = 0
-        for row in rows:
+        for cohort_rows in grouped.values():
+            cohort_samples = sum(row.sample_count for row in cohort_rows)
+            cohort_error_rate = (
+                sum(row.error_rate * row.sample_count for row in cohort_rows)
+                / cohort_samples
+                if cohort_samples
+                else 0.0
+            )
+            cohort_latency = max((row.p95_latency_ms for row in cohort_rows), default=0.0)
+            latency_attainment = 1.0
+            if latency_slo_ms > 0 and cohort_latency > 0:
+                latency_attainment = min(1.0, latency_slo_ms / cohort_latency)
+            attainments.append(
+                max(0.0, (1.0 - cohort_error_rate) * latency_attainment)
+            )
+            breaches += int(
+                cohort_error_rate >= 0.20
+                or (latency_slo_ms > 0 and cohort_latency > latency_slo_ms)
+            )
+        trusted_attainments: list[float] = []
+        trusted_breaches = 0
+        trusted_samples = 0
+        qualifying_trusted = 0
+        for _, row, attested in rows:
+            if not attested:
+                continue
             latency_attainment = 1.0
             if latency_slo_ms > 0 and row.p95_latency_ms > 0:
                 latency_attainment = min(1.0, latency_slo_ms / row.p95_latency_ms)
             attainment = max(0.0, (1.0 - row.error_rate) * latency_attainment)
-            attainments.append(attainment)
-            breaches += int(
+            trusted_attainments.append(attainment)
+            trusted_samples += row.sample_count
+            qualifying_trusted += int(
+                row.sample_count >= _GRADUATION_SAMPLES_PER_COHORT
+            )
+            trusted_breaches += int(
                 row.error_rate >= 0.20
                 or (latency_slo_ms > 0 and row.p95_latency_ms > latency_slo_ms)
             )
-        active = len(rows)
-        samples = sum(row.sample_count for row in rows)
+        active = len(grouped)
+        samples = sum(row.sample_count for _, row, _ in rows)
         breach_rate = breaches / active if active else 0.0
         fairness = _jain(attainments)
+        trusted_active = len(trusted_attainments)
+        trusted_breach_rate = (
+            trusted_breaches / trusted_active if trusted_active else 0.0
+        )
         graduated = (
-            active >= _GRADUATION_COHORTS
-            and samples >= _GRADUATION_SAMPLES
-            and breach_rate >= _GRADUATION_BREACH_RATE
+            qualifying_trusted >= _GRADUATION_COHORTS
+            and trusted_samples >= _GRADUATION_SAMPLES
+            and trusted_breach_rate >= _GRADUATION_BREACH_RATE
         )
         return {
             "workload": workload,
@@ -525,6 +607,11 @@ class WorkloadIntelligence:
             "slo_ms": float(latency_slo_ms),
             "slo_breach_rate": breach_rate,
             "fairness": fairness,
+            "trusted_active_cohorts": trusted_active,
+            "trusted_qualifying_cohorts": qualifying_trusted,
+            "trusted_samples": trusted_samples,
+            "trusted_slo_breach_rate": trusted_breach_rate,
+            "trusted_fairness": _jain(trusted_attainments),
             "graduated_allocation_pressure": graduated,
         }
 
@@ -619,15 +706,35 @@ class WorkloadIntelligence:
 def _placement_feasible(
     model_id: str,
     placement_hints: Mapping[str, Mapping[str, Any]] | None,
+    *,
+    allow_preemption: bool = False,
 ) -> bool:
     if placement_hints is None:
         return True
     hint = placement_hints.get(model_id)
-    return bool(hint and hint.get("feasible") is True)
+    return bool(
+        hint
+        and (
+            hint.get("feasible_now") is True
+            or hint.get("feasible") is True
+            or (allow_preemption and hint.get("feasible_after_preemption") is True)
+        )
+    )
 
 
-def _cohort_key(workload: str, tenant_class: str) -> str:
-    return f"{workload}:{tenant_class}"
+def _cohort_key(workload: str, tenant_class: str, *, attested: bool) -> str:
+    trust = "trusted" if attested else "untrusted"
+    return f"{workload}:{trust}:{tenant_class}"
+
+
+def _cohort_key_attested(key: str) -> bool:
+    parts = key.split(":", 2)
+    return len(parts) == 3 and parts[1] == "trusted"
+
+
+def _cohort_key_name(key: str) -> str:
+    parts = key.split(":", 2)
+    return parts[-1]
 
 
 def _jain(values: Iterable[float]) -> float:
@@ -786,4 +893,15 @@ def _merge_forecasts(
             projected.cohort_slo_breach_rate,
         ),
         cohort_fairness=min(direct.cohort_fairness, projected.cohort_fairness),
+        trusted_active_cohorts=max(
+            direct.trusted_active_cohorts,
+            projected.trusted_active_cohorts,
+        ),
+        trusted_cohort_slo_breach_rate=max(
+            direct.trusted_cohort_slo_breach_rate,
+            projected.trusted_cohort_slo_breach_rate,
+        ),
+        trusted_cohort_graduated=(
+            direct.trusted_cohort_graduated or projected.trusted_cohort_graduated
+        ),
     )

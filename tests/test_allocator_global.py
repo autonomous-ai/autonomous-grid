@@ -93,6 +93,9 @@ def test_portfolio_hints_filter_by_live_fleet_and_rank_the_cheapest_host():
     assert hints["coder"] == {
         "model_id": "coder",
         "feasible": True,
+        "feasible_now": True,
+        "hard_compatible": True,
+        "feasible_after_preemption": False,
         "eligible_nodes": 2,
         "best_node_id": "cheap",
         "cost_per_hour": 0.20,
@@ -119,7 +122,7 @@ def test_portfolio_hints_explain_when_no_live_node_can_host_a_model():
     assert hint["eligible_nodes"] == 0
     assert "model exceeds allocatable memory" in str(hint["reason"])
     assert "runtime is incompatible" in str(hint["reason"])
-    assert "model slots are full" in str(hint["reason"])
+    assert "model slots are disabled" in str(hint["reason"])
 
 
 def test_scale_down_cooldown_does_not_preserve_a_policy_ineligible_residency():

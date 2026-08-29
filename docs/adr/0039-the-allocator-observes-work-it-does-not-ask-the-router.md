@@ -62,14 +62,15 @@ canary; further speculative scale-out still waits for spare capacity.
 
 Multi-user failure is stronger than one speculative hypothesis without becoming a router command.
 Grid maps bounded affinity digests into 16 anonymous cohorts and retains only five-minute aggregate
-workload latency/error buckets. At least three active cohorts, 12 samples, and a majority cohort SLO
-breach graduate that workload to ordinary service urgency. It may reclaim capacity from historical
-or portfolio speculation, but configured baselines, pins, and administrator priority remain
-stronger. One stable caller and requests without affinity remain a canary; rotating affinity keys
-cannot create unbounded state but can occupy more than one cohort, so this is bounded breadth
-evidence rather than a Sybil-proof tenant authority. Token-level fairness, authenticated tenant
-shares, and admission still belong to the router/runtime; the allocator changes supply, never queue
-order.
+workload latency/error buckets. Caller-selected affinity is untrusted: rotating keys can occupy all
+16 buckets but can never create destructive allocation authority. A trusted authentication ingress
+may sign a short-lived attestation bound to the exact digest. At least three attested cohorts with
+four samples each and a majority trusted-cohort SLO breach graduate that workload to ordinary
+service urgency. It may reclaim capacity from historical or portfolio speculation, but configured
+baselines, pins, direct service, and administrator priority remain stronger. The attestation is an
+identity-bound observation, not a router provisioning command, and neither it nor the full digest is
+persisted. Token-level fairness, authenticated tenant shares, and admission still belong to the
+router/runtime; the allocator changes supply, never queue order.
 
 This counterfactual step prevents a loaded-only feedback loop: a Grid containing only a general LLM
 can still notice sustained image demand and prewarm a configured image model.

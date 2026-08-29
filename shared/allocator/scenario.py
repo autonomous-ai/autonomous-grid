@@ -409,6 +409,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     },
                 ),
                 tenant_class=f"cohort-{persona_index % 16:02d}",
+                tenant_attested=True,
             )
             served_model = (
                 explicit_model

@@ -9,6 +9,9 @@ safety rules.
 The allocator is experimental. It defaults to **recommend** mode and does not change a process
 until an operator explicitly selects **automatic** mode.
 
+The living [allocator expert panel](allocator-expert-panel.md) records independent scores,
+reproduced failures, accepted fixes, and the remaining gaps behind that experimental label.
+
 ## Two cooperating loops
 
 The global loop optimizes the grid. The local loop protects one computer. They exchange desired and
@@ -57,9 +60,11 @@ data-tier, artifact, memory-headroom, model-slot, and colocation rules used by p
 attractive model that no live node can host is excluded instead of suppressing a usable fallback.
 Among otherwise similar feasible candidates, a bounded cost term prefers the cheapest eligible
 host without overwhelming measured quality or configured workload suitability. Allocator status
-exposes every candidate's feasibility, eligible-node count, best host, startup estimate, hourly
-cost, and rejection reason; this is a current-fleet admission hint, not a promise that globally
-contended capacity has already been awarded.
+exposes every candidate's current-headroom feasibility, immutable compatibility, possible
+planner-authorized preemption path, eligible-node count, best host, startup estimate, hourly cost,
+and rejection reason. An ordinary canary may use only current headroom. Trusted broad service
+pressure may consider a host after removable managed speculation is drained, but the normal planner
+still proves victim priority, evidence, ownership, pins, active work, and capacity before acting.
 
 Counterfactual portfolio demand is deliberately weaker than direct evidence: it may fill spare
 capacity but cannot evict a baseline or a directly demanded model. Workload-wide latency, queues,
@@ -74,19 +79,23 @@ K-user evidence is aggregated without retaining K identities. The request bounda
 hashes an optional `X-Grid-Affinity-Key`, uses only four bits to assign it to one of 16 fixed
 anonymous cohorts, and discards the key and full digest. Requests without an affinity key share one
 anonymous class. The allocator stores five minutes of bucketed cohort counts, latency, and errors by
-workload; raw keys, users, prompts, and responses never enter controller state. Fixed cohort names
-bound cardinality even if a caller rotates affinity keys. Shipped Grid clients already send stable
-affinity keys; direct API clients should do so when they want multi-user fairness evidence.
+workload; raw keys, users, prompts, responses, signatures, and full digests never enter controller
+state. Fixed cohort names bound cardinality even if a caller rotates affinity keys. Shipped Grid
+clients already send stable affinity keys for routing and diagnostics, but a caller-selected key is
+not proof of a distinct user.
 
-One cohort, including the anonymous class, can create only non-destructive portfolio-canary
-pressure. A workload graduates to ordinary service urgency only after at least three active cohorts,
-12 recent samples, and SLO failure in at least half the cohorts. This lets sustained multi-user
-failure reclaim capacity occupied only by speculation, but it cannot displace configured baselines,
-pins, higher administrator priorities, or incompatible workloads. Status reports active cohorts,
-SLO-breach rate, and Jain fairness over cohort attainment. This is fleet-level fairness: per-token
-queue ordering, weighted tenant shares, admission control, and rate limits remain responsibilities
-of the router and serving runtime, where the allocator has neither the timing nor authority to
-schedule individual requests.
+Unattested cohorts, including the anonymous class, create only non-destructive portfolio-canary
+pressure no matter how many keys a caller rotates. A trusted authentication ingress may attach a
+short-lived `X-Grid-Tenant-Attestation` bound to the exact affinity digest and signed by the Grid
+control secret. A workload graduates to ordinary service urgency only after at least three attested
+cohorts each contribute four recent samples and SLO failure affects at least half the trusted
+cohorts. This lets sustained authenticated multi-user failure reclaim capacity occupied only by
+speculation, but it cannot displace configured baselines, pins, direct service, higher administrator
+priorities, or incompatible workloads. Status separately reports observed, attested, and qualifying
+cohorts, SLO-breach rate, and Jain fairness. This is fleet-level fairness: per-token queue ordering,
+weighted tenant shares, admission control, and rate limits remain responsibilities of the router and
+serving runtime, where the allocator has neither the timing nor authority to schedule individual
+requests.
 
 ### Global placement loop
 
@@ -870,8 +879,11 @@ cheap node, a medium economical node, and a large expensive fallback can be test
 
 `grid test demo` performs no synthetic inference or demand injection. It first converges the
 baseline to one real replica and verifies a genuine OpenAI-compatible response. Twelve genuine
-coding requests from four fixed anonymous cohorts target unresolved `auto` and receive honest HTTP
-503 responses with no router involved.
+requests using distinct caller-selected affinity keys first target unresolved `auto`; the report
+requires them to remain untrusted canary evidence at urgency one. Twelve more requests from three
+operator-attested anonymous cohorts then target the same workload. All 24 receive honest HTTP 503
+responses with no router involved, but only the attested `4 + 4 + 4` evidence may promote service
+urgency.
 The production request path classifies bounded features locally; after its minimum evidence
 threshold, the allocator projects that workload onto the configured coding portfolio, proves broad
 cohort SLO failure, and proactively loads and warms a real llama.cpp deployment before any request names it. The first named
@@ -932,6 +944,16 @@ The design follows several primary systems results while preserving Grid's alloc
 - [SLOs-Serve](https://arxiv.org/abs/2504.08784) motivates application-specific SLO accounting and
   continuous adaptation. Grid applies it at the slower model-residency timescale; token allocation
   remains inside each serving engine.
+- [Online LLM Selection via Constrained Bandits with Time-Varying Demand](https://arxiv.org/abs/2606.17489)
+  motivates confidence-aware portfolio exploration under hard cost and service constraints. Grid
+  does not yet claim a bandit optimizer; this is the next model-selection direction after trusted
+  demand and preemption admission are correct.
+- [JITServe](https://www.usenix.org/conference/nsdi26/presentation/zhang-wei) motivates maximizing
+  SLO goodput under imprecise request information. Grid applies conservative evidence and explicit
+  uncertainty at fleet timescales while leaving token scheduling to the serving runtime.
+- [HydraServe](https://www.usenix.org/conference/nsdi26/presentation/lou) motivates proactive
+  artifact distribution and contention-aware cold starts; Grid currently models cache, load, warm,
+  and measured startup time but not network transfer bandwidth.
 - [Llumnix](https://www.usenix.org/conference/osdi24/presentation/sun-biao) and
   [Libra](https://www.usenix.org/conference/nsdi26/presentation/ruan-libra) motivate dynamic
   rescheduling, isolation, and SLO-aware adaptation under changing load. Grid's load/warm and

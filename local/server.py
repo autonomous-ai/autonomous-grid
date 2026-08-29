@@ -25,7 +25,12 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from local.runtime import GRID_TYPE
-from shared.allocator.auth import control_node_id, engine_node_id, verify_node_token
+from shared.allocator.auth import (
+    control_node_id,
+    engine_node_id,
+    verify_node_token,
+    verify_tenant_attestation,
+)
 from shared.allocator.controller import AllocatorController
 from shared.allocator.intelligence import (
     RequestFeatures,
@@ -854,6 +859,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     features = replace(
         classify_request(endpoint_path, body),
         tenant_class=_allocator_tenant_class(affinity_digest),
+        tenant_attested=_allocator_tenant_attested(app, request, affinity_digest),
     )
     if request.headers.get("x-grid-allocator-evaluation") == "1":
         # Canary traffic is real inference, so it should still update engine performance.
@@ -1300,6 +1306,7 @@ async def _proxy_media(
     features = replace(
         classify_request(endpoint_path, {**body, "model": model}),
         tenant_class=_allocator_tenant_class(affinity_digest),
+        tenant_attested=_allocator_tenant_attested(app, request, affinity_digest),
     )
 
     # Only a built-in name can be checked against the route; a non-builtin (an API media model) is
@@ -1677,6 +1684,32 @@ def _allocator_tenant_class(digest: bytes | None) -> str:
     """Map an opaque affinity digest into fixed anonymous telemetry cohorts."""
 
     return anonymous_tenant_cohort(digest)
+
+
+def _allocator_tenant_attested(
+    app: FastAPI,
+    request: Request,
+    digest: bytes | None,
+) -> bool:
+    """Accept cohort authority only from a signer that controls the Grid."""
+
+    value = request.headers.get("x-grid-tenant-attestation")
+    if not value:
+        return False
+    if digest is None:
+        raise HTTPException(
+            status_code=400,
+            detail="tenant attestation requires X-Grid-Affinity-Key",
+        )
+    try:
+        verify_tenant_attestation(
+            value,
+            str(app.state.allocator_control_token or ""),
+            digest,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return True
 
 
 def _affinity_rank(digest: bytes, *, model: str, node_id: str) -> int:

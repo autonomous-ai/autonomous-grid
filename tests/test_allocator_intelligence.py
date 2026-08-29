@@ -298,6 +298,7 @@ def test_broad_cohort_slo_failure_graduates_portfolio_allocation_pressure():
                     "auto",
                     "coding",
                     tenant_class=f"cohort-{cohort:02d}",
+                    tenant_attested=True,
                 ),
                 portfolio_unbound=True,
                 service_seconds=2,
@@ -316,7 +317,9 @@ def test_broad_cohort_slo_failure_graduates_portfolio_allocation_pressure():
     projection = intelligence.projections((candidate,), now=100)[0]
 
     assert forecast.active_cohorts == 3
+    assert forecast.trusted_active_cohorts == 3
     assert forecast.cohort_slo_breach_rate == 1
+    assert forecast.trusted_cohort_graduated is True
     assert plan.urgency_for("coder") == 2
     assert projection["cohort_evidence"]["graduated_allocation_pressure"] is True
 
@@ -346,6 +349,8 @@ def test_one_noisy_cohort_remains_non_destructive_canary_pressure():
     )
 
     assert forecast.active_cohorts == 1
+    assert forecast.trusted_active_cohorts == 0
+    assert forecast.trusted_cohort_graduated is False
     assert plan.urgency_for("coder") == 1
 
 
@@ -360,6 +365,7 @@ def test_minority_cohort_failure_does_not_promote_allocation_pressure():
                     "auto",
                     "coding",
                     tenant_class=f"cohort-{cohort:02d}",
+                    tenant_attested=True,
                 ),
                 portfolio_unbound=True,
                 error=cohort == 0,
@@ -375,7 +381,9 @@ def test_minority_cohort_failure_does_not_promote_allocation_pressure():
     )
 
     assert forecast.active_cohorts == 4
+    assert forecast.trusted_active_cohorts == 4
     assert forecast.cohort_slo_breach_rate == 0.25
+    assert forecast.trusted_cohort_graduated is False
     assert plan.urgency_for("coder") == 1
 
 
@@ -400,6 +408,44 @@ def test_rotating_affinity_keys_cannot_create_unbounded_cohort_state():
     assert len(state["models"]) == 16
     assert all(len(buckets) == 1 for buckets in state["models"].values())
 
+    candidate = profile("coder", 8_000, ("coding", 1.0))
+    forecast = intelligence.portfolio_forecasts((candidate,), (), now=100)[0]
+    plan = PlacementPlanner().plan(
+        (NodeSnapshot("node", 16_000, last_heartbeat=100),),
+        (candidate,),
+        (forecast,),
+        now=100,
+    )
+    assert forecast.trusted_active_cohorts == 0
+    assert forecast.trusted_cohort_graduated is False
+    assert plan.urgency_for("coder") == 1
+
+
+def test_skewed_trusted_cohort_samples_do_not_graduate_pressure():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    candidate = profile("coder", 8_000, ("coding", 1.0))
+    for cohort, samples in enumerate((10, 1, 1)):
+        for _ in range(samples):
+            intelligence.observe(
+                RequestFeatures(
+                    "chat/completions",
+                    "auto",
+                    "coding",
+                    tenant_class=f"cohort-{cohort:02d}",
+                    tenant_attested=True,
+                ),
+                portfolio_unbound=True,
+                error=True,
+                timestamp=100,
+            )
+
+    forecast = intelligence.portfolio_forecasts((candidate,), (), now=100)[0]
+    evidence = intelligence.projections((candidate,), now=100)[0]["cohort_evidence"]
+
+    assert forecast.trusted_active_cohorts == 3
+    assert forecast.trusted_cohort_graduated is False
+    assert evidence["trusted_qualifying_cohorts"] == 1
+
 
 def test_graduated_cohort_pressure_can_reclaim_a_speculative_only_slot():
     intelligence = WorkloadIntelligence(portfolio_min_samples=1)
@@ -413,6 +459,7 @@ def test_graduated_cohort_pressure_can_reclaim_a_speculative_only_slot():
                     "auto",
                     "coding",
                     tenant_class=f"cohort-{cohort:02d}",
+                    tenant_attested=True,
                 ),
                 portfolio_unbound=True,
                 error=True,

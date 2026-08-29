@@ -25,6 +25,7 @@ import uuid
 import httpx
 
 from shared import jsonio, paths, run_records
+from shared.allocator.auth import mint_tenant_attestation
 from shared.allocator.intelligence import anonymous_tenant_cohort
 from shared.allocator.runtime import LlamaCppBackend
 
@@ -258,6 +259,15 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
             f"  {node.get('node_id')}  {node.get('state')}  "
             f"{runtimes}/{backends} · {capacity_gib:.1f} GiB{cost} · {ownership}  {placement}"
         )
+    active_hourly_cost = sum(
+        float(node.get("cost_per_hour") or 0.0)
+        for node in nodes
+        if any(
+            item.get("state") == "ready" for item in node.get("residencies") or []
+        )
+    )
+    if active_hourly_cost:
+        print(f"  active cost ${active_hourly_cost:g}/h across ready logical hosts")
     pending = payload.get("pending_commands") or []
     if pending:
         print(f"  pending   {len(pending)} allocator action(s)")
@@ -270,10 +280,28 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
         active = int(summary.get("active_cohorts") or 0)
         if not active:
             continue
+        trusted = int(summary.get("trusted_active_cohorts") or 0)
+        qualifying = int(summary.get("trusted_qualifying_cohorts") or 0)
+        graduated = " · graduated" if summary.get("graduated_allocation_pressure") else ""
         print(
             f"  demand    {summary.get('workload')} · {active} anonymous cohort(s) · "
+            f"{trusted} attested/{qualifying} qualifying{graduated} · "
             f"SLO breaches {100 * float(summary.get('slo_breach_rate') or 0):.0f}% · "
             f"fairness {100 * float(summary.get('fairness') or 0):.0f}%"
+        )
+    for projection in payload.get("portfolio_projections") or []:
+        chosen = str(projection.get("chosen_model") or "")
+        if not chosen:
+            continue
+        placement = projection.get("placement") or {}
+        transition = ""
+        if placement.get("feasible_after_preemption"):
+            victims = ",".join(placement.get("preemption_victims") or [])
+            transition = f" · preemption candidate {victims or 'managed speculation'}"
+        print(
+            f"  decision  {projection.get('workload')} → {chosen} · "
+            f"{projection.get('reason') or 'portfolio evidence'} · "
+            f"{placement.get('best_node_id') or 'no current host'}{transition}"
         )
     history = payload.get("history") or []
     if history:
@@ -804,6 +832,7 @@ def _real_chat_request(
     timeout: float,
     retries: int = 0,
     request_headers: dict[str, str] | None = None,
+    tenant_attestation_secret: str = "",
 ) -> _RealChatResult:
     request_started = time.monotonic()
     result: _RealChatResult | None = None
@@ -814,6 +843,7 @@ def _real_chat_request(
             max_tokens=max_tokens,
             timeout=timeout,
             request_headers=request_headers,
+            tenant_attestation_secret=tenant_attestation_secret,
         )
         result = replace(
             result,
@@ -838,16 +868,24 @@ def _real_chat_request_once(
     max_tokens: int,
     timeout: float,
     request_headers: dict[str, str] | None = None,
+    tenant_attestation_secret: str = "",
 ) -> _RealChatResult:
     started = time.monotonic()
     try:
+        affinity_digest = hashlib.sha256(user.user_id.encode()).digest()
+        headers = {
+            "X-Grid-Affinity-Key": user.user_id,
+            **(request_headers or {}),
+        }
+        if tenant_attestation_secret:
+            headers["X-Grid-Tenant-Attestation"] = mint_tenant_attestation(
+                tenant_attestation_secret,
+                affinity_digest,
+            )
         with httpx.Client(base_url=endpoint, timeout=timeout, trust_env=False) as client:
             response = client.post(
                 "/v1/chat/completions",
-                headers={
-                    "X-Grid-Affinity-Key": user.user_id,
-                    **(request_headers or {}),
-                },
+                headers=headers,
                 json={
                     "model": user.model,
                     "messages": [{"role": "user", "content": user.prompt}],
@@ -898,6 +936,7 @@ def _run_real_chat_batch(
     requests: int,
     max_tokens: int,
     timeout: float,
+    tenant_attestation_secret: str = "",
 ) -> tuple[_RealChatResult, ...]:
     scheduled = tuple(users[index % len(users)] for index in range(requests))
     results: list[_RealChatResult] = []
@@ -910,6 +949,7 @@ def _run_real_chat_batch(
                 max_tokens=max_tokens,
                 timeout=timeout,
                 retries=12,
+                tenant_attestation_secret=tenant_attestation_secret,
             )
             for user in scheduled
         ]
@@ -1637,11 +1677,62 @@ def cmd_test_demo(args: argparse.Namespace) -> int:
 
         print(f"[3/{phases}] Proactively allocating from unresolved coding requests")
         print(
-            "  Twelve genuine requests from four anonymous cohorts target unresolved 'auto'. "
-            "The router is not involved; the allocator must classify bounded features, select a "
-            "portfolio model, and recognize broad SLO failure."
+            "  First, twelve caller-selected affinity keys attack unresolved 'auto'. The allocator "
+            "is held in recommend mode so its evidence level can be inspected without a lifecycle "
+            "race. Then three operator-attested anonymous principals contribute four requests each."
         )
-        unresolved_user_ids = _distinct_affinity_user_ids(4)
+        response = client.put(
+            "/allocator/mode",
+            headers=headers,
+            json={"mode": "recommend"},
+        )
+        response.raise_for_status()
+        attacker_ids = _distinct_affinity_user_ids(12)
+        attacker_results = tuple(
+            _real_chat_request(
+                endpoint,
+                _RealUser(
+                    user_id=user_id,
+                    role="untrusted-caller",
+                    model="auto",
+                    prompt="Debug this Python API and propose one unit test.",
+                ),
+                max_tokens=args.max_tokens,
+                timeout=args.timeout,
+            )
+            for user_id in attacker_ids
+        )
+        if any(item.status_code != 503 for item in attacker_results):
+            raise SystemExit("Expected the untrusted unresolved requests to return HTTP 503.")
+        response = client.post("/allocator/tick", headers=headers)
+        response.raise_for_status()
+        untrusted_status = _status_payload(record)
+        untrusted_projection = next(
+            (
+                row
+                for row in untrusted_status.get("portfolio_projections") or []
+                if row.get("chosen_model") == portfolio_model
+            ),
+            {},
+        )
+        untrusted_evidence = untrusted_projection.get("cohort_evidence") or {}
+        untrusted_urgency = int(
+            ((untrusted_status.get("plan") or {}).get("model_urgencies") or {}).get(
+                portfolio_model, 0
+            )
+        )
+        if (
+            untrusted_evidence.get("graduated_allocation_pressure") is True
+            or int(untrusted_evidence.get("trusted_active_cohorts") or 0)
+            or untrusted_urgency > 1
+        ):
+            raise SystemExit("Caller-selected affinity unexpectedly gained service authority.")
+        print(
+            "  Adversarial proof: 12 rotating untrusted cohorts stayed canary-only at urgency "
+            f"{untrusted_urgency}; no attested cohort and no destructive authority."
+        )
+
+        unresolved_user_ids = _distinct_affinity_user_ids(3)
         unresolved = tuple(
             _RealUser(
                 user_id=unresolved_user_ids[index % len(unresolved_user_ids)],
@@ -1659,6 +1750,7 @@ def cmd_test_demo(args: argparse.Namespace) -> int:
                 user,
                 max_tokens=args.max_tokens,
                 timeout=args.timeout,
+                tenant_attestation_secret=token,
             )
             for user in unresolved
         )
@@ -1669,7 +1761,28 @@ def cmd_test_demo(args: argparse.Namespace) -> int:
                 "Expected unresolved requests to receive genuine HTTP 503 responses with the "
                 f"router uninvolved; got {codes}."
             )
-        print("  Real unresolved responses: 12 × HTTP 503 (no fabricated inference result)")
+        response = client.post("/allocator/tick", headers=headers)
+        response.raise_for_status()
+        trusted_status = _status_payload(record)
+        trusted_urgency = int(
+            ((trusted_status.get("plan") or {}).get("model_urgencies") or {}).get(
+                portfolio_model, 0
+            )
+        )
+        if trusted_urgency != 2:
+            raise SystemExit(
+                f"Attested multi-user pressure should reach urgency 2, got {trusted_urgency}."
+            )
+        print(
+            "  Trusted proof: 3 attested cohorts × 4 real HTTP 503s promoted the same workload "
+            "to service urgency 2."
+        )
+        response = client.put(
+            "/allocator/mode",
+            headers=headers,
+            json={"mode": "automatic"},
+        )
+        response.raise_for_status()
         coding = _wait_for_demand_ready(
             record,
             model=portfolio_model,
@@ -1693,8 +1806,12 @@ def cmd_test_demo(args: argparse.Namespace) -> int:
             raise SystemExit(
                 "Broad unresolved demand did not graduate from canary to service pressure."
             )
+        if int(cohort_evidence.get("trusted_qualifying_cohorts") or 0) < 3:
+            raise SystemExit("Service pressure was not backed by three qualifying attestations.")
         print(
             f"  Cohort evidence: {int(cohort_evidence.get('active_cohorts') or 0)} active · "
+            f"{int(cohort_evidence.get('trusted_active_cohorts') or 0)} attested · "
+            f"{int(cohort_evidence.get('trusted_qualifying_cohorts') or 0)} qualifying · "
             f"{int(cohort_evidence.get('samples') or 0)} samples · "
             f"{100 * float(cohort_evidence.get('slo_breach_rate') or 0):.0f}% SLO breaches · "
             "graduated service pressure."
@@ -1711,6 +1828,7 @@ def cmd_test_demo(args: argparse.Namespace) -> int:
             specialist_probe,
             max_tokens=args.max_tokens,
             timeout=args.timeout,
+            tenant_attestation_secret=token,
         )
         _require_real_chat((specialist_result,), label="proactively allocated specialist")
         print(
@@ -1728,6 +1846,7 @@ def cmd_test_demo(args: argparse.Namespace) -> int:
             requests=args.requests,
             max_tokens=args.max_tokens,
             timeout=args.timeout,
+            tenant_attestation_secret=token,
         )
         _require_real_chat(results, label="multi-user")
         latencies = [item.elapsed_seconds for item in results]
@@ -1788,8 +1907,8 @@ def cmd_test_demo(args: argparse.Namespace) -> int:
     print("Summary")
     print(f"  logical machines   {machines} total · {text_machines} llama.cpp" + (" · 1 ComfyUI" if record.get("include_comfyui") else ""))
     print(
-        f"  real text requests {14 + len(results)} attempted · {2 + len(results)} successful · "
-        "12 expected unresolved 503s"
+        f"  real text requests {26 + len(results)} attempted · {2 + len(results)} successful · "
+        "24 expected unresolved 503s"
     )
     print(f"  final placement    baseline={_ready_replicas(final, model)} · specialist={_ready_replicas(final, portfolio_model)}")
     if image_result is not None:
