@@ -327,6 +327,58 @@ def test_joint_portfolio_chooses_one_shared_model_when_independent_specialists_d
     assert status["portfolio_policy"]["joint"] is True
 
 
+def test_joint_portfolio_keeps_fifth_ranked_shared_model_inside_bounded_search():
+    controller = AllocatorController()
+    for workload in ("coding", "research"):
+        for index, score in enumerate((1.0, 0.99, 0.98, 0.97)):
+            controller.put_profile(
+                ModelProfile(
+                    f"{workload}-specialist-{index}",
+                    8_000,
+                    runtimes=("llama.cpp",),
+                    backends=("metal",),
+                    min_replicas=0,
+                    max_replicas=1,
+                    min_residency_seconds=0,
+                    workload_scores=((workload, score),),
+                )
+            )
+    controller.put_profile(
+        ModelProfile(
+            "fifth-ranked-generalist",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("coding", 0.8), ("research", 0.8)),
+        )
+    )
+    for workload in ("coding", "research"):
+        for timestamp in (98, 99, 100):
+            controller.observe_lifecycle(
+                RequestFeatures("chat/completions", "auto", workload),
+                service_seconds=1,
+                timestamp=timestamp,
+            )
+    machine = NodeSnapshot(
+        "one-slot",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        max_models=1,
+        last_heartbeat=100,
+    )
+
+    selection = controller.status((machine,), now=100)["portfolio_selection"]
+
+    assert selection == {
+        "coding": "fifth-ranked-generalist",
+        "research": "fifth-ranked-generalist",
+    }
+
+
 def test_joint_portfolio_allows_only_one_uncertainty_driven_model_experiment():
     controller = AllocatorController()
     candidates = []

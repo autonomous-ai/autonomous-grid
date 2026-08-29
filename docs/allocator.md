@@ -94,6 +94,9 @@ demand-weighted workload coverage, minimizes missing replicas, and compares meas
 unknown-price exposure, and known hourly cost. A shared generalist can therefore beat two slightly
 better specialists when only one model slot is affordable. Search considers at most four candidates
 per workload and 64 distinct portfolios, so catalog size cannot create an unbounded planning pass.
+Each bounded workload set reserves representation for its exploitation leader and the broadest
+cross-workload candidate; a fifth-ranked generalist can therefore remain discoverable when four
+narrow specialists would make every independently preferred portfolio infeasible.
 Only one distinct model may differ from the exploitation-only portfolio because of uncertainty at a
 time; this is an explicit fleet exploration budget, not one canary allowance per workload. Status
 shows the joint mapping, selected model set, and the model currently consuming that exploration

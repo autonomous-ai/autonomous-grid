@@ -1319,15 +1319,24 @@ class AllocatorController:
             return None
 
         row_by_workload = {str(row["workload"]): row for row in active_rows}
-        options: dict[str, tuple[str, ...]] = {}
-        exploitation_best: dict[str, str] = {}
-        candidate_by_workload: dict[str, dict[str, Mapping[str, Any]]] = {}
-        for workload, row in row_by_workload.items():
-            selectable = [
+        selectable_by_workload = {
+            workload: [
                 candidate
                 for candidate in row.get("candidates") or ()
                 if candidate.get("selectable")
             ]
+            for workload, row in row_by_workload.items()
+        }
+        candidate_breadth: dict[str, int] = {}
+        for selectable in selectable_by_workload.values():
+            for candidate in selectable:
+                model_id = str(candidate["model_id"])
+                candidate_breadth[model_id] = candidate_breadth.get(model_id, 0) + 1
+        options: dict[str, tuple[str, ...]] = {}
+        exploitation_best: dict[str, str] = {}
+        candidate_by_workload: dict[str, dict[str, Mapping[str, Any]]] = {}
+        for workload, row in row_by_workload.items():
+            selectable = selectable_by_workload[workload]
             exploitation = max(
                 selectable,
                 key=lambda candidate: (
@@ -1336,9 +1345,29 @@ class AllocatorController:
                 ),
             )
             exploitation_best[workload] = str(exploitation["model_id"])
-            bounded = list(selectable[:_MAX_JOINT_PORTFOLIO_CANDIDATES])
-            if exploitation not in bounded:
-                bounded[-1:] = [exploitation]
+            shared = max(
+                (
+                    candidate
+                    for candidate in selectable
+                    if candidate_breadth[str(candidate["model_id"])] > 1
+                ),
+                key=lambda candidate: (
+                    candidate_breadth[str(candidate["model_id"])],
+                    float(candidate.get("score") or 0.0),
+                    str(candidate["model_id"]),
+                ),
+                default=None,
+            )
+            # Keep the search bound but reserve representation for exploitation and the broadest
+            # cross-workload model. Without this diversity slot, four narrowly higher-ranked
+            # specialists can hide the only shared portfolio that fits the fleet.
+            bounded: list[Mapping[str, Any]] = []
+            for candidate in (exploitation, shared, *selectable):
+                if candidate is None or candidate in bounded:
+                    continue
+                bounded.append(candidate)
+                if len(bounded) >= _MAX_JOINT_PORTFOLIO_CANDIDATES:
+                    break
             options[workload] = tuple(str(candidate["model_id"]) for candidate in bounded)
             candidate_by_workload[workload] = {
                 str(candidate["model_id"]): candidate for candidate in selectable
