@@ -72,8 +72,9 @@ grid goal evidence <goal-id> --verify \
 
 The command exits nonzero if the Goal is not complete, fewer than three task nodes executed it, any
 turn lacks model usage attributed to a Grid inference node, a reclaimed turn lacks authoritative
-retry evidence, the transcript chain is broken, or a required final eval has no accepted passing
-run. A release is not accepted from screenshots alone.
+retry evidence, a transcript handoff is broken, a prior result is not Git-ancestral to the next
+pinned input, or a required final eval has no accepted passing run. A release is not accepted from
+screenshots alone.
 
 | Evidence | Required assertion |
 |---|---|

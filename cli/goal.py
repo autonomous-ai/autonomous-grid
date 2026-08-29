@@ -135,6 +135,25 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"turn {index} transcript input does not equal turn {index - 1} output")
 
+    worktree_chain = (trajectory.get("worktree_chain")
+                      if isinstance(trajectory.get("worktree_chain"), list) else [])
+    for index, (previous, current) in enumerate(pairwise(turns), 2):
+        if not isinstance(previous, dict) or not isinstance(current, dict):
+            continue
+        matching = [edge for edge in worktree_chain if isinstance(edge, dict)
+                    and edge.get("from_turn_id") == previous.get("id")
+                    and edge.get("to_turn_id") == current.get("id")
+                    and edge.get("result_commit") == previous.get("result_commit")
+                    and edge.get("input_commit") == current.get("input_commit")]
+        if not matching:
+            failures.append(
+                f"turn {index} has no relay-authored worktree ancestry check from turn "
+                f"{index - 1}")
+        elif matching[-1].get("ancestor") is not True:
+            detail = matching[-1].get("error") or "the commits are unrelated"
+            failures.append(
+                f"turn {index} input does not contain turn {index - 1} result: {detail}")
+
     evals = goal.get("evals") if isinstance(goal.get("evals"), list) else []
     runs = record.get("eval_runs") if isinstance(record.get("eval_runs"), list) else []
     attempt_events = (record.get("attempt_events")

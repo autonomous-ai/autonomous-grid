@@ -112,12 +112,19 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
         "goal": {"id": "goal-1", "status": "complete", "evals": [{
             "definition_id": "eval-1", "definition_hash": "hash-1", "name": "artifact",
         }]},
-        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
+                       "worktree_chain": [{
+                           "from_turn_id": "turn-1", "to_turn_id": "turn-2",
+                           "result_commit": "2" * 40, "input_commit": "2" * 40,
+                           "ancestor": True, "error": None,
+                       }]},
         "turns": [
-            {"state": "completed", "agent_kind": "codex", "provider_node_id": "node-A",
+            {"id": "turn-1", "state": "completed", "agent_kind": "codex",
+             "provider_node_id": "node-A",
              "input_commit": "1" * 40, "result_commit": "2" * 40,
              "transcript_commit": None, "transcript_result_commit": "a" * 40},
-            {"state": "completed", "agent_kind": "claude", "provider_node_id": "node-B",
+            {"id": "turn-2", "state": "completed", "agent_kind": "claude",
+             "provider_node_id": "node-B",
              "input_commit": "2" * 40, "result_commit": "3" * 40,
              "transcript_commit": "a" * 40, "transcript_result_commit": "b" * 40},
         ],
@@ -140,12 +147,19 @@ def test_goal_evidence_verify_refuses_a_broken_handoff(monkeypatch, capsys):
 
     record = {
         "goal": {"id": "goal-1", "status": "complete", "evals": []},
-        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
+                       "worktree_chain": [{
+                           "from_turn_id": "turn-1", "to_turn_id": "turn-2",
+                           "result_commit": "2" * 40, "input_commit": "2" * 40,
+                           "ancestor": True, "error": None,
+                       }]},
         "turns": [
-            {"state": "completed", "agent_kind": "codex", "provider_node_id": "node-A",
+            {"id": "turn-1", "state": "completed", "agent_kind": "codex",
+             "provider_node_id": "node-A",
              "input_commit": "1" * 40, "result_commit": "2" * 40,
              "transcript_commit": None, "transcript_result_commit": "a" * 40},
-            {"state": "completed", "agent_kind": "codex", "provider_node_id": "node-C",
+            {"id": "turn-2", "state": "completed", "agent_kind": "codex",
+             "provider_node_id": "node-C",
              "input_commit": "2" * 40, "result_commit": "3" * 40,
              "transcript_commit": "wrong", "transcript_result_commit": "b" * 40},
         ],
@@ -178,6 +192,33 @@ def test_goal_evidence_verify_refuses_pruned_training_objects():
     failures = _verify_evidence(record)
     assert "the Goal transcript ref has been pruned" in failures
     assert any("turn branches have been pruned" in item for item in failures)
+
+
+def test_goal_evidence_verify_refuses_an_unrelated_worktree_handoff():
+    from cli.goal import _verify_evidence
+
+    record = {
+        "goal": {"status": "complete", "evals": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
+                       "worktree_chain": [{
+                           "from_turn_id": "turn-1", "to_turn_id": "turn-2",
+                           "result_commit": "2" * 40, "input_commit": "9" * 40,
+                           "ancestor": False, "error": None,
+                       }]},
+        "turns": [
+            {"id": "turn-1", "state": "completed", "agent_kind": "codex",
+             "provider_node_id": "node-A", "input_commit": "1" * 40,
+             "result_commit": "2" * 40, "transcript_commit": None,
+             "transcript_result_commit": "a" * 40},
+            {"id": "turn-2", "state": "completed", "agent_kind": "codex",
+             "provider_node_id": "node-B", "input_commit": "9" * 40,
+             "result_commit": "3" * 40, "transcript_commit": "a" * 40,
+             "transcript_result_commit": "b" * 40},
+        ],
+        "attempt_events": [], "eval_runs": [],
+    }
+    failures = _verify_evidence(record)
+    assert any("input does not contain turn 1 result" in item for item in failures)
 
 
 def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
