@@ -138,6 +138,7 @@ REMOTE_ONLY: dict[str, str | None] = {
     # Tasks live in the relay's durable queue and are claimed by whichever provider is free
     # (ADR 0032). A local grid has neither, so this is sign-in-gated like the rest.
     "task": None,
+    "goal": None,
     # A project and its members are rows in the RELAY's own database (ADR 0033 D-a) — deliberately
     # not the control plane's — and the repository they name is served by the relay's git plane. A
     # local grid has none of it.

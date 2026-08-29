@@ -30,7 +30,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
-from . import relay, task_agent, task_capacity, task_evict, task_repo, task_stream
+from . import relay, task_agent, task_capacity, task_codex, task_evict, task_repo, task_stream
 
 # Queue sentinels. Plain `object()`s rather than None or "" — a task's output legitimately contains
 # blank lines, and both would be indistinguishable from one. `_EOF` is posted once per pipe.
@@ -161,6 +161,11 @@ class TaskOutcome:
     #: `task.session_reset` progress event travels through a publisher that latches off permanently
     #: on a 403/404, so it is the one disclosure that could not be relied on to arrive.
     session_reset_reason: str | None = None
+    #: Native Codex Goal checkpoint. Present only on a successfully completed Goal slice.
+    goal_status: str | None = None
+    goal_turns_completed: int | None = None
+    goal_tokens_used: int | None = None
+    goal_time_used_seconds: int | None = None
 
 
 def task_timeout() -> float:
@@ -191,17 +196,21 @@ def claim_once(state: Any) -> dict[str, Any] | None:
     """
     token = state.token()
     try:
-        return relay.claim_task(state.signaling_url, token)
+        return relay.claim_task(state.signaling_url, token, agent_kinds=_agent_kinds())
     except relay.RelayUnauthorized:
         if state.refresh(stale_token=token):
-            return relay.claim_task(state.signaling_url, state.token())
+            return relay.claim_task(state.signaling_url, state.token(), agent_kinds=_agent_kinds())
         raise
 
 
 def report_once(serve_state: Any, task_id: str, *, state: str, output: str | None,
                 error: str | None, session_id: str | None = None,
                 result_commit: str | None = None,
-                session_reset_reason: str | None = None) -> None:
+                session_reset_reason: str | None = None,
+                goal_status: str | None = None,
+                goal_turns_completed: int | None = None,
+                goal_tokens_used: int | None = None,
+                goal_time_used_seconds: int | None = None) -> None:
     """Report a terminal result; on 401 refresh the token and retry exactly once.
 
     The serve state is named `serve_state` here only because `state` is the wire's name for the
@@ -212,14 +221,28 @@ def report_once(serve_state: Any, task_id: str, *, state: str, output: str | Non
         relay.report_task_result(
             serve_state.signaling_url, token, task_id,
             state=state, output=output, error=error, session_id=session_id,
-            result_commit=result_commit, session_reset_reason=session_reset_reason)
+            result_commit=result_commit, session_reset_reason=session_reset_reason,
+            goal_status=goal_status, goal_turns_completed=goal_turns_completed,
+            goal_tokens_used=goal_tokens_used,
+            goal_time_used_seconds=goal_time_used_seconds)
     except relay.RelayUnauthorized:
         if not serve_state.refresh(stale_token=token):
             raise
         relay.report_task_result(
             serve_state.signaling_url, serve_state.token(), task_id,
             state=state, output=output, error=error, session_id=session_id,
-            result_commit=result_commit, session_reset_reason=session_reset_reason)
+            result_commit=result_commit, session_reset_reason=session_reset_reason,
+            goal_status=goal_status, goal_turns_completed=goal_turns_completed,
+            goal_tokens_used=goal_tokens_used,
+            goal_time_used_seconds=goal_time_used_seconds)
+
+
+def _agent_kinds() -> tuple[str, ...]:
+    """Harnesses this process can really execute; never advertise Codex optimistically."""
+    kinds = ["claude"]
+    if task_codex.available():
+        kinds.append("codex")
+    return tuple(kinds)
 
 
 class _Collected:
@@ -516,6 +539,7 @@ def run_task(job: dict[str, Any],
              publish: Callable[..., None] | None = None,
              on_spawn: Callable[[subprocess.Popen], None] | None = None,
              remote: task_repo.GitRemote | None = None,
+             inference: task_codex.GridInference | None = None,
              capacity: Any = None) -> TaskOutcome:
     """Run one task's agent and return how it went.
 
@@ -556,6 +580,10 @@ def run_task(job: dict[str, Any],
     if not isinstance(prompt, str):
         # The job dict came off the wire; a missing or mistyped prompt is bad input, not a crash.
         return failed(f"task has no usable prompt (got {type(prompt).__name__})")
+
+    agent_kind = str(job.get("agent_kind") or "claude")
+    if agent_kind not in ("claude", "codex"):
+        return failed(f"the relay requested unsupported agent kind {agent_kind!r}")
 
     # WHOSE workspace this task runs in (ADR 0033 D-g). Refused rather than defaulted, and this is
     # the one wire field on this path that gets that treatment: a missing key would put the agent in
@@ -614,13 +642,15 @@ def run_task(job: dict[str, Any],
         task_evict.touch(workspace)
         # Resolved HERE rather than with the argv below, which is now built after the checkout: a
         # provider with no Claude Code installed must fail before it fetches anything, not after.
-        binary = task_agent.resolve_binary()
+        binary = (task_codex.resolve_binary() if agent_kind == "codex"
+                  else task_agent.resolve_binary())
         # And the rest of what the argv and the child's environment need, for the same reason: they
         # are built AFTER the checkout and outside these guards, so a provider misconfiguration
         # would arrive as "task runner raised" having already fetched the repository. Here it is an
         # ordinary "could not start the agent: …" naming the variable to change, on a task that cost
         # nothing.
-        task_agent.preflight()
+        if agent_kind == "claude":
+            task_agent.preflight()
     except (Exception, SystemExit) as exc:
         # Nothing was spawned, so there is no session id and no output — only a reason, and it is
         # one an operator can act on ("Claude Code isn't installed", "/var/grid is not writable").
@@ -678,7 +708,11 @@ def run_task(job: dict[str, Any],
                 # keeps "the relay has a transcript and I could not get it" from becoming a silent
                 # fresh start.
                 transcript_ref=task_repo.transcript_ref(conversation_id),
-                transcript_commit=str(job.get("transcript_commit") or ""))
+                transcript_commit=str(job.get("transcript_commit") or ""),
+                # A first Goal turn has no pin, but its retry must still discard any Codex DB/WAL
+                # files left by a dead attempt on this provider. Ordinary Claude tasks retain the
+                # old no-pin compatibility behaviour in `materialize`.
+                reset_agent_state=(agent_kind == "codex"))
         except task_repo.InputFetchError as exc:
             # BEFORE the blanket handler below, and that order is the whole change (ADR 0033 issue
             # 16a, criterion 4). The fetch is the one step whose failure is about this attempt
@@ -707,6 +741,23 @@ def run_task(job: dict[str, Any],
             raise
         except (Exception, SystemExit) as exc:
             return failed(f"could not prepare the task's workspace: {exc}")
+
+    if agent_kind == "codex":
+        if inference is None:
+            return failed("the Codex Goal task has no Grid inference endpoint")
+        try:
+            result = task_codex.run_slice(
+                job, workspace, inference=inference, executable=binary, timeout=timeout,
+                publish=sink, on_spawn=on_spawn)
+            return TaskOutcome(
+                "completed", result.output, None,
+                goal_status=result.status,
+                goal_turns_completed=result.turns_completed,
+                goal_tokens_used=result.tokens_used,
+                goal_time_used_seconds=result.time_used_seconds,
+            )
+        except (task_codex.CodexGoalError, OSError) as exc:
+            return failed(f"could not run Codex Goal slice: {exc}")
 
     # AFTER the checkout, for two reasons that both bite: the link's target has to survive
     # `reset --hard`/`clean`, and the transcript this task may resume only exists once the input
@@ -1060,9 +1111,18 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
     # child it no longer has.
     renewer = _lease_renewer(state, task_id, on_beat=_tree_beat(job, publisher))
     try:
-        outcome = run_task(job, publisher.publish, remote=remote,
-                           on_spawn=lambda proc: _spawned(spawned, renewer, proc),
-                           capacity=capacity)
+        run_kwargs: dict[str, Any] = {
+            "remote": remote,
+            "on_spawn": lambda proc: _spawned(spawned, renewer, proc),
+            "capacity": capacity,
+        }
+        # Keep the established Claude runner call contract byte-for-byte compatible. Grid's bearer
+        # token is needed only by the loopback proxy for Codex model calls, and should not be
+        # constructed or threaded through ordinary tasks.
+        if str(job.get("agent_kind") or "claude") == "codex":
+            run_kwargs["inference"] = task_codex.GridInference(
+                state.signaling_url, state.token())
+        outcome = run_task(job, publisher.publish, **run_kwargs)
         outcome, landed = _push_result(job, outcome, spawned["yes"], remote, publisher)
     except task_repo.InputFetchError:
         # The input never arrived, so this attempt has produced no evidence about the task at all —
@@ -1144,10 +1204,22 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
 
     for attempt in range(1, _REPORT_ATTEMPTS + 1):
         try:
-            report_once(state, task_id, state=outcome.state, output=outcome.output,
-                        error=outcome.error, session_id=outcome.session_id,
-                        result_commit=outcome.result_commit,
-                        session_reset_reason=outcome.session_reset_reason)
+            report_kwargs: dict[str, Any] = {
+                "state": outcome.state, "output": outcome.output, "error": outcome.error,
+                "session_id": outcome.session_id, "result_commit": outcome.result_commit,
+                "session_reset_reason": outcome.session_reset_reason,
+            }
+            # Preserve the established Claude report shape. Besides compatibility with older
+            # relays, omitting absent Goal fields keeps `goal_status: null` from being mistaken for
+            # an attempted checkpoint by an intermediary that validates keys rather than values.
+            if str(job.get("agent_kind") or "claude") == "codex":
+                report_kwargs.update({
+                    "goal_status": outcome.goal_status,
+                    "goal_turns_completed": outcome.goal_turns_completed,
+                    "goal_tokens_used": outcome.goal_tokens_used,
+                    "goal_time_used_seconds": outcome.goal_time_used_seconds,
+                })
+            report_once(state, task_id, **report_kwargs)
             return
         except (Exception, SystemExit) as exc:
             status = getattr(exc, "status", None)

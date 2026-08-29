@@ -9,15 +9,15 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import tempfile
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import _harness as H  # noqa: E402
+import _harness as H
 
 sys.path.insert(0, str(H.GRID_REPO))
 
@@ -99,7 +99,7 @@ def provider_nodes(relay, owner_token):
 
     nodes = {}
     with httpx.Client(base_url=relay, timeout=30.0) as client:
-        for label in ("A", "B"):
+        for label in ("A", "B", "C"):
             created = client.post(
                 "/nodes", json={"role": "both"},
                 headers={"Authorization": f"Bearer {owner_token}"})
@@ -116,6 +116,18 @@ def fake_agent_bin(tmp_path_factory):
     target = bindir / "claude"
     target.write_text(
         f"#!{sys.executable}\n" + (_HERE / "fake_claude.py").read_text(encoding="utf-8"),
+        encoding="utf-8")
+    target.chmod(0o755)
+    return bindir
+
+
+@pytest.fixture(scope="session")
+def fake_codex_bin(tmp_path_factory):
+    """The deterministic app-server used only by the distributed Goal E2E."""
+    bindir = tmp_path_factory.mktemp("codex-bin")
+    target = bindir / "codex"
+    target.write_text(
+        f"#!{sys.executable}\n" + (_HERE / "fake_codex.py").read_text(encoding="utf-8"),
         encoding="utf-8")
     target.chmod(0o755)
     return bindir
@@ -141,6 +153,57 @@ def workspace_root():
         yield root
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture(scope="session")
+def goal_workspace_root():
+    """Three disjoint provider disks; no Goal worker can read another worker's checkout."""
+    root = Path(tempfile.mkdtemp(prefix="ggoal-e2e-", dir="/private/tmp"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture
+def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, goal_workspace_root,
+                        tmp_path_factory):
+    """A real task-loop process advertising Codex and using a node-private task root."""
+    started: list[H.Provider] = []
+    handles: list = []
+
+    def _spawn(label: str):
+        node_id, node_token = provider_nodes[label]
+        env = {
+            **os.environ,
+            "PATH": f"{fake_codex_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "GRID_REPO": str(H.GRID_REPO),
+            "GRID_SIGNALING_URL": relay,
+            "GRID_NODE_ID": node_id,
+            "GRID_TOKEN": node_token,
+            "GRID_RENEW_SECONDS": str(H.RENEW_SECONDS),
+            "GRID_TASK_ROOT": str(goal_workspace_root / label),
+            "GRID_TASK_TIMEOUT_SECONDS": "120",
+            "GRID_E2E_GOAL_NODE": label,
+            # The task runner intentionally allowlists child env. This test-only selector is
+            # explicit operator passthrough, not an accidental inheritance of provider secrets.
+            "GRID_TASK_ENV_PASSTHROUGH": "GRID_E2E_GOAL_NODE",
+        }
+        log_path = tmp_path_factory.mktemp(f"goal-provider-{label}") / "provider.log"
+        handle = open(log_path, "w", buffering=1)
+        handles.append(handle)
+        proc = subprocess.Popen(
+            [sys.executable, str(_HERE / "provider_process.py")], env=env,
+            stdout=handle, stderr=subprocess.STDOUT, text=True)
+        provider = H.Provider(proc, node_id, log_path=log_path)
+        started.append(provider)
+        return provider
+
+    yield _spawn
+    for provider in started:
+        provider.stop()
+    for handle in handles:
+        handle.close()
 
 
 @pytest.fixture

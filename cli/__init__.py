@@ -53,6 +53,7 @@ from .grid import (
 )
 from .device import cmd_device_info
 from .launch import cmd_launch
+from .goal import cmd_goal
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_pull, cmd_rm
 from .parser import build_parser
@@ -103,6 +104,7 @@ __all__ = [
     "cmd_edit",
     "cmd_video",
     "cmd_launch",
+    "cmd_goal",
     "cmd_agent_install",
     "cmd_agent_status",
     "cmd_engine_install",

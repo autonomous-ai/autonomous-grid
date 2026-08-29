@@ -6,7 +6,7 @@
 
 [![latest release](https://img.shields.io/github/v/release/autonomous-ai/autonomous-grid?label=version)](https://github.com/autonomous-ai/autonomous-grid/releases)
 
-[**Quickstart**](#quickstart) · [From anywhere](#working-from-anywhere) · [Inference](#inference) · [Training](#training-experimental) · [Local AI patterns](docs/local_ai_agent_patterns/README.md) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
+[**Quickstart**](#quickstart) · [From anywhere](#working-from-anywhere) · [Inference](#inference) · [Goals](#goals-experimental) · [Training](#training-experimental) · [Local AI patterns](docs/local_ai_agent_patterns/README.md) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
 https://github.com/user-attachments/assets/9573e961-423f-45ae-ada6-b7a8a361f188
 
@@ -560,6 +560,34 @@ grid launch claude
   `grid models` and point the app at a name the grid serves.
 
 Walkthrough: [docs/claude-code-quickstart.md](docs/claude-code-quickstart.md).
+
+## Goals (Experimental)
+
+Give Codex one measurable outcome and let any Codex-capable computer continue it:
+
+```bash
+grid goal run --project <project-id> \
+  --objective "Build a playable browser click game" \
+  --done-when "index.html, game.js, style.css and README.md exist" \
+  --model <model-name>
+
+grid goal list
+grid goal status <goal-id>
+grid goal pause <goal-id>
+grid goal resume <goal-id>
+```
+
+A Goal is not a second scheduler. It uses the existing distributed task table: each native Codex
+Goal turn is an ordinary leased task. The provider checks out the conversation branch and Codex
+checkpoint from relay Git, runs Codex with model requests routed through Grid inference, then pushes
+both back. If that computer disappears, the lease expires and another Codex-capable provider
+reclaims the same task from the last completed checkpoint.
+
+Completed work and Codex history cross machines. Uncommitted work from a computer that disappears
+mid-turn does not. `grid goal list` shows active Goals; completed Goals remain available through
+`grid goal list --all` for audit and future training data.
+
+Setup, tool manifests and the exact handoff boundary: [docs/goals-quickstart.md](docs/goals-quickstart.md).
 
 ### Don't know which model to ask for? Send `auto`
 

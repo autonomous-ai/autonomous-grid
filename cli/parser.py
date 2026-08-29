@@ -36,6 +36,7 @@ from .grid import (
     cmd_version,
 )
 from .credential import cmd_credential
+from .goal import cmd_goal
 from .launch import cmd_launch
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
@@ -109,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_price(sub)
     _add_project(sub)
     _add_task(sub)
+    _add_goal(sub)
     _add_router(sub)
     _add_engine_setup(sub)
     _add_launch(sub)
@@ -1046,6 +1048,48 @@ def _add_project(sub) -> None:
         refresher, help="The clone to refresh (default: the current directory).")
     refresher.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     refresher.set_defaults(handler=cmd_remote_project)
+
+
+def _add_goal(sub) -> None:
+    """A measurable Codex Goal whose turns are ordinary distributed Grid tasks."""
+    goal = sub.add_parser("goal", help="Run measurable Codex Goals across Grid nodes (remote)")
+    actions = goal.add_subparsers(dest="goal_action", required=True)
+
+    run = actions.add_parser("run", help="Start a Goal and let Grid continue it until done")
+    project_arg.add_project(run, help="Project id whose files the Goal may read and change.")
+    run.add_argument("--objective", required=True, help="The outcome Codex should achieve.")
+    run.add_argument("--done-when", required=True, help="One measurable completion condition.")
+    run.add_argument("--model", required=True, help="Grid model used by Codex.")
+    run.add_argument("--token-budget", type=int, default=100_000,
+                     help="Maximum cumulative tokens (default 100000).")
+    run.add_argument("--tools", default=None, metavar="JSON",
+                     help="Observe/act HTTP capability manifest.")
+    run.add_argument("--name", default=None, help="Optional short Goal name.")
+    run.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    run.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    run.set_defaults(handler=cmd_goal)
+
+    listing = actions.add_parser("list", help="List active Goals")
+    listing.add_argument("--all", action="store_true", help="Include completed Goal history.")
+    listing.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    listing.set_defaults(handler=cmd_goal)
+
+    status = actions.add_parser("status", help="Show one Goal")
+    status.add_argument("goal_id")
+    status.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    status.set_defaults(handler=cmd_goal)
+
+    for action, help_text in (("pause", "Stop scheduling new turns"),
+                              ("resume", "Resume scheduling turns"),
+                              ("cancel", "End a Goal")):
+        parser = actions.add_parser(action, help=help_text)
+        parser.add_argument("goal_id")
+        parser.add_argument("--grid", default=None,
+                            help="Grid to act on (default: active grid).")
+        parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+        parser.set_defaults(handler=cmd_goal)
 
 
 def _add_task(sub) -> None:

@@ -1,0 +1,102 @@
+"""Short-lived credential boundary for a distributed Codex Goal worker."""
+from __future__ import annotations
+
+import json
+import secrets
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import ClassVar
+
+import httpx
+
+
+class InferenceProxy:
+    """Expose only Responses on loopback; keep the Grid bearer token out of Codex's env."""
+
+    def __init__(self, upstream_base: str, upstream_token: str):
+        self.upstream_base = upstream_base.rstrip("/")
+        self.upstream_token = upstream_token
+        self.child_token = secrets.token_urlsafe(32)
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+            proxy: ClassVar[InferenceProxy] = owner
+
+            def do_POST(self):
+                self.proxy._forward(self)
+
+            def log_message(self, _format, *_args):
+                return
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    def _forward(self, handler: BaseHTTPRequestHandler) -> None:
+        supplied = handler.headers.get("Authorization", "").removeprefix("Bearer ")
+        if not secrets.compare_digest(supplied, self.child_token):
+            self._error(handler, 401, "invalid Goal inference token")
+            return
+        if handler.path.split("?", 1)[0] not in ("/responses", "/v1/responses"):
+            self._error(handler, 404, "Goal proxy only serves /responses")
+            return
+        try:
+            length = int(handler.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._error(handler, 400, "invalid Content-Length")
+            return
+        if not 1 <= length <= 32 * 1024 * 1024:
+            self._error(handler, 413, "request body must be between 1 byte and 32 MiB")
+            return
+
+        body = handler.rfile.read(length)
+        headers = {
+            "Authorization": f"Bearer {self.upstream_token}",
+            "Content-Type": handler.headers.get("Content-Type", "application/json"),
+            "Accept": handler.headers.get("Accept", "text/event-stream"),
+        }
+        started = False
+        try:
+            with httpx.Client(timeout=httpx.Timeout(30.0, read=None)) as client, client.stream(
+                "POST", f"{self.upstream_base}/responses", content=body, headers=headers
+            ) as response:
+                handler.send_response(response.status_code)
+                for name in ("content-type", "cache-control", "openai-processing-ms"):
+                    if response.headers.get(name):
+                        handler.send_header(name, response.headers[name])
+                handler.send_header("Connection", "close")
+                handler.end_headers()
+                started = True
+                for chunk in response.iter_raw():
+                    handler.wfile.write(chunk)
+                    handler.wfile.flush()
+        except (httpx.HTTPError, OSError) as exc:
+            if not started:
+                try:
+                    self._error(handler, 502, f"Grid inference proxy failed: {exc}")
+                except OSError:
+                    pass
+        finally:
+            handler.close_connection = True
+
+    @staticmethod
+    def _error(handler: BaseHTTPRequestHandler, status: int, message: str) -> None:
+        payload = json.dumps({"error": {"message": message}}).encode()
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        handler.wfile.write(payload)

@@ -314,6 +314,7 @@ def claim_task(
     signaling_url: str,
     access_token: str,
     *,
+    agent_kinds: tuple[str, ...] = ("claude",),
     timeout: float = TASK_CLAIM_TIMEOUT,
 ) -> dict[str, Any] | None:
     """Long-poll for one task and claim it (``POST /relay/v1/tasks/claim``).
@@ -343,7 +344,9 @@ def claim_task(
     """
     try:
         with _client(signaling_url, access_token, timeout=timeout) as client:
-            resp = client.post("/relay/v1/tasks/claim")
+            kwargs = ({"json": {"agent_kinds": list(agent_kinds)}}
+                      if agent_kinds != ("claude",) else {})
+            resp = client.post("/relay/v1/tasks/claim", **kwargs)
     except httpx.HTTPError as exc:
         raise RelayError(f"claim_task transport error: {exc}") from None
     if resp.status_code == 204:
@@ -368,6 +371,10 @@ def report_task_result(
     session_id: str | None = None,
     result_commit: str | None = None,
     session_reset_reason: str | None = None,
+    goal_status: str | None = None,
+    goal_turns_completed: int | None = None,
+    goal_tokens_used: int | None = None,
+    goal_time_used_seconds: int | None = None,
 ) -> None:
     """Report a task's terminal outcome (``POST /relay/v1/tasks/{id}/result``).
 
@@ -398,6 +405,13 @@ def report_task_result(
         body["result_commit"] = result_commit
     if session_reset_reason:
         body["session_reset_reason"] = session_reset_reason
+    if goal_status is not None:
+        body.update({
+            "goal_status": goal_status,
+            "goal_turns_completed": goal_turns_completed,
+            "goal_tokens_used": goal_tokens_used,
+            "goal_time_used_seconds": goal_time_used_seconds,
+        })
     try:
         with _client(signaling_url, access_token, timeout=_TASK_RESULT_TIMEOUT) as client:
             resp = client.post(
@@ -959,6 +973,38 @@ def create_task(
             "ignored the project — ask its operator to update it before using shared projects."
         )
     return task
+
+
+def create_goal(signaling_url: str, access_token: str, *, project_id: str, objective: str,
+                done_when: str, model: str, token_budget: int | None,
+                tools: list[dict[str, Any]] | None = None, name: str | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "project_id": project_id, "objective": objective, "done_when": done_when,
+        "model": model, "token_budget": token_budget, "tools": tools or [],
+    }
+    if name:
+        body["name"] = name
+    return _task_oneshot(signaling_url, access_token, "POST", "/relay/v1/goals", json=body,
+                         missing_route_hint="This grid's relay does not support Grid Goal yet.")
+
+
+def list_goals(signaling_url: str, access_token: str, *, all: bool = False) -> list[dict[str, Any]]:
+    answer = _task_oneshot(signaling_url, access_token, "GET", "/relay/v1/goals",
+                           params={"all": "true"} if all else {})
+    if not isinstance(answer, list):
+        raise RelayError("list_goals returned a malformed body")
+    return answer
+
+
+def get_goal(signaling_url: str, access_token: str, goal_id: str) -> dict[str, Any]:
+    return _task_oneshot(signaling_url, access_token, "GET",
+                         f"/relay/v1/goals/{quote(goal_id, safe='')}")
+
+
+def control_goal(signaling_url: str, access_token: str, goal_id: str,
+                 action: str) -> dict[str, Any]:
+    return _task_oneshot(signaling_url, access_token, "POST",
+                         f"/relay/v1/goals/{quote(goal_id, safe='')}/{quote(action, safe='')}")
 
 
 # Every project endpoint arrived together (ADR 0033 issue 10), so a relay missing one is missing

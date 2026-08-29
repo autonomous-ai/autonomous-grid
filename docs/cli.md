@@ -1538,6 +1538,28 @@ alone, exactly as before. The relay decides that from its own configuration — 
 against the hosted control plane *and* be a one-grid-per-email-domain network — rather than from
 anything a client sends. `grid project status` reports which, so you never have to guess.
 
+## Goal
+
+```
+grid goal run --project <project-id> --objective <text> --done-when <text> --model <model>
+              [--token-budget <n>] [--tools <json-file>] [--name <name>]
+              [--grid <grid>] [--json]
+grid goal list [--all] [--grid <grid>] [--json]
+grid goal status <goal-id> [--grid <grid>] [--json]
+grid goal pause|resume|cancel <goal-id> [--grid <grid>] [--json]
+```
+
+**Remote-only and experimental.** A Goal is one measurable Codex objective continued across
+ordinary distributed task leases until native Codex Goal state says it is complete, blocked or
+limited. The Goal id is its conversation id. `list` omits ended Goals unless `--all` is supplied.
+
+The computer running Codex and the computer serving `--model` need not be the same node. Agent state
+and project state move through the relay's Git refs at successful turn boundaries; a replacement
+provider cannot recover uncommitted work from a node that disappeared mid-turn.
+
+See [Distributed Goals](goals-quickstart.md) for provider setup, HTTP observe/act tools, lifecycle
+semantics and the three-node handoff test.
+
 ## Task
 
 ```

@@ -74,7 +74,8 @@ def main() -> int:
     # deliberately does not go through `serve`, so reading it here would name a knob nothing in this
     # process consults.
     workers = int(os.environ.get("GRID_E2E_TASK_WORKERS", "1"))
-    print(f"provider {state.node_id} up ({workers} worker(s))", file=sys.stderr, flush=True)
+    print(f"provider {state.node_id} up ({workers} worker(s), agents={tasks._agent_kinds()})",
+          file=sys.stderr, flush=True)
     if workers == 1:
         tasks.task_loop(state)
         return 0

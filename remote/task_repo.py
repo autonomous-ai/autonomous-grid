@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -453,7 +454,8 @@ def _ensure_repo(workspace: Path) -> None:
 
 def materialize(workspace: Path, *, url: str, token: str, branch: str,
                 input_commit: str, merge_ref: str = "",
-                transcript_ref: str = "", transcript_commit: str = "") -> None:
+                transcript_ref: str = "", transcript_commit: str = "",
+                reset_agent_state: bool = False) -> None:
     """Bring `workspace` to exactly `input_commit` on `branch`. Raises `CheckoutError` on any failure.
 
     Raising rather than returning a status is deliberate: the ONLY safe response to input that did
@@ -519,7 +521,13 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
         # describes, and reported terminally it burns the turn on one machine's full disk with
         # nothing to retry it. Found in review.
         task_worktree.ensure_store(store)
-        _run(store, "fetch", "--quiet", url, f"+refs/heads/{branch}:refs/heads/{branch}",
+        # A retry on the same provider already has this branch checked out in its linked worktree.
+        # Fetch normally refuses to update such a ref even when the oid is unchanged. We are about
+        # to hard-reset that worktree to the relay-pinned input, so this is exactly the plumbing use
+        # ``--update-head-ok`` exists for; without it cross-machine recovery works while same-node
+        # recovery fails before the agent starts.
+        _run(store, "fetch", "--quiet", "--update-head-ok", url,
+             f"+refs/heads/{branch}:refs/heads/{branch}",
              token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
         if merge_ref:
             # Its own invocation rather than a second refspec on the one above: a relay that has
@@ -570,6 +578,21 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
     # a nested repository a previous agent may have cloned, and `-e` spares the one directory that
     # is ours rather than the task's.
     _run(workspace, "clean", "--quiet", "-ffdx", "-e", RESERVED_DIR)
+
+    # A pinned task is allowed to see exactly the pinned agent state, not a failed attempt's newer
+    # local files. Codex Goals need the same reset even on their first turn (whose pin is empty),
+    # because an automatic retry of that first turn can land back on the same provider. Keep the
+    # explicit flag narrow: an old Claude relay sends no pin and historically relies on `.grid/`
+    # surviving materialization, so changing the default would destroy that conversation.
+    if transcript_commit or reset_agent_state:
+        agent_state = workspace / RESERVED_DIR / TRANSCRIPT_DIR
+        try:
+            if agent_state.is_symlink() or (agent_state.exists() and not agent_state.is_dir()):
+                agent_state.unlink()
+            elif agent_state.is_dir():
+                shutil.rmtree(agent_state)
+        except OSError as exc:
+            raise InputFetchError(f"could not reset the task's pinned agent state: {exc}") from None
 
     if transcript_commit:
         # The conversation, put where Claude Code will look for it (ADR 0034 D-j, issue 39). AFTER
