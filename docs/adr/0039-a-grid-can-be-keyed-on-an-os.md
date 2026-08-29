@@ -98,11 +98,13 @@ Two consequences are deliberate, not oversights:
 The membership fact is therefore about a **session on a machine**, not about a person: *you are a
 macOS user for as long as the machine you are typing on is a macOS machine.*
 
-⚠️ **A third consequence, found while building issue 02 and NOT yet decided: the refresh-credential
-path carries no OS claim, so it cannot renew an OS grid's token.** `POST /v1/grid/tokens/{id}` with a
-`refresh_token` re-resolves the caller through `store.member_for_access`, and on this type that call
-has nothing to match on — so it answers 403 *"Member is not active"*. `GET /tokens` still issues a
-bundle whose `refresh_token` is therefore inert on this one type.
+⚠️ **A third consequence, found while building issue 02 and since resolved (see the decision at the
+end of this section): the refresh-credential path carried no OS claim, so it could not renew an OS
+grid's token.** `POST /v1/grid/tokens/{id}` with a `refresh_token` re-resolves the caller through
+`store.member_for_access`, and on this type that call had nothing to match on — so it answered 403
+*"Member is not active"*. `GET /tokens` still issued a bundle whose `refresh_token` was therefore
+inert on this one type. The account below is kept in the past tense on purpose: it is the reasoning
+the decision rests on, and a later reader deciding whether to simplify the wire needs it.
 
 It bites where the CLI refreshes by itself rather than by a person's command: `remote/serve.py`'s
 serve loop and `cli/grid_credential.py` both exchange the refresh credential on a 401, and a 401 is
@@ -126,12 +128,34 @@ refusal on this route must not spend the credential it is refusing, on **any** n
 type merely reaches the path every single time, which is why it surfaced here.
 `.scratch/os-grid-type/issues/10-an-os-grids-credential-can-be-renewed.md` carries both halves.
 
-Deciding it means choosing between two shapes, and the choice belongs with whoever owns the serving
-slice: carry `os` on the refresh request too (the request stays the whole membership fact, at the
-cost of a second wire value in a second place), or let a refusal on this type mean *re-sync* to the
-CLI rather than *end of run*. What must NOT happen is the third option — persisting the OS the bundle
-was minted with — which is exactly the stored-`grid_users.os` shape rejected above, arriving through
-a side door.
+**DECIDED 2026-08-29 (issue 10): the refresh request carries the `os` claim too.** Two shapes were on
+the table, and the second turned out not to solve the problem at all:
+
+- **Chosen — carry `os` on the refresh request.** The request stays the whole membership fact, so D-e
+  is untouched and the gate on renewal is the same equality test as the gate on sign-in. The cost is
+  a second wire value in a second place, which is paid for by pinning it: the fetch's query parameter
+  and the renewal's body key are two independent spellings and get two independent lockstep cases,
+  plus a third asserting this CLI's own two call sites agree with each other.
+- **Rejected — let a refusal on this type mean *re-sync* rather than *end of run*.** It reads cheaper
+  (no new wire value) and it is not: **it cannot deliver unattended renewal, which is the entire
+  point.** `grid sync` needs a session token, and `SESSION_TTL_SECONDS` is 24 hours — so a provider
+  running longer than a day still ends at a human with a browser, which is exactly the state being
+  fixed. It also has to tell this refusal from a genuine loss of membership, and the only local
+  signal is the stored `network_type`, which `cli/grid_credential.py` already records as *"a snapshot
+  from the last login/sync that nothing refreshes on a token exchange"* — stale precisely on a grid
+  that was re-typed. Doing it on a wire `code` instead is worse: exactly three are parsed across
+  these seams and keeping that count low is the contract.
+- **Still forbidden — persisting the OS the bundle was minted with.** The stored-`grid_users.os`
+  shape rejected above, arriving through a side door. Pinned by
+  `test_the_os_a_bundle_was_minted_with_is_never_persisted`, which renews twice on one OS and then
+  claims another: if anything anywhere had remembered the first answer, that call would succeed.
+
+⚠️ **The chosen shape has no rollout ordering in either direction, and that was MEASURED rather than
+assumed.** `TokenRefreshRequest` does not forbid extra fields (Pydantic's default is `ignore`), so a
+newer CLI against an older control plane has the key dropped in silence and behaves exactly as it did
+before; an older CLI against a newer control plane sends nothing and likewise. The check mattered:
+the sibling model in these repos, grid-src's `task_files.parse_files`, **refuses** unknown keys and
+answers 422 — the same change against that model would have been a break, not a degrade.
 
 ## D-f — `name` is the label, `access_os` is the gate, the unique index is on `access_os`
 

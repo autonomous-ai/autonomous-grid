@@ -11722,9 +11722,19 @@ def test_control_plane_raises_on_error_status(monkeypatch, tmp_path):
 
 
 def test_control_plane_refresh_network_token_posts_refresh_unauthenticated(monkeypatch, tmp_path):
+    import platform
+
     from remote import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # ⚠️ Pinned, because this body is otherwise MACHINE-DEPENDENT and the exact-equality assertion
+    # below would pass or fail on who ran it. Since ADR 0039 D-e the call also carries the machine's
+    # OS claim, so it is two keys on a Mac or a Linux box and one on anything outside the closed set
+    # — this test failed on the developer's Mac and would have passed untouched on a BSD. Pinning
+    # keeps the assertion EXACT (which is what catches an unconditional extra field being added)
+    # rather than loosening it to a subset check. The claim's own presence and omission are covered
+    # by `test_the_refresh_exchange_carries_the_os_token_too` and its sibling.
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
     seen = {}
 
     def handler(request):
@@ -11737,7 +11747,7 @@ def test_control_plane_refresh_network_token_posts_refresh_unauthenticated(monke
     bundle = control_plane.refresh_network_token(network_id="n1", refresh_token="RT1")
     assert bundle == {"access_token": "AT2", "refresh_token": "RT2"}
     assert (seen["method"], seen["path"]) == ("POST", "/v1/grid/tokens/n1")
-    assert seen["body"] == {"refresh_token": "RT1"}
+    assert seen["body"] == {"refresh_token": "RT1", "os": "macos"}
     assert seen["auth"] is None  # the refresh token IS the credential — no Bearer header
 
 
@@ -39030,3 +39040,98 @@ def test_a_root_the_operator_NAMED_is_not_judged_by_the_defaults_rules(
     assert _the_child_would_claim_tasks(spawned), (
         f"a root the operator named was judged by the default's rules: {capsys.readouterr().err!r}")
     assert not (tmp_path / "never-made").exists(), "the default root was made despite a named one"
+
+
+def _refresh_body(monkeypatch, system):
+    """The JSON body `refresh_network_token` builds on a machine whose ``platform.system()`` is that."""
+    import json as _json
+    import platform
+
+    from remote import control_plane
+
+    monkeypatch.setattr(platform, "system", lambda: system)
+    seen = {}
+
+    def handler(request):
+        seen["body"] = _json.loads(request.content)
+        return httpx.Response(200, json={"access_token": "a", "refresh_token": "r"})
+
+    _mock_control_plane(monkeypatch, handler)
+    control_plane.refresh_network_token(network_id="grid-1", refresh_token="rt-1")
+    return seen["body"]
+
+
+@pytest.mark.parametrize(
+    "system,expected",
+    [("Darwin", "macos"), ("Linux", "linux"), ("Windows", "windows")])
+def test_the_refresh_exchange_carries_the_os_token_too(monkeypatch, tmp_path, system, expected):
+    """ADR 0039 D-e, issue 10 — the claim rides the RENEWAL, not only the first fetch.
+
+    On an `os-community` grid nothing about the OS is stored, so a refresh that carried no claim
+    matched nothing and was refused: the bundle the fetch handed out contained a `refresh_token` that
+    was inert on exactly one network type. A machine serving such a grid then went dark the first time
+    the grid's `network_epoch` moved, and the recovery was a person — `grid sync` needs a session
+    token, and those live 24 hours.
+
+    Asserted at the wire, and on the BODY rather than the query string: this route is a POST and the
+    refresh credential already travels in the body, so the claim goes with it.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    body = _refresh_body(monkeypatch, system)
+    assert body["os"] == expected
+    assert body["refresh_token"] == "rt-1"  # the claim rides ALONGSIDE the credential, never instead
+
+
+@pytest.mark.parametrize("system", ["FreeBSD", "Java", ""])
+def test_the_refresh_exchange_omits_the_os_key_when_there_is_no_token(monkeypatch, tmp_path, system):
+    """Omitted entirely, never an empty string — the same discipline as the fetch, for the same reason.
+
+    The far end gates by equality against a grid's own token, so an empty string would be a second
+    spelling of "no claim" for it to recognise. And a machine outside the closed set must still renew
+    every OTHER grid it belongs to: this call is not about OS grids, it merely also serves them.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    body = _refresh_body(monkeypatch, system)
+    assert "os" not in body
+    assert body["refresh_token"] == "rt-1"
+
+
+def test_the_serve_loops_own_refresh_carries_the_os_claim(monkeypatch, tmp_path):
+    """The scenario issue 10 exists for, asserted at the loop rather than at the HTTP helper.
+
+    An access token lives a year, so a serving machine does not refresh on expiry — it refreshes when
+    the grid's `network_epoch` moves, which makes the relay answer 401 and sends `_ServeState.refresh`
+    here. On an `os-community` grid that exchange used to be refused, and because a refused exchange
+    also CONSUMED the credential, the machine went dark permanently with no person watching.
+
+    Asserted through `_ServeState.refresh` and not `control_plane.refresh_network_token` because the
+    loop is the caller that matters and it passes no claim of its own: it inherits one because the
+    helper reads `os_grid.os_token()` itself. A future refactor that threaded the claim through the
+    loop's arguments instead would leave the helper's own test green and this one red, which is the
+    right way round.
+    """
+    import json as _json
+    import platform
+
+    from remote import credentials, serve
+
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    state = _serve_state(monkeypatch, tmp_path)
+    credentials.save_credentials({"networks": [
+        {"network_id": "n1", "access_token": "AT", "refresh_token": "RT"}]})
+    seen = {}
+
+    def handler(request):
+        seen["body"] = _json.loads(request.content)
+        return httpx.Response(200, json={"access_token": "AT-2", "refresh_token": "RT-2"})
+
+    _mock_control_plane(monkeypatch, handler)
+
+    assert serve._ServeState.refresh(state, "AT") is True
+    assert seen["body"]["os"] == "macos"
+    assert seen["body"]["refresh_token"] == "RT"
+    # And the loop kept what it was given, so the NEXT 401 does not replay a spent credential.
+    assert state.token() == "AT-2"
+    stored = next(n for n in credentials.load_credentials()["networks"] if n["network_id"] == "n1")
+    assert stored["access_token"] == "AT-2"
+    assert stored["refresh_token"] == "RT-2"

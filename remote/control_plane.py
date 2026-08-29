@@ -98,11 +98,30 @@ def refresh_network_token(
     Unauthenticated by design — the ``refresh_token`` in the body *is* the credential, so no
     session/access Bearer is attached (matches the reference client). A failed refresh surfaces as
     a clean ``SystemExit`` via ``_send``; the caller treats that as end-of-run.
+
+    **The OS claim rides this call too** (ADR 0039 D-e, issue 10), and it has to. On an
+    ``os-community`` grid the request IS the whole membership fact — nothing about the OS is stored —
+    so an exchange that carried no claim matched nothing, and the bundle ``fetch_tokens`` hands out
+    contained a ``refresh_token`` that was inert on exactly that one network type. A machine serving
+    an OS grid then went dark the first time the grid's ``network_epoch`` moved, since that is what
+    makes the relay answer 401 and sends the serve loop here.
+
+    Same discipline as the fetch: read from the one place that decides, and **omit the key entirely**
+    when this machine claims no OS rather than sending an empty string, so the far end never has a
+    second spelling of "no claim" to recognise. Also the same absence of rollout ordering, and for a
+    reason worth keeping written down: the far end's body model does not forbid unknown fields, so a
+    newer CLI against an older control plane has this key dropped in silence and behaves exactly as it
+    did before. That was **measured, not assumed** — a sibling model elsewhere in these repos refuses
+    unknown keys and answers 422, which would have made this a break rather than a degrade.
     """
+    body: dict[str, Any] = {"refresh_token": refresh_token}
+    machine_os = os_grid.os_token()
+    if machine_os:
+        body["os"] = machine_os
     with _client(api_url) as client:
         return _send(
             client, "POST", f"/v1/grid/tokens/{network_id}",
-            json={"refresh_token": refresh_token},
+            json=body,
         ).json()
 
 

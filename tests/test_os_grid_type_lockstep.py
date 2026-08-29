@@ -472,3 +472,119 @@ def test_the_os_claims_parameter_is_spelled_the_same_on_both_sides_of_the_call(m
         f"this CLI sends the OS claim as {sent!r}, but grid-apis' {_TOKENS_METHOD.upper()} "
         f"{_TOKENS_PATH} accepts {sorted(accepted.values())} — the parameter is dropped, so nobody "
         f"is ever issued an OS grid and nothing anywhere goes red (ADR 0039 D-e); edit BOTH sides")
+
+
+# --- the same claim on the RENEWAL, which is a body key and not a query parameter ------------------
+
+#: grid-apis' Pydantic model for the refresh exchange's body. A different route, a different shape,
+#: and therefore a THIRD hand-duplicated spelling of the same claim (ADR 0039 D-e, issue 10).
+_REFRESH_MODEL = "TokenRefreshRequest"
+#: Its pre-existing field, the positive control — the credential the exchange has always carried.
+_REFRESH_CONTROL_FIELD = "refresh_token"
+
+
+def _apis_model_fields(model_name):
+    """The field names grid-apis declares on a Pydantic model, or an assertion naming what it found."""
+    tree = _apis_module(_APIS_HANDLER)
+    classes = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == model_name
+    ]
+    assert len(classes) == 1, (
+        f"expected exactly one `class {model_name}` in grid-apis' {_APIS_HANDLER}, found "
+        f"{len(classes)} — the model moved or was renamed, so teach this check where it went rather "
+        f"than letting the pin read nothing")
+    return {
+        node.target.id
+        for node in classes[0].body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+
+
+def _os_key_the_cli_sends_on_a_refresh(monkeypatch, tmp_path):
+    """The body key this CLI actually puts on a refresh, read off a real request.
+
+    Read from the request and not the source, for the same reason the query-parameter pin above is:
+    what the far end must recognise is the string that reaches it.
+    """
+    import json
+    import platform
+
+    import httpx
+
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # Fixed, so the claim is present whatever this developer's machine runs — see the note above.
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"access_token": "a", "refresh_token": "r"})
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        control_plane.httpx,
+        "Client",
+        lambda *a, **k: real_client(*a, **{**k, "transport": httpx.MockTransport(handler)}),
+    )
+    control_plane.refresh_network_token(network_id="grid-1", refresh_token="rt-1")
+
+    body = seen.get("body") or {}
+    assert _REFRESH_CONTROL_FIELD in body, (
+        f"positive control: `refresh_network_token` sent {sorted(body)} and not even "
+        f"{_REFRESH_CONTROL_FIELD}, so its answer about the OS claim means nothing — fix the harness")
+    claim = set(body) - {_REFRESH_CONTROL_FIELD}
+    assert len(claim) == 1, (
+        f"`refresh_network_token` put {sorted(body)} on the wire, so this check cannot tell which key "
+        f"carries the OS claim — teach it the new shape rather than deleting the pin")
+    return claim.pop()
+
+
+def test_the_os_claim_on_a_renewal_is_spelled_the_same_on_both_sides(monkeypatch, tmp_path):
+    """The renewal's copy of the claim, pinned separately from the fetch's — they are two spellings.
+
+    ⚠️ **Pinning the query parameter does not pin this.** The fetch carries the claim in the URL and
+    the refresh carries it in a JSON body, so they are written in different places on both sides and
+    can drift apart independently. Renaming only the body key leaves the fetch pin green.
+
+    And this one degrades even more quietly than the fetch's, because it is a key on an EXISTING body
+    whose model does not forbid unknown fields: dropped in silence, the exchange still answers, and
+    the only symptom is that a machine on an OS grid can never renew — which looks exactly like the
+    bug this slice was written to remove, reappearing with nothing red anywhere.
+    """
+    declared = _apis_model_fields(_REFRESH_MODEL)
+    assert _REFRESH_CONTROL_FIELD in declared, (
+        f"positive control: grid-apis' {_REFRESH_MODEL} does not declare {_REFRESH_CONTROL_FIELD} "
+        f"either, so this check is reading the wrong class — fix the harness before believing it")
+
+    sent = _os_key_the_cli_sends_on_a_refresh(monkeypatch, tmp_path)
+    assert sent in declared, (
+        f"this CLI sends the OS claim on a refresh as {sent!r}, but grid-apis' {_REFRESH_MODEL} "
+        f"declares {sorted(declared)} — the key is IGNORED rather than refused (the model does not "
+        f"forbid extras), so a machine on an OS grid silently never renews (ADR 0039 D-e); either "
+        f"rename both sides together or teach this pin the new spelling")
+
+
+def test_the_fetch_and_the_renewal_agree_with_each_other(monkeypatch, tmp_path):
+    """Both ends of one claim, so the two spellings cannot drift apart inside this repository either.
+
+    The pins above each compare this CLI against grid-apis. Nothing yet says the CLI's own two call
+    sites agree — and a machine that announced `os` on sign-in and `os_token` on renewal would be
+    admitted and then quietly unable to renew, which is the same outage arriving one step later.
+
+    ⚠️ **A context per call, and it is not tidiness.** Both helpers patch `control_plane.httpx.Client`
+    and capture the real one first; run under a single `monkeypatch` the second captures the FIRST
+    one's replacement, so its handler never fires and it reads an empty body. That is not a
+    hypothetical — it is what this test did when written, and the helper's positive control is what
+    said so instead of letting the comparison report a verdict it had not measured.
+    """
+    with pytest.MonkeyPatch.context() as on_sign_in:
+        fetch = _os_parameter_the_cli_sends(on_sign_in, tmp_path)
+    with pytest.MonkeyPatch.context() as on_renewal:
+        refresh = _os_key_the_cli_sends_on_a_refresh(on_renewal, tmp_path)
+
+    assert fetch == refresh, (
+        f"this CLI announces the OS claim as {fetch!r} when signing in and {refresh!r} when renewing; "
+        f"a machine would be admitted to an OS grid and then silently unable to renew on it")
