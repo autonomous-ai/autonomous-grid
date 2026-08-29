@@ -199,6 +199,73 @@ def test_controller_portfolio_uses_a_fleet_feasible_fallback():
     assert hints["feasible-small"]["best_node_id"] == "only-node"
 
 
+def test_controller_portfolio_requires_meaningful_gain_to_replace_resident_model():
+    controller = AllocatorController()
+    for model_id, score in (("incumbent", 0.8), ("challenger", 0.805)):
+        controller.put_profile(
+            ModelProfile(
+                model_id,
+                8_000,
+                runtimes=("llama.cpp",),
+                backends=("metal",),
+                min_replicas=0,
+                max_replicas=1,
+                min_residency_seconds=0,
+                workload_scores=(("coding", score),),
+            )
+        )
+    for timestamp in (98, 99, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("chat/completions", "auto", "coding"),
+            service_seconds=1,
+            timestamp=timestamp,
+        )
+    machines = (
+        NodeSnapshot(
+            "resident-node",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            residencies=(
+                ModelResidency(
+                    "incumbent",
+                    8_000,
+                    ResidencyState.READY,
+                    loaded_at=1,
+                ),
+            ),
+            last_heartbeat=100,
+        ),
+        NodeSnapshot(
+            "empty-node",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            last_heartbeat=100,
+        ),
+    )
+
+    stable = controller.status(machines, now=100)["portfolio_projections"][0]
+    controller.put_profile(
+        ModelProfile(
+            "challenger",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("coding", 0.9),),
+        )
+    )
+    switched = controller.status(machines, now=101)["portfolio_projections"][0]
+
+    assert stable["chosen_model"] == "incumbent"
+    assert switched["chosen_model"] == "challenger"
+
+
 def test_joint_portfolio_chooses_one_shared_model_when_independent_specialists_do_not_fit():
     controller = AllocatorController()
     for candidate in (

@@ -493,6 +493,47 @@ def test_portfolio_cost_breaks_an_otherwise_equal_model_tie():
     assert forecasts[0].model_id == "a-cheap"
 
 
+def test_resident_model_hysteresis_rejects_tiny_gain_but_allows_clear_improvement():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    incumbent = profile("incumbent", 8_000, ("coding", 0.8))
+    tiny_challenger = profile("challenger", 8_000, ("coding", 0.805))
+    strong_challenger = profile("challenger", 8_000, ("coding", 0.9))
+    intelligence.observe(
+        RequestFeatures("chat/completions", "auto", "coding"),
+        portfolio_unbound=True,
+        timestamp=100,
+    )
+    placement_hints = {
+        "incumbent": {
+            "feasible": True,
+            "feasible_now": True,
+            "startup_seconds": 0,
+        },
+        "challenger": {
+            "feasible": True,
+            "feasible_now": True,
+            "startup_seconds": 60,
+        },
+    }
+
+    stable = intelligence.projections(
+        (incumbent, tiny_challenger),
+        now=100,
+        placement_hints=placement_hints,
+    )[0]
+    switched = intelligence.projections(
+        (incumbent, strong_challenger),
+        now=100,
+        placement_hints=placement_hints,
+    )[0]
+
+    stable_rows = {row["model_id"]: row for row in stable["candidates"]}
+    assert stable["chosen_model"] == "incumbent"
+    assert stable_rows["incumbent"]["transition_penalty"] == 0.0
+    assert stable_rows["challenger"]["transition_penalty"] > 0.01
+    assert switched["chosen_model"] == "challenger"
+
+
 def test_broad_cohort_slo_failure_graduates_portfolio_allocation_pressure():
     intelligence = WorkloadIntelligence(portfolio_min_samples=1)
     candidate = profile("coder", 8_000, ("coding", 1.0))

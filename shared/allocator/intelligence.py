@@ -871,6 +871,7 @@ class WorkloadIntelligence:
             # Quality and configured suitability remain dominant. This bounded term distinguishes
             # similarly effective candidates by the cheapest node that can actually host them.
             score -= min(0.10, 0.02 * math.log1p(cost_per_hour))
+        score -= _placement_transition_penalty(hint)
         if hint.get("feasible_after_preemption") is True and not (
             hint.get("feasible_now") is True or hint.get("feasible") is True
         ):
@@ -897,6 +898,23 @@ def _placement_feasible(
             or (allow_preemption and hint.get("feasible_after_preemption") is True)
         )
     )
+
+
+def _placement_transition_penalty(hint: Mapping[str, Any]) -> float:
+    """Price avoidable model churn using the candidate's best current startup path.
+
+    The penalty disappears once a model is resident, which creates state-dependent hysteresis:
+    a cold challenger must provide a meaningful score improvement, while an incumbent that becomes
+    infeasible loses its protection through the ordinary hard placement filter.
+    """
+
+    try:
+        startup_seconds = float(hint.get("startup_seconds") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(startup_seconds) or startup_seconds <= 0:
+        return 0.0
+    return min(0.05, 0.01 + startup_seconds / 1_200.0)
 
 
 def _cohort_key(workload: str, tenant_class: str, *, attested: bool) -> str:
@@ -953,6 +971,9 @@ def _candidate_rows(
                 # optimizer distinguish serving an unevaluated workload from deliberately spending
                 # one of its bounded exploration slots on a non-incumbent arm.
                 "exploitation_score": score - evidence["exploration_bonus"],
+                "transition_penalty": _placement_transition_penalty(
+                    (placement_hints or {}).get(profile.model_id) or {}
+                ),
                 "evidence": evidence,
                 "feasible": _placement_feasible(profile.model_id, placement_hints),
                 "selectable": _placement_feasible(

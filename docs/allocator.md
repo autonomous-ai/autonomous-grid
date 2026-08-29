@@ -75,9 +75,12 @@ Among otherwise similar feasible candidates, a bounded cost term prefers the che
 host without overwhelming measured quality or configured workload suitability. Allocator status
 exposes every candidate's current-headroom feasibility, immutable compatibility, possible
 planner-authorized preemption path, eligible-node count, best host, startup estimate, hourly cost,
-and rejection reason. An ordinary canary may use only current headroom. Trusted broad service
-pressure may consider a host after removable managed speculation is drained, but the normal planner
-still proves victim priority, evidence, ownership, pins, active work, and capacity before acting.
+transition penalty, and rejection reason. A candidate with an avoidable cold start must show a
+meaningful score improvement over a resident peer; after a justified switch the penalty reverses,
+providing state-dependent hysteresis without a stale controller-side lease. An ordinary canary may
+use only current headroom. Trusted broad service pressure may consider a host after removable
+managed speculation is drained, but the normal planner still proves victim priority, evidence,
+ownership, pins, active work, and capacity before acting.
 
 When two or more workload classes are active, Grid no longer picks each model independently. It
 starts from the evidence-backed choices and runs a deterministic bounded coordinate search over
