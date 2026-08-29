@@ -684,6 +684,7 @@ class PlacementPlanner:
 
         isolated_empty_orders: dict[str, tuple[NodeSnapshot, ...]] = {}
         isolated_empty_cursors: dict[str, int] = {}
+        isolated_empty_next_indices: dict[str, int] = {}
 
         def place_next_replica(model: ModelProfile) -> bool:
             target = desired_by_model[model.model_id]
@@ -731,9 +732,8 @@ class PlacementPlanner:
                         ),
                         startup_seconds=startup_by_pair,
                     )
-                    index = sum(
-                        item.model_id == model.model_id for item in assignments
-                    )
+                    index = isolated_empty_next_indices[model.model_id]
+                    isolated_empty_next_indices[model.model_id] = index + 1
                     _place(
                         _assignment(
                             model,
@@ -1018,6 +1018,9 @@ class PlacementPlanner:
                 for item in sorted(candidates, key=lambda item: (-item[0], item[1]))
             )
             isolated_empty_cursors[model.model_id] = 0
+            isolated_empty_next_indices[model.model_id] = sum(
+                item.model_id == model.model_id for item in assignments
+            )
 
         for model in order:
             place_isolated_replicas(model, ready_incumbents=True)
