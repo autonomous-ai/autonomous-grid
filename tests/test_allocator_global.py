@@ -3072,7 +3072,10 @@ def test_reconciler_automatic_mode_applies_global_and_per_node_governor():
 
 
 def test_mutation_governor_starts_higher_priority_model_before_node_id_order():
-    machines = [node("a-batch"), node("z-critical")]
+    machines = [
+        node("a-batch"),
+        node("z-critical", cached=("critical",)),
+    ]
     profiles = [
         model("batch", priority=1, pinned_nodes=("a-batch",)),
         model("critical", priority=1_000, pinned_nodes=("z-critical",)),
@@ -3089,7 +3092,7 @@ def test_mutation_governor_starts_higher_priority_model_before_node_id_order():
     )
 
     assert [(item.kind, item.model_id) for item in result.executable_actions] == [
-        (ActionKind.LOAD, "critical")
+        (ActionKind.WARM, "critical")
     ]
 
 
@@ -3145,6 +3148,58 @@ def test_mutation_governor_prioritizes_drain_for_preemption_beneficiary():
         (item.kind, item.node_id, item.model_id)
         for item in result.executable_actions
     ] == [(ActionKind.DRAIN, "z-preempt", "batch")]
+
+
+def test_capacity_unlocking_drain_precedes_unrelated_low_priority_load():
+    machines = [
+        node("a-background", 8_000),
+        node("z-critical", 8_000, residencies=(ready("batch", 8_000),)),
+    ]
+    profiles = [
+        model(
+            "background",
+            8_000,
+            pinned_nodes=("a-background",),
+            priority=1,
+        ),
+        model(
+            "batch",
+            8_000,
+            min_replicas=0,
+            max_replicas=0,
+            priority=1,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=0,
+        ),
+        model(
+            "critical",
+            8_000,
+            pinned_nodes=("z-critical",),
+            priority=1_000,
+            min_residency_seconds=0,
+        ),
+    ]
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        machines,
+        profiles,
+        now=10,
+    )
+    assert plan.preempted_pairs == frozenset({("z-critical", "batch")})
+
+    result = Reconciler(
+        ReconcilePolicy(max_concurrent_mutations=1)
+    ).reconcile(
+        plan,
+        machines,
+        profiles,
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+
+    assert [
+        (item.kind, item.node_id, item.model_id)
+        for item in result.executable_actions
+    ] == [(ActionKind.DRAIN, "z-critical", "batch")]
 
 
 def test_reconciler_waits_for_replacement_before_draining_sole_replica():

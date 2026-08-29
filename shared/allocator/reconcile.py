@@ -545,13 +545,17 @@ class Reconciler:
                 beneficiary = profile_by_id.get(preemption.for_model_id)
                 if beneficiary is not None:
                     return beneficiary.priority
-            profile = profile_by_id.get(action.model_id)
-            return profile.priority if profile is not None else 0
+            if action.kind in (ActionKind.LOAD, ActionKind.WARM):
+                profile = profile_by_id.get(action.model_id)
+                return profile.priority if profile is not None else 0
+            # Routine removal is maintenance, not service for the retired model. Keep it behind
+            # every availability action and explicit capacity-unlocking preemption.
+            return -1
 
         proposals.sort(
             key=lambda item: (
-                priority[item.kind],
                 -service_priority(item),
+                priority[item.kind],
                 item.node_id,
                 item.model_id,
             )
