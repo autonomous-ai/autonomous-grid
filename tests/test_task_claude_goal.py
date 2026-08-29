@@ -140,7 +140,7 @@ def test_claude_goal_resume_does_not_reset_native_goal(tmp_path, monkeypatch):
 
 
 def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(monkeypatch):
-    captured = {}
+    captured = []
 
     class Response:
         status_code = 201
@@ -160,7 +160,7 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
             return None
 
         def request(self, method, url, **kwargs):
-            captured.update(method=method, url=url, **kwargs)
+            captured.append({"method": method, "url": url, **kwargs})
             return Response()
 
     monkeypatch.setattr(task_codex.httpx, "Client", Client)
@@ -176,11 +176,25 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
     result = executor.call(
         "grid_spawn_subgoal", {"objective": "child"}, "call-1")
     assert result["success"] is True
-    assert captured["url"] == "https://grid.example/relay/v1/goals/parent/children"
-    assert captured["headers"]["Authorization"] == "Bearer grid-token"
-    assert captured["headers"]["X-Grid-Goal-Turn"] == "turn-1"
-    assert "X-Not-Allowed" not in captured["headers"]
-    assert captured["headers"]["Idempotency-Key"].startswith("grid-goal-")
+    # A replacement machine may replay the same logical action with a new transient Codex call id.
+    # The receiving business API must see the same key for that retry, but a later Grid Goal turn
+    # must get a new key so an intentional repeated action is not suppressed forever.
+    assert executor.call(
+        "grid_spawn_subgoal", {"objective": "child"}, "replacement-call")["success"] is True
+    later = task_codex.ToolExecutor(executor.tools.values(), publish=lambda *_a, **_k: None,
+        inference=task_codex.GridInference("https://grid.example", "grid-token"),
+        scope="parent:2")
+    assert later.call(
+        "grid_spawn_subgoal", {"objective": "child"}, "call-1")["success"] is True
+
+    assert captured[0]["url"] == "https://grid.example/relay/v1/goals/parent/children"
+    assert captured[0]["headers"]["Authorization"] == "Bearer grid-token"
+    assert captured[0]["headers"]["X-Grid-Goal-Turn"] == "turn-1"
+    assert "X-Not-Allowed" not in captured[0]["headers"]
+    keys = [request["headers"]["Idempotency-Key"] for request in captured]
+    assert keys[0].startswith("grid-goal-")
+    assert keys[0] == keys[1]
+    assert keys[2] != keys[0]
 
 
 def test_claude_profile_cannot_claim_grid_runner_capabilities_it_does_not_wire(monkeypatch):
