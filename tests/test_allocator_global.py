@@ -3150,10 +3150,29 @@ def test_mutation_governor_prioritizes_drain_for_preemption_beneficiary():
     ] == [(ActionKind.DRAIN, "z-preempt", "batch")]
 
 
-def test_capacity_unlocking_drain_precedes_unrelated_low_priority_load():
+@pytest.mark.parametrize(
+    ("residency_state", "expected_action"),
+    (
+        (ResidencyState.READY, ActionKind.DRAIN),
+        (ResidencyState.DRAINING, ActionKind.UNLOAD),
+    ),
+)
+def test_capacity_unlocking_mutation_precedes_unrelated_low_priority_load(
+    residency_state,
+    expected_action,
+):
     machines = [
         node("a-background", 8_000),
-        node("z-critical", 8_000, residencies=(ready("batch", 8_000),)),
+        node(
+            "z-critical",
+            8_000,
+            residencies=(
+                replace(
+                    ready("batch", 8_000),
+                    state=residency_state,
+                ),
+            ),
+        ),
     ]
     profiles = [
         model(
@@ -3199,7 +3218,7 @@ def test_capacity_unlocking_drain_precedes_unrelated_low_priority_load():
     assert [
         (item.kind, item.node_id, item.model_id)
         for item in result.executable_actions
-    ] == [(ActionKind.DRAIN, "z-critical", "batch")]
+    ] == [(expected_action, "z-critical", "batch")]
 
 
 def test_reconciler_waits_for_replacement_before_draining_sole_replica():
