@@ -86,6 +86,37 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
         save_history(history)
         return "complete", "B resumed A's mid-slice Codex thread and completed the game", 200
 
+    if scenario == "graceful_business_crash":
+        if call_tool is None:
+            raise RuntimeError("graceful business crash received no dynamic tool bridge")
+        arguments = {
+            "ticket_id": "T-42",
+            "reply": "Use the verified password-reset link and contact support if it expires.",
+        }
+        if node == "A" and not history:
+            result = call_tool("send_reply", arguments)
+            if not result.get("success"):
+                raise RuntimeError(f"node A's business action failed: {result!r}")
+            (cwd / "ACTION.md").write_text(
+                "Node A received success after the business API committed the reply.\n")
+            history.append({"node": "A", "action": "committed-before-native-crash"})
+            save_history(history)
+            raise RuntimeError("simulated Codex app-server failure after committed business action")
+        expected = [{"node": "A", "action": "committed-before-native-crash"}]
+        if node != "B" or history != expected or not (cwd / "ACTION.md").is_file():
+            raise RuntimeError(
+                f"node B did not resume A's action checkpoint: {node}, {history!r}")
+        result = call_tool("send_reply", arguments)
+        envelope = json.loads(((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+        if not result.get("success") or not (envelope.get("body") or {}).get("replayed"):
+            raise RuntimeError(f"node B did not idempotently replay A's action: {result!r}")
+        (cwd / "DONE.md").write_text(
+            "# Reply complete\n\nNode B resumed node A's accepted native checkpoint and "
+            "replayed the same business action without a duplicate side effect.\n")
+        history.append({"node": "B", "action": "idempotent-replay"})
+        save_history(history)
+        return "complete", "B safely reconciled A's committed action", 200
+
     if scenario == "business_tools":
         if call_tool is None:
             raise RuntimeError("business Goal received no dynamic tool bridge")

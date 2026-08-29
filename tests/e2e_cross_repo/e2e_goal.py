@@ -399,6 +399,86 @@ def test_native_codex_crash_immediately_checkpoints_same_turn_to_another_machine
     assert _verify_evidence(evidence, min_execution_nodes=2) == []
 
 
+def test_committed_business_action_survives_immediate_native_checkpoint_handoff(
+        relay, owner_token, spawn_goal_provider, goal_workspace_root, business_api, tmp_path):
+    """A's API write commits, its harness crashes, and B replays one accepted checkpoint safely."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-graceful-action-checkpoint")['id']
+    H.seed_trunk(relay, owner_token, project_id)
+    origin = business_api["origin"]
+    node_a = spawn_goal_provider(
+        "A", scenario="graceful_business_crash", disk_label="action-crash-A",
+        tool_origins=origin, one_task=True)
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Send one support reply and survive a native harness crash",
+        done_when="DONE.md proves the committed action was reconciled without duplication",
+        model="fake-grid-model", token_budget=4_000,
+        tools=[{
+            "name": "send_reply", "mode": "act", "record": "full",
+            "input_schema": {"type": "object", "properties": {
+                "ticket_id": {"type": "string"}, "reply": {"type": "string"}},
+                "required": ["ticket_id", "reply"]},
+            "http": {"method": "POST", "url": f"{origin}/tickets/reply"},
+        }],
+        evals=[{
+            "type": "file", "name": "reconciliation proof", "path": "DONE.md",
+            "max_bytes": 2_000, "contains": ["replayed", "without a duplicate side effect"],
+        }])
+
+    assert H.wait_for(lambda: node_a.proc.poll() is not None, timeout=30), node_a.output()
+    rows = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(rows) == 1 and rows[0]["state"] == "queued", rows
+    assert rows[0]["attempt"] == 1 and rows[0]["checkpoint_commit"], rows
+    assert len(business_api["write_requests"]) == 1
+    assert len(business_api["side_effects"]) == 1
+
+    node_b = spawn_goal_provider(
+        "B", scenario="graceful_business_crash", disk_label="action-crash-B",
+        tool_origins=origin, one_task=True)
+    complete = H.wait_for(lambda: _completed_goal(
+        relay, owner_token, goal["id"]), timeout=45)
+    assert complete, node_b.output()
+    rows = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(rows) == 1 and rows[0]["attempt"] == 2, rows
+    assert rows[0]["provider_id"] == node_b.node_id
+    assert len(business_api["write_requests"]) == 2
+    assert len({item["key"] for item in business_api["write_requests"]}) == 1
+    assert len(business_api["side_effects"]) == 1
+
+    destination = tmp_path / "graceful-action-result"
+    destination.mkdir()
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=rows[0]["branch"], commit=rows[0]["result_commit"], project_id=project_id)
+    assert (destination / "ACTION.md").is_file()
+    assert "without a duplicate side effect" in (destination / "DONE.md").read_text()
+
+    evidence = relay_client.get_goal_evidence(relay, owner_token, goal["id"])
+    action_requests = [item for item in evidence["attempt_events"]
+                       if item["event"].get("type") == "goal.act.request"]
+    action_results = [item for item in evidence["attempt_events"]
+                      if item["event"].get("type") == "goal.act.result"]
+    assert len(action_requests) == len(action_results) == 2
+    assert {
+        (item["event"]["provider_node_id"], item["event"]["attempt"])
+        for item in action_requests + action_results
+    } == {(node_a.node_id, 1), (node_b.node_id, 2)}
+    assert {item["event"]["idempotency_key"]
+            for item in action_requests + action_results} == {
+                business_api["write_requests"][0]["key"]}
+    retry = next(item["event"] for item in evidence["attempt_events"]
+                 if item["event"].get("type") == "task.retry")
+    assert retry["reason"] == "native_harness_failure"
+    assert retry["previous_provider_id"] == node_a.node_id
+    assert retry["checkpoint_commit"] and retry["transcript_checkpoint_commit"]
+    from cli.goal import _verify_evidence
+    assert _verify_evidence(evidence, min_execution_nodes=2) == []
+
+
 def test_image_goal_waits_for_a_node_with_the_required_capability(
         relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
     """An online native-Goal harness is not enough: the exact capability must match."""

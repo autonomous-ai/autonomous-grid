@@ -52,6 +52,7 @@ real.
 |---|---|---|---|
 | Four-feature game | A Codex -> B Codex -> C Codex | A and B are killed mid-turn | Same rows are reclaimed; commit-pinned wiring/click/score/style evals pass |
 | Native crash checkpoint | A Codex -> B Codex | A's app-server fails after partial work | Same turn immediately requeues; B restores partial tree/thread and behavior evals pass |
+| Native crash after API commit | A Codex -> B Codex | A's app-server fails after a successful business mutation | Stable key yields one side effect; both attempts retain request/result evidence |
 | Mixed game | A Codex -> B Claude -> C Codex | Two machine losses across unlike harnesses | Shared continuity plus commit-pinned behavior evals across harnesses |
 | Cross-harness eval repair | A Codex -> B Claude -> C Codex -> D Claude | C nominates plausible but broken interaction | D restores B's Claude session across Codex, consumes failed eval evidence, and repairs it |
 | Image artifact | B Claude polls; A Codex executes | Goal requires `image_generation` | Ineligible node spends no attempt; independent PNG eval passes |
@@ -71,6 +72,11 @@ overwriting or translating either: D's fresh disk contains both opaque namespace
 Claude session after C's intervening Codex turn, and receives the failed deterministic score as
 relay-authored guidance. Evidence retains C's accepted failing score and D's accepted passing score
 against their distinct result commits.
+The crash-after-action case covers the stronger handoff path while A still owns the lease. Grid
+flushes the action request/result trajectory before the retry endpoint revokes event authority,
+accepts exact worktree and transcript pins, and requeues the same logical turn immediately. B's
+replay carries the identical Goal-wide idempotency key, so the business API performs no duplicate
+mutation.
 
 ## Prerequisites
 

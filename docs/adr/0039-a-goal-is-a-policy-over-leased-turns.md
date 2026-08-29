@@ -242,6 +242,10 @@ fails an independent commit-pinned check and D resumes B's native Claude session
 relay-authored failure evidence, repairs the worktree, and passes a fresh evaluation. This proves
 mixed harness state survives an intervening harness and that a failed score cannot be inherited by
 the repair commit.
+An immediate native-harness retry must additionally be exercised after a business `act` call has
+returned success: the first worker's request/result events and accepted checkpoint survive, the
+replacement replays with the same Goal-wide key, the API records one side effect, and the final
+commit passes independent evaluation.
 
 ## Consequences
 
