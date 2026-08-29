@@ -1495,7 +1495,7 @@ def test_demand_tracker_estimates_rate_concurrency_queue_and_p95():
     assert forecast.requests_per_minute == 12
     assert forecast.offered_concurrency == pytest.approx(2.4)
     assert forecast.queue_depth == 2
-    assert forecast.p95_latency_ms == 4_000
+    assert forecast.p95_latency_ms == pytest.approx(4_000, rel=0.05)
 
 
 def test_demand_tracker_accepts_out_of_order_completion_and_clock_regression():

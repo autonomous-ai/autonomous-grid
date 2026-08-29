@@ -65,9 +65,9 @@ def test_classification_retains_only_bounded_features():
 
 
 def test_request_features_accept_only_fixed_anonymous_tenant_cohorts():
-    assert RequestFeatures("chat/completions", "auto", tenant_class="cohort-15").tenant_class == (
-        "cohort-15"
-    )
+    assert RequestFeatures(
+        "chat/completions", "auto", tenant_class="cohort-15"
+    ).tenant_class == ("cohort-15")
     for unsafe in ("alice@example.com", "cohort-16", "customer-secret"):
         with pytest.raises(ValueError, match="anonymous bounded cohort"):
             RequestFeatures("chat/completions", "auto", tenant_class=unsafe)
@@ -112,7 +112,9 @@ def test_aggregate_unbound_demand_creates_one_non_destructive_portfolio_projecti
     assert len(projected) == 1
     assert projected[0].model_id == "coder"
     assert projected[0].observed_requests_per_minute == 0
-    assert projected[0].correlated_requests_per_minute == projected[0].requests_per_minute
+    assert (
+        projected[0].correlated_requests_per_minute == projected[0].requests_per_minute
+    )
     assert projected[0].correlation_sources == ("workload:coding",)
     assert projected[0].queue_depth == 0
     assert projected[0].p95_latency_ms == 0
@@ -275,9 +277,9 @@ def test_uncertainty_bonus_explores_cold_peer_but_yields_to_strong_fresh_evidenc
         portfolio_unbound=True,
         timestamp=100,
     )
-    assert intelligence.portfolio_forecasts((incumbent, cold), (), now=100)[0].model_id == (
-        "a-cold"
-    )
+    assert intelligence.portfolio_forecasts((incumbent, cold), (), now=100)[
+        0
+    ].model_id == ("a-cold")
 
     for timestamp in range(2, 21):
         intelligence.observe(
@@ -285,9 +287,9 @@ def test_uncertainty_bonus_explores_cold_peer_but_yields_to_strong_fresh_evidenc
             served_model="z-incumbent",
             timestamp=timestamp,
         )
-    assert intelligence.portfolio_forecasts((incumbent, cold), (), now=100)[0].model_id == (
-        "z-incumbent"
-    )
+    assert intelligence.portfolio_forecasts((incumbent, cold), (), now=100)[
+        0
+    ].model_id == ("z-incumbent")
 
 
 def test_stale_outcomes_decay_and_candidate_status_explains_effective_evidence():
@@ -318,9 +320,10 @@ def test_stale_outcomes_decay_and_candidate_status_explains_effective_evidence()
     assert candidates["stale-perfect"]["evidence"]["effective_requests"] == (
         pytest.approx(20 / 256)
     )
-    assert candidates["recent-good"]["evidence"]["confidence"] > candidates[
-        "stale-perfect"
-    ]["evidence"]["confidence"]
+    assert (
+        candidates["recent-good"]["evidence"]["confidence"]
+        > candidates["stale-perfect"]["evidence"]["confidence"]
+    )
 
 
 def test_fresh_service_request_does_not_revive_stale_quality_evidence():
@@ -387,9 +390,7 @@ def test_model_quality_evidence_is_bound_to_artifact_revision():
 
 def test_legacy_shared_timestamp_discards_ambiguous_quality_on_restore():
     intelligence = WorkloadIntelligence()
-    intelligence.observe_model_evaluation(
-        "coder", "coding", quality=1.0, timestamp=100
-    )
+    intelligence.observe_model_evaluation("coder", "coding", quality=1.0, timestamp=100)
     payload = intelligence.to_dict()
     legacy = payload["outcomes"][0]
     legacy["updated_at"] = legacy.pop("service_updated_at")
@@ -569,6 +570,47 @@ def test_broad_cohort_slo_failure_graduates_portfolio_allocation_pressure():
     assert forecast.trusted_cohort_graduated is True
     assert plan.urgency_for("coder") == 2
     assert projection["cohort_evidence"]["graduated_allocation_pressure"] is True
+
+
+def test_one_slow_outlier_per_cohort_does_not_manufacture_p95_slo_breach():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    candidate = ModelProfile(
+        "coder",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+        latency_slo_ms=1_000,
+        workload_scores=(("coding", 1.0),),
+    )
+    for cohort in range(3):
+        features = RequestFeatures(
+            "chat/completions",
+            "auto",
+            "coding",
+            tenant_class=f"cohort-{cohort:02d}",
+            tenant_attested=True,
+        )
+        for _ in range(99):
+            intelligence.observe(
+                features,
+                portfolio_unbound=True,
+                latency_ms=100,
+                timestamp=100,
+            )
+        intelligence.observe(
+            features,
+            portfolio_unbound=True,
+            latency_ms=2_000,
+            timestamp=100,
+        )
+
+    projection = intelligence.projections((candidate,), now=100)[0]
+    cohort = projection["cohort_evidence"]
+
+    assert cohort["trusted_active_cohorts"] == 3
+    assert cohort["trusted_samples"] == 300
+    assert cohort["trusted_slo_breach_rate"] == 0.0
+    assert cohort["graduated_allocation_pressure"] is False
 
 
 def test_one_noisy_cohort_remains_non_destructive_canary_pressure():

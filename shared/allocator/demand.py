@@ -16,6 +16,9 @@ from typing import Any
 
 from shared.allocator.models import SCHEMA_VERSION, DemandForecast
 
+_LATENCY_HISTOGRAM_BINS = 160
+_LATENCY_BUCKETS_PER_OCTAVE = 8
+
 
 @dataclass(frozen=True, slots=True)
 class DemandSample:
@@ -23,6 +26,7 @@ class DemandSample:
     requests: int = 1
     service_seconds: float = 0.0
     latency_ms: float = 0.0
+    latency_histogram: tuple[tuple[int, int], ...] = ()
     queue_depth: int = 0
     errors: int = 0
 
@@ -35,6 +39,33 @@ class DemandSample:
             raise ValueError("requests, queue_depth, and errors must be non-negative")
         if self.errors > self.requests:
             raise ValueError("errors cannot exceed requests")
+        histogram: dict[int, int] = {}
+        for item in self.latency_histogram:
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                raise ValueError(
+                    "latency histogram entries must be (bucket, count) pairs"
+                )
+            bucket, count = item
+            if (
+                isinstance(bucket, bool)
+                or not isinstance(bucket, int)
+                or not 0 <= bucket < _LATENCY_HISTOGRAM_BINS
+                or bucket in histogram
+                or isinstance(count, bool)
+                or not isinstance(count, int)
+                or count <= 0
+            ):
+                raise ValueError("latency histogram contains an invalid bucket")
+            histogram[bucket] = count
+        if sum(histogram.values()) > self.requests:
+            raise ValueError(
+                "latency histogram cannot contain more observations than requests"
+            )
+        object.__setattr__(
+            self,
+            "latency_histogram",
+            tuple(sorted(histogram.items())),
+        )
 
 
 class DemandTracker:
@@ -95,7 +126,10 @@ class DemandTracker:
             or correlation_min_buckets < 1
         ):
             raise ValueError("correlation_min_buckets must be positive")
-        if not math.isfinite(correlation_threshold) or not 0 < correlation_threshold <= 1:
+        if (
+            not math.isfinite(correlation_threshold)
+            or not 0 < correlation_threshold <= 1
+        ):
             raise ValueError("correlation_threshold must be in (0, 1]")
         if not math.isfinite(correlation_max_growth) or correlation_max_growth < 1:
             raise ValueError("correlation_max_growth must be finite and at least 1")
@@ -128,17 +162,28 @@ class DemandTracker:
         requests: int = 1,
         service_seconds: float = 0.0,
         latency_ms: float | None = None,
+        latency_histogram: (
+            tuple[tuple[int, int], ...] | list[list[int]] | None
+        ) = None,
         queue_depth: int = 0,
         errors: int = 0,
         timestamp: float | None = None,
     ) -> None:
         if not model_id:
             raise ValueError("model_id is required")
+        measured_latency = (
+            service_seconds * 1_000.0 if latency_ms is None else latency_ms
+        )
         sample = DemandSample(
             timestamp=time.time() if timestamp is None else float(timestamp),
             requests=requests,
             service_seconds=service_seconds,
-            latency_ms=(service_seconds * 1_000.0 if latency_ms is None else latency_ms),
+            latency_ms=measured_latency,
+            latency_histogram=(
+                _latency_histogram(float(measured_latency), requests)
+                if latency_histogram is None
+                else tuple(latency_histogram)
+            ),
             queue_depth=queue_depth,
             errors=errors,
         )
@@ -168,8 +213,13 @@ class DemandTracker:
                 requests=requests,
                 service_seconds=(weighted_service / requests if requests else 0.0),
                 # Retain the worst latency in a compact bucket. It is conservative under pressure
-                # and avoids silently dropping a tail event when traffic exceeds the raw-sample cap.
+                # and remains useful to legacy readers. The histogram below retains request-level
+                # tail mass instead of turning one outlier into the latency of an entire minute.
                 latency_ms=max(prior.latency_ms, sample.latency_ms),
+                latency_histogram=_merge_latency_histograms(
+                    prior.latency_histogram,
+                    sample.latency_histogram,
+                ),
                 queue_depth=max(prior.queue_depth, sample.queue_depth),
                 errors=prior.errors + sample.errors,
             )
@@ -207,7 +257,7 @@ class DemandTracker:
 
         recent_width = min(3, max(1, len(rates) // 2))
         recent = statistics.fmean(rates[-recent_width:])
-        prior_slice = rates[-2 * recent_width:-recent_width]
+        prior_slice = rates[-2 * recent_width : -recent_width]
         prior = statistics.fmean(prior_slice) if prior_slice else recent
         trend = (recent - prior) / max(recent_width * self.bucket_seconds / 60.0, 1.0)
         # Warm for a rising workload, but do not immediately scale down on a negative trend; the
@@ -219,7 +269,9 @@ class DemandTracker:
         average_service = service_weight / request_count if request_count else 0.0
         queue_depth = max((item.queue_depth for item in samples[-5:]), default=0)
         offered_concurrency = predicted_rate / 60.0 * average_service + queue_depth
-        latencies = [item.latency_ms for item in samples if item.requests and item.latency_ms > 0]
+        latency_histogram = _merge_latency_histograms(
+            *(item.latency_histogram for item in samples)
+        )
         errors = sum(item.errors for item in samples)
         coverage = min(
             1.0,
@@ -233,7 +285,7 @@ class DemandTracker:
             observed_requests_per_minute=predicted_rate,
             offered_concurrency=max(0.0, offered_concurrency),
             queue_depth=queue_depth,
-            p95_latency_ms=_percentile(latencies, 0.95),
+            p95_latency_ms=_histogram_percentile(latency_histogram, 0.95),
             error_rate=(errors / request_count if request_count else 0.0),
             trend_per_minute=trend,
             confidence=confidence,
@@ -307,7 +359,11 @@ class DemandTracker:
                     raise ValueError(
                         "allocator demand model watermark is invalid"
                     ) from exc
-                if not key or not math.isfinite(supplied_watermark) or supplied_watermark < 0:
+                if (
+                    not key
+                    or not math.isfinite(supplied_watermark)
+                    or supplied_watermark < 0
+                ):
                     raise ValueError("allocator demand model watermark is invalid")
                 tracker._high_watermarks[key] = max(
                     tracker._high_watermarks.get(key, 0.0),
@@ -336,7 +392,7 @@ class DemandTracker:
         # requests in one minute therefore remains one bounded row with its full request/service
         # mass instead of being truncated to ``max_samples_per_model``.
         if len(history) > self.max_samples_per_model:
-            del history[:-self.max_samples_per_model]
+            del history[: -self.max_samples_per_model]
         if not history:
             self._samples.pop(model_id, None)
 
@@ -366,7 +422,9 @@ class DemandTracker:
             max((sample.timestamp for sample in valid), default=0.0),
         )
 
-    def _buckets(self, samples: list[DemandSample], reference: float) -> list[dict[str, float]]:
+    def _buckets(
+        self, samples: list[DemandSample], reference: float
+    ) -> list[dict[str, float]]:
         grouped: dict[int, dict[str, float]] = defaultdict(
             lambda: {"requests": 0.0, "service": 0.0, "errors": 0.0}
         )
@@ -463,14 +521,10 @@ class DemandTracker:
                 # older, fully observable transitions. The current and immediately prior source
                 # buckets are not counted as failures while their target buckets are incomplete.
                 completed_sources = [
-                    index
-                    for index in source_buckets
-                    if index + 1 < current_bucket
+                    index for index in source_buckets if index + 1 < current_bucket
                 ]
                 transitioned = [
-                    index
-                    for index in completed_sources
-                    if index + 1 in target_buckets
+                    index for index in completed_sources if index + 1 in target_buckets
                 ]
                 if len(transitioned) >= self.correlation_min_buckets:
                     transition_confidence = len(transitioned) / len(completed_sources)
@@ -570,9 +624,45 @@ class DemandTracker:
         return {index: rate for index, rate in rates.items() if rate > 0}
 
 
-def _percentile(values: list[float], quantile: float) -> float:
-    if not values:
+def _latency_histogram(
+    latency_ms: float,
+    requests: int,
+) -> tuple[tuple[int, int], ...]:
+    if latency_ms <= 0 or requests <= 0:
+        return ()
+    index = min(
+        _LATENCY_HISTOGRAM_BINS - 1,
+        max(
+            0,
+            math.ceil(math.log2(max(1.0, latency_ms)) * _LATENCY_BUCKETS_PER_OCTAVE),
+        ),
+    )
+    return ((index, requests),)
+
+
+def _merge_latency_histograms(
+    *histograms: tuple[tuple[int, int], ...],
+) -> tuple[tuple[int, int], ...]:
+    merged: dict[int, int] = defaultdict(int)
+    for histogram in histograms:
+        for index, count in histogram:
+            merged[index] += count
+    return tuple(sorted(merged.items()))
+
+
+def _histogram_percentile(
+    histogram: tuple[tuple[int, int], ...],
+    quantile: float,
+) -> float:
+    total = sum(count for _, count in histogram)
+    if total <= 0:
         return 0.0
-    ordered = sorted(values)
-    rank = max(0, math.ceil(quantile * len(ordered)) - 1)
-    return float(ordered[rank])
+    target = max(1, math.ceil(quantile * total))
+    cumulative = 0
+    for index, count in histogram:
+        cumulative += count
+        if cumulative >= target:
+            if index == 0:
+                return 1.0
+            return float(2 ** ((index - 0.5) / _LATENCY_BUCKETS_PER_OCTAVE))
+    return float(2 ** ((_LATENCY_HISTOGRAM_BINS - 1) / _LATENCY_BUCKETS_PER_OCTAVE))

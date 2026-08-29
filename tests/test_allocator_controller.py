@@ -188,13 +188,9 @@ def test_controller_portfolio_uses_a_fleet_feasible_fallback():
     assert controller.last_plan is not None
     assert [
         (item.model_id, item.node_id) for item in controller.last_plan.assignments
-    ] == [
-        ("feasible-small", "only-node")
-    ]
+    ] == [("feasible-small", "only-node")]
     assert status["portfolio_projections"][0]["chosen_model"] == "feasible-small"
-    hints = {
-        row["model_id"]: row for row in status["portfolio_placement_hints"]
-    }
+    hints = {row["model_id"]: row for row in status["portfolio_placement_hints"]}
     assert hints["preferred-huge"]["feasible"] is False
     assert hints["feasible-small"]["best_node_id"] == "only-node"
 
@@ -591,9 +587,7 @@ def test_controller_only_preempts_speculation_for_trusted_broad_portfolio_pressu
     controller.tick((machine,), now=100)
     status = controller.status((machine,), now=100)
     hint = next(
-        row
-        for row in status["portfolio_placement_hints"]
-        if row["model_id"] == "coder"
+        row for row in status["portfolio_placement_hints"] if row["model_id"] == "coder"
     )
 
     assert hint["feasible_now"] is False
@@ -660,12 +654,14 @@ def test_controller_automatic_queues_repeats_and_acknowledges_action():
     )
     assert done.status == MutationStatus.SUCCEEDED
     assert controller.commands_for("n", now=12) == ()
-    assert controller.acknowledge(
-        "n", command.action_id, MutationStatus.SUCCEEDED, now=13
-    ) == done
-    assert controller.acknowledge(
-        "n", command.action_id, MutationStatus.FAILED, now=13
-    ) == done
+    assert (
+        controller.acknowledge("n", command.action_id, MutationStatus.SUCCEEDED, now=13)
+        == done
+    )
+    assert (
+        controller.acknowledge("n", command.action_id, MutationStatus.FAILED, now=13)
+        == done
+    )
 
 
 def test_higher_priority_service_replaces_undelivered_pending_warm():
@@ -673,9 +669,7 @@ def test_higher_priority_service_replaces_undelivered_pending_warm():
         mode=AllocatorMode.AUTOMATIC,
         reconcile_policy=ReconcilePolicy(max_concurrent_mutations=1),
     )
-    controller.put_profile(
-        profile("low", pinned_nodes=("a-low",), priority=1)
-    )
+    controller.put_profile(profile("low", pinned_nodes=("a-low",), priority=1))
 
     def cached_node(node_id: str, model_id: str, heartbeat: float) -> NodeSnapshot:
         return NodeSnapshot(
@@ -689,9 +683,7 @@ def test_higher_priority_service_replaces_undelivered_pending_warm():
 
     first = controller.tick([cached_node("a-low", "low", 10)], now=10)
     old_action = first.executable_actions[0]
-    controller.put_profile(
-        profile("high", pinned_nodes=("z-high",), priority=1_000)
-    )
+    controller.put_profile(profile("high", pinned_nodes=("z-high",), priority=1_000))
 
     second = controller.tick(
         [
@@ -725,12 +717,8 @@ def test_command_delivery_preserves_reconciler_priority_for_same_tick(
             max_mutations_per_node=2,
         ),
     )
-    controller.put_profile(
-        profile("low", pinned_nodes=("shared",), priority=1)
-    )
-    controller.put_profile(
-        profile("high", pinned_nodes=("shared",), priority=1_000)
-    )
+    controller.put_profile(profile("low", pinned_nodes=("shared",), priority=1))
+    controller.put_profile(profile("high", pinned_nodes=("shared",), priority=1_000))
     machine = NodeSnapshot(
         "shared",
         32_000,
@@ -757,9 +745,10 @@ def test_command_delivery_preserves_reconciler_priority_for_same_tick(
     ]
     assert [action.action_id for action in delivered] == ["z-high", "a-low"]
     restored = AllocatorController(state_path=state_path)
-    assert [
-        action.action_id for action in restored.commands_for("shared", now=10)
-    ] == ["z-high", "a-low"]
+    assert [action.action_id for action in restored.commands_for("shared", now=10)] == [
+        "z-high",
+        "a-low",
+    ]
 
 
 def test_command_delivery_prioritizes_new_urgent_work_over_older_queue_entry():
@@ -770,9 +759,7 @@ def test_command_delivery_prioritizes_new_urgent_work_over_older_queue_entry():
             max_mutations_per_node=2,
         ),
     )
-    controller.put_profile(
-        profile("low", pinned_nodes=("shared",), priority=1)
-    )
+    controller.put_profile(profile("low", pinned_nodes=("shared",), priority=1))
     machine = NodeSnapshot(
         "shared",
         32_000,
@@ -784,9 +771,7 @@ def test_command_delivery_prioritizes_new_urgent_work_over_older_queue_entry():
     first = controller.tick((machine,), now=10)
     assert [action.model_id for action in first.executable_actions] == ["low"]
 
-    controller.put_profile(
-        profile("high", pinned_nodes=("shared",), priority=1_000)
-    )
+    controller.put_profile(profile("high", pinned_nodes=("shared",), priority=1_000))
     second = controller.tick(
         (replace(machine, last_heartbeat=11),),
         now=11,
@@ -803,9 +788,7 @@ def test_higher_priority_service_does_not_cancel_delivered_pending_warm():
         mode=AllocatorMode.AUTOMATIC,
         reconcile_policy=ReconcilePolicy(max_concurrent_mutations=1),
     )
-    controller.put_profile(
-        profile("low", pinned_nodes=("a-low",), priority=1)
-    )
+    controller.put_profile(profile("low", pinned_nodes=("a-low",), priority=1))
 
     def cached_node(node_id: str, model_id: str, heartbeat: float) -> NodeSnapshot:
         return NodeSnapshot(
@@ -820,9 +803,7 @@ def test_higher_priority_service_does_not_cancel_delivered_pending_warm():
     first = controller.tick([cached_node("a-low", "low", 10)], now=10)
     old_action = first.executable_actions[0]
     assert controller.commands_for("a-low", now=10) == (old_action,)
-    controller.put_profile(
-        profile("high", pinned_nodes=("z-high",), priority=1_000)
-    )
+    controller.put_profile(profile("high", pinned_nodes=("z-high",), priority=1_000))
 
     second = controller.tick(
         [
@@ -846,9 +827,7 @@ def test_equal_service_class_does_not_churn_undelivered_pending_warm():
         mode=AllocatorMode.AUTOMATIC,
         reconcile_policy=ReconcilePolicy(max_concurrent_mutations=1),
     )
-    controller.put_profile(
-        profile("alpha", pinned_nodes=("a-alpha",), priority=100)
-    )
+    controller.put_profile(profile("alpha", pinned_nodes=("a-alpha",), priority=100))
 
     def cached_node(node_id: str, model_id: str, heartbeat: float) -> NodeSnapshot:
         return NodeSnapshot(
@@ -862,9 +841,7 @@ def test_equal_service_class_does_not_churn_undelivered_pending_warm():
 
     first = controller.tick([cached_node("a-alpha", "alpha", 10)], now=10)
     old_action = first.executable_actions[0]
-    controller.put_profile(
-        profile("beta", pinned_nodes=("z-beta",), priority=100)
-    )
+    controller.put_profile(profile("beta", pinned_nodes=("z-beta",), priority=100))
 
     second = controller.tick(
         [
@@ -1024,9 +1001,7 @@ def test_direct_demand_is_delivered_before_older_speculative_prewarm(monkeypatch
         lambda _controller, _now, **_kwargs: current_forecasts[0],
     )
     first = controller.tick((machine,), now=10)
-    assert [action.model_id for action in first.executable_actions] == [
-        "speculative"
-    ]
+    assert [action.model_id for action in first.executable_actions] == ["speculative"]
 
     current_forecasts[0] = (
         speculative,
@@ -1048,8 +1023,7 @@ def test_direct_demand_is_delivered_before_older_speculative_prewarm(monkeypatch
 
     assert [action.model_id for action in delivered] == ["direct", "speculative"]
     assert not any(
-        record.model_id == "speculative"
-        and record.status == MutationStatus.CANCELLED
+        record.model_id == "speculative" and record.status == MutationStatus.CANCELLED
         for record in controller.history
     )
 
@@ -1134,9 +1108,9 @@ def test_controller_starts_equal_services_one_replica_round_at_a_time():
         "alpha",
         "beta",
     ]
-    assert {
-        action.node_id for action in first.executable_actions
-    }.isdisjoint(action.node_id for action in second.executable_actions)
+    assert {action.node_id for action in first.executable_actions}.isdisjoint(
+        action.node_id for action in second.executable_actions
+    )
 
 
 def test_undelivered_reprioritization_indexes_large_command_queue_once():
@@ -1218,9 +1192,7 @@ def test_reprioritization_cancels_leaf_before_dependency_root(monkeypatch):
             max_mutations_per_node=2,
         ),
     )
-    controller.put_profile(
-        profile("low", pinned_nodes=("shared",), priority=1)
-    )
+    controller.put_profile(profile("low", pinned_nodes=("shared",), priority=1))
     machine = NodeSnapshot(
         "shared",
         32_000,
@@ -1243,9 +1215,7 @@ def test_reprioritization_cancels_leaf_before_dependency_root(monkeypatch):
         ActionKind.WARM,
     ]
 
-    controller.put_profile(
-        profile("high", pinned_nodes=("shared",), priority=1_000)
-    )
+    controller.put_profile(profile("high", pinned_nodes=("shared",), priority=1_000))
     second = controller.tick(
         (replace(machine, last_heartbeat=11),),
         now=11,
@@ -1315,9 +1285,7 @@ def test_learned_warm_time_prioritizes_faster_equal_priority_start():
             runtimes=("llama.cpp",),
             backends=("metal",),
             cached_models=(model_id,),
-            residencies=(
-                ModelResidency(model_id, 8_000, ResidencyState.CACHED),
-            ),
+            residencies=(ModelResidency(model_id, 8_000, ResidencyState.CACHED),),
             last_heartbeat=heartbeat,
         )
 
@@ -1394,9 +1362,7 @@ def test_controller_forecasts_against_fastest_learned_cached_path(monkeypatch):
             now=11,
         )
 
-    controller.put_profile(
-        replace(initial_profile, min_replicas=0, max_replicas=10)
-    )
+    controller.put_profile(replace(initial_profile, min_replicas=0, max_replicas=10))
     monkeypatch.setattr(
         AllocatorController,
         "_forecasts",
@@ -1554,7 +1520,9 @@ def test_controller_rejects_action_ack_from_the_wrong_node():
     controller.tick([node(cached=True)], now=10)
     action = controller.commands_for("n", now=10)[0]
     with pytest.raises(KeyError, match="unknown"):
-        controller.acknowledge("attacker", action.action_id, MutationStatus.SUCCEEDED, now=11)
+        controller.acknowledge(
+            "attacker", action.action_id, MutationStatus.SUCCEEDED, now=11
+        )
 
 
 def test_invalid_ack_timestamp_cannot_leak_failure_streak_or_backoff():
@@ -1603,7 +1571,9 @@ def test_post_replace_directory_fsync_failure_keeps_memory_and_disk_consistent(
     # os.replace already made the profile visible. The live transaction must remain applied too,
     # even though the caller is warned that crash durability could not be confirmed.
     assert [item.model_id for item in controller.profiles] == ["qwen"]
-    assert [item.model_id for item in AllocatorController(state_path=path).profiles] == ["qwen"]
+    assert [
+        item.model_id for item in AllocatorController(state_path=path).profiles
+    ] == ["qwen"]
 
 
 def test_controller_disabling_automatic_mode_cancels_pending_commands():
@@ -1613,7 +1583,11 @@ def test_controller_disabling_automatic_mode_cancels_pending_commands():
     action = controller.commands_for("n", now=10)[0]
     controller.set_mode(AllocatorMode.RECOMMEND)
     assert controller.commands_for("n", now=11) == ()
-    record = next(item for item in reversed(controller.history) if item.action_id == action.action_id)
+    record = next(
+        item
+        for item in reversed(controller.history)
+        if item.action_id == action.action_id
+    )
     assert record.status == MutationStatus.CANCELLED
 
 
@@ -1647,9 +1621,7 @@ def test_controller_status_contains_forecast_plan_and_reconciliation():
 
 
 def test_controller_status_distinguishes_current_cost_from_desired_budget_cost():
-    controller = AllocatorController(
-        planner_policy=PlannerPolicy(max_hourly_cost=0.5)
-    )
+    controller = AllocatorController(planner_policy=PlannerPolicy(max_hourly_cost=0.5))
     active = (
         NodeSnapshot(
             "known",
@@ -1773,14 +1745,16 @@ def test_controller_prewarms_correlated_model_group_before_peer_request_arrives(
     assert len({item["node_id"] for item in assignments}) == 4
     assert len(status["reconciliation"]["actions"]) == 4
     assert {
-        (item["kind"], item["model_id"])
-        for item in status["reconciliation"]["actions"]
+        (item["kind"], item["model_id"]) for item in status["reconciliation"]["actions"]
     } == {("warm", "source"), ("warm", "target")}
 
 
 def test_controller_ignores_unconfigured_and_retiring_demand_keys():
     controller = AllocatorController()
-    assert controller.observe("attacker-chosen-name", service_seconds=1, timestamp=1) is False
+    assert (
+        controller.observe("attacker-chosen-name", service_seconds=1, timestamp=1)
+        is False
+    )
     assert controller.demand.to_dict()["models"] == {}
 
     controller.put_profile(profile())
@@ -1867,7 +1841,9 @@ def test_controller_is_thread_safe_for_request_observation():
 
     def observe(start: int) -> None:
         for index in range(100):
-            controller.observe("qwen", service_seconds=0.1, timestamp=start + index / 1000)
+            controller.observe(
+                "qwen", service_seconds=0.1, timestamp=start + index / 1000
+            )
 
     threads = [threading.Thread(target=observe, args=(index,)) for index in range(4)]
     for thread in threads:
@@ -2068,9 +2044,9 @@ def test_delivered_warm_intent_prevents_duplicate_cold_start_before_heartbeat():
     controller.tick((lagging_cheap, newly_cached_expensive), now=11)
 
     assert controller.last_plan is not None
-    assert [(item.node_id, item.model_id) for item in controller.last_plan.assignments] == [
-        ("cheap", "qwen")
-    ]
+    assert [
+        (item.node_id, item.model_id) for item in controller.last_plan.assignments
+    ] == [("cheap", "qwen")]
     assert command.action_id in {
         item["action_id"]
         for item in controller.status((lagging_cheap, newly_cached_expensive), now=11)[
@@ -2201,9 +2177,10 @@ def test_late_terminal_ack_after_cancellation_is_recorded_without_error():
     )
     assert late.status == MutationStatus.SUCCEEDED
     assert late.message == "finished after cancellation"
-    assert controller.acknowledge(
-        "n", action.action_id, MutationStatus.FAILED, now=22
-    ) == late
+    assert (
+        controller.acknowledge("n", action.action_id, MutationStatus.FAILED, now=22)
+        == late
+    )
 
 
 def test_failure_backoff_accumulates_across_attempts_restart_and_resets(tmp_path):
@@ -2222,32 +2199,44 @@ def test_failure_backoff_accumulates_across_attempts_restart_and_resets(tmp_path
     controller.put_profile(profile())
     controller.tick([node(cached=True)], now=10)
     first = controller.commands_for("n", now=10)[0]
-    assert controller.acknowledge(
-        "n", first.action_id, MutationStatus.FAILED, now=10
-    ).failures == 1
+    assert (
+        controller.acknowledge(
+            "n", first.action_id, MutationStatus.FAILED, now=10
+        ).failures
+        == 1
+    )
 
     restored = AllocatorController(state_path=path)
     assert restored.tick([node(cached=True)], now=19).actions == ()
     restored.tick([node(cached=True)], now=20)
     second = restored.commands_for("n", now=20)[0]
     assert second.action_id != first.action_id
-    assert restored.acknowledge(
-        "n", second.action_id, MutationStatus.FAILED, now=20
-    ).failures == 2
+    assert (
+        restored.acknowledge(
+            "n", second.action_id, MutationStatus.FAILED, now=20
+        ).failures
+        == 2
+    )
     assert restored.tick([node(cached=True)], now=39).actions == ()
 
     restored.tick([node(cached=True)], now=40)
     third = restored.commands_for("n", now=40)[0]
     assert third.action_id not in {first.action_id, second.action_id}
-    assert restored.acknowledge(
-        "n", third.action_id, MutationStatus.SUCCEEDED, now=40
-    ).failures == 0
+    assert (
+        restored.acknowledge(
+            "n", third.action_id, MutationStatus.SUCCEEDED, now=40
+        ).failures
+        == 0
+    )
 
     restored.tick([node(cached=True)], now=40)
     fourth = restored.commands_for("n", now=40)[0]
-    assert restored.acknowledge(
-        "n", fourth.action_id, MutationStatus.FAILED, now=41
-    ).failures == 1
+    assert (
+        restored.acknowledge(
+            "n", fourth.action_id, MutationStatus.FAILED, now=41
+        ).failures
+        == 1
+    )
 
 
 def test_failure_backoff_expires_after_wall_clock_rollback():
@@ -2296,14 +2285,23 @@ def test_failed_load_cancels_its_dependent_warm_and_allows_a_fresh_chain():
 
     controller.acknowledge("n", first_load.action_id, MutationStatus.FAILED, now=11)
     assert controller.commands_for("n", now=11) == ()
-    assert next(
-        item for item in reversed(controller.history) if item.action_id == first_warm.action_id
-    ).status == MutationStatus.CANCELLED
+    assert (
+        next(
+            item
+            for item in reversed(controller.history)
+            if item.action_id == first_warm.action_id
+        ).status
+        == MutationStatus.CANCELLED
+    )
 
     controller.tick([node(cached=False)], now=12)
     replacement = controller.commands_for("n", now=12)
-    replacement_load = next(item for item in replacement if item.kind == ActionKind.LOAD)
-    replacement_warm = next(item for item in replacement if item.kind == ActionKind.WARM)
+    replacement_load = next(
+        item for item in replacement if item.kind == ActionKind.LOAD
+    )
+    replacement_warm = next(
+        item for item in replacement if item.kind == ActionKind.WARM
+    )
     assert replacement_load.action_id != first_load.action_id
     assert replacement_warm.action_id != first_warm.action_id
     assert replacement_warm.dependencies == (replacement_load.action_id,)
@@ -2422,7 +2420,9 @@ def test_active_commands_are_exempt_from_terminal_history_cap():
     machines = [node(cached=True, node_id="a"), node(cached=True, node_id="b")]
     controller.tick(machines, now=10)
 
-    commands = controller.commands_for("a", now=10) + controller.commands_for("b", now=10)
+    commands = controller.commands_for("a", now=10) + controller.commands_for(
+        "b", now=10
+    )
     assert len(commands) == 2
     assert {record.action_id for record in controller.history} == {
         command.action_id for command in commands
@@ -2451,9 +2451,7 @@ def test_rebound_success_block_provenance_survives_history_compaction_and_restar
     controller.put_profile(profile("qwen"))
     controller.tick([node(cached=True)], now=10)
     qwen_warm = controller.commands_for("n", now=10)[0]
-    controller.acknowledge(
-        "n", qwen_warm.action_id, MutationStatus.SUCCEEDED, now=11
-    )
+    controller.acknowledge("n", qwen_warm.action_id, MutationStatus.SUCCEEDED, now=11)
 
     controller.put_profile(profile("other"))
     qwen_ready = ModelResidency(
@@ -2471,9 +2469,7 @@ def test_rebound_success_block_provenance_survives_history_compaction_and_restar
     controller.tick([both_cached], now=12)
     other_warm = controller.commands_for("n", now=12)[0]
     assert other_warm.model_id == "other"
-    controller.acknowledge(
-        "n", other_warm.action_id, MutationStatus.SUCCEEDED, now=13
-    )
+    controller.acknowledge("n", other_warm.action_id, MutationStatus.SUCCEEDED, now=13)
     assert [item.model_id for item in controller.history] == ["other"]
 
     restored = AllocatorController(state_path=path)
@@ -2641,9 +2637,14 @@ def test_pending_drain_is_cancelled_when_ownership_changes(ownership_change: str
         item.node_id == "b" and item.code == "not_allocator_owned"
         for item in result.deferred
     )
-    assert next(
-        item for item in controller.history if item.action_id == stale_drain.action_id
-    ).status == MutationStatus.CANCELLED
+    assert (
+        next(
+            item
+            for item in controller.history
+            if item.action_id == stale_drain.action_id
+        ).status
+        == MutationStatus.CANCELLED
+    )
 
 
 def test_pending_unload_is_cancelled_when_requests_resume():
@@ -2677,9 +2678,14 @@ def test_pending_unload_is_cancelled_when_requests_resume():
 
     assert controller.commands_for("n", now=11) == ()
     assert any(item.code == "requests_in_flight" for item in result.deferred)
-    assert next(
-        item for item in controller.history if item.action_id == stale_unload.action_id
-    ).status == MutationStatus.CANCELLED
+    assert (
+        next(
+            item
+            for item in controller.history
+            if item.action_id == stale_unload.action_id
+        ).status
+        == MutationStatus.CANCELLED
+    )
 
 
 def test_pending_drain_is_cancelled_when_minimum_residency_increases():
@@ -2701,9 +2707,14 @@ def test_pending_drain_is_cancelled_when_minimum_residency_increases():
 
     assert controller.commands_for("n", now=11) == ()
     assert any(item.code == "minimum_residency" for item in result.deferred)
-    assert next(
-        item for item in controller.history if item.action_id == stale_drain.action_id
-    ).status == MutationStatus.CANCELLED
+    assert (
+        next(
+            item
+            for item in controller.history
+            if item.action_id == stale_drain.action_id
+        ).status
+        == MutationStatus.CANCELLED
+    )
 
 
 def test_pending_drains_are_revalidated_as_one_failure_domain_batch():
@@ -2721,7 +2732,9 @@ def test_pending_drains_are_revalidated_as_one_failure_domain_batch():
         allocator_node("c", residency=ready_qwen(), domain="rack-c"),
     )
     controller.tick(nodes, now=10)
-    assert sum(len(controller.commands_for(item.node_id, now=10)) for item in nodes) == 3
+    assert (
+        sum(len(controller.commands_for(item.node_id, now=10)) for item in nodes) == 3
+    )
 
     controller.put_profile(
         replace(
@@ -2745,8 +2758,7 @@ def test_pending_drains_are_revalidated_as_one_failure_domain_batch():
     ]
     assert surviving == []
     assert any(
-        item.code == "destructive_outcome_unresolved"
-        for item in result.deferred
+        item.code == "destructive_outcome_unresolved" for item in result.deferred
     )
     assert len(controller.status(now=11)["withdrawn_destructive"]) == 3
 
@@ -2782,7 +2794,9 @@ def test_valid_active_drain_is_not_double_subtracted_from_its_failure_domain():
     )
 
 
-def test_command_delivery_marker_rolls_back_when_persistence_fails(tmp_path, monkeypatch):
+def test_command_delivery_marker_rolls_back_when_persistence_fails(
+    tmp_path, monkeypatch
+):
     path = tmp_path / "allocator.json"
     controller = AllocatorController(
         mode=AllocatorMode.AUTOMATIC,
@@ -2902,9 +2916,9 @@ def test_withdrawn_destructive_survives_restart_and_history_compaction(tmp_path)
 
     restored = AllocatorController(state_path=path, max_history=1)
     restored_status = restored.status(now=13)
-    assert [
-        item["action_id"] for item in restored_status["withdrawn_destructive"]
-    ] == [withdrawn.action_id]
+    assert [item["action_id"] for item in restored_status["withdrawn_destructive"]] == [
+        withdrawn.action_id
+    ]
     assert any(
         item["action_id"] == withdrawn.action_id
         and item["status"] == MutationStatus.CANCELLED.value

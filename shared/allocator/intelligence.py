@@ -52,32 +52,79 @@ _GRADUATION_BREACH_RATE = 0.50
 _KEYWORDS = {
     "coding": frozenset(
         {
-            "api", "bug", "code", "commit", "compile", "debug", "function", "git",
-            "javascript", "python", "refactor", "repository", "sql", "test", "typescript",
+            "api",
+            "bug",
+            "code",
+            "commit",
+            "compile",
+            "debug",
+            "function",
+            "git",
+            "javascript",
+            "python",
+            "refactor",
+            "repository",
+            "sql",
+            "test",
+            "typescript",
         }
     ),
     "research": frozenset(
         {
-            "analyze", "citation", "compare", "evidence", "literature", "paper", "research",
-            "source", "study", "survey", "verify",
+            "analyze",
+            "citation",
+            "compare",
+            "evidence",
+            "literature",
+            "paper",
+            "research",
+            "source",
+            "study",
+            "survey",
+            "verify",
         }
     ),
     "marketing": frozenset(
         {
-            "ad", "audience", "brand", "campaign", "content", "copy", "headline", "marketing",
-            "positioning", "seo", "social",
+            "ad",
+            "audience",
+            "brand",
+            "campaign",
+            "content",
+            "copy",
+            "headline",
+            "marketing",
+            "positioning",
+            "seo",
+            "social",
         }
     ),
     "sales": frozenset(
         {
-            "account", "crm", "customer", "deal", "lead", "objection", "outreach", "pipeline",
-            "prospect", "sales",
+            "account",
+            "crm",
+            "customer",
+            "deal",
+            "lead",
+            "objection",
+            "outreach",
+            "pipeline",
+            "prospect",
+            "sales",
         }
     ),
     "design": frozenset(
         {
-            "design", "figma", "layout", "mockup", "prototype", "style", "typography", "ui",
-            "ux", "wireframe",
+            "design",
+            "figma",
+            "layout",
+            "mockup",
+            "prototype",
+            "style",
+            "typography",
+            "ui",
+            "ux",
+            "wireframe",
         }
     ),
 }
@@ -148,7 +195,9 @@ class ModelWorkloadOutcome:
     def __post_init__(self) -> None:
         if not self.model_id or self.workload not in KNOWN_WORKLOADS:
             raise ValueError("model_id and known workload are required")
-        object.__setattr__(self, "artifact_sha256", canonical_sha256(self.artifact_sha256))
+        object.__setattr__(
+            self, "artifact_sha256", canonical_sha256(self.artifact_sha256)
+        )
         if not 0 <= self.errors <= self.requests <= MAX_COUNTER:
             raise ValueError("outcome counters are invalid")
         if not 0 <= self.quality_samples <= self.requests:
@@ -203,7 +252,9 @@ class WorkloadIntelligence:
     ) -> None:
         observed_at = time.time() if timestamp is None else float(timestamp)
         measured_latency = (
-            float(service_seconds) * 1_000.0 if latency_ms is None else float(latency_ms)
+            float(service_seconds) * 1_000.0
+            if latency_ms is None
+            else float(latency_ms)
         )
         self.demand.observe(
             features.workload,
@@ -246,7 +297,9 @@ class WorkloadIntelligence:
                 timestamp=observed_at,
             )
 
-    def workload_forecasts(self, *, now: float | None = None) -> tuple[DemandForecast, ...]:
+    def workload_forecasts(
+        self, *, now: float | None = None
+    ) -> tuple[DemandForecast, ...]:
         timestamp = time.time() if now is None else float(now)
         keys = tuple(sorted((self.demand.to_dict().get("models") or {}).keys()))
         return tuple(self.demand.forecast(key, now=timestamp) for key in keys)
@@ -322,7 +375,10 @@ class WorkloadIntelligence:
         )
         for workload in workload_keys:
             forecast = self.unbound_demand.forecast(workload, now=now)
-            if forecast.sample_count < self.portfolio_min_samples or forecast.requests_per_minute <= 0:
+            if (
+                forecast.sample_count < self.portfolio_min_samples
+                or forecast.requests_per_minute <= 0
+            ):
                 continue
             candidates = [
                 profile
@@ -402,7 +458,9 @@ class WorkloadIntelligence:
                     cohort_summary["graduated_allocation_pressure"]
                 ),
             )
-            merged[chosen.model_id] = _merge_forecasts(merged.get(chosen.model_id), projected)
+            merged[chosen.model_id] = _merge_forecasts(
+                merged.get(chosen.model_id), projected
+            )
         return tuple(merged[key] for key in sorted(merged))
 
     def projections(
@@ -529,7 +587,9 @@ class WorkloadIntelligence:
                         placement_hints,
                         now=timestamp,
                     ),
-                    "placement": dict((placement_hints or {}).get(chosen.model_id) or {}),
+                    "placement": dict(
+                        (placement_hints or {}).get(chosen.model_id) or {}
+                    ),
                     "candidates": _candidate_rows(
                         configured_candidates,
                         workload,
@@ -543,9 +603,9 @@ class WorkloadIntelligence:
                         if (
                             cohort_summary["graduated_allocation_pressure"]
                             and bool(
-                                ((placement_hints or {}).get(chosen.model_id) or {}).get(
-                                    "feasible_after_preemption"
-                                )
+                                (
+                                    (placement_hints or {}).get(chosen.model_id) or {}
+                                ).get("feasible_after_preemption")
                             )
                         )
                         else (
@@ -557,12 +617,18 @@ class WorkloadIntelligence:
                             else "evidence-backed portfolio choice"
                         )
                     )
-                    + ("; joint fleet optimization" if chosen_models is not None else ""),
+                    + (
+                        "; joint fleet optimization"
+                        if chosen_models is not None
+                        else ""
+                    ),
                 }
             )
         return tuple(rows)
 
-    def cohort_summaries(self, *, now: float | None = None) -> tuple[dict[str, Any], ...]:
+    def cohort_summaries(
+        self, *, now: float | None = None
+    ) -> tuple[dict[str, Any], ...]:
         """Return bounded anonymous-cohort health without exposing identities or content."""
 
         timestamp = time.time() if now is None else float(now)
@@ -596,7 +662,9 @@ class WorkloadIntelligence:
         if value.get("demand"):
             result.demand = DemandTracker.from_dict(dict(value["demand"]))
         if value.get("unbound_demand"):
-            result.unbound_demand = DemandTracker.from_dict(dict(value["unbound_demand"]))
+            result.unbound_demand = DemandTracker.from_dict(
+                dict(value["unbound_demand"])
+            )
         if value.get("cohort_demand"):
             result.cohort_demand = DemandTracker.from_dict(dict(value["cohort_demand"]))
         for row in value.get("outcomes") or ():
@@ -629,13 +697,17 @@ class WorkloadIntelligence:
             if not key.startswith(prefix):
                 continue
             forecast = self.cohort_demand.forecast(key, now=now)
-            age = max(0.0, now - forecast.updated_at) if forecast.updated_at else math.inf
+            age = (
+                max(0.0, now - forecast.updated_at) if forecast.updated_at else math.inf
+            )
             if (
                 forecast.requests_per_minute > 0
                 and forecast.sample_count > 0
                 and age < _ACTIVE_COHORT_SECONDS
             ):
-                rows.append((_cohort_key_name(key), forecast, _cohort_key_attested(key)))
+                rows.append(
+                    (_cohort_key_name(key), forecast, _cohort_key_attested(key))
+                )
         grouped: dict[str, list[DemandForecast]] = {}
         for cohort, forecast, _ in rows:
             grouped.setdefault(cohort, []).append(forecast)
@@ -649,13 +721,13 @@ class WorkloadIntelligence:
                 if cohort_samples
                 else 0.0
             )
-            cohort_latency = max((row.p95_latency_ms for row in cohort_rows), default=0.0)
+            cohort_latency = max(
+                (row.p95_latency_ms for row in cohort_rows), default=0.0
+            )
             latency_attainment = 1.0
             if latency_slo_ms > 0 and cohort_latency > 0:
                 latency_attainment = min(1.0, latency_slo_ms / cohort_latency)
-            attainments.append(
-                max(0.0, (1.0 - cohort_error_rate) * latency_attainment)
-            )
+            attainments.append(max(0.0, (1.0 - cohort_error_rate) * latency_attainment))
             breaches += int(
                 cohort_error_rate >= 0.20
                 or (latency_slo_ms > 0 and cohort_latency > latency_slo_ms)
@@ -720,7 +792,9 @@ class WorkloadIntelligence:
         quality: float | None,
         timestamp: float,
     ) -> None:
-        if quality is not None and (not math.isfinite(float(quality)) or not 0 <= quality <= 1):
+        if quality is not None and (
+            not math.isfinite(float(quality)) or not 0 <= quality <= 1
+        ):
             raise ValueError("quality must be in [0, 1]")
         if output_units < 0 or output_units > _MAX_FEATURE_UNITS:
             raise ValueError("output_units is outside the supported range")
@@ -735,8 +809,10 @@ class WorkloadIntelligence:
         )
         quality_ewma = prior.quality if prior else 0.0
         if quality is not None:
-            quality_ewma = float(quality) if not prior or not prior.quality_samples else (
-                alpha * float(quality) + (1.0 - alpha) * prior.quality
+            quality_ewma = (
+                float(quality)
+                if not prior or not prior.quality_samples
+                else (alpha * float(quality) + (1.0 - alpha) * prior.quality)
             )
         self._outcomes[key] = ModelWorkloadOutcome(
             model_id=model_id,
@@ -832,7 +908,9 @@ class WorkloadIntelligence:
         )
         if outcome and outcome.requests:
             confidence = evidence["confidence"]
-            success = (outcome.requests - outcome.errors + 1.0) / (outcome.requests + 2.0)
+            success = (outcome.requests - outcome.errors + 1.0) / (
+                outcome.requests + 2.0
+            )
             quality = outcome.quality if outcome.quality_samples else 0.5
             score += confidence * 0.15 * (success - 0.5)
             score += evidence["quality_confidence"] * 0.20 * (quality - 0.5)
@@ -987,9 +1065,7 @@ def _candidate_rows(
                         )["graduated_allocation_pressure"]
                     ),
                 ),
-                "placement": dict(
-                    (placement_hints or {}).get(profile.model_id) or {}
-                ),
+                "placement": dict((placement_hints or {}).get(profile.model_id) or {}),
             }
         )
     return sorted(rows, key=lambda row: (-float(row["score"]), str(row["model_id"])))
@@ -1020,7 +1096,9 @@ def classify_request(endpoint: str, body: Mapping[str, Any]) -> RequestFeatures:
             name: len(word_set.intersection(keywords))
             for name, keywords in _KEYWORDS.items()
         }
-        workload = max(sorted(scores), key=lambda name: scores[name]) if scores else GENERAL
+        workload = (
+            max(sorted(scores), key=lambda name: scores[name]) if scores else GENERAL
+        )
         if not scores or scores[workload] == 0:
             workload = GENERAL
     text, saw_image = _bounded_request_text(body)
@@ -1028,7 +1106,9 @@ def classify_request(endpoint: str, body: Mapping[str, Any]) -> RequestFeatures:
         modalities.add("image")
     input_units = min(_MAX_FEATURE_UNITS, max(0, math.ceil(len(text) / 4)))
     requested_output = _bounded_nonnegative_int(
-        body.get("max_completion_tokens", body.get("max_tokens", body.get("n_predict", 0)))
+        body.get(
+            "max_completion_tokens", body.get("max_tokens", body.get("n_predict", 0))
+        )
     )
     return RequestFeatures(
         endpoint=endpoint,
@@ -1060,9 +1140,18 @@ def _bounded_request_text(value: Any) -> tuple[str, bool]:
                     break
         elif isinstance(item, Mapping):
             kind = str(item.get("type") or "").lower()
-            if "image" in kind or any(key in item for key in ("image_url", "input_image")):
+            if "image" in kind or any(
+                key in item for key in ("image_url", "input_image")
+            ):
                 saw_image = True
-            for key in ("prompt", "input", "messages", "content", "text", "description"):
+            for key in (
+                "prompt",
+                "input",
+                "messages",
+                "content",
+                "text",
+                "description",
+            ):
                 if key in item:
                     visit(item[key], depth=depth + 1)
 
@@ -1097,14 +1186,16 @@ def _merge_forecasts(
         queue_depth=max(direct.queue_depth, projected.queue_depth),
         p95_latency_ms=max(direct.p95_latency_ms, projected.p95_latency_ms),
         error_rate=(
-            (direct.error_rate * direct_count + projected.error_rate * projected_count) / total_count
+            (direct.error_rate * direct_count + projected.error_rate * projected_count)
+            / total_count
             if total_count
             else 0.0
         ),
         trend_per_minute=direct.trend_per_minute + projected.trend_per_minute,
         confidence=max(direct.confidence, projected.confidence),
         correlated_requests_per_minute=(
-            direct.correlated_requests_per_minute + projected.correlated_requests_per_minute
+            direct.correlated_requests_per_minute
+            + projected.correlated_requests_per_minute
         ),
         correlation_confidence=max(
             direct.correlation_confidence, projected.correlation_confidence

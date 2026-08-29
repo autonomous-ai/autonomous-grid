@@ -68,6 +68,10 @@ capacity but cannot manufacture eviction authority. Status reports service and q
 age/freshness, effective sample count, confidence, quality confidence, and the remaining exploration
 bonus for every candidate.
 
+Request latency is compacted into a bounded logarithmic histogram per time bucket. Cohort SLO
+graduation therefore uses an approximate request-level p95: one slow outlier among ninety-nine fast
+requests remains tail evidence, but it no longer makes the entire minute appear slow.
+
 Portfolio selection first scans the current fleet with the same hard runtime, backend, GPU, tag,
 data-tier, artifact, memory-headroom, model-slot, and colocation rules used by placement. An
 attractive model that no live node can host is excluded instead of suppressing a usable fallback.
