@@ -879,7 +879,16 @@ def run_task(job: dict[str, Any],
         if any(not isinstance(value, str) or not value.strip()
                for value in (objective, done_when, model)):
             return failed("the Claude Goal metadata is missing objective, done_when, or model")
-        first_prompt = f"/goal {objective.strip()}\n\nDone when: {done_when.strip()}"
+        native_objective = f"{objective.strip()}\n\nDone when: {done_when.strip()}"
+        first_prompt = f"/goal {native_objective}"
+        # A Claude harness may join a Goal after Codex (or after an earlier Claude transcript was
+        # lost with a dead worker). There is no native Claude session to resume in that case, but
+        # the turn prompt still carries Grid's relay-authored handoff: prior work, failed evals and
+        # child results. Dropping it here gives the replacement the shared files while hiding the
+        # reason this turn exists. The first turn's prompt is exactly the native objective, so do
+        # not duplicate it; every continuation gets its handoff inside the newly-created /goal.
+        if prompt.strip() != native_objective:
+            first_prompt += f"\n\nGrid handoff for this distributed turn:\n{prompt.strip()}"
         argv = task_agent.agent_argv(
             binary, prompt if resume.session_id else first_prompt,
             workspace=workspace, resume=resume.session_id)

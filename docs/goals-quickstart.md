@@ -89,6 +89,12 @@ relay-authored guidance for the next worker. Evaluator infrastructure errors blo
 remain `accepted: false`; after recovery, `grid goal resume` schedules a fresh nomination/eval.
 With no eval manifest, native Goal completion remains the stopping decision.
 
+When a different harness takes a later turn, Grid does not try to translate opaque Codex and Claude
+session formats. It supplies the shared Git worktree plus a bounded relay-authored history of recent
+turn outcomes, failed evals and child results. A first-time Claude worker includes that handoff in
+the native `/goal` it creates, so switching harnesses does not silently reduce continuity to files
+alone.
+
 ## Distributed child Goals
 
 Opt in when a parent is allowed to fan work out to other Grid agents:

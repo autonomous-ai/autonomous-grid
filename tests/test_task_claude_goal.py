@@ -88,13 +88,16 @@ def test_claude_goal_uses_native_command_and_loopback_grid_model(tmp_path, monke
 
     outcome = tasks.run_task({
         "task_id": "turn-1", "conversation_id": "goal-1", "project_id": "project-1",
-        "member_key": "member-1", "agent_kind": "claude", "prompt": "continue",
+        "member_key": "member-1", "agent_kind": "claude",
+        "prompt": "Codex finished feature one. Continue with the failed collision check.",
         "goal": {"objective": "Build four features", "done_when": "all checks pass",
                  "model": "grid-model", "turns_completed": 2, "tokens_used": 100,
                  "time_used_seconds": 20, "token_budget": 115},
     }, inference=task_codex.GridInference("https://grid.example/relay/v1", "GRID-SECRET"))
 
     assert captured["prompt"].startswith("/goal Build four features")
+    assert "Grid handoff for this distributed turn:" in captured["prompt"]
+    assert "Codex finished feature one" in captured["prompt"]
     assert outcome.state == "completed" and outcome.goal_status == "budget_limited"
     assert outcome.session_id == "claude-session-1"
     assert outcome.goal_turns_completed == 3 and outcome.goal_tokens_used == 115

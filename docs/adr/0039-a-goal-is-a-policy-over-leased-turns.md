@@ -71,7 +71,9 @@ prompts or stopping logic.
 Each harness owns its native session format. Codex and Claude sessions are not convertible. The
 agent side ref may contain both checkpoint namespaces, and a harness resumes its own last native
 session when it returns to the Goal. A different harness receives the shared Git tree plus a concise
-handoff block describing completed turns and failed evaluations. "Mixed-agent resume" therefore
+relay-authored handoff block describing the bounded recent turn history, failed evaluations and
+child results. A harness joining for the first time feeds that handoff into the native Goal it
+creates; a returning harness receives it as the next native turn. "Mixed-agent resume" therefore
 means shared Goal continuity, not deserializing Claude history into Codex or vice versa.
 
 Codex's state database records the rollout JSONL by an absolute machine-local path. Copying that
