@@ -104,6 +104,10 @@ class PlannerPolicy:
 
 _MAX_REPACK_SEARCH_STATES = 10_000
 _MAX_REPACK_DEPTH = 64
+# A ready-residency preference is intentionally strong, but it must not strand a demanded model
+# whose only capable host is occupied by a flexible model that can move elsewhere. This penalty is
+# applied only while another desired model has strictly fewer future-compatible hosts.
+_SCARCE_HOST_OPPORTUNITY_PENALTY = 200_000.0
 
 
 @dataclass(slots=True)
@@ -641,6 +645,74 @@ class PlacementPlanner:
             for profile in model_list
         )
 
+        # Evaluate hard *future* fit without current occupancy. The ordinary capacity ledger must
+        # reserve live processes for make-before-break safety, but placement choice also needs to
+        # know that putting a tiny flexible model on the only large host can make a larger demanded
+        # model impossible. The desired plan may move the flexible model first; reconciliation then
+        # proves its replacement ready before draining the old residency.
+        future_eligible_nodes: dict[str, frozenset[str]] = {}
+        for candidate_model in model_list:
+            if desired_by_model[candidate_model.model_id] <= 0:
+                continue
+            future_eligible_nodes[candidate_model.model_id] = frozenset(
+                candidate_node.node_id
+                for candidate_node in node_list
+                if compatibility(
+                    candidate_node,
+                    candidate_model,
+                    for_new=requires_new_runtime(candidate_node, candidate_model),
+                )
+                is None
+                and runtime_memory(candidate_node, candidate_model)
+                <= placement_budget[candidate_node.node_id]
+                and candidate_node.max_models != 0
+            )
+        scarce_host_claims: dict[tuple[str, str], tuple[str, ...]] = {}
+        scarce_host_preservations: dict[tuple[str, str], tuple[str, ...]] = {}
+        for candidate_model in model_list:
+            candidate_nodes = future_eligible_nodes.get(candidate_model.model_id, frozenset())
+            if len(candidate_nodes) <= 1:
+                continue
+            for node_id in candidate_nodes:
+                constrained = tuple(
+                    sorted(
+                        other_model_id
+                        for other_model_id, other_nodes in future_eligible_nodes.items()
+                        if other_model_id != candidate_model.model_id
+                        and node_id in other_nodes
+                        and len(other_nodes) < len(candidate_nodes)
+                        and any(
+                            alternative not in other_nodes
+                            for alternative in candidate_nodes
+                        )
+                    )
+                )
+                if constrained:
+                    scarce_host_claims[(candidate_model.model_id, node_id)] = constrained
+        for (candidate_model_id, scarce_node_id), constrained in scarce_host_claims.items():
+            for alternative_node_id in future_eligible_nodes[candidate_model_id]:
+                if alternative_node_id == scarce_node_id:
+                    continue
+                preserved = tuple(
+                    model_id
+                    for model_id in constrained
+                    if alternative_node_id
+                    not in future_eligible_nodes.get(model_id, frozenset())
+                )
+                if preserved:
+                    scarce_host_preservations[
+                        (candidate_model_id, alternative_node_id)
+                    ] = tuple(
+                        sorted(
+                            {
+                                *scarce_host_preservations.get(
+                                    (candidate_model_id, alternative_node_id), ()
+                                ),
+                                *preserved,
+                            }
+                        )
+                    )
+
         def snapshot_placement_state() -> tuple[
             list[PlacementAssignment],
             set[tuple[str, str]],
@@ -727,6 +799,29 @@ class PlacementPlanner:
                     need_new_domain=need_new_domain,
                     startup_seconds=startup_by_pair,
                 )
+                constrained = scarce_host_claims.get((model.model_id, node.node_id), ())
+                if constrained:
+                    score, reasons = cached
+                    cached = (
+                        score
+                        - _SCARCE_HOST_OPPORTUNITY_PENALTY * len(constrained),
+                        (
+                            *reasons,
+                            "scarce host also required by " + ", ".join(constrained[:3]),
+                        ),
+                    )
+                preserved = scarce_host_preservations.get(
+                    (model.model_id, node.node_id), ()
+                )
+                if preserved:
+                    score, reasons = cached
+                    cached = (
+                        score,
+                        (
+                            *reasons,
+                            "preserves scarce host for " + ", ".join(preserved[:3]),
+                        ),
+                    )
                 candidate_score_cache[key] = cached
             return cached
 
@@ -1170,6 +1265,14 @@ class PlacementPlanner:
                     continue
                 if (model.model_id, node.node_id) in assigned_pairs:
                     continue
+                if live_incumbents and scarce_host_claims.get(
+                    (model.model_id, node.node_id)
+                ):
+                    # The resident fast path intentionally preserves live work, but it must not
+                    # cement a flexible small model onto the only host that can satisfy another
+                    # demanded model. Let ordinary scored placement select a replacement host;
+                    # reconciliation will make it ready before this incumbent is drained.
+                    continue
                 residency = node.residency(model.model_id)
                 if live_incumbents:
                     candidate_shape_matches = bool(
@@ -1431,6 +1534,7 @@ class PlacementPlanner:
                     desired_model_slots,
                     profile_by_id,
                     demand_urgency_by_model,
+                    desired_by_model,
                     timestamp,
                     self.policy,
                     startup_by_pair,
@@ -2565,6 +2669,7 @@ def _priority_preemption_candidates(
     desired_model_slots: Mapping[str, int],
     profile_by_id: Mapping[str, ModelProfile],
     demand_urgency_by_model: Mapping[str, int],
+    desired_by_model: Mapping[str, int],
     now: float,
     policy: PlannerPolicy,
     startup_seconds: Mapping[tuple[str, str], float],
@@ -2580,6 +2685,10 @@ def _priority_preemption_candidates(
         for node_assignments in assignments_by_node.values()
         for assignment in node_assignments
     )
+    assignments_on_node = {
+        node_id: {assignment.model_id for assignment in node_assignments}
+        for node_id, node_assignments in assignments_by_node.items()
+    }
     for node in nodes:
         if required_node_id is not None and node.node_id != required_node_id:
             continue
@@ -2616,7 +2725,14 @@ def _priority_preemption_candidates(
                 and not node.manually_managed
                 and (victim_profile := profile_by_id.get(item.model_id)) is not None
                 and (
-                    _evidence_preemption_allowed(
+                    (
+                        desired_by_model.get(item.model_id, 0) > 0
+                        and assignment_counts.get(item.model_id, 0)
+                        >= desired_by_model[item.model_id]
+                        and item.model_id
+                        not in assignments_on_node.get(node.node_id, set())
+                    )
+                    or _evidence_preemption_allowed(
                         item.model_id,
                         beneficiary.model_id,
                         victim_profile.priority,
@@ -2783,6 +2899,7 @@ def _stage_priority_preemption(
     desired_model_slots: dict[str, int],
     profile_by_id: Mapping[str, ModelProfile],
     demand_urgency_by_model: Mapping[str, int],
+    desired_by_model: Mapping[str, int],
     now: float,
     policy: PlannerPolicy,
     startup_seconds: Mapping[tuple[str, str], float],
@@ -2814,6 +2931,7 @@ def _stage_priority_preemption(
             desired_model_slots,
             profile_by_id,
             demand_urgency_by_model,
+            desired_by_model,
             now,
             policy,
             startup_seconds,

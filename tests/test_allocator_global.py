@@ -3978,6 +3978,172 @@ def test_planner_prioritizes_important_model_under_contention():
     assert plan.models_for("n") == ("important",)
 
 
+def test_planner_relocates_a_flexible_model_to_preserve_the_only_large_host():
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    baseline = model(
+        "baseline",
+        256,
+        min_replicas=1,
+        max_replicas=1,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=0,
+    )
+    specialist = model(
+        "specialist",
+        714,
+        min_replicas=0,
+        max_replicas=1,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=0,
+    )
+    forecasts = (
+        DemandForecast(
+            "specialist",
+            requests_per_minute=10,
+            offered_concurrency=0.5,
+            observed_requests_per_minute=10,
+            updated_at=10,
+        ),
+    )
+    machines = (
+        node(
+            "small",
+            512,
+            max_models=1,
+            residencies=(
+                ModelResidency("baseline", 256, ResidencyState.CACHED),
+            ),
+        ),
+        node(
+            "large",
+            4_096,
+            max_models=1,
+            residencies=(
+                ready("baseline", 256, last_used_at=10),
+                ModelResidency("specialist", 714, ResidencyState.CACHED),
+            ),
+        ),
+    )
+
+    relocating = planner.plan(
+        machines,
+        (baseline, specialist),
+        forecasts=forecasts,
+        now=10,
+    )
+
+    assert relocating.nodes_for("baseline") == ("small",)
+    assert relocating.nodes_for("specialist") == ()
+    assert relocating.preemptions == (
+        PlacementPreemption("large", "baseline", "specialist"),
+    )
+    baseline_assignment = next(
+        item for item in relocating.assignments if item.model_id == "baseline"
+    )
+    assert "preserves scarce host for specialist" in baseline_assignment.reasons
+
+    warming_replacement = Reconciler().reconcile(
+        relocating,
+        machines,
+        (baseline, specialist),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+    assert [
+        (item.kind, item.node_id, item.model_id)
+        for item in warming_replacement.executable_actions
+    ] == [(ActionKind.WARM, "small", "baseline")]
+    assert any(
+        item.node_id == "large"
+        and item.model_id == "baseline"
+        and item.code == "replacement_not_ready"
+        for item in warming_replacement.deferred
+    )
+
+    replacement_ready = replace(
+        machines[0],
+        residencies=(ready("baseline", 256, last_used_at=11),),
+    )
+    relocated = planner.plan(
+        (replacement_ready, machines[1]),
+        (baseline, specialist),
+        forecasts=(replace(forecasts[0], updated_at=11),),
+        now=11,
+    )
+    draining_incumbent = Reconciler().reconcile(
+        relocated,
+        (replacement_ready, machines[1]),
+        (baseline, specialist),
+        mode=AllocatorMode.AUTOMATIC,
+        now=11,
+    )
+    assert [
+        (item.kind, item.node_id, item.model_id)
+        for item in draining_incumbent.executable_actions
+    ] == [(ActionKind.DRAIN, "large", "baseline")]
+
+    converged = planner.plan(
+        (
+            replacement_ready,
+            replace(
+                machines[1],
+                residencies=(
+                    ModelResidency("baseline", 256, ResidencyState.CACHED),
+                    ModelResidency("specialist", 714, ResidencyState.CACHED),
+                ),
+            ),
+        ),
+        (baseline, specialist),
+        forecasts=(replace(forecasts[0], updated_at=11),),
+        now=11,
+    )
+
+    assert {
+        (item.model_id, item.node_id) for item in converged.assignments
+    } == {("baseline", "small"), ("specialist", "large")}
+    assert converged.unsatisfied == ()
+    assert converged.preemptions == ()
+
+
+def test_planner_does_not_relocate_without_demand_for_the_constrained_model():
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    baseline = model(
+        "baseline",
+        256,
+        min_replicas=1,
+        max_replicas=1,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=0,
+    )
+    specialist = model(
+        "specialist",
+        714,
+        min_replicas=0,
+        max_replicas=1,
+    )
+    machines = (
+        node(
+            "small",
+            512,
+            max_models=1,
+            residencies=(
+                ModelResidency("baseline", 256, ResidencyState.CACHED),
+            ),
+        ),
+        node(
+            "large",
+            4_096,
+            max_models=1,
+            residencies=(ready("baseline", 256, last_used_at=10),),
+        ),
+    )
+
+    plan = planner.plan(machines, (baseline, specialist), now=10)
+
+    assert plan.nodes_for("baseline") == ("large",)
+    assert plan.preemptions == ()
+
+
 def test_planner_repacking_finds_capacity_path_independent_of_ineligible_nodes():
     machines = [
         node(

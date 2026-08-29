@@ -1162,13 +1162,19 @@ def _destructive_deferral(
             f"Residency state changed to {residency.state.value}",
         )
 
-    if not priority_preemption:
-        desired_nodes = safety.desired_nodes.get(profile.model_id, ())
+    desired_nodes = safety.desired_nodes.get(profile.model_id, ())
+    required_ready = safety.target_by_model.get(profile.model_id, 0)
+    # Priority preemption may intentionally reduce a lower-priority model below its target when no
+    # alternative capacity exists. A relocation is different: when the plan contains enough
+    # destination assignments to retain the victim's full target, make those replacements READY
+    # before releasing the old host. This is the make-before-break boundary between safe repacking
+    # and an acknowledged service reduction.
+    replacement_required = not priority_preemption or len(desired_nodes) >= required_ready
+    if replacement_required:
         ready_desired = sum(
             (desired_node, profile.model_id) in safety.ready_pairs
             for desired_node in desired_nodes
         )
-        required_ready = safety.target_by_model.get(profile.model_id, 0)
         if required_ready and ready_desired < required_ready:
             return DeferredMutation(
                 kind,
@@ -1202,7 +1208,7 @@ def _destructive_deferral(
     if (
         kind == ActionKind.DRAIN
         and residency.state == ResidencyState.READY
-        and not priority_preemption
+        and replacement_required
         and not diversity_already_projected
     ):
         counts = safety.domain_counts[profile.model_id]
