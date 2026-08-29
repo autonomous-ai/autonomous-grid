@@ -173,7 +173,8 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
     handles: list = []
 
     def _spawn(label: str, *, agent_kinds: str = "codex", scenario: str = "codex",
-               disk_label: str | None = None):
+               disk_label: str | None = None, codex_capabilities: str = "",
+               claude_capabilities: str = ""):
         node_id, node_token = provider_nodes[label]
         env = {
             **os.environ,
@@ -189,6 +190,8 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
             "GRID_E2E_GOAL_NODE": label,
             "GRID_E2E_GOAL_SCENARIO": scenario,
             "GRID_TASK_AGENT_KINDS": agent_kinds,
+            "GRID_CODEX_GOAL_CAPABILITIES": codex_capabilities,
+            "GRID_CLAUDE_TASK_CAPABILITIES": claude_capabilities,
             # The task runner intentionally allowlists child env. This test-only selector is
             # explicit operator passthrough, not an accidental inheritance of provider secrets.
             "GRID_TASK_ENV_PASSTHROUGH": "GRID_E2E_GOAL_NODE,GRID_E2E_GOAL_SCENARIO",

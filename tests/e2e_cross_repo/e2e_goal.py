@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -219,6 +220,59 @@ def test_three_nodes_reclaim_one_goal_codex_then_claude_then_codex(
     assert claude_transcripts, "C did not fetch Claude B's opaque transcript side-ref"
     _assert_transcript_chain(
         relay_client.get_goal_evidence(relay, owner_token, conversation_id), 3)
+
+
+def test_image_goal_waits_for_a_node_with_the_required_capability(
+        relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
+    """An online native-Goal harness is not enough: the exact capability must match."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-capability-image-goal")["id"]
+    H.seed_trunk(relay, owner_token, project_id)
+
+    # B can run native Claude Goals, but advertises no image-generation integration. Keeping it
+    # online proves the row is capability-blocked rather than merely waiting for any provider.
+    node_b = spawn_goal_provider(
+        "B", agent_kinds="claude", scenario="image", disk_label="image-B")
+    assert H.wait_for(lambda: "provider" in node_b.output(), timeout=5), node_b.output()
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Generate a PNG poster artifact",
+        done_when="poster.png exists and passes the independent file check",
+        model="fake-grid-model", token_budget=2_000, tools=[],
+        agents=["codex", "claude"], required_capabilities=["image_generation"],
+        evals=[{"type": "file", "name": "PNG poster", "path": "poster.png",
+                "min_bytes": 50}])
+    conversation_id = goal["id"]
+    assert H.wait_for(
+        lambda: len(_tasks(relay, owner_token, project_id, conversation_id)) == 1, timeout=5)
+    time.sleep(1.5)  # several real claim polls while the incapable provider remains online
+    waiting = _tasks(relay, owner_token, project_id, conversation_id)
+    assert waiting[0]["state"] == "queued" and waiting[0]["attempt"] == 0, waiting
+    assert waiting[0]["provider_id"] is None
+    assert not (goal_workspace_root / "image-B").exists(), (
+        "Claude materialized a capability-constrained Goal it was not allowed to claim")
+
+    node_a = spawn_goal_provider(
+        "A", agent_kinds="codex", scenario="image", disk_label="image-A",
+        codex_capabilities="image_generation")
+    complete = H.wait_for(
+        lambda: _completed_goal(relay, owner_token, conversation_id), timeout=30)
+    assert complete, f"capable Codex node did not complete the image Goal:\n{node_a.output()}"
+    rows = _tasks(relay, owner_token, project_id, conversation_id)
+    assert len(rows) == 1 and rows[0]["provider_id"] == node_a.node_id, rows
+    assert rows[0]["agent_kind"] == "codex" and rows[0]["attempt"] == 1
+
+    destination = tmp_path / "image-result"
+    destination.mkdir()
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=rows[0]["branch"], commit=rows[0]["result_commit"], project_id=project_id)
+    assert (destination / "poster.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    _assert_transcript_chain(
+        relay_client.get_goal_evidence(relay, owner_token, conversation_id), 1)
 
 
 def test_parent_codex_spawns_claude_child_then_codex_fans_it_in(

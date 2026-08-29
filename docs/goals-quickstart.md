@@ -231,3 +231,8 @@ GRID_SRC_REPO=/path/to/autonomous-grid-cli uv run pytest \
 This is a single-host distributed-protocol emulation, not physical multi-machine proof. A release
 candidate must also pass [the three-machine acceptance runbook](goals-three-machine-acceptance.md),
 which forbids shared filesystems and records the node/lease/commit chain.
+
+The same suite also keeps a capability-constrained image Goal queued while an incapable Claude
+provider is actively polling, then proves a Codex provider advertising `image_generation` claims it,
+publishes a PNG, and passes the independent eval. A fourth scenario exercises a Codex parent,
+Claude child Goal, and Codex fan-in.

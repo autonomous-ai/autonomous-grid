@@ -6,6 +6,7 @@ state, never a shared directory or process object.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -47,6 +48,18 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
     history = load_history()
     scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
     mixed = scenario == "mixed"
+
+    if scenario == "image":
+        if node != "A" or history:
+            raise RuntimeError(f"image Goal reached the wrong worker: {node}, {history!r}")
+        # A valid 1x1 PNG. The scenario measures capability-aware placement and durable artifact
+        # transport; image quality belongs to a model/tool eval, not this protocol fixture.
+        (cwd / "poster.png").write_bytes(base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+            "/x8AAusB9Wl2nCEAAAAASUVORK5CYII="))
+        history.append({"node": "A", "capability": "image_generation"})
+        save_history(history)
+        return "complete", "A generated the requested PNG", 100
 
     if scenario == "subgoal":
         if node == "A" and not history:
