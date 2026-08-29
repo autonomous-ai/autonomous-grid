@@ -134,10 +134,13 @@ row with the same claim, lease, retry and reaper behavior as other distributed t
 At each successful turn boundary, the provider publishes two Git-backed checkpoints:
 
 - the project tree on the conversation/task branches;
-- Codex's durable thread state below `.grid/agent/codex` on the private agent side-ref.
+- native harness state on `refs/grid/agent/<goal-id>` (Codex state remains below
+  `.grid/agent/codex`; Claude keeps its own opaque transcript files).
 
-The next provider checks out both before resuming the same Codex thread. It does not fetch another
-provider's filesystem, process memory or bearer token.
+The worker reports the transcript commit it pushed, and the relay independently resolves the ref
+before accepting the turn. Evidence records both the input and output transcript commits. The next
+provider checks out the verified checkpoint before resuming its native thread; it does not fetch
+another provider's filesystem, process memory or bearer token.
 
 If a provider disappears mid-turn, its lease expires and the relay requeues the same task row with
 an incremented attempt number. The replacement starts from the last successful project and Codex
@@ -146,7 +149,9 @@ discarded; external actions should therefore be idempotent.
 
 When Codex marks the Goal complete, the last task becomes terminal and no next task is queued. The
 Goal disappears from the default `grid goal list`, while its Goal row, task attempts, events,
-trajectory and counters remain available for audit and future `grid train` datasets.
+trajectory and counters remain available for audit and future `grid train` datasets. Unlike
+ordinary task history, Goal branches and transcript refs do not expire by default. A relay that has
+already exported them may set `GOAL_TRAJECTORY_RETENTION_SECONDS` to a positive retention window.
 
 ## Give Codex business read/write tools
 
