@@ -3217,7 +3217,7 @@ def test_mutation_governor_prefers_fast_cached_start_within_service_class():
     )
 
 
-def test_reconciler_indexes_plan_urgencies_instead_of_rebuilding_per_action(
+def test_reconciler_indexes_high_cardinality_inputs_once(
     monkeypatch,
 ):
     machines = [
@@ -3258,14 +3258,37 @@ def test_reconciler_indexes_plan_urgencies_instead_of_rebuilding_per_action(
         residency_lookups += 1
         return original_residency(snapshot, model_id)
 
+    matching_history_sizes = []
+    original_blocked_until = Reconciler._history_blocked_until
+
+    def counted_blocked_until(reconciler, matching, now):
+        matching_history_sizes.append(len(matching))
+        return original_blocked_until(reconciler, matching, now)
+
     monkeypatch.setattr(type(plan), "urgency_for", unexpected_lookup)
     monkeypatch.setattr(NodeSnapshot, "residency", counted_residency)
+    monkeypatch.setattr(Reconciler, "_history_blocked_until", counted_blocked_until)
+    history = tuple(
+        MutationRecord(
+            f"attempt-{index}",
+            ActionKind.WARM,
+            f"node-{index}",
+            f"model-{index}",
+            MutationStatus.CANCELLED,
+            attempted_at=1,
+            completed_at=1,
+        )
+        for index in range(64)
+    )
 
-    result = Reconciler().reconcile(plan, machines, profiles, now=10)
+    result = Reconciler(
+        ReconcilePolicy(mutation_cooldown_seconds=0)
+    ).reconcile(plan, machines, profiles, history, now=10)
 
     assert len(result.actions) == 64
     assert assignments.iterations <= 5
     assert residency_lookups <= len(machines) * 2
+    assert matching_history_sizes == [1] * len(machines)
 
 
 def test_mutation_governor_prioritizes_drain_for_preemption_beneficiary():

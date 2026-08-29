@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -245,6 +245,19 @@ class Reconciler:
         # PENDING row as still active would permanently consume the node mutation budget and make a
         # later scale-down impossible.
         records = _latest_action_records(history)
+        history_by_transition: dict[
+            tuple[ActionKind, str, str, str], list[MutationRecord]
+        ] = {}
+        for record in records:
+            history_by_transition.setdefault(
+                (
+                    record.kind,
+                    record.node_id,
+                    record.model_id,
+                    record.artifact_sha256,
+                ),
+                [],
+            ).append(record)
         # A controller-supplied block map is the durable cooldown authority.  In particular it
         # has already bounded persisted wall-clock deadlines after a clock rollback.  Recomputing
         # a terminal history deadline from a future-dated receipt would create a sliding
@@ -362,7 +375,7 @@ class Reconciler:
                     plan,
                     timestamp,
                     "Download or verify model weights on the selected node",
-                    history=records,
+                    history_by_transition=history_by_transition,
                     mode=mode,
                     blocked_until=mutation_blocks,
                     blocked_causes=mutation_block_causes,
@@ -375,7 +388,7 @@ class Reconciler:
                             ActionKind.LOAD,
                             node,
                             profile,
-                            records,
+                            history_by_transition,
                             timestamp,
                             mode=mode,
                             blocked_until=mutation_blocks,
@@ -404,7 +417,7 @@ class Reconciler:
                 timestamp,
                 "Start the model and wait for its readiness probe",
                 dependencies=warm_dependencies,
-                history=records,
+                history_by_transition=history_by_transition,
                 mode=mode,
                 blocked_until=mutation_blocks,
                 blocked_causes=mutation_block_causes,
@@ -418,7 +431,7 @@ class Reconciler:
                         ActionKind.WARM,
                         node,
                         profile,
-                        records,
+                        history_by_transition,
                         timestamp,
                         mode=mode,
                         blocked_until=mutation_blocks,
@@ -505,7 +518,7 @@ class Reconciler:
                             if priority_preemption is not None
                             else "Stop assigning new work before removing the obsolete replica"
                         ),
-                        history=records,
+                        history_by_transition=history_by_transition,
                         mode=mode,
                         blocked_until=mutation_blocks,
                         blocked_causes=mutation_block_causes,
@@ -520,7 +533,7 @@ class Reconciler:
                         plan,
                         timestamp,
                         "Release model memory after the replica drained",
-                        history=records,
+                        history_by_transition=history_by_transition,
                         mode=mode,
                         blocked_until=mutation_blocks,
                         blocked_causes=mutation_block_causes,
@@ -533,7 +546,7 @@ class Reconciler:
                             action_kind,
                             node,
                             profile,
-                            records,
+                            history_by_transition,
                             timestamp,
                             mode=mode,
                             blocked_until=mutation_blocks,
@@ -684,7 +697,9 @@ class Reconciler:
         reason: str,
         *,
         dependencies: tuple[str, ...] = (),
-        history: list[MutationRecord],
+        history_by_transition: Mapping[
+            tuple[ActionKind, str, str, str], Sequence[MutationRecord]
+        ],
         mode: AllocatorMode,
         blocked_until: Mapping[tuple[ActionKind, str, str], float],
         blocked_causes: Mapping[tuple[ActionKind, str, str], MutationStatus],
@@ -695,17 +710,11 @@ class Reconciler:
         if kind.value not in node.actuator_capabilities or node.manually_managed:
             return None
         artifact_sha256 = _action_artifact_sha256(kind, node, profile)
-        latest_matching = next(
-            (
-                item
-                for item in reversed(history)
-                if item.kind == kind
-                and item.node_id == node.node_id
-                and item.model_id == profile.model_id
-                and item.artifact_sha256 == artifact_sha256
-            ),
-            None,
+        matching = history_by_transition.get(
+            (kind, node.node_id, profile.model_id, artifact_sha256),
+            (),
         )
+        latest_matching = matching[-1] if matching else None
         key = (kind, node.node_id, profile.model_id)
         block_applies = latest_matching is not None or not artifact_sha256
         block_cause = blocked_causes.get(key) if block_applies else None
@@ -730,11 +739,7 @@ class Reconciler:
             node.mutation_cooldown_until,
             (
                 self._history_blocked_until(
-                    kind,
-                    node.node_id,
-                    profile.model_id,
-                    artifact_sha256,
-                    history,
+                    matching,
                     now,
                 )
                 if history_cooldowns and not observed_prior_success
@@ -753,22 +758,10 @@ class Reconciler:
         if cooldown_until > now:
             return None
         if any(
-            item.kind == kind
-            and item.node_id == node.node_id
-            and item.model_id == profile.model_id
-            and item.artifact_sha256 == artifact_sha256
-            and item.status in (MutationStatus.PENDING, MutationStatus.RUNNING)
-            for item in history
+            item.status in (MutationStatus.PENDING, MutationStatus.RUNNING)
+            for item in matching
         ):
             return None
-        matching = [
-            item
-            for item in history
-            if item.kind == kind
-            and item.node_id == node.node_id
-            and item.model_id == profile.model_id
-            and item.artifact_sha256 == artifact_sha256
-        ]
         # A plan generation is stable while its inputs are stable, but a failed/succeeded command
         # must not reuse the same action ID: node runtimes cache terminal receipts by action ID.
         # The identity of all retained attempts keeps the next proposal deterministic for the same
@@ -797,21 +790,9 @@ class Reconciler:
 
     def _history_blocked_until(
         self,
-        kind: ActionKind,
-        node_id: str,
-        model_id: str,
-        artifact_sha256: str,
-        history: list[MutationRecord],
+        matching: Sequence[MutationRecord],
         now: float,
     ) -> float:
-        matching = [
-            item
-            for item in history
-            if item.kind == kind
-            and item.node_id == node_id
-            and item.model_id == model_id
-            and item.artifact_sha256 == artifact_sha256
-        ]
         if not matching:
             return 0.0
         latest = matching[-1]
@@ -834,7 +815,9 @@ class Reconciler:
         kind: ActionKind,
         node: NodeSnapshot,
         profile: ModelProfile,
-        history: list[MutationRecord],
+        history_by_transition: Mapping[
+            tuple[ActionKind, str, str, str], Sequence[MutationRecord]
+        ],
         now: float,
         *,
         mode: AllocatorMode,
@@ -854,13 +837,13 @@ class Reconciler:
                 )
             ]
         artifact_sha256 = _action_artifact_sha256(kind, node, profile)
+        matching = history_by_transition.get(
+            (kind, node.node_id, profile.model_id, artifact_sha256),
+            (),
+        )
         if any(
-            item.kind == kind
-            and item.node_id == node.node_id
-            and item.model_id == profile.model_id
-            and item.artifact_sha256 == artifact_sha256
-            and item.status in (MutationStatus.PENDING, MutationStatus.RUNNING)
-            for item in history
+            item.status in (MutationStatus.PENDING, MutationStatus.RUNNING)
+            for item in matching
         ):
             return [
                 DeferredMutation(
@@ -871,17 +854,7 @@ class Reconciler:
                     "An equivalent mutation is already pending or running",
                 )
             ]
-        latest_matching = next(
-            (
-                item
-                for item in reversed(history)
-                if item.kind == kind
-                and item.node_id == node.node_id
-                and item.model_id == profile.model_id
-                and item.artifact_sha256 == artifact_sha256
-            ),
-            None,
-        )
+        latest_matching = matching[-1] if matching else None
         key = (kind, node.node_id, profile.model_id)
         block_applies = latest_matching is not None or not artifact_sha256
         block_cause = blocked_causes.get(key) if block_applies else None
@@ -906,11 +879,7 @@ class Reconciler:
             node.mutation_cooldown_until,
             (
                 self._history_blocked_until(
-                    kind,
-                    node.node_id,
-                    profile.model_id,
-                    artifact_sha256,
-                    history,
+                    matching,
                     now,
                 )
                 if history_cooldowns and not observed_prior_success

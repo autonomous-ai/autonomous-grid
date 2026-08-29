@@ -286,8 +286,9 @@ A `warm` depends on a preceding `load` when the artifact is not cached; if that 
 the warm is deferred too. Availability actions have priority over destructive actions. Failure
 backoff is tracked per action kind, host, and model, so a broken artifact does not create a tight
 fleet-wide retry loop and does not block healthy targets elsewhere. Reconciliation indexes plan
-urgency, assignment memory, and actual READY inventory once per tick; safety-floor construction is
-linear in configured models plus reported residencies rather than the fleet/model cross product.
+urgency, assignment memory, actual READY inventory, and mutation attempts once per tick;
+safety-floor and retry construction scale with configured models, reported residencies, and retained
+history rather than their cross products.
 
 A delivered `drain` or `unload` may already be running even while its last controller record still
 says `pending`. If fresh placement or host evidence makes any destructive action unsafe, the
