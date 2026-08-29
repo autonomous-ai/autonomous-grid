@@ -311,11 +311,6 @@ class Reconciler:
         deferred: list[DeferredMutation] = []
         desired = plan.desired_pairs
         urgency_by_model = dict(plan.model_urgencies)
-        service_capacity_unsatisfied = any(
-            item.missing_replicas > 0
-            and urgency_by_model.get(item.model_id, 0) >= 2
-            for item in plan.unsatisfied
-        )
         replica_index_by_pair = {
             (assignment.node_id, assignment.model_id): assignment.replica_index
             for assignment in plan.assignments
@@ -367,6 +362,21 @@ class Reconciler:
         }
         safety = _destructive_safety_state(plan, node_by_id, profile_by_id)
         ready_pairs = safety.ready_pairs
+        unsatisfied_direct_models = {
+            item.model_id
+            for item in plan.unsatisfied
+            if item.missing_replicas > 0
+            and urgency_by_model.get(item.model_id, 0) >= 2
+        }
+        # Do not let a permanently impossible direct model idle unrelated capacity. Speculative
+        # availability waits only while a concrete assignment for unsatisfied direct service is
+        # itself converging. The planner has already given direct work first choice of every
+        # compatible node and staged any capacity-releasing preemption it can safely perform.
+        service_capacity_unsatisfied = any(
+            model_id in unsatisfied_direct_models
+            and (node_id, model_id) not in ready_pairs
+            for node_id, model_id in replica_index_by_pair
+        )
         active_drain_pairs: set[tuple[str, str]] = set()
         for record in active_records:
             if record.kind != ActionKind.DRAIN:

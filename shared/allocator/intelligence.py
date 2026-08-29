@@ -247,6 +247,7 @@ class WorkloadIntelligence:
         direct: Iterable[DemandForecast],
         *,
         now: float,
+        placement_hints: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> tuple[DemandForecast, ...]:
         """Project unbound workload demand onto a bounded speculative model portfolio.
 
@@ -267,14 +268,20 @@ class WorkloadIntelligence:
             candidates = [
                 profile
                 for profile in profile_list
-                if profile.max_replicas > 0 and profile.workload_score(workload) > 0
+                if profile.max_replicas > 0
+                and profile.workload_score(workload) > 0
+                and _placement_feasible(profile.model_id, placement_hints)
             ]
             if not candidates:
                 continue
             chosen = max(
                 candidates,
                 key=lambda profile: (
-                    self._portfolio_score(profile, workload),
+                    self._portfolio_score_with_placement(
+                        profile,
+                        workload,
+                        placement_hints,
+                    ),
                     -profile.maximum_memory_mb,
                     -(profile.load_seconds + profile.warm_seconds),
                     profile.model_id,
@@ -303,6 +310,7 @@ class WorkloadIntelligence:
         profiles: Iterable[ModelProfile],
         *,
         now: float | None = None,
+        placement_hints: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], ...]:
         timestamp = time.time() if now is None else float(now)
         rows: list[dict[str, Any]] = []
@@ -310,10 +318,15 @@ class WorkloadIntelligence:
         keys = tuple(sorted((self.unbound_demand.to_dict().get("models") or {}).keys()))
         for workload in keys:
             forecast = self.unbound_demand.forecast(workload, now=timestamp)
-            candidates = [
+            configured_candidates = [
                 profile
                 for profile in profile_list
                 if profile.max_replicas > 0 and profile.workload_score(workload) > 0
+            ]
+            candidates = [
+                profile
+                for profile in configured_candidates
+                if _placement_feasible(profile.model_id, placement_hints)
             ]
             if not candidates:
                 rows.append(
@@ -322,14 +335,28 @@ class WorkloadIntelligence:
                         "requests_per_minute": forecast.requests_per_minute,
                         "samples": forecast.sample_count,
                         "chosen_model": "",
-                        "reason": "no compatible configured model",
+                        "reason": (
+                            "no fleet-feasible configured model"
+                            if configured_candidates and placement_hints is not None
+                            else "no compatible configured model"
+                        ),
+                        "candidates": _candidate_rows(
+                            configured_candidates,
+                            workload,
+                            placement_hints,
+                            self,
+                        ),
                     }
                 )
                 continue
             chosen = max(
                 candidates,
                 key=lambda profile: (
-                    self._portfolio_score(profile, workload),
+                    self._portfolio_score_with_placement(
+                        profile,
+                        workload,
+                        placement_hints,
+                    ),
                     -profile.maximum_memory_mb,
                     profile.model_id,
                 ),
@@ -341,7 +368,18 @@ class WorkloadIntelligence:
                     "samples": forecast.sample_count,
                     "confidence": forecast.confidence,
                     "chosen_model": chosen.model_id,
-                    "score": self._portfolio_score(chosen, workload),
+                    "score": self._portfolio_score_with_placement(
+                        chosen,
+                        workload,
+                        placement_hints,
+                    ),
+                    "placement": dict((placement_hints or {}).get(chosen.model_id) or {}),
+                    "candidates": _candidate_rows(
+                        configured_candidates,
+                        workload,
+                        placement_hints,
+                        self,
+                    ),
                     "reason": (
                         "portfolio canary"
                         if forecast.sample_count >= self.portfolio_min_samples
@@ -440,6 +478,58 @@ class WorkloadIntelligence:
         score -= min(0.10, math.log2(max(1, profile.maximum_memory_mb)) / 200.0)
         score -= min(0.05, (profile.load_seconds + profile.warm_seconds) / 7_200.0)
         return score
+
+    def _portfolio_score_with_placement(
+        self,
+        profile: ModelProfile,
+        workload: str,
+        placement_hints: Mapping[str, Mapping[str, Any]] | None,
+    ) -> float:
+        score = self._portfolio_score(profile, workload)
+        if placement_hints is None:
+            return score
+        hint = placement_hints.get(profile.model_id) or {}
+        try:
+            cost_per_hour = float(hint.get("cost_per_hour") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            cost_per_hour = 0.0
+        if math.isfinite(cost_per_hour) and cost_per_hour > 0:
+            # Quality and configured suitability remain dominant. This bounded term distinguishes
+            # similarly effective candidates by the cheapest node that can actually host them.
+            score -= min(0.10, 0.02 * math.log1p(cost_per_hour))
+        return score
+
+
+def _placement_feasible(
+    model_id: str,
+    placement_hints: Mapping[str, Mapping[str, Any]] | None,
+) -> bool:
+    if placement_hints is None:
+        return True
+    hint = placement_hints.get(model_id)
+    return bool(hint and hint.get("feasible") is True)
+
+
+def _candidate_rows(
+    profiles: Iterable[ModelProfile],
+    workload: str,
+    placement_hints: Mapping[str, Mapping[str, Any]] | None,
+    intelligence: WorkloadIntelligence,
+) -> list[dict[str, Any]]:
+    rows = [
+        {
+            "model_id": profile.model_id,
+            "score": intelligence._portfolio_score_with_placement(
+                profile,
+                workload,
+                placement_hints,
+            ),
+            "feasible": _placement_feasible(profile.model_id, placement_hints),
+            "placement": dict((placement_hints or {}).get(profile.model_id) or {}),
+        }
+        for profile in profiles
+    ]
+    return sorted(rows, key=lambda row: (-float(row["score"]), str(row["model_id"])))
 
 
 def classify_request(endpoint: str, body: Mapping[str, Any]) -> RequestFeatures:

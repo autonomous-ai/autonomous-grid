@@ -343,8 +343,16 @@ class AllocatorController:
         self._mutation_blocks = bounded_blocks
         self._mutation_block_delays = bounded_delays
         self._mutation_block_causes = bounded_causes
-        forecasts = self._forecasts(timestamp)
         profiles = self.profiles
+        placement_hints = self.planner.portfolio_placement_hints(
+            node_list,
+            profiles,
+            now=timestamp,
+        )
+        forecasts = self._forecasts(
+            timestamp,
+            placement_hints=placement_hints,
+        )
         startup_estimates, _ = self._learned_warm_estimates(now=timestamp)
         learned_by_model = {
             profile.model_id: profile.warm_seconds for profile in profiles
@@ -758,16 +766,27 @@ class AllocatorController:
 
     def status(self, nodes: Iterable[NodeSnapshot] = (), *, now: float | None = None) -> dict[str, Any]:
         timestamp = time.time() if now is None else float(now)
+        node_list = tuple(nodes)
         with self._lock:
-            forecasts = self._forecasts(timestamp)
+            profiles = self.profiles
+            placement_hints = self.planner.portfolio_placement_hints(
+                node_list,
+                profiles,
+                now=timestamp,
+            )
+            forecasts = self._forecasts(
+                timestamp,
+                placement_hints=placement_hints,
+            )
             startup_estimates, startup_samples = self._learned_warm_estimates(
                 now=timestamp
             )
             with self._demand_lock:
                 workload_forecasts = self.intelligence.workload_forecasts(now=timestamp)
                 portfolio_projections = self.intelligence.projections(
-                    self.profiles,
+                    profiles,
                     now=timestamp,
+                    placement_hints=placement_hints,
                 )
                 model_workload_outcomes = self.intelligence.outcomes
             return {
@@ -777,7 +796,9 @@ class AllocatorController:
                 "plan_sequence": self._plan_sequence,
                 "last_tick_at": self._last_tick_at,
                 "last_tick_duration_seconds": self._last_tick_duration_seconds,
-                "nodes": [node.to_dict() for node in sorted(nodes, key=lambda item: item.node_id)],
+                "nodes": [
+                    node.to_dict() for node in sorted(node_list, key=lambda item: item.node_id)
+                ],
                 "models": [
                     {
                         **profile.to_dict(),
@@ -792,6 +813,11 @@ class AllocatorController:
                     for item in workload_forecasts
                 ],
                 "portfolio_projections": list(portfolio_projections),
+                "portfolio_placement_hints": [
+                    placement_hints[model_id]
+                    for model_id in sorted(placement_hints)
+                    if self._profiles[model_id].workload_scores
+                ],
                 "model_workload_outcomes": [
                     asdict(item) for item in model_workload_outcomes
                 ],
@@ -855,7 +881,12 @@ class AllocatorController:
     def _latest_record(self, action_id: str) -> MutationRecord | None:
         return next((item for item in reversed(self._history) if item.action_id == action_id), None)
 
-    def _forecasts(self, now: float) -> tuple[DemandForecast, ...]:
+    def _forecasts(
+        self,
+        now: float,
+        *,
+        placement_hints: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> tuple[DemandForecast, ...]:
         active_models = tuple(
             model_id for model_id in self._profiles if model_id not in self._retiring
         )
@@ -866,6 +897,7 @@ class AllocatorController:
                 profiles,
                 direct,
                 now=now,
+                placement_hints=placement_hints,
             )
 
     def _learned_warm_estimates(

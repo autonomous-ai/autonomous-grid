@@ -146,6 +146,155 @@ class PlacementPlanner:
     def __init__(self, policy: PlannerPolicy | None = None) -> None:
         self.policy = policy or PlannerPolicy()
 
+    def portfolio_placement_hints(
+        self,
+        nodes: Iterable[NodeSnapshot],
+        models: Iterable[ModelProfile],
+        *,
+        now: float | None = None,
+    ) -> dict[str, dict[str, object]]:
+        """Summarize which portfolio models can occupy a live node right now.
+
+        Portfolio choice happens before ordinary placement, so it needs a bounded feasibility
+        filter or an attractive but impossible model can suppress every usable fallback. This is a
+        single fleet scan per model using the same hard compatibility, memory, model-slot, and
+        colocation rules as placement. It does not promise that globally contended capacity will be
+        awarded to the candidate; the normal fair planner remains authoritative for that decision.
+        """
+
+        timestamp = time.time() if now is None else float(now)
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise ValueError("now must be finite and non-negative")
+        node_list = tuple(sorted(nodes, key=lambda item: item.node_id))
+        model_list = tuple(sorted(models, key=lambda item: item.model_id))
+        _require_unique((node.node_id for node in node_list), "node")
+        _require_unique((model.model_id for model in model_list), "model")
+        profile_by_id = {model.model_id: model for model in model_list}
+        hints: dict[str, dict[str, object]] = {}
+
+        for model in model_list:
+            rejected: Counter[str] = Counter()
+            eligible: list[tuple[float, float, str]] = []
+            if model.max_replicas <= 0:
+                rejected["model is disabled"] += 1
+            else:
+                for node in node_list:
+                    residency = node.residency(model.model_id)
+                    for_new = _requires_new_runtime(residency, model)
+                    reason = _ineligible_reason(
+                        node,
+                        model,
+                        timestamp,
+                        self.policy,
+                        for_new=for_new,
+                    )
+                    allocatable = node.capacity_mb - node.reserved_mb
+                    if node.state == NodeState.THROTTLED:
+                        allocatable *= self.policy.throttled_capacity_fraction
+                    allocatable = max(0, math.floor(allocatable))
+                    usable = max(
+                        0,
+                        math.floor(
+                            allocatable * (1.0 - self.policy.memory_headroom_fraction)
+                        ),
+                    )
+                    live_memory = sum(
+                        item.memory_mb
+                        for item in node.residencies
+                        if not _adds_model_slot(item)
+                    )
+                    incremental = _incremental_memory_mb(
+                        residency,
+                        model.memory_for(node.runtimes),
+                    )
+                    occupied = sum(
+                        not _adds_model_slot(item) for item in node.residencies
+                    )
+                    adds_slot = _adds_model_slot(residency)
+                    if reason is None and model.memory_for(node.runtimes) > allocatable:
+                        reason = "model exceeds allocatable memory"
+                    if reason is None and incremental > max(0, usable - live_memory):
+                        reason = "insufficient current memory headroom"
+                    if (
+                        reason is None
+                        and node.max_models is not None
+                        and (
+                            node.max_models == 0
+                            or (adds_slot and occupied >= node.max_models)
+                        )
+                    ):
+                        reason = "model slots are full"
+                    if reason is None and not _colocation_allowed(
+                        node,
+                        model,
+                        (),
+                        profile_by_id,
+                    ):
+                        reason = "colocation policy rejects the model"
+                    if reason is not None:
+                        rejected[reason] += 1
+                        continue
+
+                    if (
+                        residency is not None
+                        and residency.state == ResidencyState.READY
+                        and model.matches_artifact(residency)
+                    ):
+                        startup_seconds = 0.0
+                    elif (
+                        residency is not None
+                        and model.matches_artifact(residency)
+                        and residency.state
+                        in (
+                            ResidencyState.CACHED,
+                            ResidencyState.LOADING,
+                            ResidencyState.WARMING,
+                            ResidencyState.DRAINING,
+                        )
+                    ):
+                        startup_seconds = model.warm_seconds
+                    else:
+                        startup_seconds = model.load_seconds + model.warm_seconds
+                    eligible.append(
+                        (
+                            float(node.cost_per_hour),
+                            float(startup_seconds),
+                            node.node_id,
+                        )
+                    )
+
+            if eligible:
+                cost, startup_seconds, node_id = min(eligible)
+                hints[model.model_id] = {
+                    "model_id": model.model_id,
+                    "feasible": True,
+                    "eligible_nodes": len(eligible),
+                    "best_node_id": node_id,
+                    "cost_per_hour": cost,
+                    "startup_seconds": startup_seconds,
+                    "reason": "fleet-feasible",
+                }
+            else:
+                reason = "no live node is currently eligible"
+                if rejected:
+                    reason += ": " + "; ".join(
+                        f"{item} ({count})"
+                        for item, count in sorted(
+                            rejected.items(),
+                            key=lambda pair: (-pair[1], pair[0]),
+                        )[:3]
+                    )
+                hints[model.model_id] = {
+                    "model_id": model.model_id,
+                    "feasible": False,
+                    "eligible_nodes": 0,
+                    "best_node_id": "",
+                    "cost_per_hour": 0.0,
+                    "startup_seconds": 0.0,
+                    "reason": reason,
+                }
+        return hints
+
     def plan(
         self,
         nodes: Iterable[NodeSnapshot],
@@ -1223,6 +1372,43 @@ class PlacementPlanner:
         # ordinary priority placement and explicitly evict only the excess managed residencies;
         # otherwise replacement-readiness safety would retain a violating incumbent indefinitely.
         preempted_pairs = {(item.node_id, item.model_id) for item in preemptions}
+        # A newly tightened privacy, allowlist, hardware, or runtime constraint is authoritative
+        # even when old direct demand or residency cooldown still requests a replica. The old
+        # residency cannot legally satisfy that target, so keeping it ready as a "replacement"
+        # deadlocks convergence and can violate policy. Stage an owned, unpinned residency for
+        # removal; the desired target remains visible as unsatisfied until a compliant host exists.
+        for node in node_list:
+            if len(preemptions) >= self.policy.max_staged_preemptions:
+                break
+            for residency in sorted(node.residencies, key=lambda item: item.model_id):
+                if len(preemptions) >= self.policy.max_staged_preemptions:
+                    break
+                pair = (node.node_id, residency.model_id)
+                profile = profile_by_id.get(residency.model_id)
+                if (
+                    pair in preempted_pairs
+                    or profile is None
+                    or residency.state
+                    not in (
+                        ResidencyState.READY,
+                        ResidencyState.DRAINING,
+                        ResidencyState.FAILED,
+                    )
+                    or not residency.managed
+                    or residency.pinned
+                    or node.manually_managed
+                    or node.node_id in profile.pinned_nodes
+                    or _hard_residency_policy_violation(node, profile) is None
+                ):
+                    continue
+                preemptions.append(
+                    PlacementPreemption(
+                        node_id=node.node_id,
+                        model_id=residency.model_id,
+                    )
+                )
+                preempted_pairs.add(pair)
+
         for node in node_list:
             if len(preemptions) >= self.policy.max_staged_preemptions:
                 break
@@ -1700,6 +1886,14 @@ def desired_replica_count(
                 residency is None
                 or residency.state != ResidencyState.READY
                 or not model.matches_artifact(residency)
+                or _ineligible_reason(
+                    node,
+                    model,
+                    timestamp,
+                    policy,
+                    for_new=False,
+                )
+                is not None
             ):
                 continue
             last_activity = max(residency.loaded_at, residency.last_used_at)
@@ -1949,6 +2143,43 @@ def _ineligible_reason(
     )
     if for_new and not artifact_cached and "load" not in node.actuator_capabilities:
         return "node cannot load uncached model weights"
+    return None
+
+
+def _hard_residency_policy_violation(
+    node: NodeSnapshot,
+    model: ModelProfile,
+) -> str | None:
+    """Return a stable policy violation that an existing runtime cannot satisfy in place.
+
+    Transient node health, heartbeat age, actuator availability, artifact replacement, capacity,
+    and colocation are intentionally handled by their existing safety paths. This helper is only
+    for administrator and hardware constraints that make continued service on this node invalid.
+    """
+
+    if model.data_tier not in node.allowed_data_tiers:
+        return "data tier is not allowed"
+    if node.allowed_models and model.model_id not in node.allowed_models:
+        return "model is not allowlisted"
+    if model.model_id in node.denied_models:
+        return "model is denied"
+    if model.runtimes and not set(model.runtimes).intersection(node.runtimes):
+        return "runtime is incompatible"
+    if model.backends and not set(model.backends).intersection(node.backends):
+        return "backend is incompatible"
+    if node.gpu_count < model.min_gpu_count:
+        return "GPU count is insufficient"
+    if model.min_gpu_memory_mb:
+        required_devices = max(1, model.min_gpu_count)
+        matching_devices = sum(
+            memory_mb >= model.min_gpu_memory_mb for memory_mb in node.gpu_memory_mb
+        )
+        if matching_devices < required_devices:
+            return "GPU memory is insufficient"
+    if not set(model.required_tags).issubset(node.tags):
+        return "required node tags are missing"
+    if set(model.forbidden_tags).intersection(node.tags):
+        return "node has a forbidden tag"
     return None
 
 

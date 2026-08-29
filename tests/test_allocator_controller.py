@@ -9,6 +9,7 @@ import pytest
 
 from shared import jsonio
 from shared.allocator.controller import AllocatorController
+from shared.allocator.intelligence import RequestFeatures
 from shared.allocator.models import (
     ActionKind,
     AllocatorMode,
@@ -88,6 +89,63 @@ def test_controller_status_reports_last_successful_tick_duration(monkeypatch):
     controller.tick([node()], now=10)
 
     assert controller.status([node()], now=10)["last_tick_duration_seconds"] == 0.25
+
+
+def test_controller_portfolio_uses_a_fleet_feasible_fallback():
+    controller = AllocatorController(mode=AllocatorMode.AUTOMATIC)
+    for candidate in (
+        ModelProfile(
+            "preferred-huge",
+            32_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("coding", 1.0),),
+        ),
+        ModelProfile(
+            "feasible-small",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("coding", 0.7),),
+        ),
+    ):
+        controller.put_profile(candidate)
+    for timestamp in (98, 99, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("chat/completions", "auto", "coding"),
+            service_seconds=1,
+            timestamp=timestamp,
+        )
+    machine = NodeSnapshot(
+        "only-node",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        last_heartbeat=100,
+        cost_per_hour=0.20,
+    )
+
+    controller.tick((machine,), now=100)
+    status = controller.status((machine,), now=100)
+
+    assert controller.last_plan is not None
+    assert [
+        (item.model_id, item.node_id) for item in controller.last_plan.assignments
+    ] == [
+        ("feasible-small", "only-node")
+    ]
+    assert status["portfolio_projections"][0]["chosen_model"] == "feasible-small"
+    hints = {
+        row["model_id"]: row for row in status["portfolio_placement_hints"]
+    }
+    assert hints["preferred-huge"]["feasible"] is False
+    assert hints["feasible-small"]["best_node_id"] == "only-node"
 
 
 def test_controller_versioning_preserves_plan_model_urgency():
@@ -422,7 +480,7 @@ def test_direct_demand_replaces_undelivered_speculative_prewarm(monkeypatch):
     monkeypatch.setattr(
         AllocatorController,
         "_forecasts",
-        lambda _controller, _now: current_forecasts[0],
+        lambda _controller, _now, **_kwargs: current_forecasts[0],
     )
 
     first = controller.tick(machines, now=10)
@@ -503,7 +561,7 @@ def test_direct_demand_is_delivered_before_older_speculative_prewarm(monkeypatch
     monkeypatch.setattr(
         AllocatorController,
         "_forecasts",
-        lambda _controller, _now: current_forecasts[0],
+        lambda _controller, _now, **_kwargs: current_forecasts[0],
     )
     first = controller.tick((machine,), now=10)
     assert [action.model_id for action in first.executable_actions] == [
@@ -882,7 +940,7 @@ def test_controller_forecasts_against_fastest_learned_cached_path(monkeypatch):
     monkeypatch.setattr(
         AllocatorController,
         "_forecasts",
-        lambda _controller, _now: (
+        lambda _controller, _now, **_kwargs: (
             DemandForecast(
                 "qwen",
                 requests_per_minute=60,

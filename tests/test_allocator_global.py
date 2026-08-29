@@ -76,6 +76,178 @@ def model(model_id: str = "qwen", memory_mb: int = 8_000, **kwargs) -> ModelProf
     )
 
 
+def test_portfolio_hints_filter_by_live_fleet_and_rank_the_cheapest_host():
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    nodes = (
+        node("small", 4_000, cost_per_hour=0.05),
+        node("expensive", 16_000, cost_per_hour=0.80),
+        node("cheap", 16_000, cost_per_hour=0.20),
+    )
+
+    hints = planner.portfolio_placement_hints(
+        nodes,
+        (model("coder", 8_000, min_replicas=0),),
+        now=10,
+    )
+
+    assert hints["coder"] == {
+        "model_id": "coder",
+        "feasible": True,
+        "eligible_nodes": 2,
+        "best_node_id": "cheap",
+        "cost_per_hour": 0.20,
+        "startup_seconds": 35.0,
+        "reason": "fleet-feasible",
+    }
+
+
+def test_portfolio_hints_explain_when_no_live_node_can_host_a_model():
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    nodes = (
+        node("too-small", 4_000),
+        node("wrong-runtime", 16_000, runtime="comfyui", backend="mps"),
+        node("no-slots", 16_000, max_models=0),
+    )
+
+    hint = planner.portfolio_placement_hints(
+        nodes,
+        (model("coder", 8_000, min_replicas=0),),
+        now=10,
+    )["coder"]
+
+    assert hint["feasible"] is False
+    assert hint["eligible_nodes"] == 0
+    assert "model exceeds allocatable memory" in str(hint["reason"])
+    assert "runtime is incompatible" in str(hint["reason"])
+    assert "model slots are full" in str(hint["reason"])
+
+
+def test_scale_down_cooldown_does_not_preserve_a_policy_ineligible_residency():
+    machine = node(
+        "worker",
+        residencies=(
+            ModelResidency(
+                "coder",
+                8_000,
+                ResidencyState.READY,
+                loaded_at=99,
+                last_used_at=100,
+            ),
+        ),
+        now=100,
+    )
+    candidate = model(
+        "coder",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=300,
+        required_tags=("missing",),
+    )
+
+    assert desired_replica_count(candidate, None, nodes=(machine,), now=100) == 0
+
+
+def test_hard_policy_change_evicts_owned_residency_despite_direct_demand():
+    machine = node(
+        "worker",
+        residencies=(
+            ModelResidency(
+                "coder",
+                8_000,
+                ResidencyState.READY,
+                loaded_at=99,
+                last_used_at=100,
+            ),
+        ),
+        now=100,
+    )
+    candidate = model(
+        "coder",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=300,
+        required_tags=("missing",),
+    )
+    direct = DemandForecast(
+        "coder",
+        requests_per_minute=60,
+        observed_requests_per_minute=60,
+        offered_concurrency=1,
+        updated_at=100,
+    )
+
+    plan = PlacementPlanner().plan((machine,), (candidate,), (direct,), now=100)
+    result = Reconciler().reconcile(
+        plan,
+        (machine,),
+        (candidate,),
+        mode=AllocatorMode.AUTOMATIC,
+        now=100,
+    )
+
+    assert plan.target_for("coder") == 1
+    assert [(item.node_id, item.model_id) for item in plan.preemptions] == [
+        ("worker", "coder")
+    ]
+    assert [item.kind for item in result.actions] == [ActionKind.DRAIN]
+
+
+def test_impossible_direct_model_does_not_block_unrelated_speculative_warm():
+    machine = node("worker", cached=("speculative",), now=10)
+    direct = model(
+        "direct",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+        required_tags=("missing",),
+    )
+    speculative = model(
+        "speculative",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+    )
+    forecasts = (
+        DemandForecast(
+            "direct",
+            requests_per_minute=60,
+            observed_requests_per_minute=60,
+            offered_concurrency=1,
+            updated_at=10,
+        ),
+        DemandForecast(
+            "speculative",
+            requests_per_minute=60,
+            correlated_requests_per_minute=60,
+            correlation_confidence=1,
+            correlation_sources=("workload:coding",),
+            updated_at=10,
+        ),
+    )
+
+    plan = PlacementPlanner().plan(
+        (machine,),
+        (direct, speculative),
+        forecasts,
+        now=10,
+    )
+    result = Reconciler().reconcile(
+        plan,
+        (machine,),
+        (direct, speculative),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+
+    assert plan.nodes_for("direct") == ()
+    assert plan.nodes_for("speculative") == ("worker",)
+    assert [item.kind for item in result.executable_actions] == [ActionKind.WARM]
+
+
 def test_runtime_specific_memory_is_canonical_and_round_trips():
     profile = ModelProfile(
         model_id="qwen",

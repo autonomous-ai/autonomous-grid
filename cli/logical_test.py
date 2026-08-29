@@ -193,6 +193,7 @@ def _status_payload(record: dict[str, Any] | None = None) -> dict[str, Any]:
             forecasts=status.get("forecasts") or [],
             workload_forecasts=status.get("workload_forecasts") or [],
             portfolio_projections=status.get("portfolio_projections") or [],
+            portfolio_placement_hints=status.get("portfolio_placement_hints") or [],
             model_workload_outcomes=status.get("model_workload_outcomes") or [],
             pending_commands=status.get("pending_commands") or [],
             history=status.get("history") or [],
@@ -1080,6 +1081,7 @@ def _wait_for_competition_choice(
     candidates: tuple[str, ...],
     timeout: float,
     initial: dict[str, Any],
+    expected: str = "",
 ) -> tuple[str, dict[str, Any]]:
     deadline = time.monotonic() + timeout
     prior = _residency_states(initial)
@@ -1101,8 +1103,13 @@ def _wait_for_competition_choice(
             None,
         )
         chosen = str((projection or {}).get("chosen_model") or "")
-        if chosen and _ready_replicas(status, chosen) >= 1 and not status.get(
+        if (
+            chosen
+            and (not expected or chosen == expected)
+            and _ready_replicas(status, chosen) >= 1
+            and not status.get(
             "pending_commands"
+            )
         ):
             return chosen, status
         time.sleep(0.1)
@@ -1360,6 +1367,94 @@ def cmd_test_compete(args: argparse.Namespace) -> int:
     )
     _require_real_chat((proof,), label="winning model")
 
+    print(f"\n[constraint change] Making {chosen} ineligible on every logical node")
+    forced_tag = "logical-test-forced-infeasible"
+    original_tags = list(by_model[chosen].get("required_tags") or [])
+    with httpx.Client(base_url=endpoint, timeout=10.0, trust_env=False) as client:
+        _put_test_profile(
+            client,
+            headers,
+            by_model[chosen],
+            min_replicas=0,
+            max_replicas=1,
+            min_failure_domains=1,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=300,
+            workload_scores=[["coding", 1.0]],
+            required_tags=[*original_tags, forced_tag],
+        )
+    fallback, fallback_status = _wait_for_competition_choice(
+        record,
+        candidates=candidates,
+        timeout=args.timeout,
+        initial=selected,
+    )
+    if fallback == chosen:
+        raise SystemExit("Allocator retained a portfolio model after it became fleet-infeasible.")
+    fallback_projection = next(
+        row
+        for row in fallback_status.get("portfolio_projections") or []
+        if row.get("workload") == "coding" and row.get("chosen_model") == fallback
+    )
+    rejected = next(
+        row
+        for row in fallback_projection.get("candidates") or []
+        if row.get("model_id") == chosen
+    )
+    rejected_reason = str((rejected.get("placement") or {}).get("reason") or "")
+    fallback_proof = _real_chat_request(
+        endpoint,
+        _RealUser(
+            user_id="competition-fallback-proof",
+            role="software-engineer",
+            model=fallback,
+            prompt="What is the time complexity of binary search? Reply concisely.",
+        ),
+        max_tokens=args.max_tokens,
+        timeout=args.timeout,
+    )
+    _require_real_chat((fallback_proof,), label="fleet-feasible fallback")
+    print(f"  rejected {chosen}: {rejected_reason}")
+    print(f"  loaded {fallback} instead and served a real response: {fallback_proof.text[:100]!r}")
+
+    print(f"\n[recovery] Restoring eligibility for {chosen}")
+    with httpx.Client(base_url=endpoint, timeout=10.0, trust_env=False) as client:
+        _put_test_profile(
+            client,
+            headers,
+            by_model[chosen],
+            min_replicas=0,
+            max_replicas=1,
+            min_failure_domains=1,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=300,
+            workload_scores=[["coding", 1.0]],
+            required_tags=original_tags,
+        )
+    recovered, selected = _wait_for_competition_choice(
+        record,
+        candidates=candidates,
+        timeout=args.timeout,
+        initial=fallback_status,
+        expected=chosen,
+    )
+    if recovered != chosen:
+        raise SystemExit(f"Allocator did not restore the measured winner {chosen!r}.")
+    with httpx.Client(base_url=endpoint, timeout=10.0, trust_env=False) as client:
+        _put_test_profile(
+            client,
+            headers,
+            by_model[chosen],
+            min_replicas=0,
+            max_replicas=1,
+            min_failure_domains=1,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=300,
+            workload_scores=[["coding", 1.0]],
+            required_tags=original_tags,
+        )
+    print(f"  restored {chosen}; the measured winner is ready again")
+
     print("\nResult")
     for row in sorted(benchmark_rows, key=lambda item: (-item["quality"], item["median_latency"])):
         print(
@@ -1373,7 +1468,13 @@ def cmd_test_compete(args: argparse.Namespace) -> int:
         f"${float(chosen_node.get('cost_per_hour') or 0):g}/h · cheapest capable node"
     )
     print(f"  real winning response: {proof.text[:160]!r}")
-    print("The router supplied no provisioning requirement; measured evidence drove selection.")
+    print(
+        f"  forced constraint fallback: {chosen} → {fallback} → {chosen} after recovery"
+    )
+    print(
+        "The router supplied no provisioning requirement; measured evidence and live fleet "
+        "constraints drove selection."
+    )
     return 0
 
 

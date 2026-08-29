@@ -52,6 +52,15 @@ allocator projects sustained workload demand onto configured models using each p
 scores, compatibility and resource cost, cold-start time, and measured outcomes. This lets an
 inactive specialist receive a bounded canary without creating a loaded-only feedback loop.
 
+Portfolio selection first scans the current fleet with the same hard runtime, backend, GPU, tag,
+data-tier, artifact, memory-headroom, model-slot, and colocation rules used by placement. An
+attractive model that no live node can host is excluded instead of suppressing a usable fallback.
+Among otherwise similar feasible candidates, a bounded cost term prefers the cheapest eligible
+host without overwhelming measured quality or configured workload suitability. Allocator status
+exposes every candidate's feasibility, eligible-node count, best host, startup estimate, hourly
+cost, and rejection reason; this is a current-fleet admission hint, not a promise that globally
+contended capacity has already been awarded.
+
 Counterfactual portfolio demand is deliberately weaker than direct evidence: it may fill spare
 capacity but cannot evict a baseline or a directly demanded model. Workload-wide latency, queues,
 and errors remain workload evidence and are never copied into a candidate model as if that model
@@ -827,7 +836,10 @@ deterministic coding questions through real llama.cpp/Metal inference, and submi
 correctness and latency evidence without manufacturing user demand. It then offloads every
 candidate and sends unresolved coding traffic through the ordinary Grid request boundary. The
 allocator—not the router—chooses the measured portfolio winner, reloads it, verifies a real answer,
-and fails the test if it did not use the cheapest currently capable logical node. Evaluation-marked
+and fails the test if it did not use the cheapest currently capable logical node. It then makes the
+winner fleet-ineligible with a temporary impossible node tag, verifies that the allocator explains
+the rejection, unloads it, loads a feasible runner-up, and serves another real answer. Removing the
+constraint must restore the measured winner. Evaluation-marked
 inference still updates per-engine performance, but only the owner capability may mark it and its
 quality is recorded separately at `POST /allocator/evaluations`; ordinary callers cannot suppress
 their demand signal. The command leaves the selected winner ready for interactive `grid chat` use.
@@ -880,6 +892,23 @@ active on every logical host, injects a high-priority burst for the second model
 drain/unload of every incumbent before the second model is warmed and served. It then retires the
 critical burst and requires the displaced batch service to warm back onto every logical host and
 complete another real streamed request before final cleanup.
+
+## Research basis
+
+The design follows several primary systems results while preserving Grid's allocator/router split:
+
+- [Scalable Joint Resource Allocation for SLO-Constrained LLM Inference in Heterogeneous GPU
+  Clouds](https://arxiv.org/abs/2604.07472) motivates joint feasibility, model choice, provisioning,
+  routing, quality, latency, memory, and budget constraints. Grid applies its fleet-feasibility and
+  bounded cost insight in the allocator while leaving per-request routing independent.
+- [Fairness in Serving Large Language Models](https://www.usenix.org/conference/osdi24/presentation/sheng)
+  motivates work-conserving, token-aware user fairness. Grid currently measures fairness in the
+  scenario lab; enforceable token fairness belongs primarily in the serving scheduler/router and
+  remains future work for the production plane.
+- [Llumnix](https://www.usenix.org/conference/osdi24/presentation/sun-biao) and
+  [Libra](https://www.usenix.org/conference/nsdi26/presentation/ruan-libra) motivate dynamic
+  rescheduling, isolation, and SLO-aware adaptation under changing load. Grid's load/warm and
+  drain/unload state machine applies those ideas at the slower fleet-allocation timescale.
 
 ## Current limits
 

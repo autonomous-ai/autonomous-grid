@@ -197,3 +197,70 @@ def test_measured_quality_and_latency_choose_between_equal_portfolio_candidates(
     projection = intelligence.portfolio_forecasts(candidates, (), now=100)
 
     assert projection[0].model_id == "fast-correct"
+
+
+def test_portfolio_falls_back_from_preferred_but_infeasible_model():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    candidates = (
+        profile("preferred-huge", 32_000, ("coding", 1.0)),
+        profile("feasible-small", 8_000, ("coding", 0.7)),
+    )
+    intelligence.observe(
+        RequestFeatures("chat/completions", "auto", "coding"),
+        portfolio_unbound=True,
+        timestamp=100,
+    )
+    placement_hints = {
+        "preferred-huge": {
+            "feasible": False,
+            "reason": "no live node is currently eligible",
+        },
+        "feasible-small": {
+            "feasible": True,
+            "best_node_id": "cheap-node",
+            "cost_per_hour": 0.20,
+        },
+    }
+
+    forecasts = intelligence.portfolio_forecasts(
+        candidates,
+        (),
+        now=100,
+        placement_hints=placement_hints,
+    )
+    projection = intelligence.projections(
+        candidates,
+        now=100,
+        placement_hints=placement_hints,
+    )[0]
+
+    assert forecasts[0].model_id == "feasible-small"
+    assert projection["chosen_model"] == "feasible-small"
+    assert projection["placement"]["best_node_id"] == "cheap-node"
+    candidate_rows = {row["model_id"]: row for row in projection["candidates"]}
+    assert candidate_rows["preferred-huge"]["feasible"] is False
+
+
+def test_portfolio_cost_breaks_an_otherwise_equal_model_tie():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    candidates = (
+        profile("a-cheap", 8_000, ("coding", 1.0)),
+        profile("z-expensive", 8_000, ("coding", 1.0)),
+    )
+    intelligence.observe(
+        RequestFeatures("chat/completions", "auto", "coding"),
+        portfolio_unbound=True,
+        timestamp=100,
+    )
+
+    forecasts = intelligence.portfolio_forecasts(
+        candidates,
+        (),
+        now=100,
+        placement_hints={
+            "a-cheap": {"feasible": True, "cost_per_hour": 0.05},
+            "z-expensive": {"feasible": True, "cost_per_hour": 5.00},
+        },
+    )
+
+    assert forecasts[0].model_id == "a-cheap"
