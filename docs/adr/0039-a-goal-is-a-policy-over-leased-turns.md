@@ -98,7 +98,10 @@ Planned evaluator-node kinds, which are not part of the first release gate, are:
 Every evaluation run stores Goal id, turn id, result commit, definition hash, evaluator node,
 started/completed timestamps, pass/score, and bounded structured evidence. A run for commit A can
 never complete commit B. Evaluation jobs use leases and may be retried, but their idempotency key is
-`(goal, result commit, definition hash)` so a retry records attempts without producing two verdicts.
+`(goal, turn, result commit, definition hash)` so one turn's retry cannot produce two verdicts and a
+later turn cannot inherit the earlier attempt's acceptance state merely because it reached the same
+commit. The guarded provider-lease transaction marks a verdict authoritative. Rejected attempts
+remain audit evidence with `accepted=false` and cannot change Goal state or enter training outcomes.
 
 If native completion is nominated and evaluation fails, the Goal stays active. The next turn gets
 the failed checks and evidence as a relay-authored handoff block. In the synchronous file-eval slice,

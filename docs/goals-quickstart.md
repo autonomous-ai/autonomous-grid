@@ -77,8 +77,11 @@ For example, `game-evals.json` can require artifacts without trusting the acting
 ```
 
 Each definition is immutable. Every score is stored with its definition hash, turn, evaluator node,
-and exact Git commit. A failed check keeps the Goal active and becomes relay-authored guidance for
-the next worker. With no eval manifest, native Goal completion remains the stopping decision.
+and exact Git commit. The guarded lease transaction marks a score `accepted`; a stale provider's
+completed evaluation remains visible as rejected audit evidence but cannot change Goal state or
+enter authoritative training data. A failed accepted check keeps the Goal active and becomes
+relay-authored guidance for the next worker. With no eval manifest, native Goal completion remains
+the stopping decision.
 
 ## Distributed child Goals
 
