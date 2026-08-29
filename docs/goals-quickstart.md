@@ -111,14 +111,17 @@ Codex then receives a built-in `grid_spawn_subgoal` action. The relay accepts it
 currently leasing that parent turn and requires an idempotency key, a bounded child token budget,
 and independent child evals for every required child. The action's `required` field defaults to
 `true`. Set it to `false` for bounded exploratory work: an optional child may omit evals, its failure
-does not block the parent, and Grid merges its branch only if it completes. Each child is an ordinary
+does not block the parent, and Grid merges its branch only if it completes cleanly. If a completed
+optional branch conflicts, Grid skips it, records the conflicting paths on the child relation, and
+includes that fact in the parent's next handoff. Each child is an ordinary
 Goal conversation on the same distributed task table, so other machines can claim children
 concurrently; a child may use Claude even though the spawning parent uses Codex.
 
 The parent enters `waiting_children` after its turn checkpoints. It receives no new turn until every
 child is terminal and all required children are complete, then resumes with every child id, status,
-and eval summary. A failed required child blocks the parent; a failed optional child is recorded in
-the resumed prompt without blocking it. Child slots and token allocations are reserved atomically,
+and eval summary. A failed or conflicting required child blocks the parent; a failed, missing, or
+conflicting optional child is recorded in the resumed prompt without blocking it. Child slots and
+token allocations are reserved atomically,
 fan-out is limited to eight children, nesting is limited to three levels, and at least 1,000 parent
 tokens remain for final fan-in. Subgoals are off by default because enabling them authorizes
 autonomous parallel work and budget allocation.

@@ -77,8 +77,11 @@ def _show(goal: dict, as_json: bool) -> None:
         print(f"  children   {len(children)}")
         for child in children:
             required = "required" if child.get("required", True) else "optional"
+            merge = f" · fan-in {child['merge_state']}" if child.get("merge_state") else ""
             print(f"    {child.get('id')} [{child.get('status')}] ({required}) "
-                  f"{child.get('objective')}")
+                  f"{child.get('objective')}{merge}")
+            if child.get("merge_error"):
+                print(f"      {child['merge_error']}")
 
 
 def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,

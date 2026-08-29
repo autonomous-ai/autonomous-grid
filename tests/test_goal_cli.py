@@ -303,12 +303,14 @@ def test_goal_status_shows_budget_blocker_and_distributed_children(capsys):
         "token_budget": 10_000, "child_tokens_reserved": 4_000,
         "agents": ["codex", "claude"], "blocked_reason": "child conflict in app.py",
         "children": [{
-            "id": "child-1", "status": "complete", "required": True,
-            "objective": "Build the API",
+            "id": "child-1", "status": "complete", "required": False,
+            "objective": "Explore the API", "merge_state": "skipped",
+            "merge_error": "child child-1 conflicts with the parent in app.py",
         }],
     }, False)
     output = capsys.readouterr().out
     assert "1,250 / 10,000 tokens · 4,000 reserved for children" in output
     assert "agents     codex, claude" in output
     assert "blocked    child conflict in app.py" in output
-    assert "child-1 [complete] (required) Build the API" in output
+    assert "child-1 [complete] (optional) Explore the API · fan-in skipped" in output
+    assert "child child-1 conflicts with the parent in app.py" in output

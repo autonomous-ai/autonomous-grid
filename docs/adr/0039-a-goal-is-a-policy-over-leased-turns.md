@@ -135,8 +135,10 @@ A Goal may create child Goals only through a Grid-provided action capability. Th
 `parent_goal_id`, an idempotency key, required/optional dependency status, depth, and the budget
 allocation. The parent enters `waiting_children` once its current turn checkpoints. Children use
 ordinary Goal rows and ordinary task claims. Completed child branches are merged into the parent
-conversation branch before it becomes active again. A clean merge is relay-side Git plumbing; a
-conflict blocks the parent with the child id and paths rather than resuming from stale state. A
+conversation branch before it becomes active again. A clean merge is relay-side Git plumbing. A
+required conflict blocks the parent with the child id and paths rather than resuming from stale
+state. A conflicting optional branch is skipped, with its outcome and paths persisted on the edge
+and included in the next handoff; optional exploration can never block the parent. A
 future slice may turn that blocked merge into an ordinary leased conflict-resolution turn, but
 bypassing the missing ancestry is never an option.
 
