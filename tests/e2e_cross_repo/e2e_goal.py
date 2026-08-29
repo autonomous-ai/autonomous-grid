@@ -43,6 +43,16 @@ def _completed_goal(relay: str, token: str, conversation_id: str) -> dict | None
     return value if value.get("status") == "complete" else None
 
 
+def _assert_transcript_chain(evidence: dict, expected_turns: int) -> None:
+    """Every new relay turn must consume the exact checkpoint its predecessor published."""
+    turns = evidence["turns"]
+    assert len(turns) == expected_turns, turns
+    assert turns[0]["transcript_commit"] is None, turns
+    assert all(turn["transcript_result_commit"] for turn in turns), turns
+    for previous, current in zip(turns, turns[1:]):
+        assert current["transcript_commit"] == previous["transcript_result_commit"], turns
+
+
 def test_three_nodes_reclaim_goal_turns_and_finish_one_game(
         relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
     from remote import relay as relay_client
@@ -127,6 +137,8 @@ def test_three_nodes_reclaim_goal_turns_and_finish_one_game(
         {"node": "B", "feature": 2},
         {"node": "C", "features": [3, 4]},
     ]
+    _assert_transcript_chain(
+        relay_client.get_goal_evidence(relay, owner_token, conversation_id), 3)
 
 
 def test_three_nodes_reclaim_one_goal_codex_then_claude_then_codex(
@@ -203,6 +215,8 @@ def test_three_nodes_reclaim_one_goal_codex_then_claude_then_codex(
     ]
     claude_transcripts = list((goal_workspace_root / "mixed-C").rglob("*.jsonl"))
     assert claude_transcripts, "C did not fetch Claude B's opaque transcript side-ref"
+    _assert_transcript_chain(
+        relay_client.get_goal_evidence(relay, owner_token, conversation_id), 3)
 
 
 def test_parent_codex_spawns_claude_child_then_codex_fans_it_in(
