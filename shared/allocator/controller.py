@@ -311,6 +311,12 @@ class AllocatorController:
             node_list,
             profiles,
         )
+        self._reprioritize_undelivered_constructive(
+            plan,
+            node_list,
+            profiles,
+            now=timestamp,
+        )
         result = self.reconciler.reconcile(
             plan,
             node_list,
@@ -722,6 +728,7 @@ class AllocatorController:
             objective_score=plan.objective_score,
             input_digest=plan.input_digest,
             preemptions=plan.preemptions,
+            model_urgencies=plan.model_urgencies,
         )
 
     def _sequence_actions(self, result: ReconcileResult) -> ReconcileResult:
@@ -967,6 +974,108 @@ class AllocatorController:
         if not self._restored_command_ids:
             self._membership_recovery_started_at = None
         return unsafe_destructive_models
+
+    def _reprioritize_undelivered_constructive(
+        self,
+        plan: PlacementPlan,
+        nodes: tuple[NodeSnapshot, ...],
+        profiles: tuple[ModelProfile, ...],
+        *,
+        now: float,
+    ) -> None:
+        """Free scarce mutation slots for strictly more important service.
+
+        A PENDING receipt does not prove whether a polled command has started, so only commands
+        that have never been delivered are eligible. Equal service classes retain FIFO stability;
+        reprioritization is reserved for a higher administrator priority or demand-urgency tier.
+        """
+
+        if not self._commands:
+            return
+        node_by_id = {node.node_id: node for node in nodes}
+        profile_by_id = {profile.model_id: profile for profile in profiles}
+        urgency_by_model = dict(plan.model_urgencies)
+
+        def service_rank(model_id: str) -> tuple[int, int]:
+            profile = profile_by_id.get(model_id)
+            return (
+                profile.priority if profile is not None else 0,
+                urgency_by_model.get(model_id, 0),
+            )
+
+        constructive = (ActionKind.LOAD, ActionKind.WARM)
+        active_pairs = {
+            (action.node_id, action.model_id)
+            for action in self._commands.values()
+            if action.kind in constructive
+        }
+        active_by_node: dict[str, int] = {}
+        for action in self._commands.values():
+            active_by_node[action.node_id] = active_by_node.get(action.node_id, 0) + 1
+        active_count = len(self._commands)
+
+        waiting: list[tuple[tuple[int, int], str, str]] = []
+        for assignment in plan.assignments:
+            pair = (assignment.node_id, assignment.model_id)
+            if pair in active_pairs:
+                continue
+            node = node_by_id.get(assignment.node_id)
+            profile = profile_by_id.get(assignment.model_id)
+            residency = node.residency(assignment.model_id) if node is not None else None
+            if node is None or profile is None or (
+                residency is not None
+                and residency.state == ResidencyState.READY
+                and profile.matches_artifact(residency)
+            ):
+                continue
+            waiting.append(
+                (service_rank(assignment.model_id), assignment.node_id, assignment.model_id)
+            )
+        waiting.sort(key=lambda item: (-item[0][0], -item[0][1], item[1], item[2]))
+
+        for waiting_rank, node_id, _model_id in waiting:
+            global_full = active_count >= self.reconciler.policy.max_concurrent_mutations
+            node_full = (
+                active_by_node.get(node_id, 0)
+                >= self.reconciler.policy.max_mutations_per_node
+            )
+            if not global_full and not node_full:
+                active_count += 1
+                active_by_node[node_id] = active_by_node.get(node_id, 0) + 1
+                continue
+            candidates = [
+                action
+                for action in self._commands.values()
+                if action.kind in constructive
+                and action.action_id not in self._delivered_command_ids
+                and service_rank(action.model_id) < waiting_rank
+                and (not node_full or action.node_id == node_id)
+            ]
+            if not candidates:
+                continue
+            victim = min(
+                candidates,
+                key=lambda action: (
+                    service_rank(action.model_id),
+                    action.created_at,
+                    action.action_id,
+                ),
+            )
+            self._cancel_command(
+                victim,
+                now,
+                "undelivered mutation yielded to higher-priority service",
+            )
+            # Cancelling a prerequisite recursively cancels queued dependants. Recount instead of
+            # assuming exactly one command disappeared.
+            active_count = len(self._commands)
+            active_by_node = {}
+            for action in self._commands.values():
+                active_by_node[action.node_id] = active_by_node.get(action.node_id, 0) + 1
+            # Reserve the slot for this waiting assignment so one cancellation cannot be credited
+            # repeatedly while scanning the remainder of the desired plan.
+            active_count += 1
+            active_by_node[node_id] = active_by_node.get(node_id, 0) + 1
 
     def _cancel_command(self, action: MutationAction, now: float, message: str) -> None:
         if action.action_id not in self._commands:

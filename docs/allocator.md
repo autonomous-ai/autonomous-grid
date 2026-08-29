@@ -290,6 +290,11 @@ urgency, assignment memory, actual READY inventory, and mutation attempts once p
 safety-floor and retry construction scale with configured models, reported residencies, and retained
 history rather than their cross products.
 
+If a higher service class appears while the mutation governor is full, the controller may withdraw
+a lower-class constructive command only when it has never been delivered to its node. A delivered
+`pending` command is treated as potentially running and keeps its slot until the node acknowledges
+it; equal-class work is not churned merely to change queue order.
+
 A delivered `drain` or `unload` may already be running even while its last controller record still
 says `pending`. If fresh placement or host evidence makes any destructive action unsafe, the
 controller withdraws the entire destructive batch for that model. Every delivered member remains

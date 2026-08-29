@@ -12,6 +12,7 @@ from shared.allocator.controller import AllocatorController
 from shared.allocator.models import (
     ActionKind,
     AllocatorMode,
+    DemandForecast,
     ModelProfile,
     ModelResidency,
     NodeSnapshot,
@@ -88,6 +89,17 @@ def test_controller_status_reports_last_successful_tick_duration(monkeypatch):
     assert controller.status([node()], now=10)["last_tick_duration_seconds"] == 0.25
 
 
+def test_controller_versioning_preserves_plan_model_urgency():
+    controller = AllocatorController()
+    controller.put_profile(profile())
+
+    controller.tick([node()], now=10)
+
+    assert controller.last_plan is not None
+    assert controller.last_plan.urgency_for("qwen") == 3
+    assert controller.last_plan.to_dict()["model_urgencies"] == {"qwen": 3}
+
+
 def test_tick_duration_clock_failure_cannot_fail_committed_reconciliation(
     monkeypatch,
 ):
@@ -135,6 +147,185 @@ def test_controller_automatic_queues_repeats_and_acknowledges_action():
     assert controller.acknowledge(
         "n", command.action_id, MutationStatus.FAILED, now=13
     ) == done
+
+
+def test_higher_priority_service_replaces_undelivered_pending_warm():
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(max_concurrent_mutations=1),
+    )
+    controller.put_profile(
+        profile("low", pinned_nodes=("a-low",), priority=1)
+    )
+
+    def cached_node(node_id: str, model_id: str, heartbeat: float) -> NodeSnapshot:
+        return NodeSnapshot(
+            node_id,
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            cached_models=(model_id,),
+            last_heartbeat=heartbeat,
+        )
+
+    first = controller.tick([cached_node("a-low", "low", 10)], now=10)
+    old_action = first.executable_actions[0]
+    controller.put_profile(
+        profile("high", pinned_nodes=("z-high",), priority=1_000)
+    )
+
+    second = controller.tick(
+        [
+            cached_node("a-low", "low", 11),
+            cached_node("z-high", "high", 11),
+        ],
+        now=11,
+    )
+
+    assert [(action.kind, action.model_id) for action in second.executable_actions] == [
+        (ActionKind.WARM, "high")
+    ]
+    assert any(
+        record.action_id == old_action.action_id
+        and record.status == MutationStatus.CANCELLED
+        and "higher-priority" in record.message
+        for record in controller.history
+    )
+
+
+def test_higher_priority_service_does_not_cancel_delivered_pending_warm():
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(max_concurrent_mutations=1),
+    )
+    controller.put_profile(
+        profile("low", pinned_nodes=("a-low",), priority=1)
+    )
+
+    def cached_node(node_id: str, model_id: str, heartbeat: float) -> NodeSnapshot:
+        return NodeSnapshot(
+            node_id,
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            cached_models=(model_id,),
+            last_heartbeat=heartbeat,
+        )
+
+    first = controller.tick([cached_node("a-low", "low", 10)], now=10)
+    old_action = first.executable_actions[0]
+    assert controller.commands_for("a-low", now=10) == (old_action,)
+    controller.put_profile(
+        profile("high", pinned_nodes=("z-high",), priority=1_000)
+    )
+
+    second = controller.tick(
+        [
+            cached_node("a-low", "low", 11),
+            cached_node("z-high", "high", 11),
+        ],
+        now=11,
+    )
+
+    assert second.executable_actions == ()
+    assert controller.commands_for("a-low", now=11) == (old_action,)
+    assert not any(
+        record.action_id == old_action.action_id
+        and record.status == MutationStatus.CANCELLED
+        for record in controller.history
+    )
+
+
+def test_direct_demand_replaces_undelivered_speculative_prewarm(monkeypatch):
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(max_concurrent_mutations=1),
+    )
+    profiles = (
+        ModelProfile(
+            "speculative",
+            8_000,
+            runtimes=("llama.cpp",),
+            required_tags=("speculative",),
+            min_replicas=0,
+            max_replicas=1,
+        ),
+        ModelProfile(
+            "direct",
+            8_000,
+            runtimes=("llama.cpp",),
+            required_tags=("direct",),
+            min_replicas=0,
+            max_replicas=1,
+        ),
+    )
+    for item in profiles:
+        controller.put_profile(item)
+    machines = (
+        NodeSnapshot(
+            "a-speculative",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            tags=("speculative",),
+            cached_models=("speculative",),
+            last_heartbeat=10,
+        ),
+        NodeSnapshot(
+            "z-direct",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            tags=("direct",),
+            cached_models=("direct",),
+            last_heartbeat=10,
+        ),
+    )
+    speculative = DemandForecast(
+        "speculative",
+        requests_per_minute=60,
+        correlated_requests_per_minute=60,
+        correlation_confidence=1,
+        correlation_sources=("source",),
+        updated_at=10,
+    )
+    current_forecasts = [(speculative,)]
+    monkeypatch.setattr(
+        AllocatorController,
+        "_forecasts",
+        lambda _controller, _now: current_forecasts[0],
+    )
+
+    first = controller.tick(machines, now=10)
+    speculative_action = first.executable_actions[0]
+    assert speculative_action.model_id == "speculative"
+
+    current_forecasts[0] = (
+        speculative,
+        DemandForecast(
+            "direct",
+            requests_per_minute=60,
+            observed_requests_per_minute=60,
+            offered_concurrency=1,
+            updated_at=11,
+        ),
+    )
+    second = controller.tick(
+        tuple(replace(machine, last_heartbeat=11) for machine in machines),
+        now=11,
+    )
+
+    assert controller.last_plan is not None
+    assert controller.last_plan.urgency_for("speculative") == 1
+    assert controller.last_plan.urgency_for("direct") == 2
+    assert [(action.kind, action.model_id) for action in second.executable_actions] == [
+        (ActionKind.WARM, "direct")
+    ]
+    assert any(
+        record.action_id == speculative_action.action_id
+        and record.status == MutationStatus.CANCELLED
+        for record in controller.history
+    )
 
 
 def test_controller_learns_and_persists_bounded_warm_duration(tmp_path):
