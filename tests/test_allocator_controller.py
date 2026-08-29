@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 
 from shared import jsonio
-from shared.allocator.controller import AllocatorController
+from shared.allocator.controller import AllocatorController, EconomicsRevisionConflict
 from shared.allocator.intelligence import RequestFeatures
 from shared.allocator.models import (
     ActionKind,
@@ -3146,7 +3146,10 @@ def test_host_prices_are_authoritative_durable_and_transactional(tmp_path, monke
     assert effective.cost_per_hour == 0.0
     assert effective.cost_known is True
     assert effective.cost_source == "operator"
-    assert AllocatorController(state_path=path).host_prices == {"host-1": 0.0}
+    restored = AllocatorController(state_path=path)
+    assert restored.host_prices == {"host-1": 0.0}
+    assert restored.economics_revision == 1
+    assert restored.economics_audit[-1]["kind"] == "host_price_set"
 
     original_save = controller._save
 
@@ -3157,6 +3160,8 @@ def test_host_prices_are_authoritative_durable_and_transactional(tmp_path, monke
     with pytest.raises(OSError, match="injected"):
         controller.set_host_price("host-1", 1.0)
     assert controller.host_prices == {"host-1": 0.0}
+    assert controller.economics_revision == 1
+    assert len(controller.economics_audit) == 1
     monkeypatch.setattr(controller, "_save", original_save)
 
 
@@ -3188,6 +3193,37 @@ def test_host_price_update_requires_service_shortfall_acknowledgement():
         allow_service_shortfall=True,
     )
     assert controller.host_prices == {"host-1": 1.0}
+    assert controller.economics_revision == 2
+    audit = controller.economics_audit[-1]
+    assert audit["allow_service_shortfall"] is True
+    assert audit["impact_assessed"] is True
+    assert audit["service_impact"] == [
+        {
+            "model_id": "qwen",
+            "before_replicas": 1,
+            "after_replicas": 0,
+            "desired_replicas": 1,
+        }
+    ]
+
+
+def test_economics_compare_and_swap_rejects_stale_operator_without_mutation():
+    controller = AllocatorController()
+    controller.set_host_price("host-1", 0.25, expected_revision=0, now=10)
+
+    with pytest.raises(EconomicsRevisionConflict, match="current revision is 1"):
+        controller.set_hourly_cost_budget(
+            1.0,
+            expected_revision=0,
+            now=11,
+        )
+
+    assert controller.economics_revision == 1
+    assert controller.planner.policy.max_hourly_cost == 0
+    assert len(controller.economics_audit) == 1
+    controller.set_hourly_cost_budget(1.0, expected_revision=1, now=12)
+    assert controller.economics_revision == 2
+    assert [row["revision"] for row in controller.economics_audit] == [1, 2]
 
 
 def test_direct_controller_planning_reapplies_operator_price():
