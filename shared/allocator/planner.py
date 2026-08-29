@@ -1579,7 +1579,7 @@ def _stage_priority_preemption(
 
     candidates: list[
         tuple[
-            tuple[int, float, int, int, str],
+            tuple[int, int, int, int, float, int, int, str],
             NodeSnapshot,
             tuple[ModelResidency, ...],
             tuple[PlacementAssignment, ...],
@@ -1625,6 +1625,8 @@ def _stage_priority_preemption(
             ),
             key=lambda item: (
                 profile_by_id[item.model_id].priority,
+                item.active_requests,
+                _preemption_state_cost(item.state),
                 startup_seconds.get(
                     (node.node_id, item.model_id),
                     profile_by_id[item.model_id].warm_seconds,
@@ -1708,6 +1710,9 @@ def _stage_priority_preemption(
                 (
                     (
                         sum(item.priority for item in victim_profiles),
+                        sum(item.active_requests for item in selected),
+                        sum(_preemption_state_cost(item.state) for item in selected),
+                        node.queue_depth,
                         sum(
                             startup_seconds.get(
                                 (node.node_id, item.model_id),
@@ -1791,6 +1796,16 @@ def _stage_priority_preemption(
             occupied_models[selected_node.node_id] - 1,
         )
     return selected_node.node_id, victims
+
+
+def _preemption_state_cost(state: ResidencyState) -> int:
+    """Rank how much live lifecycle progress an eviction would disrupt."""
+
+    return {
+        ResidencyState.FAILED: 0,
+        ResidencyState.DRAINING: 1,
+        ResidencyState.READY: 2,
+    }.get(state, 3)
 
 
 def _colocation_allowed(

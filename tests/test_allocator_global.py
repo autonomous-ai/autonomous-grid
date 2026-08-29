@@ -2294,6 +2294,62 @@ def test_priority_preemption_prefers_the_cheapest_learned_warm_back_cost():
     ] == [("z-cheap", "batch", "critical")]
 
 
+def test_priority_preemption_prefers_idle_work_over_cheaper_busy_work():
+    batch = model("batch", 8_000, priority=10, min_residency_seconds=0)
+    critical = model("critical", 8_000, priority=1_000, min_residency_seconds=0)
+    busy = node(
+        "a-busy",
+        8_000,
+        residencies=(ready("batch", 8_000, active_requests=1),),
+    )
+    idle = node(
+        "z-idle",
+        8_000,
+        residencies=(ready("batch", 8_000),),
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (busy, idle),
+        (batch, critical),
+        now=10,
+        startup_seconds={
+            ("a-busy", "batch"): 1,
+            ("z-idle", "batch"): 100,
+        },
+    )
+
+    assert plan.preempted_pairs == frozenset({("z-idle", "batch")})
+
+
+def test_priority_preemption_prefers_a_residency_already_draining():
+    batch = model("batch", 8_000, priority=10, min_residency_seconds=0)
+    critical = model("critical", 8_000, priority=1_000, min_residency_seconds=0)
+    ready_node = node(
+        "a-ready",
+        8_000,
+        residencies=(ready("batch", 8_000),),
+    )
+    draining_node = node(
+        "z-draining",
+        8_000,
+        residencies=(
+            replace(ready("batch", 8_000), state=ResidencyState.DRAINING),
+        ),
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (ready_node, draining_node),
+        (batch, critical),
+        now=10,
+        startup_seconds={
+            ("a-ready", "batch"): 1,
+            ("z-draining", "batch"): 100,
+        },
+    )
+
+    assert plan.preempted_pairs == frozenset({("z-draining", "batch")})
+
+
 def test_priority_preemption_reserves_required_failure_domains_before_cost():
     batch = model(
         "batch",

@@ -85,8 +85,9 @@ instead of producing an unbounded operational wave. External,
 manual, pinned, and minimum-residency-protected work is never bypassed. Correlation-only predictive
 demand may use spare capacity but cannot trigger a destructive preemption; a configured baseline,
 pin, or direct request/queue/SLO/error signal is required. Among equally low-priority choices, the
-allocator prefers the victim set with the lowest learned warm-back cost, reducing the
-price of restoring displaced service after the burst. Required failure-domain diversity is reserved
+allocator first prefers failed, already-draining, and idle victims so urgent capacity does not wait
+behind avoidable live work. It then prefers the set with the lowest learned warm-back cost, reducing
+the price of restoring displaced service after the burst. Required failure-domain diversity is reserved
 before that cost comparison, so several cheap victims in one rack cannot strand a critical model
 that needs capacity across racks. A missing hard pin targets its exact node before either domain or
 cost selection; freeing a cheaper host that cannot satisfy the pin would be gratuitous disruption.
