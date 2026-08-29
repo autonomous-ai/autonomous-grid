@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+import shared.allocator.planner as planner_module
 from shared.allocator.demand import DemandTracker
 from shared.allocator.models import (
     ActionKind,
@@ -2355,6 +2356,89 @@ def test_equal_priority_cached_candidate_order_matches_general_scoring_exactly()
         profile.model_id: len(optimized.nodes_for(profile.model_id))
         for profile in profiles
     } == {profile.model_id: 16 for profile in profiles}
+
+
+def test_equal_priority_isolated_fleet_scores_candidates_linearly(monkeypatch):
+    machines = tuple(
+        node(f"n{index:03d}", 8_000, max_models=1)
+        for index in range(256)
+    )
+    profiles = tuple(
+        model(
+            f"model-{index}",
+            8_000,
+            min_replicas=256,
+            max_replicas=256,
+        )
+        for index in range(8)
+    )
+    original = planner_module._candidate_score
+    score_calls = 0
+
+    def counted_score(*args, **kwargs):
+        nonlocal score_calls
+        score_calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(planner_module, "_candidate_score", counted_score)
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        machines,
+        profiles,
+        now=10,
+    )
+
+    assert len(plan.assignments) == len(machines)
+    assert score_calls <= len(machines) * (len(profiles) + 2)
+
+
+def test_independent_preemption_wave_scans_the_fleet_once(monkeypatch):
+    machines = tuple(
+        node(
+            f"n{index:03d}",
+            8_000,
+            max_models=1,
+            residencies=(ready("batch", 8_000),),
+        )
+        for index in range(256)
+    )
+    profiles = (
+        model(
+            "batch",
+            8_000,
+            min_replicas=0,
+            max_replicas=256,
+            priority=10,
+            scale_down_cooldown_seconds=0,
+        ),
+        model(
+            "critical",
+            8_000,
+            min_replicas=256,
+            max_replicas=256,
+            priority=1_000,
+        ),
+    )
+    original = planner_module._priority_preemption_candidates
+    fleet_scans = 0
+
+    def counted_candidates(*args, **kwargs):
+        nonlocal fleet_scans
+        fleet_scans += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        planner_module,
+        "_priority_preemption_candidates",
+        counted_candidates,
+    )
+
+    plan = PlacementPlanner(
+        PlannerPolicy(memory_headroom_fraction=0, max_staged_preemptions=16)
+    ).plan(machines, profiles, now=10)
+
+    assert len(plan.preemptions) == 16
+    assert fleet_scans == 1
 
 
 def test_priority_preemption_prefers_the_cheapest_learned_warm_back_cost():
