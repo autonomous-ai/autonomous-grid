@@ -932,7 +932,6 @@ class AllocatorNodeAgent:
     def _allocator_envelope(self) -> dict[str, Any]:
         envelope = self.runtime.allocator_envelope()
         envelope["cost_per_hour"] = self.resources.get("cost_per_hour", 0.0)
-        envelope["cost_known"] = "cost_per_hour" in self.resources
         envelope["host_priority"] = self.resources.get("host_priority", 0)
         return envelope
 

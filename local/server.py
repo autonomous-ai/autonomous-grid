@@ -820,29 +820,6 @@ def create_app(
         result = await _run_allocator_tick(app)
         return {"mode": mode.value, "reconciliation": _reconcile_summary(result)}
 
-    @app.put("/allocator/budget")
-    async def allocator_set_budget(request: Request):
-        _require_allocator_control(app, request)
-        try:
-            body = await request.json()
-            maximum = float(body.get("max_hourly_cost", 0.0))
-            allow_unknown = body.get("allow_unknown_cost", False)
-            if not isinstance(allow_unknown, bool):
-                raise ValueError("allow_unknown_cost must be a boolean")
-            policy = _allocator(app).set_hourly_cost_budget(
-                maximum,
-                allow_unknown_cost=allow_unknown,
-            )
-        except (AttributeError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        _mark_allocator_dirty(app)
-        result = await _run_allocator_tick(app)
-        return {
-            "max_hourly_cost": policy.max_hourly_cost,
-            "allow_unknown_cost": policy.allow_unknown_cost,
-            "reconciliation": _reconcile_summary(result),
-        }
-
     @app.post("/allocator/tick")
     async def allocator_tick(request: Request):
         _require_allocator_control(app, request)
@@ -2187,8 +2164,6 @@ def _validate_allocator_envelope(value: dict[str, Any]) -> None:
             status_code=400,
             detail=f"unsupported allocator schema_version {schema_version}",
         )
-    if "cost_known" in value and not isinstance(value["cost_known"], bool):
-        raise HTTPException(status_code=400, detail="allocator cost_known must be a boolean")
     controller_term = value.get("highest_controller_term", 0)
     controller_id = value.get("controller_id_for_term", "")
     if (
@@ -2894,7 +2869,6 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                     ),
                     gpu_memory_mb=gpu_memory_mb,
                     cost_per_hour=_nonnegative_float(allocator.get("cost_per_hour")),
-                    cost_known=bool(allocator.get("cost_known", False)),
                     host_priority=_first_nonnegative_int(
                         allocator.get("host_priority")
                     ),
@@ -3111,7 +3085,6 @@ def _merge_allocator_hosts(
                 # Capacity-node and child-engine records describe one physical host, so host cost
                 # is metadata rather than an additive per-record charge.
                 cost_per_hour=max(member.cost_per_hour for member in members),
-                cost_known=all(member.cost_known for member in members),
                 host_priority=max(member.host_priority for member in members),
                 last_heartbeat=max(member.last_heartbeat for member in members),
                 mutation_cooldown_until=max(

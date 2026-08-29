@@ -229,30 +229,6 @@ class AllocatorController:
                 )
             self._save_or_rollback(checkpoint)
 
-    def set_hourly_cost_budget(
-        self,
-        max_hourly_cost: float,
-        *,
-        allow_unknown_cost: bool = False,
-    ) -> PlannerPolicy:
-        """Persist a hard fleet placement budget; zero disables the ceiling."""
-
-        maximum = float(max_hourly_cost)
-        if not math.isfinite(maximum) or maximum < 0:
-            raise ValueError("max_hourly_cost must be finite and non-negative")
-        if not isinstance(allow_unknown_cost, bool):
-            raise ValueError("allow_unknown_cost must be a boolean")
-        with self._lock:
-            checkpoint = self._checkpoint()
-            policy = replace(
-                self.planner.policy,
-                max_hourly_cost=maximum,
-                allow_unknown_cost=allow_unknown_cost,
-            )
-            self.planner = PlacementPlanner(policy)
-            self._save_or_rollback(checkpoint)
-            return policy
-
     def put_profile(self, profile: ModelProfile) -> None:
         with self._lock:
             checkpoint = self._checkpoint()
@@ -962,104 +938,6 @@ class AllocatorController:
                 )
                 if selected != str(exploitation.get("model_id") or ""):
                     exploration_models.add(selected)
-            active_cost_nodes = tuple(
-                node
-                for node in node_list
-                if any(
-                    residency.state
-                    not in (ResidencyState.CACHED, ResidencyState.FAILED)
-                    for residency in node.residencies
-                )
-            )
-            current_hourly_cost = sum(
-                node.cost_per_hour for node in active_cost_nodes if node.cost_known
-            )
-            current_unknown_cost_nodes = tuple(
-                sorted(node.node_id for node in active_cost_nodes if not node.cost_known)
-            )
-            maximum_hourly_cost = self.planner.policy.max_hourly_cost
-            if not maximum_hourly_cost:
-                budget_compliance = "disabled"
-            elif current_hourly_cost > maximum_hourly_cost + 1e-12:
-                budget_compliance = "over_budget"
-            elif current_unknown_cost_nodes:
-                budget_compliance = "unknown"
-            else:
-                budget_compliance = "within_budget"
-            desired_hourly_cost = self._last_plan.hourly_cost if self._last_plan else 0.0
-            desired_unknown_cost_nodes = (
-                self._last_plan.unknown_cost_nodes if self._last_plan else ()
-            )
-            demand_weight = sum(max(0.0, item.requests_per_minute) for item in forecasts)
-            demand_confidence = (
-                sum(
-                    max(0.0, item.requests_per_minute) * item.confidence
-                    for item in forecasts
-                )
-                / demand_weight
-                if demand_weight
-                else 1.0
-            )
-            spend_forecast = {
-                "basis": "desired_fleet_run_rate",
-                "demand_confidence": demand_confidence,
-                "complete": not desired_unknown_cost_nodes,
-                "unknown_cost_nodes": list(desired_unknown_cost_nodes),
-                "windows": [
-                    {
-                        "hours": hours,
-                        "known_spend": desired_hourly_cost * hours,
-                        "risk_adjusted_known_spend": desired_hourly_cost
-                        * hours
-                        * (1.0 + 0.25 * (1.0 - demand_confidence)),
-                        "budget_limit": (
-                            maximum_hourly_cost * hours if maximum_hourly_cost else 0.0
-                        ),
-                        "budget_headroom": (
-                            max(0.0, maximum_hourly_cost - desired_hourly_cost) * hours
-                            if maximum_hourly_cost
-                            else 0.0
-                        ),
-                    }
-                    for hours in (1, 24, 720)
-                ],
-            }
-            capacity_recommendations = []
-            if self._last_plan is not None:
-                for constraint in self._last_plan.unsatisfied:
-                    if constraint.missing_replicas <= 0:
-                        continue
-                    profile = self._profiles.get(constraint.model_id)
-                    hint = placement_hints.get(constraint.model_id) or {}
-                    if profile is None:
-                        continue
-                    cheapest_cost = float(hint.get("cost_per_hour") or 0.0)
-                    capacity_recommendations.append(
-                        {
-                            "model_id": constraint.model_id,
-                            "reason": constraint.code,
-                            "missing_replicas": constraint.missing_replicas,
-                            "minimum_memory_mb": profile.maximum_memory_mb,
-                            "runtimes": list(profile.runtimes),
-                            "backends": list(profile.backends),
-                            "minimum_gpu_count": profile.min_gpu_count,
-                            "minimum_gpu_memory_mb": profile.min_gpu_memory_mb,
-                            "cheapest_known_host_cost_per_hour": cheapest_cost,
-                            "minimum_additional_budget_per_hour": (
-                                max(
-                                    0.0,
-                                    cheapest_cost
-                                    - max(
-                                        0.0,
-                                        maximum_hourly_cost - desired_hourly_cost,
-                                    ),
-                                )
-                                if maximum_hourly_cost
-                                and constraint.code == "hourly_cost_budget"
-                                else 0.0
-                            ),
-                        }
-                    )
             return {
                 "schema_version": SCHEMA_VERSION,
                 "mode": self.mode.value,
@@ -1067,22 +945,6 @@ class AllocatorController:
                 "controller_term": self._controller_term,
                 "controller_id": self._controller_id,
                 "controller_lease_expires_at": self._controller_lease_expires_at,
-                "planner_policy": asdict(self.planner.policy),
-                "cost": {
-                    "max_hourly_cost": maximum_hourly_cost,
-                    "allow_unknown_cost": self.planner.policy.allow_unknown_cost,
-                    "current_hourly_cost": current_hourly_cost,
-                    "current_unknown_cost_nodes": list(current_unknown_cost_nodes),
-                    "desired_hourly_cost": (
-                        desired_hourly_cost
-                    ),
-                    "desired_unknown_cost_nodes": (
-                        list(desired_unknown_cost_nodes)
-                    ),
-                    "compliance": budget_compliance,
-                },
-                "spend_forecast": spend_forecast,
-                "capacity_recommendations": capacity_recommendations,
                 "plan_sequence": self._plan_sequence,
                 "last_tick_at": self._last_tick_at,
                 "last_tick_duration_seconds": self._last_tick_duration_seconds,
@@ -1524,9 +1386,6 @@ class AllocatorController:
             input_digest=plan.input_digest,
             preemptions=plan.preemptions,
             model_urgencies=plan.model_urgencies,
-            hourly_cost=plan.hourly_cost,
-            unknown_cost_nodes=plan.unknown_cost_nodes,
-            hourly_cost_budget=plan.hourly_cost_budget,
         )
 
     def _sequence_actions(self, result: ReconcileResult) -> ReconcileResult:
@@ -2127,7 +1986,6 @@ class AllocatorController:
 
         return {
             "mode": self.mode,
-            "planner": self.planner,
             "profiles": dict(self._profiles),
             "retiring": set(self._retiring),
             "history": list(self._history),
@@ -2170,7 +2028,6 @@ class AllocatorController:
         """Restore controller-owned transaction state without rewinding request telemetry."""
 
         self.mode = checkpoint["mode"]
-        self.planner = checkpoint["planner"]
         self._profiles = checkpoint["profiles"]
         self._retiring = checkpoint["retiring"]
         self._history = checkpoint["history"]

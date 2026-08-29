@@ -49,8 +49,6 @@ class PlannerPolicy:
     throttled_capacity_fraction: float = 0.5
     preserve_recent_residencies: bool = True
     max_staged_preemptions: int = 64
-    max_hourly_cost: float = 0.0
-    allow_unknown_cost: bool = False
 
     def __post_init__(self) -> None:
         if not 0 <= self.memory_headroom_fraction < 1:
@@ -64,7 +62,6 @@ class PlannerPolicy:
                 self.model_failure_penalty,
                 self.performance_ttl_seconds,
                 self.max_predictive_lookahead_seconds,
-                self.max_hourly_cost,
             )
         ):
             raise ValueError("planner weights and TTL must be finite and non-negative")
@@ -98,8 +95,6 @@ class PlannerPolicy:
             raise ValueError("pressure limits are invalid")
         if not 0 < self.throttled_capacity_fraction <= 1:
             raise ValueError("throttled_capacity_fraction must be in (0, 1]")
-        if not isinstance(self.allow_unknown_cost, bool):
-            raise ValueError("allow_unknown_cost must be a boolean")
 
 
 _MAX_REPACK_SEARCH_STATES = 10_000
@@ -284,14 +279,6 @@ class PlacementPlanner:
                     allocatable = max(0, math.floor(allocatable))
                     if reason is None and model.memory_for(node.runtimes) > allocatable:
                         reason = "model exceeds allocatable memory"
-                    if reason is None and self.policy.max_hourly_cost > 0:
-                        if not node.cost_known and not self.policy.allow_unknown_cost:
-                            reason = "node hourly cost is unknown"
-                        elif (
-                            node.cost_known
-                            and node.cost_per_hour > self.policy.max_hourly_cost
-                        ):
-                            reason = "node exceeds fleet hourly cost budget"
                     if (
                         reason is None
                         and node.max_models is not None
@@ -574,15 +561,13 @@ class PlacementPlanner:
             return compatibility_cache[key]
 
         def fits_node(node: NodeSnapshot, model: ModelProfile) -> bool:
-            if not budget_allows(node):
-                return False
             model_memory_mb = runtime_memory(node, model)
             if (
                 desired_memory[node.node_id] + model_memory_mb
                 > placement_budget[node.node_id]
             ):
                 return False
-            if colocation_policy_active or self.policy.max_hourly_cost > 0:
+            if colocation_policy_active:
                 return _fits(
                     node,
                     model,
@@ -611,33 +596,6 @@ class PlacementPlanner:
                     profile_by_id,
                 )
             return fit_cache[key]
-
-        def selected_node_ids() -> set[str]:
-            return {item.node_id for item in assignments}
-
-        def active_hourly_cost() -> float:
-            selected = selected_node_ids()
-            return sum(
-                node.cost_per_hour
-                for node in node_list
-                if node.node_id in selected and node.cost_known
-            )
-
-        def budget_block_reason(node: NodeSnapshot) -> str:
-            if self.policy.max_hourly_cost <= 0 or node.node_id in selected_node_ids():
-                return ""
-            if not node.cost_known and not self.policy.allow_unknown_cost:
-                return "node hourly cost is unknown"
-            if (
-                node.cost_known
-                and active_hourly_cost() + node.cost_per_hour
-                > self.policy.max_hourly_cost + 1e-12
-            ):
-                return "fleet hourly cost budget would be exceeded"
-            return ""
-
-        def budget_allows(node: NodeSnapshot) -> bool:
-            return not budget_block_reason(node)
 
         # Higher-priority and larger models place first.  Larger-first is the standard bin-packing
         # guard against a collection of small replicas fragmenting every host before a large model.
@@ -679,8 +637,6 @@ class PlacementPlanner:
                     if node is not None
                     else "node does not exist"
                 )
-                if node is not None and reason is None:
-                    reason = budget_block_reason(node) or None
                 if node is None or reason is not None or not fits_node(node, model):
                     unsatisfied.append(
                         UnsatisfiedConstraint(
@@ -1779,56 +1735,6 @@ class PlacementPlanner:
                     for victim in victims
                 )
 
-        # A hard placement budget must converge existing Grid-owned state, not merely reject new
-        # assignments. Otherwise replacement-readiness safety can preserve an unaffordable replica
-        # forever because its configured minimum is still unsatisfied. Explicitly stage only
-        # unselected, managed, unpinned residencies on hosts the final assignment set cannot afford.
-        # Manual, external, and pinned processes remain visible operator conflicts because Grid has
-        # no authority (or explicit permission) to stop them.
-        if self.policy.max_hourly_cost > 0:
-            assigned_models_by_node = {
-                node.node_id: {
-                    item.model_id for item in assignments if item.node_id == node.node_id
-                }
-                for node in node_list
-            }
-            already_preempted = {
-                (item.node_id, item.model_id) for item in preemptions
-            }
-            for node in node_list:
-                if len(preemptions) >= self.policy.max_staged_preemptions:
-                    break
-                if not budget_block_reason(node):
-                    continue
-                for residency in sorted(node.residencies, key=lambda item: item.model_id):
-                    if len(preemptions) >= self.policy.max_staged_preemptions:
-                        break
-                    pair = (node.node_id, residency.model_id)
-                    profile = profile_by_id.get(residency.model_id)
-                    if (
-                        pair in already_preempted
-                        or residency.model_id in assigned_models_by_node[node.node_id]
-                        or profile is None
-                        or residency.state
-                        not in (
-                            ResidencyState.READY,
-                            ResidencyState.DRAINING,
-                            ResidencyState.FAILED,
-                        )
-                        or not residency.managed
-                        or residency.pinned
-                        or node.manually_managed
-                        or node.node_id in profile.pinned_nodes
-                    ):
-                        continue
-                    preemptions.append(
-                        PlacementPreemption(
-                            node_id=node.node_id,
-                            model_id=residency.model_id,
-                        )
-                    )
-                    already_preempted.add(pair)
-
         # Host model ceilings can be lowered below live inventory. Preserve the winners selected by
         # ordinary priority placement and explicitly evict only the excess managed residencies;
         # otherwise replacement-readiness safety would retain a violating incumbent indefinitely.
@@ -2036,12 +1942,7 @@ class PlacementPlanner:
                 eligible = [
                     node
                     for node in node_list
-                    if compatibility(
-                        node,
-                        model,
-                        for_new=requires_new_runtime(node, model),
-                    )
-                    is None
+                    if compatibility(node, model, for_new=True) is None
                 ]
                 colocation_eligible = [
                     node
@@ -2053,59 +1954,19 @@ class PlacementPlanner:
                         profile_by_id,
                     )
                 ]
-                fitting_without_budget = [
-                    node
-                    for node in eligible
-                    if _fits(
-                        node,
-                        model,
-                        capacity,
-                        occupied_models,
-                        desired_model_slots,
-                        assignments,
-                        profile_by_id,
-                    )
-                    and desired_memory[node.node_id] + runtime_memory(node, model)
-                    <= placement_budget[node.node_id]
-                ]
-                budget_eligible = [
-                    node for node in fitting_without_budget if budget_allows(node)
-                ]
                 code = (
                     "no_eligible_nodes"
                     if not eligible
                     else "colocation_limit"
                     if not colocation_eligible
                     else "insufficient_capacity"
-                    if not fitting_without_budget
-                    else (
-                        "unknown_node_cost"
-                        if all(not node.cost_known for node in fitting_without_budget)
-                        and not self.policy.allow_unknown_cost
-                        else "hourly_cost_budget"
-                    )
-                    if not budget_eligible
-                    else "insufficient_capacity"
                 )
                 message = (
                     f"Placed {placed} of {target} desired replicas"
-                    if code not in (
-                        "colocation_limit",
-                        "hourly_cost_budget",
-                        "unknown_node_cost",
-                    )
+                    if code != "colocation_limit"
                     else (
                         f"Placed {placed} of {target} desired replicas; all eligible hosts "
-                        + (
-                            "would violate a model co-location limit"
-                            if code == "colocation_limit"
-                            else "have unknown cost under fail-closed budget policy"
-                            if code == "unknown_node_cost"
-                            else (
-                                f"would exceed the ${self.policy.max_hourly_cost:g}/h "
-                                "fleet budget"
-                            )
-                        )
+                        "would violate a model co-location limit"
                     )
                 )
                 unsatisfied.append(
@@ -2155,24 +2016,9 @@ class PlacementPlanner:
             desired_by_model=desired_by_model,
             assignments=assignments,
             preemptions=preemptions,
-            max_hourly_cost=self.policy.max_hourly_cost,
-            allow_unknown_cost=self.policy.allow_unknown_cost,
         )
         objective = sum(item.score for item in assignments) - 1_000_000 * sum(
             item.missing_replicas for item in unsatisfied
-        )
-        selected_nodes = {item.node_id for item in assignments}
-        hourly_cost = sum(
-            node.cost_per_hour
-            for node in node_list
-            if node.node_id in selected_nodes and node.cost_known
-        )
-        unknown_cost_nodes = tuple(
-            sorted(
-                node.node_id
-                for node in node_list
-                if node.node_id in selected_nodes and not node.cost_known
-            )
         )
         return PlacementPlan(
             generation=new_generation(input_digest, timestamp),
@@ -2195,9 +2041,6 @@ class PlacementPlanner:
                     for model in model_list
                 )
             ),
-            hourly_cost=hourly_cost,
-            unknown_cost_nodes=unknown_cost_nodes,
-            hourly_cost_budget=self.policy.max_hourly_cost,
         )
 
 
@@ -3563,8 +3406,6 @@ def _input_digest(
     desired_by_model: dict[str, int],
     assignments: list[PlacementAssignment],
     preemptions: list[PlacementPreemption],
-    max_hourly_cost: float,
-    allow_unknown_cost: bool,
 ) -> str:
     return stable_digest(
         {
@@ -3598,9 +3439,5 @@ def _input_digest(
             "preemptions": [
                 (item.node_id, item.model_id, item.for_model_id) for item in preemptions
             ],
-            "placement_budget": {
-                "max_hourly_cost": max_hourly_cost,
-                "allow_unknown_cost": allow_unknown_cost,
-            },
         }
     )
