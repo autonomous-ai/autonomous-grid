@@ -88,8 +88,11 @@ When two or more workload classes are active, Grid no longer picks each model in
 starts from the evidence-backed choices and runs a deterministic bounded coordinate search over
 complete workload-to-model maps, evaluating each candidate portfolio with the authoritative fleet
 planner. Configured baselines and direct demand are preserved first; then the search maximizes
-demand-weighted workload coverage, minimizes missing replicas, and compares measured utility,
-and transition cost. A shared generalist can therefore beat two slightly better specialists when
+service-time-aware resource-pressure coverage, then request coverage, minimizes missing replicas,
+and compares measured utility and transition cost. Resource pressure uses offered concurrency—the
+arrival rate multiplied by measured service time, plus queued work—so a long image or video job is
+not incorrectly treated as cheaper than a short embedding call merely because fewer jobs arrive.
+A shared generalist can therefore beat two slightly better specialists when
 only one model slot is available. Search considers at most four candidates
 per workload and 64 distinct portfolios, so catalog size cannot create an unbounded planning pass.
 Each bounded workload set reserves representation for its exploitation leader and the broadest

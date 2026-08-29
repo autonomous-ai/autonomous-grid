@@ -370,6 +370,74 @@ def test_joint_portfolio_chooses_one_shared_model_when_independent_specialists_d
     assert status["portfolio_policy"]["joint"] is True
 
 
+def test_joint_portfolio_uses_service_time_aware_resource_pressure():
+    controller = AllocatorController()
+    controller.put_profile(
+        ModelProfile(
+            "short-request-specialist",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("embedding", 1.0),),
+        )
+    )
+    controller.put_profile(
+        ModelProfile(
+            "long-request-specialist",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("video", 1.0),),
+        )
+    )
+    # More short calls arrive, but the long jobs impose greater concurrent device demand.
+    for timestamp in (98, 99, 100, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("embeddings", "auto", "embedding"),
+            service_seconds=1,
+            timestamp=timestamp,
+        )
+    for timestamp in (98, 99, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("videos/generations", "auto", "video"),
+            service_seconds=60,
+            timestamp=timestamp,
+        )
+    machine = NodeSnapshot(
+        "one-slot",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        max_models=1,
+        last_heartbeat=100,
+    )
+
+    controller.tick((machine,), now=100)
+    status = controller.status((machine,), now=100)
+
+    assert status["portfolio_selection"] == {
+        "embedding": "short-request-specialist",
+        "video": "long-request-specialist",
+    }
+    assert controller.last_plan is not None
+    assert {item.model_id for item in controller.last_plan.assignments} == {
+        "long-request-specialist"
+    }
+    projections = {
+        row["workload"]: row for row in status["portfolio_projections"]
+    }
+    assert (
+        projections["video"]["offered_concurrency"]
+        > projections["embedding"]["offered_concurrency"]
+    )
+
+
 def test_joint_portfolio_keeps_fifth_ranked_shared_model_inside_bounded_search():
     controller = AllocatorController()
     for workload in ("coding", "research"):

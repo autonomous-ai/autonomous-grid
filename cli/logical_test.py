@@ -303,6 +303,8 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
             f"  portfolio {int(portfolio_policy.get('workloads') or 0)} workloads jointly · "
             f"models {', '.join(portfolio_policy.get('selected_models') or []) or 'none'}"
         )
+        if portfolio_policy.get("objective"):
+            print(f"  objective {portfolio_policy['objective']}")
     for recommendation in (payload.get("capacity_recommendations") or [])[:3]:
         shape = recommendation.get("minimum_shape") or {}
         runtimes = ",".join(shape.get("runtimes") or []) or "any runtime"

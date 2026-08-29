@@ -89,6 +89,8 @@ def cmd_allocator_status(args: argparse.Namespace) -> int:
             f"  joint portfolio    {int(portfolio_policy.get('workloads') or 0)} workloads"
             f" -> {len(selected_models)} models"
         )
+        if portfolio_policy.get("objective"):
+            print(f"  objective          {portfolio_policy['objective']}")
         if portfolio_policy.get("exploration_models"):
             print(
                 "  exploration slot  "

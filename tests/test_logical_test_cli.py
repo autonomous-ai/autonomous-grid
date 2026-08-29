@@ -60,6 +60,7 @@ def test_logical_status_explains_fleet_and_capacity(capsys):
             ],
             "portfolio_policy": {
                 "joint": True,
+                "objective": "resource pressure then request coverage",
                 "workloads": 2,
                 "selected_models": ["generalist"],
             },
@@ -82,6 +83,7 @@ def test_logical_status_explains_fleet_and_capacity(capsys):
     output = capsys.readouterr().out
     assert "llama.cpp/metal · 8.0 GiB · managed" in output
     assert "2 workloads jointly · models generalist" in output
+    assert "objective resource pressure then request coverage" in output
     assert "video missing 1 · >=24.0 GiB · comfyui/cuda" in output
 
 

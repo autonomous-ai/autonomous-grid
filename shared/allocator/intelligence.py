@@ -444,6 +444,7 @@ class WorkloadIntelligence:
                     {
                         "workload": workload,
                         "requests_per_minute": forecast.requests_per_minute,
+                        "offered_concurrency": forecast.offered_concurrency,
                         "samples": forecast.sample_count,
                         "chosen_model": "",
                         "reason": (
@@ -515,6 +516,7 @@ class WorkloadIntelligence:
                 {
                     "workload": workload,
                     "requests_per_minute": forecast.requests_per_minute,
+                    "offered_concurrency": forecast.offered_concurrency,
                     "samples": forecast.sample_count,
                     "confidence": forecast.confidence,
                     "chosen_model": chosen.model_id,

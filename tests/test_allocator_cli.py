@@ -139,6 +139,7 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
         },
         "portfolio_policy": {
             "joint": True,
+            "objective": "resource pressure then request coverage",
             "workloads": 2,
             "selected_models": ["general"],
             "exploration_models": ["general"],
@@ -156,6 +157,7 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
     output = capsys.readouterr().out
     assert "Allocator recommend · 1 hosts · 1 models" in output
     assert "joint portfolio    2 workloads -> 1 models" in output
+    assert "objective          resource pressure then request coverage" in output
     assert "exploration slot  general" in output
     assert "secret-token" not in output
     assert calls[0][2]["headers"] == {}

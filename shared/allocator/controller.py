@@ -964,6 +964,11 @@ class AllocatorController:
                 "portfolio_selection": dict(portfolio_selection or {}),
                 "portfolio_policy": {
                     "joint": bool(portfolio_selection is not None),
+                    "objective": (
+                        "preserve required service; maximize service-time-aware resource "
+                        "pressure coverage; maximize request coverage; minimize replica "
+                        "shortfall; maximize measured model utility"
+                    ),
                     "workloads": len(portfolio_selection or {}),
                     "selected_models": selected_portfolio_models,
                     "exploration_models": sorted(exploration_models),
@@ -1219,23 +1224,39 @@ class AllocatorController:
                 for model_id, target in baseline_targets.items()
                 if target > 0 and model_id in profile_by_id
             )
-            workload_coverage = 0.0
+            pressure_coverage = 0.0
+            request_coverage = 0.0
             utility = 0.0
             for workload, model_id in candidate_selection.items():
                 row = row_by_workload[workload]
-                weight = max(1e-6, float(row.get("requests_per_minute") or 0.0)) * (
+                confidence_weight = (
                     0.5 + 0.5 * float(row.get("confidence") or 0.0)
                 )
+                # Allocation pressure is service-time aware. Requests per minute alone makes one
+                # long image/video job look cheaper than a short embedding call even when it holds
+                # a device orders of magnitude longer. Offered concurrency is Little's-law load
+                # plus observed queue depth, so use it for the primary capacity objective while
+                # retaining request coverage as the next tie-break.
+                pressure_weight = max(
+                    1e-6,
+                    float(row.get("offered_concurrency") or 0.0),
+                ) * confidence_weight
+                request_weight = max(
+                    1e-6,
+                    float(row.get("requests_per_minute") or 0.0),
+                ) * confidence_weight
                 desired = max(1, plan.target_for(model_id))
                 ratio = min(1.0, placed.get(model_id, 0) / desired)
-                workload_coverage += weight * ratio
-                utility += weight * ratio * float(
+                pressure_coverage += pressure_weight * ratio
+                request_coverage += request_weight * ratio
+                utility += pressure_weight * ratio * float(
                     candidate_by_workload[workload][model_id].get("score") or 0.0
                 )
             missing = sum(item.missing_replicas for item in plan.unsatisfied)
             result = (
                 baseline_coverage,
-                workload_coverage,
+                pressure_coverage,
+                request_coverage,
                 -float(missing),
                 utility,
             )
