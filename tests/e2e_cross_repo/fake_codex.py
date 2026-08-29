@@ -85,7 +85,8 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
             time.sleep(90)
             raise RuntimeError("node B was expected to be killed after its business action")
         expected = [{"node": "B", "observed": "T-42"}]
-        if node != "C" or history != expected:
+        after_failed_eval = [*expected, {"node": "C", "eval_retry": 1}]
+        if node != "C" or history not in (expected, after_failed_eval):
             raise RuntimeError(f"business retry did not resume B's checkpoint: {node}, {history!r}")
         if (cwd / "partial-reply.tmp").exists():
             raise RuntimeError("B's uncommitted post-action file crossed the lease fence")
@@ -93,11 +94,21 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
         envelope = json.loads(((result.get("contentItems") or [{}])[0]).get("text") or "{}")
         if not result.get("success") or not (envelope.get("body") or {}).get("replayed"):
             raise RuntimeError(f"replacement action was not safely replayed: {result!r}")
+        if history == expected:
+            # Nominate completion with deliberately insufficient evidence. Grid's independent eval
+            # must reject it and create another turn without allowing the action to duplicate.
+            (cwd / "DONE.md").write_text("# Ticket T-42 resolved\n\nPending full audit proof.\n")
+            history.append({"node": "C", "eval_retry": 1})
+            save_history(history)
+            return "complete", "C nominated completion before the evidence was sufficient", 200
         (cwd / "DONE.md").write_text(
-            "# Ticket T-42 resolved\n\nThe reply action was idempotently confirmed after failover.\n")
-        history.append({"node": "C", "replayed": "R-1"})
+            "# Ticket T-42 resolved\n\nThe reply action was idempotently confirmed after worker "
+            "failover and again after an independent evaluation rejected the first proof. The "
+            "business API performed exactly one side effect across every replay. This expanded "
+            "artifact is the independently measurable completion evidence.\n")
+        history.append({"node": "C", "eval_retry": 2, "replayed": "R-1"})
         save_history(history)
-        return "complete", "C safely confirmed the reply and completed the Goal", 200
+        return "complete", "C repaired the evidence without duplicating the reply", 300
 
     if scenario == "image":
         if node != "A" or history:

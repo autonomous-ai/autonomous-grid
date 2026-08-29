@@ -306,7 +306,7 @@ class ToolExecutor:
     """Execute the Goal's explicit observe/act HTTP capabilities and publish an audit event."""
 
     def __init__(self, tools: list[dict[str, Any]], *, publish: Callable[..., Any],
-                 inference: GridInference, scope: str):
+                 inference: GridInference, scope: str, turn_scope: str | None = None):
         self.tools: dict[str, dict[str, Any]] = {}
         invalid_names: set[str] = set()
         for tool in tools:
@@ -323,6 +323,7 @@ class ToolExecutor:
         self.publish = publish
         self.inference = inference
         self.scope = scope
+        self.turn_scope = turn_scope or scope
         self.allowed_origins = _allowed_goal_tool_origins()
 
     def specs(self) -> list[dict[str, Any]]:
@@ -401,7 +402,11 @@ class ToolExecutor:
                 if isinstance(turn_id, str) and turn_id:
                     headers["X-Grid-Goal-Turn"] = turn_id
         if mode == "act":
-            canonical = json.dumps([self.scope, name, arguments], sort_keys=True,
+            # External mutations are content-idempotent across the whole Goal, including a later
+            # turn created after an eval failure. Relay-internal actions remain turn-scoped because
+            # their lease fence and child-spawn ownership are explicitly tied to one turn.
+            action_scope = self.turn_scope if internal else self.scope
+            canonical = json.dumps([action_scope, name, arguments], sort_keys=True,
                                    separators=(",", ":"), ensure_ascii=False).encode()
             headers["Idempotency-Key"] = "grid-goal-" + hashlib.sha256(canonical).hexdigest()
         raw_timeout = http.get("timeout_seconds", 30)
@@ -600,6 +605,9 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
     for field in ("objective", "done_when", "model"):
         if not isinstance(goal.get(field), str) or not goal[field].strip():
             raise CodexGoalError(f"the relay supplied no usable Goal {field}")
+    conversation_id = job.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id:
+        raise CodexGoalError("the relay supplied no Goal conversation id")
 
     state = _load_state(workspace)
     thread_id = str(state.get("thread_id") or "")
@@ -611,7 +619,8 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
                      _counter(state, "time_used_seconds", "distributed checkpoint"))
     tools = ToolExecutor(goal.get("tools") if isinstance(goal.get("tools"), list) else [],
                          publish=publish, inference=inference,
-                         scope=f"{job.get('conversation_id')}:{turns_before + 1}")
+                         scope=conversation_id,
+                         turn_scope=f"{conversation_id}:{turns_before + 1}")
 
     proxy = InferenceProxy(
         inference.base_url.rstrip("/") + "/relay/v1", inference.token,

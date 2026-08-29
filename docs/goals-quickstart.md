@@ -245,9 +245,11 @@ those events contain tool/call identity and success metadata only. Set
 `"record": "full"` when the arguments and returned observation should become local Goal evidence
 and future training data; credential-shaped object fields are recursively redacted and each stored
 value is hard-bounded. Requests do not inherit proxy or `.netrc` credentials, redirects are not
-followed, and arguments and response bodies are capped at 64 KiB. `act` calls carry a deterministic
-idempotency key scoped to the Goal turn, so the receiving API can reject a duplicate after a worker
-failure. Grid credentials are never placed in Codex's environment or stored in Git.
+followed, and arguments and response bodies are capped at 64 KiB. Business `act` calls carry a
+deterministic key over the Goal, tool and canonical arguments, so the receiving API can reject the
+same mutation after either worker failure or an independent-eval retry. Relay-internal actions are
+turn-scoped because their authorization is tied to that lease. Grid credentials are never placed in
+Codex's environment or stored in Git.
 
 Tool request and result events are durability fences, not buffered console progress. Grid flushes
 the request record before contacting the API. If that record cannot land, it does not make the
@@ -288,12 +290,13 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 | Four-feature game | A -> B -> C | Codex -> Codex -> Codex | A dies in feature 2; B dies in 3–4 | Four required files |
 | Mixed game | A -> B -> C | Codex -> Claude -> Codex | A and B die mid-feature | Four required files |
 | Image artifact | B polls; A executes | Claude rejected; Codex selected | Capability mismatch | PNG file and size |
-| Support reply | A polls; B -> C execute | Codex | B dies after API commit | `DONE.md`; one API side effect |
+| Support reply | A polls; B -> C execute | Codex | B dies after API commit; first eval fails | `DONE.md`; one API side effect |
 | Required child | A parent; B child; C parent | Codex -> Claude -> Codex | Parent moves while child runs | Child and parent files |
 | Optional child | A parent; B child; C parent | Codex | Child fails | Parent file; child failure retained |
 
 Every scenario uses `fake-grid-model` so the test measures Grid's queue, agent harness, tool,
 Git/checkpoint and eval protocols deterministically rather than model quality. The support-reply
 scenario additionally proves an unauthorized but otherwise healthy node spends zero attempts, the
-authorized successor restores Codex's dynamic tools, and both write attempts carry one identical
-idempotency key while the API performs exactly one side effect.
+authorized successor restores Codex's dynamic tools, and all three writes (the failed attempt, its
+lease retry, and the eval-repair turn) carry one identical idempotency key while the API performs
+exactly one side effect.

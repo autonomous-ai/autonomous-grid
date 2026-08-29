@@ -183,7 +183,7 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
         },
     }], publish=lambda *_a, **_k: None,
         inference=task_codex.GridInference("https://grid.example", "grid-token"),
-        scope="parent:1")
+        scope="parent", turn_scope="parent:1")
     result = executor.call(
         "grid_spawn_subgoal", {"objective": "child"}, "call-1")
     assert result["success"] is True
@@ -194,7 +194,7 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
         "grid_spawn_subgoal", {"objective": "child"}, "replacement-call")["success"] is True
     later = task_codex.ToolExecutor(executor.tools.values(), publish=lambda *_a, **_k: None,
         inference=task_codex.GridInference("https://grid.example", "grid-token"),
-        scope="parent:2")
+        scope="parent", turn_scope="parent:2")
     assert later.call(
         "grid_spawn_subgoal", {"objective": "child"}, "call-1")["success"] is True
 
@@ -436,3 +436,48 @@ def test_tool_fails_the_turn_if_its_committed_result_cannot_be_recorded(monkeypa
     with pytest.raises(task_codex.CodexGoalError, match="durably record tool result"):
         executor.call("send_reply", {"reply": "hello"}, "call-1")
     assert publishes == ["goal.act.request", "goal.act.result"]
+
+
+def test_business_action_key_survives_a_later_eval_repair_turn(monkeypatch):
+    monkeypatch.setenv("GRID_GOAL_TOOL_ORIGINS", "https://support.example")
+    requests = []
+
+    class Response:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def iter_bytes():
+            yield b'{"reply_id":"R-1"}'
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, _method, _url, **kwargs):
+            requests.append(kwargs)
+            return Response()
+
+    monkeypatch.setattr(task_codex.httpx, "Client", Client)
+    tool = {
+        "name": "send_reply", "mode": "act",
+        "http": {"method": "POST", "url": "https://support.example/reply"},
+    }
+    for turn in (1, 2):
+        executor = task_codex.ToolExecutor(
+            [tool], publish=lambda *_a, **_k: True,
+            inference=task_codex.GridInference("https://grid.example", "secret"),
+            scope="goal-1", turn_scope=f"goal-1:{turn}")
+        assert executor.call("send_reply", {"reply": "same"}, f"call-{turn}")["success"]
+    assert requests[0]["headers"]["Idempotency-Key"] == requests[1]["headers"]["Idempotency-Key"]

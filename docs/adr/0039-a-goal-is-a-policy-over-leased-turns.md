@@ -79,9 +79,12 @@ fleet must fail closed even when an older relay accepted an unsafe manifest.
 Tool request/result events are stronger than ordinary progress events. The request is synchronously
 accepted by the relay before the worker contacts an API. The result is synchronously accepted before
 it is returned to Codex. Losing the result after a possible side effect fails the leased turn; its
-replacement uses the same turn-scoped idempotency key, so a conforming API can return the committed
-outcome without repeating the mutation. This yields a durable action trajectory even across the
-otherwise unavoidable crash window after a remote commit.
+replacement uses the same content-derived idempotency key, so a conforming API can return the
+committed outcome without repeating the mutation. External keys are scoped to Goal, tool and
+canonical arguments, which also prevents a later independent-eval repair turn from repeating the
+same mutation. Relay-internal actions remain turn-scoped because their authority belongs to the
+lease. This yields a durable action trajectory even across the otherwise unavoidable crash window
+after a remote commit.
 
 ### Native Goal mechanisms remain authoritative progress loops
 

@@ -331,7 +331,8 @@ def test_business_goal_matches_api_origin_and_replays_action_across_nodes(
                 "http": {"method": "POST", "url": f"{origin}/tickets/reply"},
             },
         ],
-        evals=[{"type": "file", "name": "resolution proof", "path": "DONE.md"}])
+        evals=[{"type": "file", "name": "resolution proof", "path": "DONE.md",
+                "min_bytes": 200}])
     conversation_id = goal["id"]
     origin_caps = [item for item in goal["required_capabilities"]
                    if item.startswith("tool_origin.")]
@@ -367,9 +368,11 @@ def test_business_goal_matches_api_origin_and_replays_action_across_nodes(
         lambda: _completed_goal(relay, owner_token, conversation_id), timeout=75)
     assert complete, f"C did not complete the business Goal; output:\n{node_c.output()}"
     rows = _tasks(relay, owner_token, project_id, conversation_id)
-    assert len(rows) == 2 and rows[1]["id"] == second_turn, rows
+    assert len(rows) == 3 and rows[1]["id"] == second_turn, rows
     assert rows[1]["attempt"] == 2 and rows[1]["provider_id"] == node_c.node_id
-    assert len(business_api["write_requests"]) == 2
+    assert rows[2]["attempt"] == 1 and rows[2]["provider_id"] == node_c.node_id
+    assert complete["turns_completed"] == 3
+    assert len(business_api["write_requests"]) == 3
     assert len({item["key"] for item in business_api["write_requests"]}) == 1
     assert business_api["write_requests"][0]["body"] == business_api["write_requests"][1]["body"]
     assert len(business_api["side_effects"]) == 1
@@ -384,15 +387,17 @@ def test_business_goal_matches_api_origin_and_replays_action_across_nodes(
     assert not (destination / "partial-reply.tmp").exists()
 
     evidence = relay_client.get_goal_evidence(relay, owner_token, conversation_id)
-    _assert_transcript_chain(evidence, 2, min_nodes=2)
+    _assert_transcript_chain(evidence, 3, min_nodes=2)
     action_requests = [item["event"] for item in evidence["attempt_events"]
                        if item["event"].get("type") == "goal.act.request"]
     action_results = [item["event"] for item in evidence["attempt_events"]
                       if item["event"].get("type") == "goal.act.result"]
-    assert len(action_requests) == 2 and len(action_results) == 2
+    assert len(action_requests) == 3 and len(action_results) == 3
     assert all(item["success"] for item in action_results)
     evidence_keys = {item["idempotency_key"] for item in action_requests + action_results}
     assert evidence_keys == {business_api["write_requests"][0]["key"]}
+    assert any(run["passed"] is False for run in evidence["eval_runs"])
+    assert evidence["eval_runs"][-1]["passed"] is True
 
 
 def test_parent_codex_spawns_claude_child_then_codex_fans_it_in(
