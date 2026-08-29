@@ -2718,6 +2718,47 @@ def automatic_controller(*, concurrent: int = 4) -> AllocatorController:
     )
 
 
+def test_success_waits_for_a_post_ack_heartbeat_before_repeating_drain():
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(
+            mutation_cooldown_seconds=0,
+            success_observation_timeout_seconds=120,
+        ),
+    )
+    controller.put_profile(
+        replace(
+            profile(),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=0,
+        )
+    )
+    stale = allocator_node(
+        "n",
+        residency=ready_qwen(),
+        heartbeat=10,
+    )
+    controller.tick((stale,), now=10)
+    first = controller.commands_for("n", now=10)[0]
+    assert first.kind == ActionKind.DRAIN
+    controller.acknowledge(
+        "n",
+        first.action_id,
+        MutationStatus.SUCCEEDED,
+        now=11,
+    )
+
+    controller.tick((stale,), now=11.5)
+    assert controller.commands_for("n", now=11.5) == ()
+
+    controller.tick((replace(stale, last_heartbeat=12),), now=12)
+    repeated = controller.commands_for("n", now=12)
+    assert len(repeated) == 1
+    assert repeated[0].kind == ActionKind.DRAIN
+
+
 def test_pending_drain_is_cancelled_when_new_required_replacement_is_not_ready():
     controller = automatic_controller()
     baseline = replace(

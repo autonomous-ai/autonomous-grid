@@ -5602,7 +5602,7 @@ def test_reconciler_readmits_live_draining_replica_despite_prior_warm_success_bl
         loaded_at=90,
         managed=True,
     )
-    machine = node("n", residencies=(draining,))
+    machine = node("n", residencies=(draining,), now=100)
     plan = PlacementPlanner().plan([machine], [profile], now=100)
     prior_success = MutationRecord(
         "warm-prior",
@@ -5675,7 +5675,12 @@ def test_reconciler_failed_desired_residency_bypasses_only_old_success_observati
         loaded_at=90,
         managed=True,
     )
-    machine = node("n", residencies=(failed_residency,), cached=("qwen",))
+    machine = node(
+        "n",
+        residencies=(failed_residency,),
+        cached=("qwen",),
+        now=100,
+    )
     plan = PlacementPlanner().plan([machine], [profile], now=100)
     key = (ActionKind.WARM, "n", "qwen")
 
@@ -5715,7 +5720,7 @@ def test_reconciler_cached_residency_can_rewarm_after_completed_prior_lifecycle(
         loaded_at=90,
         managed=True,
     )
-    machine = node("n", residencies=(cached,), cached=("qwen",))
+    machine = node("n", residencies=(cached,), cached=("qwen",), now=100)
     plan = PlacementPlanner().plan((machine,), (profile,), now=100)
     succeeded = MutationRecord(
         "old-warm-success",
@@ -5770,7 +5775,7 @@ def test_authoritative_state_allows_repeated_destructive_lifecycle(kind, state):
         loaded_at=90,
         managed=True,
     )
-    machine = node("n", residencies=(residency,))
+    machine = node("n", residencies=(residency,), now=100)
     plan = PlacementPlanner().plan((), (profile,), now=100)
     old_success = MutationRecord(
         "old-success",

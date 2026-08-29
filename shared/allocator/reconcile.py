@@ -850,6 +850,13 @@ class Reconciler:
                     and latest_matching.status == MutationStatus.SUCCEEDED
                 )
             )
+            and _snapshot_observes_prior_success(
+                latest_matching,
+                block_cause,
+                blocked_until.get(key, 0.0),
+                node.last_heartbeat,
+                self.policy.success_observation_timeout_seconds,
+            )
         )
         cooldown_until = max(
             node.mutation_cooldown_until,
@@ -996,6 +1003,13 @@ class Reconciler:
                     and latest_matching.status == MutationStatus.SUCCEEDED
                 )
             )
+            and _snapshot_observes_prior_success(
+                latest_matching,
+                block_cause,
+                blocked_until.get(key, 0.0),
+                node.last_heartbeat,
+                self.policy.success_observation_timeout_seconds,
+            )
         )
         retry_at = max(
             node.mutation_cooldown_until,
@@ -1105,6 +1119,35 @@ def _action_artifact_sha256(
     if residency is None:
         residency = node.residency(profile.model_id)
     return residency.artifact_sha256 if residency is not None else ""
+
+
+def _snapshot_observes_prior_success(
+    latest_matching: MutationRecord | None,
+    block_cause: MutationStatus | None,
+    block_deadline: float,
+    node_heartbeat: float,
+    success_observation_timeout_seconds: float,
+) -> bool:
+    """Prove the reported residency state was observed after a successful mutation.
+
+    Mutation acknowledgements and inventory heartbeats travel independently. A stale snapshot may
+    still show READY after a successful drain or DRAINING after a successful unload; immediately
+    treating that state as authoritative repeats work and delays the beneficiary by a control
+    round. A newer heartbeat that still reports the old state proves a genuinely repeated
+    lifecycle and may bypass the ordinary success-observation timeout.
+    """
+
+    success_anchor = 0.0
+    if latest_matching is not None and latest_matching.status == MutationStatus.SUCCEEDED:
+        success_anchor = latest_matching.completed_at or latest_matching.attempted_at
+    elif block_cause == MutationStatus.SUCCEEDED and block_deadline > 0:
+        success_anchor = max(
+            0.0,
+            block_deadline - success_observation_timeout_seconds,
+        )
+    if success_anchor <= 0:
+        return False
+    return node_heartbeat > success_anchor
 
 
 def _project_drain(
