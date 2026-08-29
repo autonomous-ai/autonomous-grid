@@ -88,6 +88,28 @@ def test_controller_status_reports_last_successful_tick_duration(monkeypatch):
     assert controller.status([node()], now=10)["last_tick_duration_seconds"] == 0.25
 
 
+def test_tick_duration_clock_failure_cannot_fail_committed_reconciliation(
+    monkeypatch,
+):
+    calls = iter((100.0, RuntimeError("clock unavailable")))
+
+    def monotonic():
+        value = next(calls)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr("shared.allocator.controller.time.monotonic", monotonic)
+    controller = AllocatorController()
+    controller.put_profile(profile())
+
+    result = controller.tick([node()], now=10)
+
+    assert result.actions
+    assert controller.last_plan is not None
+    assert controller.status([node()], now=10)["last_tick_duration_seconds"] == 0
+
+
 def test_controller_automatic_queues_repeats_and_acknowledges_action():
     controller = AllocatorController(
         mode=AllocatorMode.AUTOMATIC,

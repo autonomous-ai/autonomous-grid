@@ -212,11 +212,6 @@ class AllocatorController:
             started_at = time.monotonic()
             try:
                 result = self._tick_locked(node_list, timestamp, checkpoint)
-                self._last_tick_duration_seconds = max(
-                    0.0,
-                    time.monotonic() - started_at,
-                )
-                return result
             except jsonio.AtomicWriteCommittedError:
                 raise
             except BaseException:
@@ -225,6 +220,16 @@ class AllocatorController:
                 # independently locked request telemetry that arrived during the failed tick.
                 self._rollback(checkpoint)
                 raise
+            try:
+                self._last_tick_duration_seconds = max(
+                    0.0,
+                    time.monotonic() - started_at,
+                )
+            except Exception:  # pragma: no cover - platform clock failures are non-actionable
+                # Observability is best-effort and must never fail or roll back committed desired
+                # state. A later successful tick replaces this sentinel.
+                self._last_tick_duration_seconds = 0.0
+            return result
 
     def _tick_locked(
         self,
