@@ -181,3 +181,15 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
     assert captured["headers"]["X-Grid-Goal-Turn"] == "turn-1"
     assert "X-Not-Allowed" not in captured["headers"]
     assert captured["headers"]["Idempotency-Key"].startswith("grid-goal-")
+
+
+def test_claude_profile_cannot_claim_grid_runner_capabilities_it_does_not_wire(monkeypatch):
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude")
+    monkeypatch.setenv(
+        "GRID_CLAUDE_TASK_CAPABILITIES",
+        "native_goal dynamic_tools subgoals image_generation")
+    monkeypatch.setattr(task_agent, "distributed_goal_available", lambda: True)
+
+    assert tasks._agent_profiles() == ({
+        "kind": "claude", "capabilities": ["image_generation", "native_goal"],
+    },)

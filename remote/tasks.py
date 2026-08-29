@@ -278,6 +278,11 @@ def _agent_profiles() -> tuple[dict[str, Any], ...]:
     profiles: list[dict[str, Any]] = []
     if "claude" in kinds:
         claude_capabilities = _declared_capabilities("GRID_CLAUDE_TASK_CAPABILITIES")
+        # These names describe concrete Grid runner wiring, not an operator assertion. Claude has
+        # native `/goal`, but this provider does not inject arbitrary Goal HTTP tools or the built-in
+        # child-spawn action into Claude Code. Letting an env var advertise either would schedule a
+        # Goal onto a harness that cannot perform its required actions and strand it mid-run.
+        claude_capabilities.difference_update({"native_goal", "dynamic_tools", "subgoals"})
         if task_agent.distributed_goal_available():
             claude_capabilities.add("native_goal")
         profiles.append({"kind": "claude", "capabilities": sorted(claude_capabilities)})
