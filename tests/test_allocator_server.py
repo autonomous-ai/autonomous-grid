@@ -1797,6 +1797,13 @@ def test_router_affinity_never_overrides_load_or_host_protection(tmp_path, monke
     )
     server_module._change_active_tasks(preferred, -1)
 
+    preferred.load["queue_depth"] = 1
+    assert (
+        server_module._choose_engine(app, "qwen", affinity_digest=digest)
+        is not preferred
+    )
+    preferred.load.pop("queue_depth")
+
     preferred.allocator["state"] = "throttled"
     assert (
         server_module._choose_engine(app, "qwen", affinity_digest=digest)
