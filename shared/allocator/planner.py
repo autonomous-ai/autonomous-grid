@@ -104,8 +104,8 @@ _MAX_REPACK_DEPTH = 64
 # applied only while another desired model has strictly fewer future-compatible hosts.
 _SCARCE_HOST_OPPORTUNITY_PENALTY = 200_000.0
 # Repacking delays placement by at least one controller wave, so require a material improvement
-# over an immediately usable host. Candidate scores already price load/warm time, live traffic,
-# hardware, and hourly cost; this guard prevents marginal score noise from causing churn.
+# over an immediately usable host. Candidate scores already account for load/warm time, live
+# traffic, hardware, and fit; this guard prevents marginal score noise from causing churn.
 _PROACTIVE_REPACK_SCORE_MARGIN = 500.0
 
 
@@ -269,45 +269,14 @@ class PlacementPlanner:
                     if node.state == NodeState.THROTTLED:
                         allocatable *= self.policy.throttled_capacity_fraction
                     allocatable = max(0, math.floor(allocatable))
-                    usable = max(
-                        0,
-                        math.floor(
-                            allocatable * (1.0 - self.policy.memory_headroom_fraction)
-                        ),
-                    )
-                    live_memory = sum(
-                        item.memory_mb
-                        for item in node.residencies
-                        if not _adds_model_slot(item)
-                    )
-                    incremental = _incremental_memory_mb(
-                        residency,
-                        model.memory_for(node.runtimes),
-                    )
-                    occupied = sum(
-                        not _adds_model_slot(item) for item in node.residencies
-                    )
-                    adds_slot = _adds_model_slot(residency)
                     if reason is None and model.memory_for(node.runtimes) > allocatable:
                         reason = "model exceeds allocatable memory"
-                    if reason is None and incremental > max(0, usable - live_memory):
-                        reason = "insufficient current memory headroom"
                     if (
                         reason is None
                         and node.max_models is not None
-                        and (
-                            node.max_models == 0
-                            or (adds_slot and occupied >= node.max_models)
-                        )
+                        and node.max_models == 0
                     ):
-                        reason = "model slots are full"
-                    if reason is None and not _colocation_allowed(
-                        node,
-                        model,
-                        (),
-                        profile_by_id,
-                    ):
-                        reason = "colocation policy rejects the model"
+                        reason = "model slots are disabled"
                     if reason is not None:
                         rejected[reason] += 1
                         continue
@@ -410,6 +379,9 @@ class PlacementPlanner:
                 hints[model.model_id] = {
                     "model_id": model.model_id,
                     "feasible": True,
+                    "feasible_now": True,
+                    "hard_compatible": True,
+                    "feasible_after_preemption": False,
                     "eligible_nodes": len(eligible),
                     "best_node_id": node_id,
                     "host_priority": host_priority,
@@ -451,6 +423,9 @@ class PlacementPlanner:
                 hints[model.model_id] = {
                     "model_id": model.model_id,
                     "feasible": False,
+                    "feasible_now": False,
+                    "hard_compatible": bool(hard_compatible_nodes),
+                    "feasible_after_preemption": False,
                     "eligible_nodes": 0,
                     "best_node_id": "",
                     "host_priority": 0,
@@ -2058,6 +2033,69 @@ class PlacementPlanner:
                 )
             ),
         )
+
+
+def _portfolio_dynamic_fit_reason(
+    node: NodeSnapshot,
+    model: ModelProfile,
+    profile_by_id: Mapping[str, ModelProfile],
+    policy: PlannerPolicy,
+) -> str | None:
+    """Check occupancy-dependent fit after hard node compatibility already passed."""
+
+    allocatable = node.capacity_mb - node.reserved_mb
+    if node.state == NodeState.THROTTLED:
+        allocatable *= policy.throttled_capacity_fraction
+    allocatable = max(0, math.floor(allocatable))
+    usable = max(
+        0,
+        math.floor(allocatable * (1.0 - policy.memory_headroom_fraction)),
+    )
+    residency = node.residency(model.model_id)
+    live_memory = sum(
+        item.memory_mb for item in node.residencies if not _adds_model_slot(item)
+    )
+    incremental = _incremental_memory_mb(
+        residency,
+        model.memory_for(node.runtimes),
+    )
+    if incremental > max(0, usable - live_memory):
+        return "insufficient current memory headroom"
+    occupied = sum(not _adds_model_slot(item) for item in node.residencies)
+    if (
+        node.max_models is not None
+        and _adds_model_slot(residency)
+        and occupied >= node.max_models
+    ):
+        return "model slots are full"
+    if not _colocation_allowed(node, model, (), profile_by_id):
+        return "colocation policy rejects the model"
+    return None
+
+
+def _portfolio_startup_seconds(
+    residency: ModelResidency | None,
+    model: ModelProfile,
+) -> float:
+    if (
+        residency is not None
+        and residency.state == ResidencyState.READY
+        and model.matches_artifact(residency)
+    ):
+        return 0.0
+    if (
+        residency is not None
+        and model.matches_artifact(residency)
+        and residency.state
+        in (
+            ResidencyState.CACHED,
+            ResidencyState.LOADING,
+            ResidencyState.WARMING,
+            ResidencyState.DRAINING,
+        )
+    ):
+        return model.warm_seconds
+    return model.load_seconds + model.warm_seconds
 
 
 def _placement_demand_urgency(

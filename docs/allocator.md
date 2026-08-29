@@ -150,10 +150,9 @@ Placement is deterministic. Hard pins are reserved first and higher-priority cla
 lower-priority work. Within one priority class, constrained and larger models define each round's
 order, but placement progresses one replica per model per round. Scarce capacity is therefore
 max-min fair among equally important compatible models instead of being monopolized by the first
-model ID before its peers receive a baseline. If a hard budget or capacity limit ends partway
-through one equal-share round, the tie is resolved by attributable service harm: breached trusted
-cohorts first, then trusted cohort count, measured queue, latency/SLO ratio, errors, concurrency,
-and observed request rate. Caller-chosen cohort breadth is deliberately excluded. Model IDs remain
+model ID before its peers receive a baseline. If capacity ends partway through one equal-share
+round, the tie is resolved by attributable service harm: measured queue, latency/SLO ratio, errors,
+concurrency, and observed request rate. Model IDs remain
 only the final deterministic tie-break, so renaming two otherwise identical workloads cannot move
 the scarce slot away from the workload with greater measured harm. If lower-priority managed residencies already occupy
 all compatible capacity, Grid emits an explicit staged preemption: it first drains and unloads the
@@ -169,10 +168,10 @@ demand may use spare capacity but cannot trigger a destructive preemption; a con
 pin, or direct request/queue/SLO/error signal is required. Among equally low-priority choices, the
 allocator first prefers failed, already-draining, and idle victims so urgent capacity does not wait
 behind avoidable live work. It then prefers the set with the lowest learned warm-back cost, reducing
-the price of restoring displaced service after the burst. Required failure-domain diversity is reserved
-before that cost comparison, so several cheap victims in one rack cannot strand a critical model
+the delay of restoring displaced service after the burst. Required failure-domain diversity is reserved
+before that disruption comparison, so several convenient victims in one rack cannot strand a critical model
 that needs capacity across racks. A missing hard pin targets its exact node before either domain or
-cost selection; freeing a cheaper host that cannot satisfy the pin would be gratuitous disruption.
+victim selection; freeing a different host that cannot satisfy the pin would be gratuitous disruption.
 Candidates otherwise prefer an existing ready residency, local cached weights, another failure
 domain, measured throughput, and best-fit memory. Before measured
 throughput exists, bounded memory-bandwidth and compute estimates break otherwise-cold ties; ready
@@ -180,11 +179,11 @@ and cached bonuses remain much larger, so hardware estimates do not cause gratui
 Placement also computes each desired model's future-compatible host set without pretending that
 live memory is already free. A flexible small model is penalized on a host needed by a more
 constrained model when it has another valid destination. If an immediately free host is materially
-worse after accounting for startup time, current work, hardware, fit, and hourly cost, Grid may
+worse after accounting for startup time, current work, hardware, and fit, Grid may
 stage a proactive repack instead: it assigns the incumbent to its replacement host, proves that
 replacement ready, drains and unloads the old copy, and only then warms the demanded model on the
 released host. The target remains sticky while the victim is `DRAINING`; an intermediate heartbeat
-cannot redirect the beneficiary to an avoidable cold or expensive host. Marginal improvements use
+cannot redirect the beneficiary to an avoidable cold or slower host. Marginal improvements use
 immediate capacity, which bounds churn.
 Ready, loading, and warming incumbents on full one-model hosts are indexed and ranked in one pass
 when their failure domains are independent. Treating an in-progress incumbent as occupied prevents
@@ -893,8 +892,8 @@ URL (`--local` makes that explicit even when remote mode is active), including `
 owner-only token file for allocator mutations. The fixture stays isolated from the active local or
 remote Grid configuration.
 
-To compare genuinely different models and heterogeneous node economics, add repeatable portfolio
-candidates plus one capacity and hourly cost per text node, then run the real competition:
+To compare genuinely different models and heterogeneous node capacities, add repeatable portfolio
+candidates plus one capacity per text node, then run the real competition:
 
 ```bash
 uv run grid test start --machines 4 --include-comfyui --media-bundle z_image \
@@ -904,8 +903,7 @@ uv run grid test start --machines 4 --include-comfyui --media-bundle z_image \
   --workload-model research=qwen2.5-0.5b-instruct-q4_k_m.gguf \
   --workload-model marketing=qwen2.5-0.5b-instruct-q4_k_m.gguf \
   --workload-model sales=qwen2.5-0.5b-instruct-q4_k_m.gguf \
-  --text-capacities-gib 3.5,5,25.5 \
-  --text-costs-per-hour 0.05,0.20,0.80
+  --text-capacities-gib 3.5,5,25.5
 uv run grid test demo --users 6 --requests 12 --max-tokens 24
 uv run grid test compete
 ```

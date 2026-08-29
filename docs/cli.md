@@ -625,7 +625,7 @@ grid test start [--machines N] [--candidate-model GGUF]...
     [--workload-model WORKLOAD=GGUF]...
     [--include-comfyui --media-bundle z_image]
     [--comfyui-port N] [--media-port N]
-    [--text-capacities-gib GIB,...] [--text-costs-per-hour USD,...]
+    [--text-capacities-gib GIB,...]
 grid test demo [--users N] [--requests N] [--max-tokens N] [--timeout SECONDS]
 grid test compete [--max-tokens N] [--timeout SECONDS]
 grid test status [--json]
@@ -642,9 +642,9 @@ replica surge, a changed workload mix, and cooldown. It requires real responses 
 actions at every placement. Without bindings, the original single-specialist demo remains
 available. `test compete` benchmarks repeatable, distinct `--candidate-model` GGUFs with real
 inference, records authenticated quality/latency evidence without creating demand, then proves the
-allocator selects the measured winner and places it on the cheapest capable logical node.
-`--text-capacities-gib` and `--text-costs-per-hour` define one heterogeneous value per text node;
-their counts must match. Starting with `--include-comfyui` uses
+allocator selects the measured winner and places it on the planner-preferred capable logical node.
+`--text-capacities-gib` defines one heterogeneous capacity per text node; its count must match.
+Starting with `--include-comfyui` uses
 one of the N logical machines for a real ComfyUI/PyTorch-MPS node; the demo then requires an actual
 PNG from the installed image-generation bundle. Install it first with `grid engine install comfyui`
 and `grid engine pull z_image`. See the allocator guide for the ownership limits and full workflow.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from shared.allocator.intelligence import (
     RequestFeatures,
     WorkloadIntelligence,
