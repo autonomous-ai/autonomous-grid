@@ -132,7 +132,19 @@ class GoalSlice:
 @dataclass(frozen=True)
 class GridInference:
     base_url: str
-    token: str
+    token: str | Callable[[], str]
+    refresh: Callable[[str], bool] | None = None
+
+    def current_token(self) -> str:
+        return str(self.token() if callable(self.token) else self.token)
+
+    def refresh_token(self, stale_token: str) -> bool:
+        if self.refresh is None:
+            return False
+        try:
+            return bool(self.refresh(stale_token))
+        except (Exception, SystemExit):
+            return False
 
 
 class ProcessLike(Protocol):
@@ -392,7 +404,7 @@ class ToolExecutor:
         # A Grid credential may only be sent to a relay-authored internal action on the exact relay
         # origin. Business API credentials are never smuggled through the Goal manifest or Git.
         if internal:
-            headers["Authorization"] = f"Bearer {self.inference.token}"
+            headers["Authorization"] = f"Bearer {self.inference.current_token()}"
             configured_headers = http.get("headers")
             if isinstance(configured_headers, dict):
                 # The relay injects this lease fence for its built-in subgoal action. No arbitrary
@@ -426,19 +438,28 @@ class ToolExecutor:
         try:
             with httpx.Client(
                     timeout=float(raw_timeout), trust_env=False, follow_redirects=False) as client:
-                with client.stream(
-                        method, url, params=arguments if method == "GET" else None,
-                        json=None if method == "GET" else arguments, headers=headers) as response:
-                    status_code = response.status_code
-                    chunks: list[bytes] = []
-                    size = 0
-                    oversized = False
-                    for chunk in response.iter_bytes():
-                        size += len(chunk)
-                        if size > _MAX_TOOL_HTTP_BYTES:
-                            oversized = True
-                            break
-                        chunks.append(chunk)
+                for attempt in range(2):
+                    stale_token = self.inference.current_token() if internal else ""
+                    if internal:
+                        headers["Authorization"] = f"Bearer {stale_token}"
+                    with client.stream(
+                            method, url, params=arguments if method == "GET" else None,
+                            json=None if method == "GET" else arguments,
+                            headers=headers) as response:
+                        status_code = response.status_code
+                        if (internal and status_code == 401 and attempt == 0
+                                and self.inference.refresh_token(stale_token)):
+                            continue
+                        chunks: list[bytes] = []
+                        size = 0
+                        oversized = False
+                        for chunk in response.iter_bytes():
+                            size += len(chunk)
+                            if size > _MAX_TOOL_HTTP_BYTES:
+                                oversized = True
+                                break
+                            chunks.append(chunk)
+                        break
             if oversized:
                 success, result = False, {
                     "status_code": status_code,
@@ -623,7 +644,8 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
                          turn_scope=f"{conversation_id}:{turns_before + 1}")
 
     proxy = InferenceProxy(
-        inference.base_url.rstrip("/") + "/relay/v1", inference.token,
+        inference.base_url.rstrip("/") + "/relay/v1", inference.current_token,
+        refresh_token=inference.refresh_token,
         turn_id=str(job.get("task_id") or "") or None,
         conversation_id=str(job.get("conversation_id") or "") or None)
     proxy.start()

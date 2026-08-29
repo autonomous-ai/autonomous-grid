@@ -948,7 +948,8 @@ def run_task(job: dict[str, Any],
                 job.get("author_name"), job.get("author_email")),
             workspace=workspace)
         proxy = task_codex_proxy.InferenceProxy(
-            inference.base_url, inference.token,
+            inference.base_url, inference.current_token,
+            refresh_token=inference.refresh_token,
             turn_id=str(job.get("task_id") or "") or None,
             conversation_id=str(job.get("conversation_id") or "") or None)
         # Map every Claude tier to the Goal's explicit Grid model. In particular `/goal` evaluates
@@ -1347,7 +1348,8 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
         # harness use a loopback credential boundary and route their model calls through Grid.
         if str(job.get("agent_kind") or "claude") == "codex" or isinstance(job.get("goal"), dict):
             run_kwargs["inference"] = task_codex.GridInference(
-                state.signaling_url, state.token())
+                state.signaling_url, state.token,
+                lambda stale: state.refresh(stale_token=stale))
         outcome = run_task(job, publisher.publish, **run_kwargs)
         is_goal = isinstance(job.get("goal"), dict)
         retry_goal_failure = (is_goal and outcome.state == "failed"

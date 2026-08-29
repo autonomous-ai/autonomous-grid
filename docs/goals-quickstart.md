@@ -37,6 +37,12 @@ The Goal's `--model` must name a model available through the Grid Responses API.
 on the provider; its model requests go back through Grid, so the machine executing the agent and the
 machine serving the model may be different computers.
 
+The native agent receives only a short-lived loopback proxy token, never the provider's Grid
+credential. The proxy reads the provider's current node token for every model request. If that token
+expires during a long Goal slice, it coordinates with the provider's normal refresh path and retries
+the authentication refusal once; Claude evaluation calls and relay-internal subgoal actions use the
+same live-token boundary.
+
 ## Run and control a Goal
 
 ```bash

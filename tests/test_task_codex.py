@@ -4,8 +4,12 @@ from __future__ import annotations
 import io
 import json
 import subprocess
+import threading
 from email.message import Message
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import httpx
 
 from remote import task_codex, task_codex_proxy, task_repo
 
@@ -82,6 +86,59 @@ def test_goal_inference_proxy_attributes_requests_to_durable_turn_and_conversati
     assert headers["Authorization"] == "Bearer grid-secret"
     assert headers["X-Request-Id"] == "turn-1"
     assert headers["X-Grid-Conversation"] == "goal-1"
+
+
+def test_goal_inference_proxy_refreshes_expired_node_token_once():
+    seen_tokens = []
+    live = {"token": "expired-node-token"}
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length)
+            token = self.headers.get("Authorization")
+            seen_tokens.append(token)
+            status = 401 if token == "Bearer expired-node-token" else 200
+            payload = json.dumps({"ok": status == 200}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format, *_args):
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    refreshes = []
+
+    def refresh(stale):
+        refreshes.append(stale)
+        live["token"] = "fresh-node-token"
+        return True
+
+    proxy = task_codex_proxy.InferenceProxy(
+        f"http://127.0.0.1:{upstream.server_address[1]}",
+        lambda: live["token"], refresh_token=refresh,
+        turn_id="turn-1", conversation_id="goal-1")
+    proxy.start()
+    try:
+        response = httpx.post(
+            proxy.base_url + "/responses",
+            headers={"Authorization": f"Bearer {proxy.child_token}"},
+            json={"model": "grid-coder", "input": "continue"}, timeout=5)
+    finally:
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=5)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert seen_tokens == ["Bearer expired-node-token", "Bearer fresh-node-token"]
+    assert refreshes == ["expired-node-token"]
 
 
 def test_codex_goal_capability_requires_a_measured_native_goal_version(monkeypatch):

@@ -2184,6 +2184,53 @@ class _FakeState:
         return False
 
 
+def test_goal_supervisor_wires_live_inference_token_and_refresh(monkeypatch):
+    """A long Goal slice must not retain the node JWT captured when it started."""
+    from remote import tasks
+
+    captured = {}
+
+    class State:
+        signaling_url = "http://relay"
+        current = "expired-node-token"
+
+        def token(self):
+            return self.current
+
+        def refresh(self, stale_token=None):
+            assert stale_token == "expired-node-token"
+            self.current = "fresh-node-token"
+            return True
+
+    class Renewer:
+        lost = False
+        cancelled = False
+
+        def close(self):
+            return None
+
+    def fake_run(job, publish=None, on_spawn=None, remote=None, inference=None, capacity=None):
+        captured["inference"] = inference
+        return tasks.TaskOutcome("completed", "ok", None, goal_status="complete")
+
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *_a, **_k: _NullPublisher())
+    monkeypatch.setattr(tasks, "_git_remote", lambda *_a, **_k: None)
+    monkeypatch.setattr(tasks, "_lease_renewer", lambda *_a, **_k: Renewer())
+    monkeypatch.setattr(tasks, "run_task", fake_run)
+    monkeypatch.setattr(tasks, "_push_result", lambda _j, outcome, *_a: (outcome, True))
+    monkeypatch.setattr(tasks, "report_once", lambda *_a, **_k: None)
+
+    state = State()
+    tasks._supervise_one_task(state, {
+        "task_id": "turn-1", "agent_kind": "codex", "goal": {"model": "grid-model"},
+    }, "turn-1", None)
+
+    inference = captured["inference"]
+    assert inference.current_token() == "expired-node-token"
+    assert inference.refresh_token("expired-node-token") is True
+    assert inference.current_token() == "fresh-node-token"
+
+
 def test_a_runner_that_raises_does_not_publish_the_exceptions_words_verbatim(monkeypatch):
     """The fourth door, and it was open.
 

@@ -275,6 +275,66 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
     assert keys[2] != keys[0]
 
 
+def test_internal_subgoal_tool_refreshes_expired_node_token_without_repeating_action(monkeypatch):
+    calls = []
+    live = {"token": "expired-node-token"}
+
+    class Response:
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def iter_bytes(self):
+            yield b'{"id":"child-goal"}'
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, _method, _url, **kwargs):
+            calls.append(kwargs["headers"].copy())
+            return Response(401 if len(calls) == 1 else 201)
+
+    refreshes = []
+
+    def refresh(stale):
+        refreshes.append(stale)
+        live["token"] = "fresh-node-token"
+        return True
+
+    monkeypatch.setattr(task_codex.httpx, "Client", Client)
+    executor = task_codex.ToolExecutor([{
+        "name": "grid_spawn_subgoal", "grid_internal": True, "mode": "act",
+        "http": {
+            "method": "POST", "url": "/relay/v1/goals/parent/children", "auth": "grid",
+            "headers": {"X-Grid-Goal-Turn": "turn-1"},
+        },
+    }], publish=lambda *_a, **_k: None,
+        inference=task_codex.GridInference(
+            "https://grid.example", lambda: live["token"], refresh),
+        scope="parent", turn_scope="parent:1")
+
+    result = executor.call("grid_spawn_subgoal", {"objective": "child"}, "call-1")
+
+    assert result["success"] is True
+    assert refreshes == ["expired-node-token"]
+    assert [call["Authorization"] for call in calls] == [
+        "Bearer expired-node-token", "Bearer fresh-node-token"]
+    # The same idempotency key makes the one authentication retry safe even for an act tool.
+    assert calls[0]["Idempotency-Key"] == calls[1]["Idempotency-Key"]
+
+
 def test_claude_profile_cannot_claim_grid_runner_capabilities_it_does_not_wire(monkeypatch):
     monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude")
     monkeypatch.setenv(

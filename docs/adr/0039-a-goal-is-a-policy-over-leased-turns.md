@@ -112,6 +112,13 @@ requests, authorization compares the original routed name while the transaction 
 concrete model Grid actually selected. Evidence exports retain every transaction state, but only a
 completed transaction can satisfy the physical inference gate.
 
+The agent child never receives the node credential. Its loopback inference proxy reads the live
+provider token for each call. On one upstream 401 it invokes the provider's serialized,
+compare-and-swap refresh path and replays once before exposing any response bytes to the child.
+Relay-internal Goal actions use the same refresh rule and retain their deterministic idempotency key
+across that authentication retry. This keeps a Goal slice alive across token rotation without
+making a credential part of the Git checkpoint, agent environment, transcript, or training data.
+
 ### Native Goal mechanisms remain authoritative progress loops
 
 Grid invokes Codex's native Goal API and Claude Code's native `/goal`; it does not reproduce their
