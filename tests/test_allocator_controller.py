@@ -244,6 +244,42 @@ def test_command_delivery_preserves_reconciler_priority_for_same_tick(
     ] == ["z-high", "a-low"]
 
 
+def test_command_delivery_prioritizes_new_urgent_work_over_older_queue_entry():
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(
+            max_concurrent_mutations=2,
+            max_mutations_per_node=2,
+        ),
+    )
+    controller.put_profile(
+        profile("low", pinned_nodes=("shared",), priority=1)
+    )
+    machine = NodeSnapshot(
+        "shared",
+        32_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        cached_models=("high", "low"),
+        last_heartbeat=10,
+    )
+    first = controller.tick((machine,), now=10)
+    assert [action.model_id for action in first.executable_actions] == ["low"]
+
+    controller.put_profile(
+        profile("high", pinned_nodes=("shared",), priority=1_000)
+    )
+    second = controller.tick(
+        (replace(machine, last_heartbeat=11),),
+        now=11,
+    )
+    assert [action.model_id for action in second.executable_actions] == ["high"]
+
+    assert [
+        action.model_id for action in controller.commands_for("shared", now=11)
+    ] == ["high", "low"]
+
+
 def test_higher_priority_service_does_not_cancel_delivered_pending_warm():
     controller = AllocatorController(
         mode=AllocatorMode.AUTOMATIC,

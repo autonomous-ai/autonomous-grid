@@ -371,14 +371,42 @@ class AllocatorController:
         if not math.isfinite(timestamp) or timestamp < 0:
             raise ValueError("now must be finite and non-negative")
         with self._lock:
+            urgency_by_model = dict(
+                self._last_plan.model_urgencies if self._last_plan is not None else ()
+            )
+            preemption_by_pair = {
+                (item.node_id, item.model_id): item.for_model_id
+                for item in (
+                    self._last_plan.preemptions if self._last_plan is not None else ()
+                )
+            }
+
+            def delivery_rank(action: MutationAction) -> tuple[int, int]:
+                beneficiary_id = preemption_by_pair.get(
+                    (action.node_id, action.model_id),
+                    "",
+                )
+                if action.kind in (ActionKind.LOAD, ActionKind.WARM):
+                    beneficiary_id = action.model_id
+                if not beneficiary_id:
+                    return (-1, -1)
+                profile = self._profiles.get(beneficiary_id)
+                return (
+                    profile.priority if profile is not None else 0,
+                    urgency_by_model.get(beneficiary_id, 0),
+                )
+
+            def delivery_key(action: MutationAction) -> tuple[int, int, float, float]:
+                priority, urgency = delivery_rank(action)
+                return (-priority, -urgency, action.not_before, action.created_at)
+
             commands = tuple(
                 action
                 for action in sorted(
                     self._commands.values(),
-                    # Python's stable sort retains the controller queue's insertion order for
-                    # same-tick commands. That order is the reconciler's service priority; a
-                    # content-hashed action ID must not randomly invert it at delivery.
-                    key=lambda item: (item.not_before, item.created_at),
+                    # Stable sorting retains the reconciler's insertion order within a service
+                    # class, including LOAD before its dependent WARM.
+                    key=delivery_key,
                 )
                 if action.node_id == node_id
                 and action.not_before <= timestamp

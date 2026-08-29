@@ -296,7 +296,8 @@ a lower-class constructive command only when it has never been delivered to its 
 `pending` command is treated as potentially running and keeps its slot until the node acknowledges
 it; equal-class work is not churned merely to change queue order. When a host permits several
 queued mutations, delivery preserves the reconciler's service ordering instead of re-sorting by
-opaque action identity.
+opaque action identity. A higher service class queued on a later tick also precedes an older,
+undelivered lower-class entry; FIFO remains the tie-breaker within the same class.
 
 A delivered `drain` or `unload` may already be running even while its last controller record still
 says `pending`. If fresh placement or host evidence makes any destructive action unsafe, the
