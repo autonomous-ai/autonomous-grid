@@ -98,6 +98,10 @@ relay-local deterministic kind is:
 
 - `file`: path exists, regular-file type, size, and SHA-256 predicates.
 
+The evaluator semantics version is part of each canonical definition and therefore its hash.
+Definitions created before this field existed are version 1; a future implementation must add an
+explicit version branch rather than silently changing what an existing metric means.
+
 Planned evaluator-node kinds, which are not part of the first release gate, are:
 
 - `command`: argv (never a shell string), timeout, expected exit code, optional bounded output

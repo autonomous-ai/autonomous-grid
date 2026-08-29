@@ -317,6 +317,12 @@ def main() -> int:
             if not prompt.startswith("/goal ") or resume is not None:
                 sys.stderr.write("fake claude did not receive native /goal on its first slice\n")
                 return 2
+            if ("Grid handoff for this distributed turn:" not in prompt
+                    or "A completed feature 1" not in prompt):
+                sys.stderr.write(
+                    "fake claude started a native /goal but did not receive Codex A's "
+                    "relay-authored turn handoff\n")
+                return 2
             if not pathlib.Path("index.html").exists():
                 sys.stderr.write("fake claude did not receive Codex's committed feature 1\n")
                 return 2

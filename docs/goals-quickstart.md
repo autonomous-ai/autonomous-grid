@@ -81,8 +81,9 @@ For example, `game-evals.json` can require artifacts without trusting the acting
 }
 ```
 
-Each definition is immutable. Every score is stored with its definition hash, turn, evaluator node,
-and exact Git commit. The guarded lease transaction marks a score `accepted`; a stale provider's
+Each definition is immutable, and its hash includes the evaluator-semantics version. Every score is
+stored with that definition hash, its turn, evaluator node, and exact Git commit. The guarded lease
+transaction marks a score `accepted`; a stale provider's
 completed evaluation remains visible as rejected audit evidence but cannot change Goal state or
 enter authoritative training data. A failed accepted check keeps the Goal active and becomes
 relay-authored guidance for the next worker. Evaluator infrastructure errors block the Goal and
