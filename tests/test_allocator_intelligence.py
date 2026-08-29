@@ -445,8 +445,8 @@ def test_portfolio_falls_back_from_preferred_but_infeasible_model():
         },
         "feasible-small": {
             "feasible": True,
-            "best_node_id": "cheap-node",
-            "cost_per_hour": 0.20,
+            "best_node_id": "ready-node",
+            "startup_seconds": 0.0,
         },
     }
 
@@ -464,16 +464,16 @@ def test_portfolio_falls_back_from_preferred_but_infeasible_model():
 
     assert forecasts[0].model_id == "feasible-small"
     assert projection["chosen_model"] == "feasible-small"
-    assert projection["placement"]["best_node_id"] == "cheap-node"
+    assert projection["placement"]["best_node_id"] == "ready-node"
     candidate_rows = {row["model_id"]: row for row in projection["candidates"]}
     assert candidate_rows["preferred-huge"]["feasible"] is False
 
 
-def test_portfolio_cost_breaks_an_otherwise_equal_model_tie():
+def test_portfolio_startup_time_breaks_an_otherwise_equal_model_tie():
     intelligence = WorkloadIntelligence(portfolio_min_samples=1)
     candidates = (
-        profile("a-cheap", 8_000, ("coding", 1.0)),
-        profile("z-expensive", 8_000, ("coding", 1.0)),
+        profile("a-fast", 8_000, ("coding", 1.0)),
+        profile("z-slow", 8_000, ("coding", 1.0)),
     )
     intelligence.observe(
         RequestFeatures("chat/completions", "auto", "coding"),
@@ -486,12 +486,12 @@ def test_portfolio_cost_breaks_an_otherwise_equal_model_tie():
         (),
         now=100,
         placement_hints={
-            "a-cheap": {"feasible": True, "cost_per_hour": 0.05},
-            "z-expensive": {"feasible": True, "cost_per_hour": 5.00},
+            "a-fast": {"feasible": True, "startup_seconds": 1.0},
+            "z-slow": {"feasible": True, "startup_seconds": 120.0},
         },
     )
 
-    assert forecasts[0].model_id == "a-cheap"
+    assert forecasts[0].model_id == "a-fast"
 
 
 def test_resident_model_hysteresis_rejects_tiny_gain_but_allows_clear_improvement():

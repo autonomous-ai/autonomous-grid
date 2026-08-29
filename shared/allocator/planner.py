@@ -188,7 +188,7 @@ class PlacementPlanner:
         ) -> str:
             """Find a host that can receive a required victim before its current copy drains."""
 
-            candidates: list[tuple[float, float, str]] = []
+            candidates: list[tuple[float, int, str]] = []
             for candidate_node in node_list:
                 if (
                     candidate_node.node_id == blocked_node_id
@@ -210,14 +210,6 @@ class PlacementPlanner:
                 allocatable = max(0, math.floor(allocatable))
                 if reason is None and victim.memory_for(candidate_node.runtimes) > allocatable:
                     reason = "model exceeds allocatable memory"
-                if reason is None and self.policy.max_hourly_cost > 0:
-                    if not candidate_node.cost_known and not self.policy.allow_unknown_cost:
-                        reason = "node hourly cost is unknown"
-                    elif (
-                        candidate_node.cost_known
-                        and candidate_node.cost_per_hour > self.policy.max_hourly_cost
-                    ):
-                        reason = "node exceeds fleet hourly cost budget"
                 if reason is not None or candidate_node.max_models == 0:
                     continue
                 if (
@@ -240,8 +232,8 @@ class PlacementPlanner:
                     continue
                 candidates.append(
                     (
-                        float(candidate_node.cost_per_hour),
                         _portfolio_startup_seconds(residency, victim),
+                        candidate_node.host_priority,
                         candidate_node.node_id,
                     )
                 )
@@ -249,11 +241,11 @@ class PlacementPlanner:
 
         for model in model_list:
             rejected: Counter[str] = Counter()
-            eligible: list[tuple[float, float, str]] = []
+            eligible: list[tuple[float, int, str]] = []
             preemptible: list[
                 tuple[
                     float,
-                    float,
+                    int,
                     str,
                     tuple[str, ...],
                     tuple[tuple[str, str], ...],
@@ -301,8 +293,8 @@ class PlacementPlanner:
                     if reason is None:
                         eligible.append(
                             (
-                                float(node.cost_per_hour),
                                 float(startup_seconds),
+                                node.host_priority,
                                 node.node_id,
                             )
                         )
@@ -374,8 +366,8 @@ class PlacementPlanner:
                         ):
                             preemptible.append(
                                 (
-                                    float(node.cost_per_hour),
                                     float(startup_seconds),
+                                    node.host_priority,
                                     node.node_id,
                                     tuple(item.model_id for item in selected),
                                     tuple(relocations),
@@ -384,7 +376,7 @@ class PlacementPlanner:
                             break
 
             if eligible:
-                cost, startup_seconds, node_id = min(eligible)
+                startup_seconds, host_priority, node_id = min(eligible)
                 hints[model.model_id] = {
                     "model_id": model.model_id,
                     "feasible": True,
@@ -393,12 +385,12 @@ class PlacementPlanner:
                     "feasible_after_preemption": False,
                     "eligible_nodes": len(eligible),
                     "best_node_id": node_id,
-                    "cost_per_hour": cost,
+                    "host_priority": host_priority,
                     "startup_seconds": startup_seconds,
                     "reason": "fleet-feasible",
                 }
             elif preemptible:
-                cost, startup_seconds, node_id, victims, relocations = min(preemptible)
+                startup_seconds, host_priority, node_id, victims, relocations = min(preemptible)
                 hints[model.model_id] = {
                     "model_id": model.model_id,
                     # Preserve the old field as current-headroom feasibility. Callers must opt in
@@ -410,7 +402,7 @@ class PlacementPlanner:
                     "eligible_nodes": 0,
                     "preemption_eligible_nodes": len(preemptible),
                     "best_node_id": node_id,
-                    "cost_per_hour": cost,
+                    "host_priority": host_priority,
                     "startup_seconds": startup_seconds,
                     "preemption_victims": list(victims),
                     "relocation_targets": [
@@ -437,7 +429,7 @@ class PlacementPlanner:
                     "feasible_after_preemption": False,
                     "eligible_nodes": 0,
                     "best_node_id": "",
-                    "cost_per_hour": 0.0,
+                    "host_priority": 0,
                     "startup_seconds": 0.0,
                     "reason": reason,
                 }
@@ -916,7 +908,7 @@ class PlacementPlanner:
                     candidate_node,
                     model,
                     for_new=requires_new_runtime(candidate_node, model),
-                ) is not None or not budget_allows(candidate_node):
+                ) is not None:
                     continue
                 victims: list[ModelResidency] = []
                 relocation_delay_seconds = 0.0
@@ -3297,7 +3289,6 @@ def _candidate_score(
     if node.state == NodeState.THROTTLED:
         score -= 20_000.0 * (1.0 - policy.throttled_capacity_fraction)
         reasons.append("host is throttled")
-    score -= min(node.cost_per_hour, 1_000_000_000_000.0) * 1_000.0
     score -= min(max(0, node.host_priority), 1_000_000_000_000) * 100.0
     return score, tuple(reasons)
 

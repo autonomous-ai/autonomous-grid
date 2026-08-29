@@ -102,20 +102,6 @@ def positive_gib_csv(raw: str) -> tuple[float, ...]:
     return values
 
 
-def nonnegative_cost_csv(raw: str) -> tuple[float, ...]:
-    try:
-        values = tuple(float(item.strip()) for item in raw.split(","))
-    except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"{raw!r} must be a comma-separated list of hourly costs"
-        ) from None
-    if not values or any(not 0 <= value <= 1_000_000 for value in values):
-        raise argparse.ArgumentTypeError(
-            f"{raw!r} must contain finite non-negative hourly costs"
-        )
-    return values
-
-
 def workload_model_binding(raw: str) -> tuple[str, str]:
     """Parse one real-demo capability binding such as ``coding=coder.gguf``."""
 
@@ -205,7 +191,6 @@ def _status_payload(record: dict[str, Any] | None = None) -> dict[str, Any]:
         "include_comfyui": bool(record.get("include_comfyui", False)) if record else False,
         "media_bundle": str(record.get("media_bundle") or "") if record else "",
         "text_capacities_gib": list(record.get("text_capacities_gib") or []) if record else [],
-        "text_costs_per_hour": list(record.get("text_costs_per_hour") or []) if record else [],
         "endpoint": str(record.get("endpoint") or "") if record else "",
         "run_dir": str(record.get("run_dir") or "") if record else "",
         "log": str(record.get("log") or "") if record else "",
@@ -311,41 +296,9 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
         backends = ",".join(node.get("backends") or []) or "unknown-backend"
         capacity_gib = float(node.get("capacity_mb") or 0) / 1024.0
         ownership = "managed" if node.get("actuator_capabilities") else "inventory"
-        hourly_cost = float(node.get("cost_per_hour") or 0.0)
-        cost = (
-            f" · ${hourly_cost:g}/h"
-            if node.get("cost_known")
-            else " · price unknown"
-        )
         print(
             f"  {node.get('node_id')}  {node.get('state')}  "
-            f"{runtimes}/{backends} · {capacity_gib:.1f} GiB{cost} · {ownership}  {placement}"
-        )
-    active_hourly_cost = sum(
-        float(node.get("cost_per_hour") or 0.0)
-        for node in nodes
-        if any(
-            item.get("state") == "ready" for item in node.get("residencies") or []
-        )
-    )
-    if active_hourly_cost:
-        print(f"  active cost ${active_hourly_cost:g}/h across ready logical hosts")
-    spend = payload.get("spend_forecast") or {}
-    day = next(
-        (
-            row
-            for row in spend.get("windows") or []
-            if float(row.get("hours") or 0) == 24
-        ),
-        None,
-    )
-    if day is not None:
-        completeness = "complete" if spend.get("complete") else "known-cost only"
-        print(
-            f"  projected ${float(day.get('known_spend') or 0):g}/24h · "
-            f"risk-adjusted ${float(day.get('risk_adjusted_known_spend') or 0):g} · "
-            f"{100 * float(spend.get('demand_confidence') or 0):.0f}% demand confidence · "
-            f"{completeness}"
+            f"{runtimes}/{backends} · {capacity_gib:.1f} GiB · {ownership}  {placement}"
         )
     portfolio_policy = payload.get("portfolio_policy") or {}
     if portfolio_policy.get("joint"):
@@ -441,8 +394,6 @@ def cmd_test_start(args: argparse.Namespace) -> int:
             != (args.media_bundle if args.include_comfyui else "")
             or tuple(existing.get("text_capacities_gib") or ())
             != tuple(args.text_capacities_gib or ())
-            or tuple(existing.get("text_costs_per_hour") or ())
-            != tuple(args.text_costs_per_hour or ())
         ):
             raise SystemExit(
                 "A logical test Grid is already running with different settings; "
@@ -481,10 +432,6 @@ def cmd_test_start(args: argparse.Namespace) -> int:
         raise SystemExit(
             f"--text-capacities-gib needs {text_machines} values, one per text node."
         )
-    if args.text_costs_per_hour and len(args.text_costs_per_hour) != text_machines:
-        raise SystemExit(
-            f"--text-costs-per-hour needs {text_machines} values, one per text node."
-        )
     extra_ports = (
         (args.comfyui_port, args.media_port) if args.include_comfyui else ()
     )
@@ -520,7 +467,6 @@ def cmd_test_start(args: argparse.Namespace) -> int:
             "comfyui_port": args.comfyui_port,
             "media_port": args.media_port,
             "text_capacities_gib": list(args.text_capacities_gib or ()),
-            "text_costs_per_hour": list(args.text_costs_per_hour or ()),
             "artifact_sha256": artifact_sha256,
             "port": args.port,
             "engine_port_base": args.engine_port_base,
@@ -553,7 +499,6 @@ def cmd_test_start(args: argparse.Namespace) -> int:
         "include_comfyui": args.include_comfyui,
         "media_bundle": args.media_bundle if args.include_comfyui else "",
         "text_capacities_gib": list(args.text_capacities_gib or ()),
-        "text_costs_per_hour": list(args.text_costs_per_hour or ()),
         "endpoint": endpoint,
         "run_dir": os.fspath(run_dir),
         "log": os.fspath(log_path),
@@ -1212,42 +1157,6 @@ def _profile_body(row: dict[str, Any], **updates: Any) -> dict[str, Any]:
     return {**{key: value for key, value in row.items() if key != "retiring"}, **updates}
 
 
-def _cheapest_competition_cost(
-    status: dict[str, Any], profile: dict[str, Any]
-) -> float:
-    """Return the cheapest node that can host this logical-test profile right now."""
-
-    model_id = str(profile["model_id"])
-    memory_mb = int(profile.get("memory_mb") or 0)
-    required_runtimes = set(profile.get("runtimes") or [])
-    required_backends = set(profile.get("backends") or [])
-    required_tags = set(profile.get("required_tags") or [])
-    capable: list[float] = []
-    for node in status.get("nodes") or []:
-        if node.get("state") not in {"accepting", "throttled"}:
-            continue
-        if required_runtimes and not required_runtimes.intersection(node.get("runtimes") or []):
-            continue
-        if required_backends and not required_backends.intersection(node.get("backends") or []):
-            continue
-        if not required_tags.issubset(node.get("tags") or []):
-            continue
-        if int(node.get("capacity_mb") or 0) - int(node.get("reserved_mb") or 0) < memory_mb:
-            continue
-        occupied = sum(
-            item.get("model_id") != model_id
-            and item.get("state") in {"loading", "warming", "ready", "draining"}
-            for item in node.get("residencies") or []
-        )
-        max_models = node.get("max_models")
-        if max_models is not None and occupied >= int(max_models):
-            continue
-        capable.append(float(node.get("cost_per_hour") or 0.0))
-    if not capable:
-        raise SystemExit(f"No capable logical node remains for {model_id!r}.")
-    return min(capable)
-
-
 def _put_test_profile(
     client: httpx.Client,
     headers: dict[str, str],
@@ -1449,14 +1358,12 @@ def cmd_test_compete(args: argparse.Namespace) -> int:
                     "memory_mb": int(by_model[candidate].get("memory_mb") or 0),
                     "node": str(node.get("node_id") or ""),
                     "node_capacity_mb": int(node.get("capacity_mb") or 0),
-                    "node_cost": float(node.get("cost_per_hour") or 0.0),
                 }
             )
             print(
                 f"  score {correct}/{len(_CODING_BENCHMARK)} ({quality:.0%}) · median "
                 f"{statistics.median(latencies):.3f}s · {node.get('node_id')} "
-                f"({float(node.get('capacity_mb') or 0) / 1024:.1f} GiB, "
-                f"${float(node.get('cost_per_hour') or 0):g}/h)\n"
+                f"({float(node.get('capacity_mb') or 0) / 1024:.1f} GiB)\n"
             )
             _put_test_profile(
                 client,
@@ -1535,12 +1442,19 @@ def cmd_test_compete(args: argparse.Namespace) -> int:
             for item in node.get("residencies") or []
         )
     )
-    cheapest_cost = _cheapest_competition_cost(selected, by_model[chosen])
-    chosen_cost = float(chosen_node.get("cost_per_hour") or 0.0)
-    if chosen_cost > cheapest_cost + 1e-9:
+    placement_hint = next(
+        (
+            row
+            for row in selected.get("portfolio_placement_hints") or []
+            if row.get("model_id") == chosen
+        ),
+        {},
+    )
+    expected_node = str(placement_hint.get("best_node_id") or "")
+    if expected_node and chosen_node.get("node_id") != expected_node:
         raise SystemExit(
-            f"Allocator selected {chosen_node.get('node_id')} at ${chosen_cost:g}/h for "
-            f"{chosen!r}, but a capable ${cheapest_cost:g}/h node was available."
+            f"Allocator placed {chosen!r} on {chosen_node.get('node_id')}, but its live "
+            f"placement plan preferred {expected_node}."
         )
     proof = _real_chat_request(
         endpoint,
@@ -1653,7 +1567,7 @@ def cmd_test_compete(args: argparse.Namespace) -> int:
     print(
         f"  placed on {chosen_node.get('node_id')} · "
         f"{float(chosen_node.get('capacity_mb') or 0) / 1024:.1f} GiB · "
-        f"${float(chosen_node.get('cost_per_hour') or 0):g}/h · cheapest capable node"
+        "planner-preferred capable node"
     )
     print(f"  real winning response: {proof.text[:160]!r}")
     print(

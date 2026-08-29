@@ -19,7 +19,6 @@ def test_logical_resources_partition_real_physical_capacity_without_multiplying_
         machine_index=0,
         machine_count=4,
         capacity_bytes=8 * gib,
-        cost_per_hour=0.25,
     )()
     large = logical_resources(
         physical,
@@ -35,7 +34,6 @@ def test_logical_resources_partition_real_physical_capacity_without_multiplying_
     assert small["memory"]["available_gb"] == 6
     assert large["memory"]["available_gb"] == 15
     assert small["failure_domain"] == "logical-machine-1"
-    assert small["cost_per_hour"] == 0.25
     assert large["failure_domain"] == "logical-machine-2"
 
 

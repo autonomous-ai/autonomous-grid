@@ -1243,8 +1243,6 @@ class AllocatorController:
                 workload_coverage,
                 -float(missing),
                 utility,
-                -float(len(plan.unknown_cost_nodes)),
-                -plan.hourly_cost,
             )
             evaluation_cache[key] = result
             return result

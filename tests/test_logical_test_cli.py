@@ -36,12 +36,11 @@ def test_logical_test_parser_defaults_to_four_machines():
     assert args.comfyui_port == 22_200
     assert args.media_port == 22_201
     assert args.text_capacities_gib == ()
-    assert args.text_costs_per_hour == ()
     assert args.timeout == 600.0
     assert args.handler is cli.cmd_test_start
 
 
-def test_logical_status_explains_price_uncertainty_spend_and_capacity(capsys):
+def test_logical_status_explains_fleet_and_capacity(capsys):
     _print_status(
         {
             "running": True,
@@ -59,23 +58,10 @@ def test_logical_status_explains_price_uncertainty_spend_and_capacity(capsys):
                     "runtimes": ["llama.cpp"],
                     "backends": ["metal"],
                     "capacity_mb": 8_192,
-                    "cost_per_hour": 0,
-                    "cost_known": False,
                     "residencies": [],
                     "actuator_capabilities": ["load"],
                 }
             ],
-            "spend_forecast": {
-                "complete": False,
-                "demand_confidence": 0.75,
-                "windows": [
-                    {
-                        "hours": 24,
-                        "known_spend": 4.8,
-                        "risk_adjusted_known_spend": 6.0,
-                    }
-                ],
-            },
             "portfolio_policy": {
                 "joint": True,
                 "workloads": 2,
@@ -98,9 +84,7 @@ def test_logical_status_explains_price_uncertainty_spend_and_capacity(capsys):
     )
 
     output = capsys.readouterr().out
-    assert "price unknown" in output
-    assert "projected $4.8/24h" in output
-    assert "75% demand confidence · known-cost only" in output
+    assert "llama.cpp/metal · 8.0 GiB · managed" in output
     assert "2 workloads jointly · models generalist" in output
     assert "video missing 1 · >=24.0 GiB · comfyui/cuda" in output
 
@@ -224,8 +208,6 @@ def test_mixed_framework_parser_exposes_real_media_and_user_controls():
             "research=general.gguf",
             "--text-capacities-gib",
             "3.4,5,17",
-            "--text-costs-per-hour",
-            "0.05,0.20,0.80",
         ]
     )
     demo = cli.build_parser().parse_args(
@@ -251,7 +233,6 @@ def test_mixed_framework_parser_exposes_real_media_and_user_controls():
         ("research", "general.gguf"),
     ]
     assert start.text_capacities_gib == (3.4, 5.0, 17.0)
-    assert start.text_costs_per_hour == (0.05, 0.2, 0.8)
     assert demo.users == 9
     assert demo.requests == 18
     assert demo.max_tokens == 48

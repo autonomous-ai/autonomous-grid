@@ -76,12 +76,12 @@ def model(model_id: str = "qwen", memory_mb: int = 8_000, **kwargs) -> ModelProf
     )
 
 
-def test_portfolio_hints_filter_by_live_fleet_and_rank_the_cheapest_host():
+def test_portfolio_hints_filter_by_live_fleet_and_rank_the_preferred_host():
     planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
     nodes = (
-        node("small", 4_000, cost_per_hour=0.05),
-        node("expensive", 16_000, cost_per_hour=0.80),
-        node("cheap", 16_000, cost_per_hour=0.20),
+        node("small", 4_000),
+        node("secondary", 16_000, host_priority=2),
+        node("preferred", 16_000, host_priority=1),
     )
 
     hints = planner.portfolio_placement_hints(
@@ -97,8 +97,8 @@ def test_portfolio_hints_filter_by_live_fleet_and_rank_the_cheapest_host():
         "hard_compatible": True,
         "feasible_after_preemption": False,
         "eligible_nodes": 2,
-        "best_node_id": "cheap",
-        "cost_per_hour": 0.20,
+        "best_node_id": "preferred",
+        "host_priority": 1,
         "startup_seconds": 35.0,
         "reason": "fleet-feasible",
     }
@@ -3931,8 +3931,7 @@ def test_planner_repacks_onto_a_materially_better_host_instead_of_cold_loading()
             "small",
             512,
             max_models=1,
-            cost_per_hour=0.05,
-            cost_known=True,
+            host_priority=0,
             residencies=(
                 ModelResidency("baseline", 256, ResidencyState.CACHED),
             ),
@@ -3941,8 +3940,7 @@ def test_planner_repacks_onto_a_materially_better_host_instead_of_cold_loading()
             "medium",
             2_048,
             max_models=1,
-            cost_per_hour=0.20,
-            cost_known=True,
+            host_priority=1,
             residencies=(
                 ready("baseline", 256, last_used_at=10),
                 ModelResidency("specialist", 714, ResidencyState.CACHED),
@@ -3952,8 +3950,7 @@ def test_planner_repacks_onto_a_materially_better_host_instead_of_cold_loading()
             "large",
             4_096,
             max_models=1,
-            cost_per_hour=0.80,
-            cost_known=True,
+            host_priority=10,
             cached=("specialist",),
         ),
     )
@@ -4022,7 +4019,6 @@ def test_planner_repacks_onto_a_materially_better_host_instead_of_cold_loading()
     assert {
         (item.model_id, item.node_id) for item in converged.assignments
     } == {("baseline", "small"), ("specialist", "medium")}
-    assert converged.hourly_cost == pytest.approx(0.25)
 
 
 def test_planner_uses_immediate_capacity_when_repack_gain_is_only_marginal():
@@ -4054,7 +4050,7 @@ def test_planner_uses_immediate_capacity_when_repack_gain_is_only_marginal():
             "small",
             512,
             max_models=1,
-            cost_per_hour=0.05,
+            host_priority=0,
             residencies=(
                 ModelResidency("baseline", 256, ResidencyState.CACHED),
             ),
@@ -4063,7 +4059,7 @@ def test_planner_uses_immediate_capacity_when_repack_gain_is_only_marginal():
             "medium",
             4_096,
             max_models=1,
-            cost_per_hour=0.20,
+            host_priority=0,
             residencies=(
                 ready("baseline", 256, last_used_at=10),
                 ModelResidency("specialist", 714, ResidencyState.CACHED),
@@ -4073,7 +4069,7 @@ def test_planner_uses_immediate_capacity_when_repack_gain_is_only_marginal():
             "large",
             4_096,
             max_models=1,
-            cost_per_hour=0.30,
+            host_priority=1,
             cached=("specialist",),
         ),
     )

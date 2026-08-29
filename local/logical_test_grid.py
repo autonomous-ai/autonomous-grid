@@ -55,7 +55,6 @@ def logical_resources(
     machine_index: int,
     machine_count: int,
     capacity_bytes: int | None = None,
-    cost_per_hour: float = 0.0,
 ) -> Callable[[], dict[str, Any]]:
     """Partition one machine's capacity instead of multiplying it by the logical host count."""
 
@@ -96,7 +95,6 @@ def logical_resources(
                 float(physical.get("compute_gflops") or 0) / machine_count,
             ),
             "failure_domain": f"logical-machine-{machine_index + 1}",
-            "cost_per_hour": cost_per_hour,
         }
 
     return collect
@@ -178,7 +176,6 @@ def run_worker(config_path: Path) -> int:
     media_port = int(cfg.get("media_port") or 22_201)
     text_machines = machines - int(include_comfyui)
     text_capacities_gib = tuple(float(item) for item in cfg.get("text_capacities_gib") or ())
-    text_costs_per_hour = tuple(float(item) for item in cfg.get("text_costs_per_hour") or ())
     if text_machines < 1:
         raise RuntimeError("a real logical Grid needs at least one text machine")
     model = str(cfg["model"])
@@ -319,9 +316,6 @@ def run_worker(config_path: Path) -> int:
                     machine_index=index,
                     machine_count=machines,
                     capacity_bytes=text_capacity_bytes[index],
-                    cost_per_hour=(
-                        text_costs_per_hour[index] if text_costs_per_hour else 0.0
-                    ),
                 ),
                 heartbeat_interval=0.25,
                 shutdown_drain_timeout=5.0,

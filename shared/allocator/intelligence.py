@@ -941,14 +941,6 @@ class WorkloadIntelligence:
         if placement_hints is None:
             return score
         hint = placement_hints.get(profile.model_id) or {}
-        try:
-            cost_per_hour = float(hint.get("cost_per_hour") or 0.0)
-        except (TypeError, ValueError, OverflowError):
-            cost_per_hour = 0.0
-        if math.isfinite(cost_per_hour) and cost_per_hour > 0:
-            # Quality and configured suitability remain dominant. This bounded term distinguishes
-            # similarly effective candidates by the cheapest node that can actually host them.
-            score -= min(0.10, 0.02 * math.log1p(cost_per_hour))
         score -= _placement_transition_penalty(hint)
         if hint.get("feasible_after_preemption") is True and not (
             hint.get("feasible_now") is True or hint.get("feasible") is True

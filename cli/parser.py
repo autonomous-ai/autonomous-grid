@@ -68,7 +68,6 @@ from .logical_test import (
     positive_seconds,
     positive_tokens,
     positive_gib_csv,
-    nonnegative_cost_csv,
     workload_model_binding,
     real_request_count,
     real_user_count,
@@ -274,13 +273,6 @@ def _add_logical_test(sub) -> None:
             "Logical usable-memory totals for text nodes; count must equal the number of text "
             "nodes and the physical total remains enforced."
         ),
-    )
-    start.add_argument(
-        "--text-costs-per-hour",
-        type=nonnegative_cost_csv,
-        default=(),
-        metavar="USD,...",
-        help="Logical hourly costs for text nodes, used by placement scoring.",
     )
     start.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     start.set_defaults(handler=cmd_test_start)
