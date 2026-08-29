@@ -647,9 +647,18 @@ class AllocatorController:
         served_artifact = canonical_sha256(served_artifact_sha256)
         direct_model = served_model or features.requested_model
         directly_observable = direct_model in self._observable_models
+        # Model binding belongs to the incoming request, not to the router's eventual fallback.
+        # An ``auto`` coding request that a ready generalist happens to serve is still unbound
+        # coding demand: retaining that signal is what lets the allocator provision a better
+        # specialist for later requests. At the same time, the served model receives ordinary
+        # direct capacity demand so a useful fallback can scale while the specialist warms.
+        portfolio_unbound = features.requested_model not in self._observable_models
         with self._demand_lock:
             # Close a profile-retirement race after acquiring the telemetry lock.
             directly_observable = direct_model in self._observable_models
+            portfolio_unbound = (
+                features.requested_model not in self._observable_models
+            )
             observable_artifact = self._observable_artifacts.get(served_model, "")
             if directly_observable:
                 self.demand.observe(
@@ -664,7 +673,7 @@ class AllocatorController:
                 features,
                 served_model=(served_model if served_model in self._observable_models else ""),
                 served_artifact_sha256=(served_artifact or observable_artifact),
-                portfolio_unbound=not directly_observable,
+                portfolio_unbound=portfolio_unbound,
                 service_seconds=service_seconds,
                 latency_ms=latency_ms,
                 queue_depth=queue_depth,

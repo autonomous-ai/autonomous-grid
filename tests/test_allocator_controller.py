@@ -124,6 +124,49 @@ def test_late_response_from_old_artifact_cannot_update_new_revision_evidence():
     assert evidence["quality_confidence"] == 0.0
 
 
+def test_router_fallback_preserves_unbound_workload_demand_for_specialist_selection():
+    controller = AllocatorController()
+    controller.put_profile(profile(model_id="general"))
+    controller.put_profile(
+        ModelProfile(
+            "coder",
+            8_000,
+            runtimes=("llama.cpp",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("coding", 1.0),),
+        )
+    )
+
+    controller.observe_lifecycle(
+        RequestFeatures("chat/completions", "auto", "coding"),
+        served_model="general",
+        service_seconds=2,
+        timestamp=10,
+    )
+
+    assert set(controller.demand.to_dict()["models"]) == {"general"}
+    assert set(controller.intelligence.unbound_demand.to_dict()["models"]) == {
+        "coding"
+    }
+
+
+def test_explicit_named_request_does_not_become_portfolio_demand():
+    controller = AllocatorController()
+    controller.put_profile(profile(model_id="general"))
+
+    controller.observe_lifecycle(
+        RequestFeatures("chat/completions", "general", "coding"),
+        served_model="general",
+        service_seconds=2,
+        timestamp=10,
+    )
+
+    assert set(controller.demand.to_dict()["models"]) == {"general"}
+    assert controller.intelligence.unbound_demand.to_dict()["models"] == {}
+
+
 def test_evaluation_rejects_explicit_artifact_mismatch_and_uses_current_revision():
     controller = AllocatorController()
     revision_a = "a" * 64
