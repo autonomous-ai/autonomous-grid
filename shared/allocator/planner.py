@@ -47,6 +47,7 @@ class PlannerPolicy:
     predictive_growth_limit: float = 2.0
     throttled_capacity_fraction: float = 0.5
     preserve_recent_residencies: bool = True
+    max_staged_preemptions: int = 64
 
     def __post_init__(self) -> None:
         if not 0 <= self.memory_headroom_fraction < 1:
@@ -78,6 +79,12 @@ class PlannerPolicy:
             raise ValueError(
                 f"performance_full_confidence_samples must be in [1, {MAX_COUNTER}]"
             )
+        if (
+            isinstance(self.max_staged_preemptions, bool)
+            or not isinstance(self.max_staged_preemptions, int)
+            or not 1 <= self.max_staged_preemptions <= MAX_COUNTER
+        ):
+            raise ValueError(f"max_staged_preemptions must be in [1, {MAX_COUNTER}]")
         if (
             not math.isfinite(self.latency_pressure_limit)
             or not math.isfinite(self.error_pressure_limit)
@@ -793,11 +800,16 @@ class PlacementPlanner:
         # lower-priority victims. The beneficiary remains unsatisfied this tick and is placed only
         # after later heartbeats prove that drain/unload actually released the resource.
         preempted_nodes: set[str] = set()
+        assignments_by_node: dict[str, list[PlacementAssignment]] = {}
+        for assignment in assignments:
+            assignments_by_node.setdefault(assignment.node_id, []).append(assignment)
         staged_domains = {
             model.model_id: set(assigned_domains.get(model.model_id, set()))
             for model in order
         }
         for beneficiary in order:
+            if len(preemptions) >= self.policy.max_staged_preemptions:
+                break
             if _placement_demand_urgency(
                 beneficiary,
                 forecast_by_model.get(beneficiary.model_id),
@@ -820,6 +832,8 @@ class PlacementPlanner:
                 *(None for _ in range(max(0, missing - len(pending_pins)))),
             ]
             for required_node_id in preemption_targets:
+                if len(preemptions) >= self.policy.max_staged_preemptions:
+                    break
                 staged = _stage_priority_preemption(
                     beneficiary,
                     node_list,
@@ -843,6 +857,10 @@ class PlacementPlanner:
                     existing_domains=staged_domains[beneficiary.model_id],
                     required_node_id=required_node_id,
                     excluded_nodes=preempted_nodes,
+                    max_victims=(
+                        self.policy.max_staged_preemptions - len(preemptions)
+                    ),
+                    assignments_by_node=assignments_by_node,
                 )
                 if not staged:
                     break
@@ -868,6 +886,8 @@ class PlacementPlanner:
             (item.node_id, item.model_id) for item in preemptions
         }
         for node in node_list:
+            if len(preemptions) >= self.policy.max_staged_preemptions:
+                break
             if node.max_models is None:
                 continue
             live = [item for item in node.residencies if not _adds_model_slot(item)]
@@ -912,7 +932,8 @@ class PlacementPlanner:
                     item.model_id,
                 ),
             )
-            for victim in removable[:excess]:
+            remaining_budget = self.policy.max_staged_preemptions - len(preemptions)
+            for victim in removable[: min(excess, remaining_budget)]:
                 preemption = PlacementPreemption(
                     node_id=node.node_id,
                     model_id=victim.model_id,
@@ -925,6 +946,8 @@ class PlacementPlanner:
         # a lowered host model ceiling. Keep the assignment winners, then evict only managed,
         # unpinned incumbents until every selected model's isolation contract is actually true.
         for node in node_list:
+            if len(preemptions) >= self.policy.max_staged_preemptions:
+                break
             selected = [item for item in assignments if item.node_id == node.node_id]
             protected_profiles = tuple(
                 profile_by_id[item.model_id]
@@ -975,6 +998,8 @@ class PlacementPlanner:
                 )
 
             while violates_selected_colocation():
+                if len(preemptions) >= self.policy.max_staged_preemptions:
+                    break
                 selected_models = {item.model_id for item in protected_profiles}
                 removable = sorted(
                     (
@@ -1547,14 +1572,17 @@ def _stage_priority_preemption(
     existing_domains: set[str],
     required_node_id: str | None,
     excluded_nodes: set[str],
+    max_victims: int,
+    assignments_by_node: dict[str, list[PlacementAssignment]],
 ) -> tuple[str, tuple[ModelResidency, ...]] | None:
-    """Remove desired incumbents only after proving a lower-priority staged eviction fits."""
+    """Prove a lower-priority eviction path, then return its bounded next wave."""
 
     candidates: list[
         tuple[
             tuple[int, float, int, int, str],
             NodeSnapshot,
             tuple[ModelResidency, ...],
+            tuple[PlacementAssignment, ...],
         ]
     ] = []
     for node in nodes:
@@ -1608,10 +1636,33 @@ def _stage_priority_preemption(
         if not victims:
             continue
 
-        simulated_assignments = list(assignments)
-        simulated_capacity = dict(capacity)
-        simulated_occupied = dict(occupied_models)
-        simulated_slots = dict(desired_model_slots)
+        simulated_assignments = list(assignments_by_node.get(node.node_id, ()))
+        simulated_capacity = {node.node_id: capacity[node.node_id]}
+        simulated_occupied = {node.node_id: occupied_models[node.node_id]}
+        simulated_slots = {node.node_id: desired_model_slots[node.node_id]}
+        # A prior bounded wave may already have freed part of this host. Do not let a fresh,
+        # lower-priority cold assignment immediately consume that progress and deadlock the next
+        # wave. Such an assignment is only planner intent, so it can be displaced without an
+        # actuator command or service interruption.
+        displaced_assignments = tuple(
+            item
+            for item in simulated_assignments
+            if _adds_model_slot(node.residency(item.model_id))
+            and (profile := profile_by_id.get(item.model_id)) is not None
+            and profile.priority < beneficiary.priority
+        )
+        for assignment in displaced_assignments:
+            simulated_assignments.remove(assignment)
+            residency = node.residency(assignment.model_id)
+            simulated_capacity[node.node_id] += _incremental_memory_mb(
+                residency,
+                assignment.memory_mb,
+            )
+            simulated_slots[node.node_id] -= 1
+            simulated_occupied[node.node_id] = max(
+                0,
+                simulated_occupied[node.node_id] - 1,
+            )
         selected: list[ModelResidency] = []
         for victim in victims:
             selected.append(victim)
@@ -1670,6 +1721,7 @@ def _stage_priority_preemption(
                     ),
                     node,
                     tuple(selected),
+                    displaced_assignments,
                 )
             )
             break
@@ -1684,7 +1736,31 @@ def _stage_priority_preemption(
         ]
         if new_domain_candidates:
             candidates = new_domain_candidates
-    _, selected_node, victims = min(candidates, key=lambda item: item[0])
+    _, selected_node, victims, displaced_assignments = min(
+        candidates,
+        key=lambda item: item[0],
+    )
+    for assignment in displaced_assignments:
+        assignments.remove(assignment)
+        assignments_by_node[selected_node.node_id].remove(assignment)
+        assigned_pairs.remove((assignment.model_id, selected_node.node_id))
+        residency = selected_node.residency(assignment.model_id)
+        capacity[selected_node.node_id] += _incremental_memory_mb(
+            residency,
+            assignment.memory_mb,
+        )
+        desired_model_slots[selected_node.node_id] -= 1
+        if _adds_model_slot(residency):
+            occupied_models[selected_node.node_id] = max(
+                0,
+                occupied_models[selected_node.node_id] - 1,
+            )
+        assigned_domains[assignment.model_id] = {
+            node.failure_domain or node.node_id
+            for node in nodes
+            if (assignment.model_id, node.node_id) in assigned_pairs
+        }
+    victims = victims[:max_victims]
     for victim in victims:
         assignment = next(
             (
@@ -1697,6 +1773,7 @@ def _stage_priority_preemption(
         )
         if assignment is not None:
             assignments.remove(assignment)
+            assignments_by_node[selected_node.node_id].remove(assignment)
             assigned_pairs.remove((victim.model_id, selected_node.node_id))
             capacity[selected_node.node_id] += _incremental_memory_mb(
                 victim,

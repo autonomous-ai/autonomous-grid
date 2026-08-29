@@ -79,7 +79,9 @@ model ID before its peers receive a baseline. If lower-priority managed residenc
 all compatible capacity, Grid emits an explicit staged preemption: it first drains and unloads the
 lowest-priority sufficient victim set, continues reporting the important model as
 unsatisfied, and places it only after a later heartbeat proves that memory is actually free. The
-same mechanism converges a host whose model ceiling was lowered below its live inventory. External,
+same mechanism converges a host whose model ceiling was lowered below its live inventory. Each plan
+stages at most 64 individual evictions by default; larger changes converge over later heartbeats
+instead of producing an unbounded operational wave. External,
 manual, pinned, and minimum-residency-protected work is never bypassed. Correlation-only predictive
 demand may use spare capacity but cannot trigger a destructive preemption; a configured baseline,
 pin, or direct request/queue/SLO/error signal is required. Among equally low-priority choices, the

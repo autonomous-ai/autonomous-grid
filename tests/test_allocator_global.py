@@ -955,6 +955,10 @@ def test_allocator_models_validate_impossible_values():
         PlannerPolicy(performance_full_confidence_samples=0)
     with pytest.raises(ValueError, match="performance_full_confidence_samples"):
         PlannerPolicy(performance_full_confidence_samples=True)
+    with pytest.raises(ValueError, match="max_staged_preemptions"):
+        PlannerPolicy(max_staged_preemptions=0)
+    with pytest.raises(ValueError, match="max_staged_preemptions"):
+        PlannerPolicy(max_staged_preemptions=True)
     with pytest.raises(ValueError, match="non-negative"):
         PlannerPolicy(max_predictive_lookahead_seconds=-1)
     with pytest.raises(ValueError, match="predictive_growth_limit"):
@@ -2177,6 +2181,75 @@ def test_higher_priority_model_stages_managed_incumbent_preemption():
     ready_plan = planner.plan((available,), (batch, critical), now=12)
     assert ready_plan.nodes_for("critical") == ("n",)
     assert ready_plan.preemptions == ()
+
+
+def test_priority_preemption_budget_progressively_frees_a_multi_victim_host():
+    planner = PlacementPlanner(
+        PlannerPolicy(memory_headroom_fraction=0, max_staged_preemptions=1)
+    )
+    critical = model("critical", 16_000, priority=1_000)
+    incumbents = (
+        model("batch-a", 8_000, priority=10),
+        model("batch-b", 8_000, priority=10),
+    )
+    machine = node(
+        "n",
+        16_000,
+        residencies=(ready("batch-a", 8_000), ready("batch-b", 8_000)),
+    )
+
+    first = planner.plan((machine,), (*incumbents, critical), now=10)
+    assert first.preempted_pairs == frozenset({("n", "batch-a")})
+    assert first.nodes_for("critical") == ()
+
+    one_released = replace(machine, residencies=(ready("batch-b", 8_000),))
+    second = planner.plan((one_released,), (*incumbents, critical), now=11)
+    assert second.preempted_pairs == frozenset({("n", "batch-b")})
+    assert second.nodes_for("critical") == ()
+
+    available = replace(machine, residencies=())
+    converged = planner.plan((available,), (*incumbents, critical), now=12)
+    assert converged.preemptions == ()
+    assert converged.nodes_for("critical") == ("n",)
+
+
+def test_priority_preemption_budget_bounds_large_fleet_wave_deterministically():
+    machines = tuple(
+        node(
+            f"n{index:03d}",
+            8_000,
+            max_models=1,
+            residencies=(ready("batch", 8_000),),
+        )
+        for index in range(256)
+    )
+    profiles = (
+        model(
+            "batch",
+            8_000,
+            min_replicas=256,
+            max_replicas=256,
+            priority=10,
+        ),
+        model(
+            "critical",
+            8_000,
+            min_replicas=256,
+            max_replicas=256,
+            priority=1_000,
+        ),
+    )
+    planner = PlacementPlanner(
+        PlannerPolicy(memory_headroom_fraction=0, max_staged_preemptions=16)
+    )
+
+    forward = planner.plan(machines, profiles, now=10)
+    reversed_input = planner.plan(tuple(reversed(machines)), profiles, now=10)
+
+    expected = frozenset((f"n{index:03d}", "batch") for index in range(16))
+    assert len(forward.preemptions) == 16
+    assert forward.preempted_pairs == expected
+    assert reversed_input.preemptions == forward.preemptions
 
 
 def test_priority_preemption_prefers_the_cheapest_learned_warm_back_cost():
