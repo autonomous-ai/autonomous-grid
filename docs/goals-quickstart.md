@@ -133,7 +133,9 @@ does not block the parent, and Grid merges its branch only if it completes clean
 optional branch conflicts, Grid skips it, records the conflicting paths on the child relation, and
 includes that fact in the parent's next handoff. Each child is an ordinary
 Goal conversation on the same distributed task table, so other machines can claim children
-concurrently; a child may use Claude even though the spawning parent uses Codex.
+concurrently. The spawn action can select both a different harness and a different Grid-served
+model for the child—for example, a Codex parent can delegate a bounded specialist task to Claude on
+a cheaper model. If omitted, the child model inherits the parent's model.
 
 The parent enters `waiting_children` after its turn checkpoints. It receives no new turn until every
 child is terminal and all required children are complete, then resumes with every child id, status,

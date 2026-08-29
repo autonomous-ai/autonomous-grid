@@ -706,6 +706,7 @@ def test_parent_codex_spawns_claude_child_then_codex_fans_it_in(
                                     else None)(relay_client.get_goal(
                                         relay, owner_token, child_id)), timeout=75)
     assert child_done, f"Claude child did not complete; B output:\n{node_b.output()}"
+    assert child_done["model"] == "fake-grid-child-model"
     child_turns = _tasks(relay, owner_token, project_id, child_id)
     assert len(child_turns) == 1
     assert child_turns[0]["provider_id"] == node_b.node_id

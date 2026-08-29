@@ -223,6 +223,7 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
             result = call_tool("grid_spawn_subgoal", {
                 "objective": "Write the child instructions",
                 "done_when": "README.md exists",
+                "model": "fake-grid-child-model",
                 "agents": ["claude"],
                 "evals": [{"type": "file", "name": "instructions", "path": "README.md"}],
                 "token_budget": 2_000,

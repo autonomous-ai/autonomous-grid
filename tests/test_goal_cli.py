@@ -481,7 +481,7 @@ def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
 
     record = {
         "schema_version": 1,
-        "goal": {"status": "complete", "evals": []},
+        "goal": {"status": "complete", "model": "grid-model", "evals": []},
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
         "turns": [{
             "id": "turn-1", "attempt": 1, "state": "completed", "agent_kind": "codex",
@@ -500,6 +500,11 @@ def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
         "requests": 1,
     })
     assert _verify_evidence(record, require_inference=True) == []
+
+    record["inference"][0]["model"] = "wrong-model"
+    failures = _verify_evidence(record, require_inference=True)
+    assert any("not the Goal's requested model" in item for item in failures)
+    assert any("no model requests attributed" in item for item in failures)
 
 
 def test_goal_status_shows_budget_blocker_and_distributed_children(capsys):

@@ -260,6 +260,15 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     evals = goal.get("evals") if isinstance(goal.get("evals"), list) else []
     runs = record.get("eval_runs") if isinstance(record.get("eval_runs"), list) else []
     inference = record.get("inference") if isinstance(record.get("inference"), list) else []
+    requested_model = goal.get("model")
+    turn_ids = {turn.get("id") for turn in turns if isinstance(turn, dict)}
+    if isinstance(requested_model, str) and requested_model:
+        for item in inference:
+            if (isinstance(item, dict) and item.get("turn_id") in turn_ids
+                    and item.get("model") != requested_model):
+                failures.append(
+                    f"turn {item.get('turn_id')} used Grid model {item.get('model')!r}, not the "
+                    f"Goal's requested model {requested_model!r}")
     if require_inference:
         for index, turn in enumerate(turns, 1):
             if not isinstance(turn, dict):
@@ -268,8 +277,9 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                      and item.get("turn_id") == turn.get("id")
                      and isinstance(item.get("requests"), int)
                      and not isinstance(item.get("requests"), bool)
-                     and item["requests"] > 0
-                     and item.get("model") and item.get("provider_node_id")]
+                    and item["requests"] > 0
+                    and item.get("model") and item.get("provider_node_id")
+                    and (not requested_model or item.get("model") == requested_model)]
             if not usage:
                 failures.append(
                     f"turn {index} has no model requests attributed to a Grid inference node")

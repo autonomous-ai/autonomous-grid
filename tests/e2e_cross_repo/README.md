@@ -57,7 +57,7 @@ real.
 | Cross-harness eval repair | A Codex -> B Claude -> C Codex -> D Claude | C nominates plausible but broken interaction | D restores B's Claude session across Codex, consumes failed eval evidence, and repairs it |
 | Image artifact | B Claude polls; A Codex executes | Goal requires `image_generation` | Ineligible node spends no attempt; independent PNG eval passes |
 | Support reply | A polls; B Codex -> C Codex | Origin restriction, crash after API commit, failed first eval | One business side effect, stable idempotency key, repair turn passes |
-| Required child | A parent; B Claude child; C parent | Parent waits while child runs | Independently evaluated child commit fans into parent exactly once |
+| Required child | A parent model; B Claude child specialist model; C parent | Parent waits while child runs | Child model/harness selection survives the tool bridge; evaluated child commit fans in once |
 | Optional child | A parent; B child; C parent | Child returns native `failed` verdict | Failure remains evidence and does not block parent completion |
 
 The native-crash case starts each provider in one-claim mode so A withdraws after handing off its
