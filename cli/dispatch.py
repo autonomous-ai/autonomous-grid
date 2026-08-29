@@ -51,6 +51,9 @@ AGNOSTIC = frozenset({
     # `stt` hits the account-level control plane — there's no "this grid" for it to route
     # through, so it is mode-blind too.
     "stt",
+    # A single-machine development fixture is deliberately independent of the selected local or
+    # remote production mode. It owns its isolated endpoint and never mutates either grid catalog.
+    "test",
 })
 
 # Mode-gated commands: real local behaviour today; a clear stub in remote mode until later slices

@@ -50,6 +50,14 @@ from .grid import (
 )
 from .credential import cmd_credential
 from .launch import cmd_launch
+from .logical_test import (
+    cmd_test_start,
+    cmd_test_status,
+    cmd_test_stop,
+    cmd_test_watch,
+    logical_machine_count,
+    positive_seconds,
+)
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from . import project_arg
@@ -150,11 +158,69 @@ def build_parser() -> argparse.ArgumentParser:
     _add_engine_setup(sub)
     _add_launch(sub)
     _add_allocator(sub)
+    _add_logical_test(sub)
     _add_train(sub)
     _add_credential(sub)
     _add_stt(sub)
 
     return parser
+
+
+def _add_logical_test(sub) -> None:
+    test = sub.add_parser(
+        "test",
+        help="Run an isolated logical-machine Grid on this computer",
+    )
+    test_sub = test.add_subparsers(dest="test_command", required=True)
+
+    start = test_sub.add_parser("start", help="Start a persistent logical test Grid")
+    start.add_argument(
+        "--machines",
+        type=logical_machine_count,
+        default=4,
+        metavar="N",
+        help=f"Number of logical machines (default 4; maximum {32}).",
+    )
+    start.add_argument(
+        "--model",
+        default="SmolLM2-135M-Instruct-Q3_K_M.gguf",
+        help="Cached GGUF filename to load on every logical machine.",
+    )
+    start.add_argument("--port", type=int, default=22_100, help="Grid control/API port.")
+    start.add_argument(
+        "--engine-port-base",
+        type=int,
+        default=22_110,
+        help="Beginning of the non-overlapping logical llama.cpp port ranges.",
+    )
+    start.add_argument(
+        "--timeout",
+        type=positive_seconds,
+        default=120.0,
+        help="Seconds to wait for every real model replica to become ready.",
+    )
+    start.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    start.set_defaults(handler=cmd_test_start)
+
+    status = test_sub.add_parser("status", help="Show logical hosts and ready replicas")
+    status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    status.set_defaults(handler=cmd_test_status)
+
+    watch = test_sub.add_parser(
+        "watch",
+        help="Follow model placement and allocator action transitions",
+    )
+    watch.add_argument(
+        "--interval",
+        type=positive_seconds,
+        default=0.5,
+        help="Seconds between status polls (default 0.5).",
+    )
+    watch.set_defaults(handler=cmd_test_watch)
+
+    stop = test_sub.add_parser("stop", help="Drain and stop the logical test Grid")
+    stop.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    stop.set_defaults(handler=cmd_test_stop)
 
 
 def _add_allocator(sub) -> None:

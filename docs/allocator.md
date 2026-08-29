@@ -699,6 +699,34 @@ the restart grace period prevents a temporarily incomplete fleet view from causi
 
 ### Single-machine logical fleet test
 
+For interactive development, start a persistent Grid with any number of logical machines. Each
+machine gets a stable host id, failure domain, state file, credential, capacity share, and real
+llama.cpp child while the Grid API remains available until explicitly stopped:
+
+```bash
+uv run grid test start --machines 4
+uv run grid test status
+uv run grid test watch
+uv run grid --local models http://127.0.0.1:22100
+uv run grid --local chat --grid http://127.0.0.1:22100 \
+  -m SmolLM2-135M-Instruct-Q3_K_M.gguf 'Reply with OK'
+curl http://127.0.0.1:22100/v1/models
+curl http://127.0.0.1:22100/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"SmolLM2-135M-Instruct-Q3_K_M.gguf","messages":[{"role":"user","content":"Reply with OK"}],"max_tokens":8}'
+uv run grid test stop
+```
+
+`--machines N` accepts 1–32 logical machines; practical limits are the physical machine's memory
+and process capacity. Use `--model`, `--port`, and `--engine-port-base` to run a different cached
+GGUF or avoid local port conflicts. Starting is idempotent for matching settings, and status can be
+emitted as JSON. `watch` follows residency transitions and allocator command outcomes without
+stopping the Grid when you press Ctrl-C. The ordinary shipped CLI can address the test endpoint by
+URL (`--local` makes that explicit even when remote mode is active), including `grid chat`,
+`grid models`, and `grid allocator status --grid http://127.0.0.1:22100`. The start output names the
+owner-only token file for allocator mutations. The fixture stays isolated from the active local or
+remote Grid configuration.
+
 Before a physical multi-machine rollout, the development harness can partition one Mac into
 isolated logical hosts with separate host IDs, failure domains, durable state files, credentials,
 port ranges, capacity shares, and real llama.cpp children:

@@ -53,8 +53,8 @@ from .grid import (
     cmd_up,
     cmd_version,
 )
-from .device import cmd_device_info
 from .launch import cmd_launch
+from .logical_test import cmd_test_start, cmd_test_status, cmd_test_stop, cmd_test_watch
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_pull, cmd_rm
 from .parser import build_parser
@@ -100,6 +100,10 @@ __all__ = [
     "cmd_rm",
     "cmd_mode",
     "cmd_use",
+    "cmd_test_start",
+    "cmd_test_status",
+    "cmd_test_stop",
+    "cmd_test_watch",
     "cmd_login",
     "cmd_logout",
     "cmd_sync",
