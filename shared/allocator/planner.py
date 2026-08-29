@@ -758,6 +758,112 @@ class PlacementPlanner:
             )
             return True
 
+        def place_isolated_ready_replicas(model: ModelProfile) -> None:
+            """Bulk-place ready residencies whose occupied one-model hosts are non-fungible.
+
+            These hosts cannot accept another model until their incumbent is explicitly evicted,
+            so repeatedly rediscovering the same ready set cannot affect fairness or repacking. A
+            unique, previously unused failure domain per candidate also keeps the score ordering
+            static; the selected assignment still receives its exact current-domain score.
+            """
+
+            goal = placement_goal(model)
+            placed = sum(
+                item.model_id == model.model_id for item in assignments
+            )
+            missing = max(0, goal - placed)
+            if not missing:
+                return
+            domains = assigned_domains.setdefault(model.model_id, set())
+            candidates: list[tuple[float, str, NodeSnapshot]] = []
+            candidate_domains: list[str] = []
+            for node in node_list:
+                if node.max_models != 1:
+                    continue
+                if (model.model_id, node.node_id) in assigned_pairs:
+                    continue
+                residency = node.residency(model.model_id)
+                if (
+                    residency is None
+                    or residency.state != ResidencyState.READY
+                    or not model.matches_artifact(residency)
+                    or sum(not _adds_model_slot(item) for item in node.residencies) != 1
+                    or _ineligible_reason(
+                        node,
+                        model,
+                        timestamp,
+                        self.policy,
+                        for_new=False,
+                    )
+                    is not None
+                    or not _fits(
+                        node,
+                        model,
+                        capacity,
+                        occupied_models,
+                        desired_model_slots,
+                        assignments,
+                        profile_by_id,
+                    )
+                ):
+                    continue
+                domain = node.failure_domain or node.node_id
+                candidate_domains.append(domain)
+                score, _ = _candidate_score(
+                    node,
+                    model,
+                    capacity[node.node_id],
+                    domains,
+                    self.policy,
+                    now=timestamp,
+                    need_new_domain=False,
+                    startup_seconds=startup_by_pair,
+                )
+                candidates.append((score, node.node_id, node))
+            if (
+                len(candidate_domains) != len(set(candidate_domains))
+                or set(candidate_domains).intersection(domains)
+            ):
+                return
+            for _, _, node in sorted(
+                candidates,
+                key=lambda item: (-item[0], item[1]),
+            )[:missing]:
+                need_new_domain = len(domains) < min(
+                    model.min_failure_domains,
+                    desired_by_model[model.model_id],
+                )
+                score, reasons = _candidate_score(
+                    node,
+                    model,
+                    capacity[node.node_id],
+                    domains,
+                    self.policy,
+                    now=timestamp,
+                    need_new_domain=need_new_domain,
+                    startup_seconds=startup_by_pair,
+                )
+                _place(
+                    _assignment(
+                        model,
+                        node,
+                        index=placed,
+                        score=score,
+                        reasons=reasons,
+                    ),
+                    node,
+                    assignments,
+                    assigned_pairs,
+                    domains,
+                    capacity,
+                    occupied_models,
+                    desired_model_slots,
+                )
+                placed += 1
+
+        for model in order:
+            place_isolated_ready_replicas(model)
+
         priorities = sorted({model.priority for model in order}, reverse=True)
         for priority in priorities:
             priority_models = [model for model in order if model.priority == priority]
@@ -1544,14 +1650,13 @@ def _fits(
     incremental_mb = _incremental_memory_mb(residency, model.memory_for(node.runtimes))
     if capacity[node.node_id] < incremental_mb:
         return False
-    if not _colocation_allowed(node, model, assignments, profile_by_id):
-        return False
     adds_slot = _adds_model_slot(residency)
-    if node.max_models is None:
-        return True
-    if desired_model_slots[node.node_id] >= node.max_models:
-        return False
-    return not adds_slot or occupied_models[node.node_id] < node.max_models
+    if node.max_models is not None:
+        if desired_model_slots[node.node_id] >= node.max_models:
+            return False
+        if adds_slot and occupied_models[node.node_id] >= node.max_models:
+            return False
+    return _colocation_allowed(node, model, assignments, profile_by_id)
 
 
 def _stage_priority_preemption(
@@ -1814,6 +1919,15 @@ def _colocation_allowed(
     assignments: Iterable[PlacementAssignment],
     profile_by_id: Mapping[str, ModelProfile],
 ) -> bool:
+    if (
+        not model.max_colocated_models
+        and not model.colocation_excludes
+        and not any(
+            profile.max_colocated_models or profile.colocation_excludes
+            for profile in profile_by_id.values()
+        )
+    ):
+        return True
     other_models = {
         residency.model_id
         for residency in node.residencies

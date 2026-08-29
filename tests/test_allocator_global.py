@@ -2252,6 +2252,37 @@ def test_priority_preemption_budget_bounds_large_fleet_wave_deterministically():
     assert reversed_input.preemptions == forward.preemptions
 
 
+def test_isolated_ready_bulk_placement_matches_general_scoring_exactly():
+    general_nodes = tuple(
+        node(
+            f"n{index:02d}",
+            8_000,
+            domain=f"rack-{index}",
+            max_models=None,
+            residencies=(ready("batch", 8_000),),
+            active_requests=index % 4,
+            max_concurrency=4,
+            queue_depth=index % 3,
+            cost_per_hour=index / 100,
+        )
+        for index in range(32)
+    )
+    isolated_nodes = tuple(replace(item, max_models=1) for item in general_nodes)
+    profile = model(
+        "batch",
+        8_000,
+        min_replicas=20,
+        max_replicas=20,
+        min_failure_domains=4,
+    )
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+
+    general = planner.plan(general_nodes, (profile,), now=10)
+    optimized = planner.plan(isolated_nodes, (profile,), now=10)
+
+    assert optimized.assignments == general.assignments
+
+
 def test_priority_preemption_prefers_the_cheapest_learned_warm_back_cost():
     batch = model(
         "batch",
