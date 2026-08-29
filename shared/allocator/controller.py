@@ -19,6 +19,7 @@ from typing import Any
 
 from shared import jsonio
 from shared.allocator.demand import DemandTracker
+from shared.allocator.intelligence import RequestFeatures, WorkloadIntelligence
 from shared.allocator.models import (
     SCHEMA_VERSION,
     ActionKind,
@@ -69,6 +70,7 @@ class AllocatorController:
         self.planner = PlacementPlanner(planner_policy)
         self.reconciler = Reconciler(reconcile_policy)
         self.demand = DemandTracker()
+        self.intelligence = WorkloadIntelligence()
         self.state_path = state_path
         self.max_history = max_history
         self.membership_recovery_grace_seconds = float(membership_recovery_grace_seconds)
@@ -197,6 +199,54 @@ class AllocatorController:
                 timestamp=timestamp,
             )
             return True
+
+    def observe_lifecycle(
+        self,
+        features: RequestFeatures,
+        *,
+        served_model: str = "",
+        service_seconds: float,
+        latency_ms: float | None = None,
+        queue_depth: int = 0,
+        error: bool = False,
+        output_units: int = 0,
+        quality: float | None = None,
+        timestamp: float | None = None,
+    ) -> bool:
+        """Observe one completed request independently of any router implementation.
+
+        Configured named models retain the existing direct scaling signal. Unknown/reserved model
+        names additionally become portfolio-unbound workload pressure, allowing an inactive but
+        configured capable model to receive a conservative canary placement at planning time.
+        """
+
+        direct_model = served_model or features.requested_model
+        directly_observable = direct_model in self._observable_models
+        with self._demand_lock:
+            # Close a profile-retirement race after acquiring the telemetry lock.
+            directly_observable = direct_model in self._observable_models
+            if directly_observable:
+                self.demand.observe(
+                    direct_model,
+                    service_seconds=service_seconds,
+                    latency_ms=latency_ms,
+                    queue_depth=queue_depth,
+                    errors=int(error),
+                    timestamp=timestamp,
+                )
+            self.intelligence.observe(
+                features,
+                served_model=(served_model if served_model in self._observable_models else ""),
+                portfolio_unbound=not directly_observable,
+                service_seconds=service_seconds,
+                latency_ms=latency_ms,
+                queue_depth=queue_depth,
+                error=error,
+                output_units=output_units,
+                quality=quality,
+                timestamp=timestamp,
+            )
+        return True
 
     def tick(
         self,
@@ -596,6 +646,13 @@ class AllocatorController:
             startup_estimates, startup_samples = self._learned_warm_estimates(
                 now=timestamp
             )
+            with self._demand_lock:
+                workload_forecasts = self.intelligence.workload_forecasts(now=timestamp)
+                portfolio_projections = self.intelligence.projections(
+                    self.profiles,
+                    now=timestamp,
+                )
+                model_workload_outcomes = self.intelligence.outcomes
             return {
                 "schema_version": SCHEMA_VERSION,
                 "mode": self.mode.value,
@@ -613,6 +670,14 @@ class AllocatorController:
                 ],
                 "retiring_models": sorted(self._retiring),
                 "forecasts": [asdict(item) for item in forecasts],
+                "workload_forecasts": [
+                    {**asdict(item), "workload": item.model_id}
+                    for item in workload_forecasts
+                ],
+                "portfolio_projections": list(portfolio_projections),
+                "model_workload_outcomes": [
+                    asdict(item) for item in model_workload_outcomes
+                ],
                 "learned_warm_seconds": [
                     {
                         "node_id": node_id,
@@ -678,7 +743,13 @@ class AllocatorController:
             model_id for model_id in self._profiles if model_id not in self._retiring
         )
         with self._demand_lock:
-            return self.demand.forecasts(active_models, now=now)
+            direct = self.demand.forecasts(active_models, now=now)
+            profiles = tuple(self._profiles[model_id] for model_id in active_models)
+            return self.intelligence.portfolio_forecasts(
+                profiles,
+                direct,
+                now=now,
+            )
 
     def _learned_warm_estimates(
         self,
@@ -1263,6 +1334,7 @@ class AllocatorController:
             return
         with self._demand_lock:
             demand = self.demand.to_dict()
+            intelligence = self.intelligence.to_dict()
         payload = {
             "schema_version": SCHEMA_VERSION,
             "mode": self.mode.value,
@@ -1277,6 +1349,7 @@ class AllocatorController:
             "profiles": [profile.to_dict() for profile in self.profiles],
             "retiring_models": sorted(self._retiring),
             "demand": demand,
+            "intelligence": intelligence,
             "history": [_record_dict(item) for item in self._history],
             "commands": [_action_dict(item) for item in self._commands.values()],
             "delivered_command_ids": sorted(self._delivered_command_ids),
@@ -1463,6 +1536,9 @@ class AllocatorController:
         demand = value.get("demand")
         if demand:
             self.demand = DemandTracker.from_dict(demand)
+        intelligence = value.get("intelligence")
+        if intelligence:
+            self.intelligence = WorkloadIntelligence.from_dict(intelligence)
         self._refresh_observable_models_locked()
         self._prune_unobservable_demand()
         self._history = [_record_from_dict(row) for row in value.get("history") or ()]

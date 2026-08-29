@@ -262,7 +262,7 @@ def test_request_demand_marks_allocator_dirty_for_an_event_driven_tick(tmp_path)
     assert app.state.allocator_dirty_revision == before + 1
 
 
-def test_unconfigured_model_names_do_not_create_persisted_demand_series(tmp_path):
+def test_unconfigured_model_names_create_only_bounded_workload_demand(tmp_path):
     app, client, _ = _app(tmp_path)
     before = app.state.allocator_dirty_revision
 
@@ -272,8 +272,10 @@ def test_unconfigured_model_names_do_not_create_persisted_demand_series(tmp_path
     )
 
     assert response.status_code == 503
-    assert app.state.allocator_dirty_revision == before
+    assert app.state.allocator_dirty_revision == before + 1
     assert app.state.allocator.demand.to_dict()["models"] == {}
+    workload_models = app.state.allocator.intelligence.unbound_demand.to_dict()["models"]
+    assert set(workload_models) == {"general"}
 
 
 def test_automatic_commands_are_visible_only_to_authenticated_host(tmp_path):

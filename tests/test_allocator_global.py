@@ -16,8 +16,11 @@ from shared.allocator.models import (
     ModelResidency,
     NodeSnapshot,
     NodeState,
+    PlacementAssignment,
+    PlacementPlan,
     PlacementPreemption,
     ResidencyState,
+    UnsatisfiedConstraint,
 )
 from shared.allocator.planner import (
     PlacementPlanner,
@@ -1458,6 +1461,48 @@ def test_observed_demand_is_placed_before_inferred_only_prewarm():
 
     assert plan.nodes_for("z-observed") == ("only",)
     assert plan.nodes_for("a-inferred") == ()
+
+
+def test_observed_service_fills_free_fleet_before_inferred_canary():
+    inferred = model("inferred", min_replicas=0, max_replicas=4)
+    observed = model("observed", min_replicas=1, max_replicas=4)
+    forecasts = (
+        DemandForecast(
+            "inferred",
+            requests_per_minute=240,
+            offered_concurrency=4,
+            correlated_requests_per_minute=240,
+            correlation_confidence=1,
+            correlation_sources=("workload:coding",),
+            updated_at=10,
+        ),
+        DemandForecast(
+            "observed",
+            requests_per_minute=240,
+            observed_requests_per_minute=240,
+            offered_concurrency=4,
+            updated_at=10,
+        ),
+    )
+    machines = tuple(
+        node(
+            f"n-{index}",
+            capacity_mb=8_000,
+            cached=("inferred", "observed"),
+            max_models=1,
+        )
+        for index in range(4)
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        machines,
+        (inferred, observed),
+        forecasts,
+        now=10,
+    )
+
+    assert plan.nodes_for("observed") == ("n-0", "n-1", "n-2", "n-3")
+    assert plan.nodes_for("inferred") == ()
 
 
 def test_required_baseline_is_placed_before_burst_capacity_at_equal_priority():
@@ -3091,6 +3136,102 @@ def test_correlation_only_prediction_cannot_preempt_live_observed_service():
     assert observed.preempted_pairs == frozenset({("n", "batch")})
 
 
+def test_direct_demand_reclaims_same_priority_speculative_canary():
+    speculative = model(
+        "speculative",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+        priority=100,
+        min_residency_seconds=0,
+    )
+    direct = model(
+        "direct",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+        priority=100,
+        min_residency_seconds=0,
+    )
+    machine = node(
+        "n",
+        8_000,
+        residencies=(ready("speculative", 8_000),),
+        max_models=1,
+    )
+    forecasts = (
+        DemandForecast(
+            "speculative",
+            requests_per_minute=60,
+            offered_concurrency=1,
+            correlated_requests_per_minute=60,
+            correlation_confidence=1,
+            correlation_sources=("workload:coding",),
+            updated_at=10,
+        ),
+        DemandForecast(
+            "direct",
+            requests_per_minute=60,
+            offered_concurrency=1,
+            observed_requests_per_minute=60,
+            updated_at=10,
+        ),
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        (speculative, direct),
+        forecasts,
+        now=10,
+    )
+
+    assert plan.preempted_pairs == frozenset({("n", "speculative")})
+    assert plan.preemptions[0].for_model_id == "direct"
+
+
+def test_same_priority_baseline_does_not_preempt_live_direct_service():
+    baseline = model(
+        "baseline",
+        8_000,
+        min_replicas=1,
+        max_replicas=1,
+        priority=100,
+        min_residency_seconds=0,
+    )
+    direct = model(
+        "direct",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+        priority=100,
+        min_residency_seconds=0,
+    )
+    machine = node(
+        "n",
+        8_000,
+        residencies=(ready("direct", 8_000),),
+        max_models=1,
+    )
+    forecast = DemandForecast(
+        "direct",
+        requests_per_minute=60,
+        observed_requests_per_minute=60,
+        offered_concurrency=1,
+        updated_at=10,
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        (baseline, direct),
+        (forecast,),
+        now=10,
+    )
+
+    assert plan.preemptions == ()
+    assert plan.nodes_for("direct") == ("n",)
+    assert any(item.model_id == "baseline" for item in plan.unsatisfied)
+
+
 def test_priority_preemption_preserves_ownership_and_minimum_residency():
     critical = model(
         "critical",
@@ -3532,6 +3673,51 @@ def test_mutation_governor_starts_direct_demand_before_speculative_prewarm():
     assert [(item.kind, item.model_id) for item in result.executable_actions] == [
         (ActionKind.WARM, "direct")
     ]
+
+
+def test_reconciler_suppresses_speculative_warm_during_service_shortfall():
+    machines = [
+        node("a-direct", cached=("direct",), max_models=1),
+        node("z-speculative", cached=("speculative",), max_models=1),
+    ]
+    profiles = [
+        model("direct", min_replicas=0, max_replicas=2),
+        model("speculative", min_replicas=0, max_replicas=2),
+    ]
+    plan = PlacementPlan(
+        generation="test",
+        created_at=10,
+        assignments=(
+            PlacementAssignment("direct", "a-direct", 8_000, 0, 1),
+            PlacementAssignment("speculative", "z-speculative", 8_000, 0, 1),
+        ),
+        desired_replicas=(("direct", 2), ("speculative", 2)),
+        unsatisfied=(
+            UnsatisfiedConstraint(
+                "direct",
+                "insufficient_capacity",
+                "Placed 1 of 2 desired replicas",
+                1,
+            ),
+        ),
+        model_urgencies=(("direct", 2), ("speculative", 1)),
+    )
+
+    result = Reconciler().reconcile(
+        plan,
+        machines,
+        profiles,
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+
+    assert [(item.kind, item.model_id) for item in result.executable_actions] == [
+        (ActionKind.WARM, "direct")
+    ]
+    assert any(
+        item.model_id == "speculative" and item.code == "service_capacity_unsatisfied"
+        for item in result.deferred
+    )
 
 
 def test_mutation_governor_prefers_fast_cached_start_within_service_class():

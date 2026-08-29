@@ -33,6 +33,32 @@ request counts, latency, queues          host telemetry and local override
        heartbeat actual state + acknowledgements
 ```
 
+### Proactive observation and portfolio planning
+
+The router and allocator have separate jobs. The router selects one ready engine for one live
+request. It never tells the allocator what to provision. The allocator independently observes the
+ordinary request lifecycle at the Grid boundary and changes future supply across the fleet.
+
+For every completed or failed request, Grid derives bounded features in memory: endpoint family,
+requested and served model, text/image/video modality, approximate input and output units, one of a
+small configured workload vocabulary, service time, queue pressure, and outcome. Raw prompts,
+images, tool arguments, responses, API keys, and user identities are not retained. Observation is
+best effort and cannot delay or fail inference.
+
+The controller keeps direct named-model pressure separate from workload demand. Named-model traffic
+scales that model normally. Unbound or automatic traffic contributes to a workload forecast such as
+coding, research, design, image, video, embedding, or general language work. At planning time, the
+allocator projects sustained workload demand onto configured models using each profile's workload
+scores, compatibility and resource cost, cold-start time, and measured outcomes. This lets an
+inactive specialist receive a bounded canary without creating a loaded-only feedback loop.
+
+Counterfactual portfolio demand is deliberately weaker than direct evidence: it may fill spare
+capacity but cannot evict a baseline or a directly demanded model. Workload-wide latency, queues,
+and errors remain workload evidence and are never copied into a candidate model as if that model
+had served the work. If direct demand later needs the hosts, the normal drain and unload guards
+reclaim the canary first. See [ADR 0039](adr/0039-the-allocator-observes-work-it-does-not-ask-the-router.md)
+for the control-loop boundary.
+
 ### Global placement loop
 
 The global loop consumes:
@@ -542,6 +568,8 @@ budget for one replica, not the file's compressed size:
 grid allocator model set <model.gguf> \
   --memory-mb 12000 \
   --artifact-sha256 <64-hex-digest> \
+  --workload-score coding=1 \
+  --workload-score research=.8 \
   --max-colocated-models 1 \
   --colocation-exclude <interfering-model.gguf> \
   --min-replicas 1 \
@@ -550,8 +578,10 @@ grid allocator model set <model.gguf> \
 ```
 
 The profile command also accepts repeated `--runtime`, `--backend`, `--required-tag`,
-`--forbidden-tag`, and `--pin` constraints; data tier, target utilization, expected service time,
-latency SLO, priority, load/warm estimates, residency and scale-down cooldowns are explicit flags.
+`--forbidden-tag`, `--pin`, and `--workload-score WORKLOAD=SCORE` values. Workload scores are
+capability hints in `(0, 1]` for portfolio planning; they do not route an individual request. Data
+tier, target utilization, expected service time, latency SLO, priority, load/warm estimates,
+residency and scale-down cooldowns are explicit flags.
 `--artifact-sha256` is optional but recommended for managed production GGUFs; it is canonicalized
 to lowercase and becomes part of command, retry, and readiness identity.
 `--max-colocated-models` is also optional (`0` means unlimited). The value counts the candidate
@@ -707,6 +737,7 @@ llama.cpp child while the Grid API remains available until explicitly stopped:
 uv run grid test start --machines 4
 uv run grid test status
 uv run grid test watch
+uv run grid test demo
 uv run grid --local models http://127.0.0.1:22100
 uv run grid --local chat --grid http://127.0.0.1:22100 \
   -m SmolLM2-135M-Instruct-Q3_K_M.gguf 'Reply with OK'
@@ -726,6 +757,16 @@ URL (`--local` makes that explicit even when remote mode is active), including `
 `grid models`, and `grid allocator status --grid http://127.0.0.1:22100`. The start output names the
 owner-only token file for allocator mutations. The fixture stays isolated from the active local or
 remote Grid configuration.
+
+`grid test demo` registers a second portfolio model and gives every logical host one real model
+slot. It first converges the baseline from four replicas to its idle floor of one. It then replays
+ordinary coding request/response exchanges—the fixture does not provide a workload label—so the
+allocator classifies the bounded observations and proactively fills the three spare hosts with the
+coding model. Direct named-model pressure then reclaims all hosts for the baseline before quiet
+demand safely returns it to one replica: `4+0 → 1+0 → 1+3 → 4+0 → 1+0`. The command narrates every
+real llama.cpp load, warm, drain, and unload transition. The replay endpoint is available only on
+the loopback test fixture behind its control token, and retained allocator state contains no prompt
+or response text.
 
 Before a physical multi-machine rollout, the development harness can partition one Mac into
 isolated logical hosts with separate host IDs, failure domains, durable state files, credentials,

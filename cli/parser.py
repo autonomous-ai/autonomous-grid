@@ -52,6 +52,7 @@ from .credential import cmd_credential
 from .launch import cmd_launch
 from .logical_test import (
     cmd_test_start,
+    cmd_test_demo,
     cmd_test_status,
     cmd_test_stop,
     cmd_test_watch,
@@ -184,7 +185,12 @@ def _add_logical_test(sub) -> None:
     start.add_argument(
         "--model",
         default="SmolLM2-135M-Instruct-Q3_K_M.gguf",
-        help="Cached GGUF filename to load on every logical machine.",
+        help="Cached baseline GGUF filename to load on every logical machine.",
+    )
+    start.add_argument(
+        "--portfolio-model",
+        default="SmolLM2-135M-Instruct-Q3_K_S.gguf",
+        help="Cached GGUF the autonomous workload demo may proactively load.",
     )
     start.add_argument("--port", type=int, default=22_100, help="Grid control/API port.")
     start.add_argument(
@@ -205,6 +211,37 @@ def _add_logical_test(sub) -> None:
     status = test_sub.add_parser("status", help="Show logical hosts and ready replicas")
     status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     status.set_defaults(handler=cmd_test_status)
+
+    demo = test_sub.add_parser(
+        "demo",
+        help="Explain and exercise demand-driven scale-up and scale-down",
+    )
+    demo.add_argument(
+        "--requests",
+        type=_positive_task_count,
+        default=60,
+        metavar="N",
+        help="Synthetic requests in the current one-minute demand bucket (default 60).",
+    )
+    demo.add_argument(
+        "--service-seconds",
+        type=positive_seconds,
+        default=5.0,
+        help="Average synthetic service time per request (default 5).",
+    )
+    demo.add_argument(
+        "--queue-depth",
+        type=int,
+        default=0,
+        help="Synthetic queued requests (default 0).",
+    )
+    demo.add_argument(
+        "--timeout",
+        type=positive_seconds,
+        default=120.0,
+        help="Seconds allowed for each real placement transition.",
+    )
+    demo.set_defaults(handler=cmd_test_demo)
 
     watch = test_sub.add_parser(
         "watch",
@@ -252,6 +289,16 @@ def _add_allocator(sub) -> None:
         default=[],
         metavar="RUNTIME=MB",
         help="Runtime-specific memory estimate; repeat for multiple runtimes.",
+    )
+    set_model.add_argument(
+        "--workload-score",
+        action="append",
+        default=[],
+        metavar="WORKLOAD=SCORE",
+        help=(
+            "Capability score in (0, 1] for an allocator workload such as coding, research, "
+            "design, image, or video; repeat for multiple workloads."
+        ),
     )
     set_model.add_argument(
         "--runtime",

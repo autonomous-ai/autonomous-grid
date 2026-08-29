@@ -505,7 +505,9 @@ def test_routable_write_completion_anchors_full_registry_lease(
             )
             with managed._lock:
                 managed._residencies[residency.model_id] = residency
-            operation = lambda: agent._register_engine(residency)
+
+            def operation():
+                return agent._register_engine(residency)
 
         if lose_response:
             with pytest.raises(httpx.ReadTimeout, match="late commit"):

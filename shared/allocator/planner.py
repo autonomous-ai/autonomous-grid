@@ -121,7 +121,7 @@ class _RepackSearchState:
 
 @dataclass(frozen=True, slots=True)
 class _PreemptionCandidate:
-    sort_key: tuple[int, int, int, int, float, float, int, int, str]
+    sort_key: tuple[int, int, int, int, int, float, float, int, int, str]
     node: NodeSnapshot
     victims: tuple[ModelResidency, ...]
     displaced_assignments: tuple[PlacementAssignment, ...]
@@ -385,6 +385,13 @@ class PlacementPlanner:
                 item.model_id,
             ),
         )
+        demand_urgency_by_model = {
+            model.model_id: _placement_demand_urgency(
+                model,
+                forecast_by_model.get(model.model_id),
+            )
+            for model in model_list
+        }
         node_by_id = {item.node_id: item for item in node_list}
         # Moving an assignment can change net resource use when runtimes have different model
         # footprints or a destination already has resident weights. Only the simple homogeneous
@@ -1045,60 +1052,76 @@ class PlacementPlanner:
         priorities = sorted({model.priority for model in order}, reverse=True)
         for priority in priorities:
             priority_models = [model for model in order if model.priority == priority]
-            remaining_contenders = [
-                model
-                for model in priority_models
-                if sum(item.model_id == model.model_id for item in assignments)
-                < placement_goal(model)
-            ]
-            if len(remaining_contenders) == 1:
-                place_isolated_replicas(
-                    remaining_contenders[0],
-                    ready_incumbents=False,
-                )
-            else:
-                for model in remaining_contenders:
-                    cache_isolated_empty_order(model)
-            blocked: set[str] = set()
-            placed_by_model = {
-                model.model_id: sum(
-                    item.model_id == model.model_id for item in assignments
-                )
-                for model in priority_models
-            }
-            while True:
-                unfinished = [
+            # Preserve max-min fairness among real service at one administrator priority, but do
+            # not let correlation-only canaries take freshly freed slots while directly observed
+            # models are still missing replicas. Once service demand is satisfied or infeasible,
+            # opportunistic models may fairly share what remains.
+            evidence_tiers = (
+                [
                     model
                     for model in priority_models
-                    if model.model_id not in blocked
-                    and placed_by_model[model.model_id] < placement_goal(model)
-                ]
-                if not unfinished:
-                    break
-                minimum_placed = min(
-                    placed_by_model[model.model_id] for model in unfinished
-                )
-                current_level = [
+                    if demand_urgency_by_model[model.model_id] >= 2
+                ],
+                [
                     model
-                    for model in unfinished
-                    if placed_by_model[model.model_id] == minimum_placed
+                    for model in priority_models
+                    if demand_urgency_by_model[model.model_id] < 2
+                ],
+            )
+            for tier_models in evidence_tiers:
+                remaining_contenders = [
+                    model
+                    for model in tier_models
+                    if sum(item.model_id == model.model_id for item in assignments)
+                    < placement_goal(model)
                 ]
-                progress = False
-                for model in current_level:
-                    if place_next_replica(model):
-                        placed_by_model[model.model_id] += 1
-                        progress = True
-                if not progress:
-                    # A model with no feasible next placement must not strand capacity usable by an
-                    # equally important peer. Adding other replicas cannot create net resources;
-                    # bounded repacking already exhausted every admissible rearrangement here.
-                    blocked.update(model.model_id for model in current_level)
+                if len(remaining_contenders) == 1:
+                    place_isolated_replicas(
+                        remaining_contenders[0],
+                        ready_incumbents=False,
+                    )
+                else:
+                    for model in remaining_contenders:
+                        cache_isolated_empty_order(model)
+                blocked: set[str] = set()
+                placed_by_model = {
+                    model.model_id: sum(
+                        item.model_id == model.model_id for item in assignments
+                    )
+                    for model in tier_models
+                }
+                while True:
+                    unfinished = [
+                        model
+                        for model in tier_models
+                        if model.model_id not in blocked
+                        and placed_by_model[model.model_id] < placement_goal(model)
+                    ]
+                    if not unfinished:
+                        break
+                    minimum_placed = min(
+                        placed_by_model[model.model_id] for model in unfinished
+                    )
+                    current_level = [
+                        model
+                        for model in unfinished
+                        if placed_by_model[model.model_id] == minimum_placed
+                    ]
+                    progress = False
+                    for model in current_level:
+                        if place_next_replica(model):
+                            placed_by_model[model.model_id] += 1
+                            progress = True
+                    if not progress:
+                        # An infeasible service tier must not strand capacity usable by the next
+                        # evidence tier; bounded repacking already exhausted useful moves here.
+                        blocked.update(model.model_id for model in current_level)
 
-        # A lower-priority managed residency can otherwise deadlock a saturated fleet forever:
-        # its live memory prevents the critical placement, while its desired assignment prevents
-        # reconciliation from draining it. Explicitly stage a deterministic lower-priority set of
-        # lower-priority victims. The beneficiary remains unsatisfied this tick and is placed only
-        # after later heartbeats prove that drain/unload actually released the resource.
+        # Lower-priority or lower-evidence managed residency can otherwise deadlock a saturated
+        # fleet forever: its live slot prevents critical placement while desired assignment keeps
+        # reconciliation from draining it. Stage deterministic victims. Administrator priority is
+        # primary; within one class, baseline/direct evidence may reclaim speculative canaries.
+        # The beneficiary remains unsatisfied until a later heartbeat proves capacity is free.
         preempted_nodes: set[str] = set()
         assignments_by_node: dict[str, list[PlacementAssignment]] = {}
         for assignment in assignments:
@@ -1150,6 +1173,7 @@ class PlacementPlanner:
                     occupied_models,
                     desired_model_slots,
                     profile_by_id,
+                    demand_urgency_by_model,
                     timestamp,
                     self.policy,
                     startup_by_pair,
@@ -1947,6 +1971,7 @@ def _priority_preemption_candidates(
     occupied_models: Mapping[str, int],
     desired_model_slots: Mapping[str, int],
     profile_by_id: Mapping[str, ModelProfile],
+    demand_urgency_by_model: Mapping[str, int],
     now: float,
     policy: PlannerPolicy,
     startup_seconds: Mapping[tuple[str, str], float],
@@ -1992,11 +2017,19 @@ def _priority_preemption_candidates(
                 and not item.pinned
                 and not node.manually_managed
                 and (victim_profile := profile_by_id.get(item.model_id)) is not None
-                and victim_profile.priority < beneficiary.priority
+                and (
+                    victim_profile.priority < beneficiary.priority
+                    or (
+                        victim_profile.priority == beneficiary.priority
+                        and demand_urgency_by_model.get(item.model_id, 0) < 2
+                        and demand_urgency_by_model.get(beneficiary.model_id, 0) >= 2
+                    )
+                )
                 and node.node_id not in victim_profile.pinned_nodes
             ),
             key=lambda item: (
                 profile_by_id[item.model_id].priority,
+                demand_urgency_by_model.get(item.model_id, 0),
                 item.active_requests,
                 _preemption_state_cost(item.state),
                 startup_seconds.get(
@@ -2023,7 +2056,14 @@ def _priority_preemption_candidates(
             for item in simulated_assignments
             if _adds_model_slot(node.residency(item.model_id))
             and (profile := profile_by_id.get(item.model_id)) is not None
-            and profile.priority < beneficiary.priority
+            and (
+                profile.priority < beneficiary.priority
+                or (
+                    profile.priority == beneficiary.priority
+                    and demand_urgency_by_model.get(item.model_id, 0) < 2
+                    and demand_urgency_by_model.get(beneficiary.model_id, 0) >= 2
+                )
+            )
         )
         for assignment in displaced_assignments:
             simulated_assignments.remove(assignment)
@@ -2102,6 +2142,10 @@ def _priority_preemption_candidates(
                 _PreemptionCandidate(
                     sort_key=(
                         sum(item.priority for item in victim_profiles),
+                        sum(
+                            demand_urgency_by_model.get(item.model_id, 0)
+                            for item in selected
+                        ),
                         sum(item.active_requests for item in selected),
                         sum(_preemption_state_cost(item.state) for item in selected),
                         node.queue_depth,
@@ -2136,6 +2180,7 @@ def _stage_priority_preemption(
     occupied_models: dict[str, int],
     desired_model_slots: dict[str, int],
     profile_by_id: Mapping[str, ModelProfile],
+    demand_urgency_by_model: Mapping[str, int],
     now: float,
     policy: PlannerPolicy,
     startup_seconds: Mapping[tuple[str, str], float],
@@ -2148,7 +2193,7 @@ def _stage_priority_preemption(
     assignments_by_node: dict[str, list[PlacementAssignment]],
     candidate_cache: _PreemptionSearchCache | None,
 ) -> tuple[str, tuple[ModelResidency, ...]] | None:
-    """Prove a lower-priority eviction path, then return its bounded next wave."""
+    """Prove a lower-priority/evidence eviction path, then return its bounded next wave."""
 
     if candidate_cache is not None and candidate_cache.candidates is not None:
         candidates = [
@@ -2166,6 +2211,7 @@ def _stage_priority_preemption(
             occupied_models,
             desired_model_slots,
             profile_by_id,
+            demand_urgency_by_model,
             now,
             policy,
             startup_seconds,

@@ -106,10 +106,19 @@ def cmd_allocator_model_set(args: argparse.Namespace) -> int:
         )
         if len(runtime_memory_mb) != len(args.runtime_memory_mb):
             raise ValueError("--runtime-memory-mb must use RUNTIME=MB")
+        workload_scores = tuple(
+            (workload.strip().lower(), float(score))
+            for value in args.workload_score
+            for workload, separator, score in (value.partition("="),)
+            if separator
+        )
+        if len(workload_scores) != len(args.workload_score):
+            raise ValueError("--workload-score must use WORKLOAD=SCORE")
         profile = ModelProfile(
             model_id=args.model,
             memory_mb=args.memory_mb,
             runtime_memory_mb=runtime_memory_mb,
+            workload_scores=workload_scores,
             runtimes=runtimes,
             backends=tuple(args.backends),
             data_tier=args.data_tier,

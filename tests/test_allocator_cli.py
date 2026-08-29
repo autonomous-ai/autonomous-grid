@@ -256,6 +256,10 @@ def test_model_set_accepts_runtime_specific_memory(monkeypatch):
             "llama.cpp=10000",
             "--runtime-memory-mb",
             "vllm=24000",
+            "--workload-score",
+            "coding=1.0",
+            "--workload-score",
+            "research=0.8",
             "--min-gpu-count",
             "2",
             "--min-gpu-memory-mb",
@@ -267,6 +271,7 @@ def test_model_set_accepts_runtime_specific_memory(monkeypatch):
     body = captured["json"]
     assert isinstance(body, dict)
     assert body["runtime_memory_mb"] == (("llama.cpp", 10_000), ("vllm", 24_000))
+    assert body["workload_scores"] == (("coding", 1.0), ("research", 0.8))
     assert body["min_gpu_count"] == 2
     assert body["min_gpu_memory_mb"] == 48_000
 
@@ -287,6 +292,25 @@ def test_model_set_rejects_malformed_runtime_specific_memory(monkeypatch):
     )
 
     with pytest.raises(SystemExit, match="RUNTIME=MB"):
+        args.handler(args)
+
+
+def test_model_set_rejects_malformed_workload_score(monkeypatch):
+    monkeypatch.setattr(config, "select_grid", lambda _value: grid_config())
+    args = cli.build_parser().parse_args(
+        [
+            "allocator",
+            "model",
+            "set",
+            "qwen",
+            "--memory-mb",
+            "8000",
+            "--workload-score",
+            "coding:1.0",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="WORKLOAD=SCORE"):
         args.handler(args)
 
 

@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from local.runtime import GRID_TYPE
 from shared.allocator.auth import control_node_id, engine_node_id, verify_node_token
 from shared.allocator.controller import AllocatorController
+from shared.allocator.intelligence import RequestFeatures, classify_request
 from shared.allocator.models import (
     MAX_COUNTER,
     MAX_ID_LENGTH,
@@ -803,6 +804,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     model = body.get("model")
     if not isinstance(model, str) or not model:
         return _openai_error(400, "model is required", "invalid_request")
+    features = classify_request(endpoint_path, body)
 
     engine = _choose_engine(
         app,
@@ -811,7 +813,9 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         affinity_digest=_affinity_digest(request.headers.get("x-grid-affinity-key")),
     )
     if not engine:
-        _observe_allocator_request(app, model, started_at, error=True, queue_depth=1)
+        _observe_allocator_request(
+            app, model, started_at, features=features, error=True, queue_depth=1
+        )
         return _openai_error(
             503, f"No active local engine for model {model!r}", "engine_unavailable"
         )
@@ -849,7 +853,14 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
             await client.aclose()
             _change_active_tasks(engine, -1)
             _record_proxy_route_outcome(engine, model, transport_error=True)
-            _observe_allocator_request(app, model, started_at, error=True)
+            _observe_allocator_request(
+                app,
+                model,
+                started_at,
+                features=features,
+                served_model=model,
+                error=True,
+            )
             return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
 
         # Streamed answers are captured too. Every chat interface streams, so skipping this branch
@@ -885,10 +896,13 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
                     app,
                     model,
                     started_at,
+                    features=features,
+                    served_model=model,
                     error=(
                         stream_transport_error
                         or _allocator_capacity_error(engine_response.status_code)
                     ),
+                    output_units=usage_collector.completion_tokens or 0,
                 )
                 if not stream_transport_error:
                     _record_engine_performance(
@@ -922,7 +936,14 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     except httpx.RequestError as exc:
         _change_active_tasks(engine, -1)
         _record_proxy_route_outcome(engine, model, transport_error=True)
-        _observe_allocator_request(app, model, started_at, error=True)
+        _observe_allocator_request(
+            app,
+            model,
+            started_at,
+            features=features,
+            served_model=model,
+            error=True,
+        )
         return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
     _change_active_tasks(engine, -1)
     _record_proxy_route_outcome(
@@ -934,7 +955,10 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         app,
         model,
         started_at,
+        features=features,
+        served_model=model,
         error=_allocator_capacity_error(engine_response.status_code),
+        output_units=_completion_tokens(engine_response),
     )
     _record_engine_performance(
         engine,
@@ -1199,6 +1223,7 @@ async def _proxy_media(
     default_model: str,
     request: Request,
 ) -> Response:
+    started_at = time.monotonic()
     raw_body = await request.body()
 
     try:
@@ -1214,6 +1239,7 @@ async def _proxy_media(
     model = body.get("model") or default_model
     if not isinstance(model, str):
         return _openai_error(400, "model must be a string", "invalid_request")
+    features = classify_request(endpoint_path, {**body, "model": model})
 
     # Only a built-in name can be checked against the route; a non-builtin (an API media model) is
     # not this proxy's to validate — it either resolves to an engine below or 503s.
@@ -1238,6 +1264,14 @@ async def _proxy_media(
     )
 
     if not engine:
+        _observe_allocator_request(
+            app,
+            model,
+            started_at,
+            features=features,
+            error=True,
+            queue_depth=1,
+        )
         return _openai_error(
             503, f"No active local media engine for {model!r}", "engine_unavailable"
         )
@@ -1268,6 +1302,14 @@ async def _proxy_media(
         await client.aclose()
         _change_active_tasks(engine, -1)
         _record_proxy_route_outcome(engine, model, transport_error=True)
+        _observe_allocator_request(
+            app,
+            model,
+            started_at,
+            features=features,
+            served_model=model,
+            error=True,
+        )
         return _openai_error(502, f"Engine media request failed: {exc}", "engine_error")
 
     async def stream_response():
@@ -1287,6 +1329,17 @@ async def _proxy_media(
                 model,
                 status_code=engine_response.status_code,
                 transport_error=stream_transport_error,
+            )
+            _observe_allocator_request(
+                app,
+                model,
+                started_at,
+                features=features,
+                served_model=model,
+                error=(
+                    stream_transport_error
+                    or _allocator_capacity_error(engine_response.status_code)
+                ),
             )
 
     return StreamingResponse(
@@ -2853,17 +2906,26 @@ def _observe_allocator_request(
     model: str,
     started_at: float,
     *,
+    features: RequestFeatures | None = None,
+    served_model: str = "",
     error: bool,
     queue_depth: int = 0,
+    output_units: int = 0,
 ) -> None:
     elapsed = max(0.0, time.monotonic() - started_at)
     try:
-        recorded = _allocator(app).observe(
-            model,
+        recorded = _allocator(app).observe_lifecycle(
+            features
+            or RequestFeatures(
+                endpoint="unknown",
+                requested_model=model,
+            ),
+            served_model=served_model,
             service_seconds=elapsed,
             latency_ms=elapsed * 1_000.0,
             queue_depth=queue_depth,
             error=error,
+            output_units=output_units,
         )
         if recorded:
             _mark_allocator_dirty(app)
@@ -2875,6 +2937,22 @@ def _allocator_capacity_error(status_code: int) -> bool:
     """Only retryable saturation/server failures should increase replica pressure."""
 
     return status_code == 429 or status_code >= 500
+
+
+def _completion_tokens(response: httpx.Response) -> int:
+    """Read bounded usage metadata without retaining or interpreting response content."""
+
+    if len(response.content) > _MAX_PERFORMANCE_RESPONSE_BYTES:
+        return 0
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return 0
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    value = usage.get("completion_tokens") if isinstance(usage, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= MAX_COUNTER:
+        return 0
+    return value
 
 
 _ENGINE_PERFORMANCE_EWMA_ALPHA = 0.20

@@ -410,6 +410,9 @@ class ModelProfile:
     artifact_sha256: str = ""
     max_colocated_models: int = 0
     colocation_excludes: tuple[str, ...] = ()
+    # Allocator portfolio suitability by workload. These are planning priors, not router ranks.
+    # A model with no entries participates only in direct named-model scaling.
+    workload_scores: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.model_id or len(self.model_id) > MAX_ID_LENGTH:
@@ -440,6 +443,17 @@ class ModelProfile:
             "runtime_memory_mb",
             tuple(sorted(runtime_memory.items())),
         )
+        workload_scores: dict[str, float] = {}
+        for item in self.workload_scores:
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                raise ValueError("workload_scores entries must be (workload, score) pairs")
+            workload, score = str(item[0]), float(item[1])
+            if not workload or len(workload) > 64 or workload in workload_scores:
+                raise ValueError("workload_scores contains an invalid or duplicate workload")
+            if not math.isfinite(score) or not 0 < score <= 1:
+                raise ValueError("workload_scores values must be in (0, 1]")
+            workload_scores[workload] = score
+        object.__setattr__(self, "workload_scores", tuple(sorted(workload_scores.items())))
         if (
             self.min_replicas < 0
             or self.max_replicas < self.min_replicas
@@ -523,6 +537,11 @@ class ModelProfile:
         overrides = dict(self.runtime_memory_mb)
         matched = [overrides[runtime] for runtime in set(runtimes) if runtime in overrides]
         return max(matched, default=self.memory_mb)
+
+    def workload_score(self, workload: str) -> float:
+        """Return this model's configured portfolio suitability for one workload."""
+
+        return dict(self.workload_scores).get(workload, 0.0)
 
     def matches_artifact(self, residency: ModelResidency | None) -> bool:
         """Whether a residency proves the immutable artifact requested by this profile."""

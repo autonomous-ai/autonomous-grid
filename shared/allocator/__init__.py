@@ -21,6 +21,13 @@ from shared.allocator.models import (
     ResidencyState,
     UnsatisfiedConstraint,
 )
+from shared.allocator.intelligence import (
+    KNOWN_WORKLOADS,
+    ModelWorkloadOutcome,
+    RequestFeatures,
+    WorkloadIntelligence,
+    classify_request,
+)
 
 __all__ = [
     "ActionKind",
@@ -37,4 +44,9 @@ __all__ = [
     "PlacementPreemption",
     "ResidencyState",
     "UnsatisfiedConstraint",
+    "KNOWN_WORKLOADS",
+    "ModelWorkloadOutcome",
+    "RequestFeatures",
+    "WorkloadIntelligence",
+    "classify_request",
 ]

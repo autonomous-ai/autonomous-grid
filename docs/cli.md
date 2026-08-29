@@ -535,6 +535,7 @@ grid allocator status [--grid <g>] [--json]
 
 grid allocator model set <model> --memory-mb <n>
     [--artifact-sha256 <64-hex-digest>]
+    [--workload-score <workload=score>]...
     [--runtime <name>]... [--backend <name>]... [--data-tier <tier>]
     [--required-tag <tag>]... [--forbidden-tag <tag>]... [--pin <host>]...
     [--min-replicas <n>] [--max-replicas <n>] [--target-utilization <f>]
@@ -571,6 +572,11 @@ actions, `recommend` shows the actions it would take, and `automatic` delivers e
 load/warm/drain/unload commands within the allocator's safety limits. For the initial managed
 runtime, `<model>` must be the exact filename of a GGUF already cached with `grid pull` on each
 eligible computer; allocation never invents a download source.
+
+Repeat `--workload-score WORKLOAD=SCORE` to describe where a model fits the portfolio, for example
+`--workload-score coding=1 --workload-score research=.8`. Scores are capability hints in `(0, 1]`;
+the allocator combines them with observed workload demand, compatibility, resource cost, cold-start
+time, and measured outcomes. They do not route an individual request.
 
 `grid allocator node start` joins this computer as managed capacity and starts a detached local
 protection loop. `drain`, `pause`, and `quarantine` are durable local overrides that outrank global

@@ -311,6 +311,11 @@ class Reconciler:
         deferred: list[DeferredMutation] = []
         desired = plan.desired_pairs
         urgency_by_model = dict(plan.model_urgencies)
+        service_capacity_unsatisfied = any(
+            item.missing_replicas > 0
+            and urgency_by_model.get(item.model_id, 0) >= 2
+            for item in plan.unsatisfied
+        )
         replica_index_by_pair = {
             (assignment.node_id, assignment.model_id): assignment.replica_index
             for assignment in plan.assignments
@@ -380,6 +385,20 @@ class Reconciler:
         for assignment in plan.assignments:
             pair = (assignment.node_id, assignment.model_id)
             if pair in ready_pairs:
+                continue
+            if (
+                service_capacity_unsatisfied
+                and urgency_by_model.get(assignment.model_id, 0) < 2
+            ):
+                deferred.append(
+                    DeferredMutation(
+                        ActionKind.WARM,
+                        assignment.node_id,
+                        assignment.model_id,
+                        "service_capacity_unsatisfied",
+                        "Speculative capacity waits until direct service demand converges",
+                    )
+                )
                 continue
             node = node_by_id.get(assignment.node_id)
             profile = profile_by_id.get(assignment.model_id)
