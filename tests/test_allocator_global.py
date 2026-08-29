@@ -3291,6 +3291,53 @@ def test_reconciler_indexes_high_cardinality_inputs_once(
     assert matching_history_sizes == [1] * len(machines)
 
 
+def test_reconciler_indexes_plan_once_for_broad_retirement_wave():
+    machines = tuple(
+        node(
+            f"node-{index}",
+            residencies=(
+                replace(
+                    ready(f"old-{index}"),
+                    state=ResidencyState.DRAINING,
+                ),
+            ),
+        )
+        for index in range(64)
+    )
+    profiles = tuple(
+        model(
+            f"old-{index}",
+            min_replicas=0,
+            max_replicas=0,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=0,
+        )
+        for index in range(64)
+    )
+    plan = PlacementPlanner().plan(machines, profiles, now=10)
+    assert plan.assignments == ()
+
+    class CountingAssignments(tuple):
+        def __new__(cls, values):
+            instance = super().__new__(cls, values)
+            instance.iterations = 0
+            return instance
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    assignments = CountingAssignments(plan.assignments)
+    plan = replace(plan, assignments=assignments)
+    assignments.iterations = 0
+
+    result = Reconciler().reconcile(plan, machines, profiles, now=10)
+
+    assert len(result.actions) == len(machines)
+    assert {action.kind for action in result.actions} == {ActionKind.UNLOAD}
+    assert assignments.iterations <= 5
+
+
 def test_mutation_governor_prioritizes_drain_for_preemption_beneficiary():
     machines = [
         node("a-routine", 8_000, residencies=(ready("obsolete", 8_000),)),

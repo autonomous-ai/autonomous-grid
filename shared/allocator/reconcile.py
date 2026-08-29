@@ -123,6 +123,8 @@ class _DestructiveSafetyState:
     managed_ready_pairs: set[tuple[str, str]]
     domain_counts: dict[str, dict[str, int]]
     domain_floors: dict[str, int]
+    desired_nodes: dict[str, tuple[str, ...]]
+    target_by_model: dict[str, int]
 
 
 class Reconciler:
@@ -153,6 +155,8 @@ class Reconciler:
         node_by_id = {node.node_id: node for node in nodes}
         profile_by_id = {profile.model_id: profile for profile in profiles}
         safety = _destructive_safety_state(plan, node_by_id, profile_by_id)
+        desired_pairs = plan.desired_pairs
+        preempted_pairs = plan.preempted_pairs
         deferrals: dict[str, DeferredMutation] = {}
         destructive = sorted(
             (
@@ -164,8 +168,8 @@ class Reconciler:
         )
         for action in destructive:
             pair = (action.node_id, action.model_id)
-            priority_preemption = pair in plan.preempted_pairs
-            if pair in plan.desired_pairs and not priority_preemption:
+            priority_preemption = pair in preempted_pairs
+            if pair in desired_pairs and not priority_preemption:
                 deferrals[action.action_id] = DeferredMutation(
                     action.kind,
                     action.node_id,
@@ -191,7 +195,6 @@ class Reconciler:
                 node,
                 residency,
                 profile,
-                plan,
                 safety,
                 timestamp,
                 priority_preemption=priority_preemption,
@@ -477,7 +480,6 @@ class Reconciler:
                     node,
                     residency,
                     profile,
-                    plan,
                     safety,
                     timestamp,
                     priority_preemption=priority_preemption is not None,
@@ -942,6 +944,15 @@ def _destructive_safety_state(
             counts[domain] = counts.get(domain, 0) + 1
 
     target_by_model = dict(plan.desired_replicas)
+    desired_node_lists: dict[str, list[str]] = {}
+    for assignment in plan.assignments:
+        desired_node_lists.setdefault(assignment.model_id, []).append(
+            assignment.node_id
+        )
+    desired_nodes = {
+        model_id: tuple(node_ids)
+        for model_id, node_ids in desired_node_lists.items()
+    }
     domain_floors: dict[str, int] = {}
     for profile in profile_by_id.values():
         counts = domain_counts.setdefault(profile.model_id, {})
@@ -955,6 +966,8 @@ def _destructive_safety_state(
         managed_ready_pairs,
         domain_counts,
         domain_floors,
+        desired_nodes,
+        target_by_model,
     )
 
 
@@ -992,7 +1005,6 @@ def _destructive_deferral(
     node: NodeSnapshot,
     residency: ModelResidency,
     profile: ModelProfile,
-    plan: PlacementPlan,
     safety: _DestructiveSafetyState,
     now: float,
     *,
@@ -1028,12 +1040,12 @@ def _destructive_deferral(
         )
 
     if not priority_preemption:
-        desired_nodes = plan.nodes_for(profile.model_id)
+        desired_nodes = safety.desired_nodes.get(profile.model_id, ())
         ready_desired = sum(
             (desired_node, profile.model_id) in safety.ready_pairs
             for desired_node in desired_nodes
         )
-        required_ready = plan.target_for(profile.model_id)
+        required_ready = safety.target_by_model.get(profile.model_id, 0)
         if required_ready and ready_desired < required_ready:
             return DeferredMutation(
                 kind,
