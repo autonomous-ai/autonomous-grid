@@ -106,6 +106,17 @@ slots and token allocations are reserved atomically, fan-out is limited to eight
 is limited to three levels, and at least 1,000 parent tokens remain for final fan-in. Subgoals are
 off by default because enabling them authorizes autonomous parallel work and budget allocation.
 
+Harness capabilities are scheduled honestly:
+
+| Harness | Native Goal | Goal HTTP tools | Spawn child Goals |
+|---|---:|---:|---:|
+| Codex | yes | yes | yes |
+| Claude Code | yes | no | no |
+
+`--agent auto` may hand ordinary child work to Claude, but a Goal requiring tools or subgoal spawn
+waits for a compatible Codex node. Environment capability declarations cannot override these three
+runner-wiring facts; custom harness-native capabilities remain operator-declarable.
+
 Before resuming, Grid merges every completed child's conversation branch into the parent's branch
 in the bare relay repository. Clean sibling changes therefore appear in the parent's next pinned
 input commit, rather than only in its prompt. A conflicting child leaves the parent `blocked` with
