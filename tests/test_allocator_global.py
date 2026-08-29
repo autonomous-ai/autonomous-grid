@@ -99,19 +99,23 @@ def test_artifact_sha256_is_canonical_validated_and_round_trips():
     assert residency.artifact_sha256 == "a" * 64
     assert profile.matches_artifact(residency)
     assert ModelProfile.from_dict(profile.to_dict()) == profile
-    assert ModelResidency.from_dict(
-        {
-            "model_id": residency.model_id,
-            "memory_mb": residency.memory_mb,
-            "artifact_sha256": residency.artifact_sha256,
-        }
-    ) == residency
+    assert (
+        ModelResidency.from_dict(
+            {
+                "model_id": residency.model_id,
+                "memory_mb": residency.memory_mb,
+                "artifact_sha256": residency.artifact_sha256,
+            }
+        )
+        == residency
+    )
 
     performance = ModelPerformance("qwen", artifact_sha256="A" * 64)
     assert performance.artifact_sha256 == "a" * 64
-    assert ModelPerformance.from_dict(
-        {"model_id": "qwen", "artifact_sha256": "A" * 64}
-    ) == performance
+    assert (
+        ModelPerformance.from_dict({"model_id": "qwen", "artifact_sha256": "A" * 64})
+        == performance
+    )
     with pytest.raises(ValueError, match="artifact_sha256"):
         ModelPerformance("qwen", artifact_sha256="not-a-digest")
 
@@ -179,8 +183,7 @@ def test_pairwise_colocation_exclusions_are_reciprocal_and_selective():
         for node_id in ("one", "two")
     )
     assert any(
-        "compatible" in plan.models_for(node_id)
-        and len(plan.models_for(node_id)) == 2
+        "compatible" in plan.models_for(node_id) and len(plan.models_for(node_id)) == 2
         for node_id in ("one", "two")
     )
     assert ModelProfile.from_dict(alpha.to_dict()) == alpha
@@ -299,8 +302,7 @@ def test_managed_colocation_violation_stages_deterministic_convergence(
 
     assert staged.assignments == ()
     assert [
-        (item.node_id, item.model_id, item.for_model_id)
-        for item in staged.preemptions
+        (item.node_id, item.model_id, item.for_model_id) for item in staged.preemptions
     ] == [("managed", victim, beneficiary)]
     result = Reconciler().reconcile(
         staged,
@@ -309,9 +311,9 @@ def test_managed_colocation_violation_stages_deterministic_convergence(
         mode=AllocatorMode.AUTOMATIC,
         now=10,
     )
-    assert [
-        (item.kind, item.model_id) for item in result.executable_actions
-    ] == [(ActionKind.DRAIN, victim)]
+    assert [(item.kind, item.model_id) for item in result.executable_actions] == [
+        (ActionKind.DRAIN, victim)
+    ]
 
     converged_node = replace(
         machine,
@@ -335,9 +337,9 @@ def test_managed_pairwise_colocation_violation_converges_but_external_does_not()
     managed = node("managed", residencies=(ready("alpha"), ready("beta")))
 
     staged = planner.plan((managed,), (alpha, beta), now=10)
-    assert [
-        (item.model_id, item.for_model_id) for item in staged.preemptions
-    ] == [("beta", "alpha")]
+    assert [(item.model_id, item.for_model_id) for item in staged.preemptions] == [
+        ("beta", "alpha")
+    ]
     result = Reconciler().reconcile(
         staged,
         (managed,),
@@ -621,9 +623,7 @@ def test_multi_model_engine_uses_only_per_model_performance_for_placement():
 
     stale = replace(
         attributed,
-        model_performance=(
-            replace(attributed.model_performance[0], updated_at=1),
-        ),
+        model_performance=(replace(attributed.model_performance[0], updated_at=1),),
     )
     expired = PlacementPlanner(
         PlannerPolicy(performance_ttl_seconds=5),
@@ -632,9 +632,7 @@ def test_multi_model_engine_uses_only_per_model_performance_for_placement():
 
     fresh = replace(
         attributed,
-        model_performance=(
-            replace(attributed.model_performance[0], updated_at=9),
-        ),
+        model_performance=(replace(attributed.model_performance[0], updated_at=9),),
     )
     refreshed = PlacementPlanner(
         PlannerPolicy(performance_ttl_seconds=5),
@@ -807,12 +805,17 @@ def test_fresh_latency_does_not_keep_stale_throughput_in_placement():
         now=100,
     )
 
-    assignment = PlacementPlanner(
-        PlannerPolicy(performance_ttl_seconds=50),
-    ).plan((machine,), (profile,), now=100).assignments[0]
+    assignment = (
+        PlacementPlanner(
+            PlannerPolicy(performance_ttl_seconds=50),
+        )
+        .plan((machine,), (profile,), now=100)
+        .assignments[0]
+    )
 
     assert "measured throughput" not in assignment.reasons
     assert "hardware performance estimate" in assignment.reasons
+
 
 def ready(
     model_id: str = "qwen",
@@ -1027,7 +1030,9 @@ def test_node_snapshot_round_trip_preserves_residency_and_enum():
     legacy_performance = original.to_dict()
     legacy_performance["model_performance"][0].pop("throughput_sample_count")
     legacy_performance["model_performance"][0].pop("throughput_updated_at")
-    restored_performance = NodeSnapshot.from_dict(legacy_performance).performance("qwen")
+    restored_performance = NodeSnapshot.from_dict(legacy_performance).performance(
+        "qwen"
+    )
     assert restored_performance.throughput_sample_count == 4
     assert restored_performance.throughput_updated_at == 9
 
@@ -1344,7 +1349,9 @@ def test_demand_correlation_requires_support_and_rejects_popularity_overlap():
         popular.observe("target", requests=10, service_seconds=1, timestamp=timestamp)
     for timestamp in (71, 81, 91, 101):
         popular.observe("source", requests=20, service_seconds=1, timestamp=timestamp)
-    popular_target = {item.model_id: item for item in popular.forecasts(now=101)}["target"]
+    popular_target = {item.model_id: item for item in popular.forecasts(now=101)}[
+        "target"
+    ]
     assert popular_target.correlation_sources == ()
 
 
@@ -1816,17 +1823,21 @@ def test_replica_count_preserves_recent_residencies_from_single_pass_iterable():
     )
     forecast = DemandForecast("qwen", offered_concurrency=0.5)
 
-    assert desired_replica_count(
-        profile,
-        forecast,
-        nodes=(machine for machine in machines),
-        now=100,
-    ) == desired_replica_count(
-        profile,
-        forecast,
-        nodes=machines,
-        now=100,
-    ) == 3
+    assert (
+        desired_replica_count(
+            profile,
+            forecast,
+            nodes=(machine for machine in machines),
+            now=100,
+        )
+        == desired_replica_count(
+            profile,
+            forecast,
+            nodes=machines,
+            now=100,
+        )
+        == 3
+    )
 
 
 def test_replica_count_falls_back_to_profile_service_time_for_rate_only_demand():
@@ -1976,11 +1987,14 @@ def test_reserve_growth_moves_low_priority_incumbent_to_safe_peer():
 
     assert plan.models_for("pressured") == ("assistant", "code")
     assert plan.nodes_for("embeddings") == ("peer",)
-    assert sum(
-        assignment.memory_mb
-        for assignment in plan.assignments
-        if assignment.node_id == "pressured"
-    ) <= 32_000 - 9_000
+    assert (
+        sum(
+            assignment.memory_mb
+            for assignment in plan.assignments
+            if assignment.node_id == "pressured"
+        )
+        <= 32_000 - 9_000
+    )
     result = Reconciler().reconcile(plan, (pressured, peer), profiles, now=10)
     assert [action.kind for action in result.actions] == [
         ActionKind.LOAD,
@@ -2048,11 +2062,14 @@ def test_throttling_derating_moves_lower_priority_incumbent_to_peer():
 
     assert plan.nodes_for("code") == ("throttled",)
     assert plan.nodes_for("assistant") == ("peer",)
-    assert sum(
-        assignment.memory_mb
-        for assignment in plan.assignments
-        if assignment.node_id == "throttled"
-    ) <= 16_000
+    assert (
+        sum(
+            assignment.memory_mb
+            for assignment in plan.assignments
+            if assignment.node_id == "throttled"
+        )
+        <= 16_000
+    )
     result = Reconciler().reconcile(plan, (throttled, peer), profiles, now=10)
     assert [action.kind for action in result.actions] == [
         ActionKind.LOAD,
@@ -2328,8 +2345,7 @@ def test_planner_respects_node_model_limit():
 
 def test_same_priority_models_share_scarce_capacity_before_scaling_out():
     machines = [
-        node(f"n{index}", capacity_mb=8_000, max_models=1)
-        for index in range(3)
+        node(f"n{index}", capacity_mb=8_000, max_models=1) for index in range(3)
     ]
     plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
         machines,
@@ -2352,8 +2368,7 @@ def test_same_priority_models_share_scarce_capacity_before_scaling_out():
 
 def test_hard_pins_count_toward_equal_priority_fair_share():
     machines = [
-        node(f"n{index}", capacity_mb=8_000, max_models=1)
-        for index in range(4)
+        node(f"n{index}", capacity_mb=8_000, max_models=1) for index in range(4)
     ]
     plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
         machines,
@@ -2375,8 +2390,7 @@ def test_hard_pins_count_toward_equal_priority_fair_share():
 
 def test_higher_priority_model_can_use_all_scarce_capacity():
     machines = [
-        node(f"n{index}", capacity_mb=8_000, max_models=1)
-        for index in range(2)
+        node(f"n{index}", capacity_mb=8_000, max_models=1) for index in range(2)
     ]
     plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
         machines,
@@ -2625,10 +2639,7 @@ def test_equal_priority_cached_candidate_order_matches_general_scoring_exactly()
 
 
 def test_equal_priority_isolated_fleet_scores_candidates_linearly(monkeypatch):
-    machines = tuple(
-        node(f"n{index:03d}", 8_000, max_models=1)
-        for index in range(256)
-    )
+    machines = tuple(node(f"n{index:03d}", 8_000, max_models=1) for index in range(256))
     profiles = tuple(
         model(
             f"model-{index}",
@@ -2669,10 +2680,18 @@ def test_shared_host_fairness_rounds_reuse_exact_candidate_state(monkeypatch):
         )
         for index in range(4)
     )
-    calls = {"score": 0, "compatibility": 0, "fit": 0}
+    calls = {
+        "score": 0,
+        "compatibility": 0,
+        "fit": 0,
+        "memory": 0,
+        "residency": 0,
+    }
     original_score = planner_module._candidate_score
     original_compatibility = planner_module._ineligible_reason
     original_fit = planner_module._fits
+    original_memory = ModelProfile.memory_for
+    original_residency = NodeSnapshot.residency
 
     def counted_score(*args, **kwargs):
         calls["score"] += 1
@@ -2686,6 +2705,14 @@ def test_shared_host_fairness_rounds_reuse_exact_candidate_state(monkeypatch):
         calls["fit"] += 1
         return original_fit(*args, **kwargs)
 
+    def counted_memory(*args, **kwargs):
+        calls["memory"] += 1
+        return original_memory(*args, **kwargs)
+
+    def counted_residency(*args, **kwargs):
+        calls["residency"] += 1
+        return original_residency(*args, **kwargs)
+
     monkeypatch.setattr(planner_module, "_candidate_score", counted_score)
     monkeypatch.setattr(
         planner_module,
@@ -2693,6 +2720,8 @@ def test_shared_host_fairness_rounds_reuse_exact_candidate_state(monkeypatch):
         counted_compatibility,
     )
     monkeypatch.setattr(planner_module, "_fits", counted_fit)
+    monkeypatch.setattr(ModelProfile, "memory_for", counted_memory)
+    monkeypatch.setattr(NodeSnapshot, "residency", counted_residency)
 
     plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
         machines,
@@ -2705,6 +2734,11 @@ def test_shared_host_fairness_rounds_reuse_exact_candidate_state(monkeypatch):
     assert calls["score"] <= distinct_pairs * 3
     assert calls["compatibility"] <= distinct_pairs * 3
     assert calls["fit"] <= distinct_pairs * 3
+    # Public pair lookups include desired-count forecasting, scoring, assignment materialization,
+    # and plan validation in addition to candidate evaluation. They must remain linear in the
+    # distinct node/model facts instead of repeating on every fairness round.
+    assert calls["memory"] <= distinct_pairs * 6
+    assert calls["residency"] <= distinct_pairs * 10
 
 
 def test_independent_preemption_wave_scans_the_fleet_once(monkeypatch):
@@ -2793,8 +2827,7 @@ def test_priority_preemption_prefers_the_cheapest_learned_warm_back_cost():
     )
 
     assert [
-        (item.node_id, item.model_id, item.for_model_id)
-        for item in plan.preemptions
+        (item.node_id, item.model_id, item.for_model_id) for item in plan.preemptions
     ] == [("z-cheap", "batch", "critical")]
 
 
@@ -2835,8 +2868,7 @@ def test_priority_preemption_prefers_cached_beneficiary_after_equal_disruption()
     )
 
     assert [
-        (item.node_id, item.model_id, item.for_model_id)
-        for item in plan.preemptions
+        (item.node_id, item.model_id, item.for_model_id) for item in plan.preemptions
     ] == [("z-cached", "low-z", "critical")]
 
 
@@ -2878,9 +2910,7 @@ def test_priority_preemption_prefers_a_residency_already_draining():
     draining_node = node(
         "z-draining",
         8_000,
-        residencies=(
-            replace(ready("batch", 8_000), state=ResidencyState.DRAINING),
-        ),
+        residencies=(replace(ready("batch", 8_000), state=ResidencyState.DRAINING),),
     )
 
     plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
@@ -3438,9 +3468,7 @@ def test_mutation_governor_starts_higher_priority_model_before_node_id_order():
         model("critical", priority=1_000, pinned_nodes=("z-critical",)),
     ]
     plan = PlacementPlanner().plan(machines, profiles, now=10)
-    result = Reconciler(
-        ReconcilePolicy(max_concurrent_mutations=1)
-    ).reconcile(
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
         plan,
         machines,
         profiles,
@@ -3493,9 +3521,7 @@ def test_mutation_governor_starts_direct_demand_before_speculative_prewarm():
     assert plan.urgency_for("speculative") == 1
     assert plan.urgency_for("direct") == 2
 
-    result = Reconciler(
-        ReconcilePolicy(max_concurrent_mutations=1)
-    ).reconcile(
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
         plan,
         machines,
         profiles,
@@ -3529,9 +3555,7 @@ def test_mutation_governor_prefers_fast_cached_start_within_service_class():
     ]
     plan = PlacementPlanner().plan(machines, profiles, now=10)
 
-    result = Reconciler(
-        ReconcilePolicy(max_concurrent_mutations=1)
-    ).reconcile(
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
         plan,
         machines,
         profiles,
@@ -3576,9 +3600,7 @@ def test_mutation_governor_preserves_replica_round_fairness():
     ]
     plan = PlacementPlanner().plan(machines, profiles, now=10)
 
-    result = Reconciler(
-        ReconcilePolicy(max_concurrent_mutations=2)
-    ).reconcile(
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=2)).reconcile(
         plan,
         machines,
         profiles,
@@ -3645,9 +3667,7 @@ def test_mutation_governor_preserves_replica_round_fairness_during_preemption():
     )
     plan = PlacementPlanner().plan(machines, profiles, now=10)
 
-    result = Reconciler(
-        ReconcilePolicy(max_concurrent_mutations=2)
-    ).reconcile(
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=2)).reconcile(
         plan,
         machines,
         profiles,
@@ -3656,8 +3676,7 @@ def test_mutation_governor_preserves_replica_round_fairness_during_preemption():
     )
 
     beneficiary_by_pair = {
-        (item.node_id, item.model_id): item.for_model_id
-        for item in plan.preemptions
+        (item.node_id, item.model_id): item.for_model_id for item in plan.preemptions
     }
     assert [
         beneficiary_by_pair[(item.node_id, item.model_id)]
@@ -3723,9 +3742,7 @@ def test_mutation_governor_finishes_nearest_capacity_release_group_first():
         now=10,
     )
 
-    result = Reconciler(
-        ReconcilePolicy(max_concurrent_mutations=1)
-    ).reconcile(
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
         plan,
         machines,
         profiles,
@@ -3735,8 +3752,7 @@ def test_mutation_governor_finishes_nearest_capacity_release_group_first():
 
     selected = result.executable_actions[0]
     beneficiary_by_pair = {
-        (item.node_id, item.model_id): item.for_model_id
-        for item in plan.preemptions
+        (item.node_id, item.model_id): item.for_model_id for item in plan.preemptions
     }
     assert beneficiary_by_pair[(selected.node_id, selected.model_id)] == "beta"
 
@@ -3745,8 +3761,7 @@ def test_reconciler_indexes_high_cardinality_inputs_once(
     monkeypatch,
 ):
     machines = [
-        node(f"node-{index}", cached=(f"model-{index}",))
-        for index in range(64)
+        node(f"node-{index}", cached=(f"model-{index}",)) for index in range(64)
     ]
     profiles = [
         model(
@@ -3805,9 +3820,9 @@ def test_reconciler_indexes_high_cardinality_inputs_once(
         for index in range(64)
     )
 
-    result = Reconciler(
-        ReconcilePolicy(mutation_cooldown_seconds=0)
-    ).reconcile(plan, machines, profiles, history, now=10)
+    result = Reconciler(ReconcilePolicy(mutation_cooldown_seconds=0)).reconcile(
+        plan, machines, profiles, history, now=10
+    )
 
     assert len(result.actions) == 64
     assert assignments.iterations <= 5
@@ -3869,20 +3884,25 @@ def test_constructive_command_revalidation_skips_destructive_safety_index(monkey
     warm = Reconciler().reconcile(plan, (machine,), (profile,), now=10).actions[0]
 
     def unexpected_safety_index(*_args, **_kwargs):
-        raise AssertionError("constructive-only validation built destructive safety state")
+        raise AssertionError(
+            "constructive-only validation built destructive safety state"
+        )
 
     monkeypatch.setattr(
         "shared.allocator.reconcile._destructive_safety_state",
         unexpected_safety_index,
     )
 
-    assert Reconciler().destructive_command_deferrals(
-        plan,
-        (machine,),
-        (profile,),
-        (warm,),
-        now=10,
-    ) == {}
+    assert (
+        Reconciler().destructive_command_deferrals(
+            plan,
+            (machine,),
+            (profile,),
+            (warm,),
+            now=10,
+        )
+        == {}
+    )
 
 
 def test_dense_host_retirement_reuses_observed_residencies(monkeypatch):
@@ -4009,9 +4029,7 @@ def test_mutation_governor_prioritizes_drain_for_preemption_beneficiary():
     )
     assert plan.preempted_pairs == frozenset({("z-preempt", "batch")})
 
-    result = Reconciler(
-        ReconcilePolicy(max_concurrent_mutations=1)
-    ).reconcile(
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
         plan,
         machines,
         profiles,
@@ -4020,8 +4038,7 @@ def test_mutation_governor_prioritizes_drain_for_preemption_beneficiary():
     )
 
     assert [
-        (item.kind, item.node_id, item.model_id)
-        for item in result.executable_actions
+        (item.kind, item.node_id, item.model_id) for item in result.executable_actions
     ] == [(ActionKind.DRAIN, "z-preempt", "batch")]
 
 
@@ -4065,9 +4082,7 @@ def test_preemption_governor_unloads_drained_capacity_before_starting_new_drain(
     )
     assert len(plan.preemptions) == 2
 
-    result = Reconciler(
-        ReconcilePolicy(max_concurrent_mutations=1)
-    ).reconcile(
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
         plan,
         machines,
         profiles,
@@ -4075,10 +4090,9 @@ def test_preemption_governor_unloads_drained_capacity_before_starting_new_drain(
         now=10,
     )
 
-    assert [
-        (action.kind, action.node_id)
-        for action in result.executable_actions
-    ] == [(ActionKind.UNLOAD, "z-drained")]
+    assert [(action.kind, action.node_id) for action in result.executable_actions] == [
+        (ActionKind.UNLOAD, "z-drained")
+    ]
 
 
 def test_preemption_governor_drains_idle_capacity_before_busy_capacity():
@@ -4117,9 +4131,7 @@ def test_preemption_governor_drains_idle_capacity_before_busy_capacity():
     )
     assert len(plan.preemptions) == 2
 
-    result = Reconciler(
-        ReconcilePolicy(max_concurrent_mutations=1)
-    ).reconcile(
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
         plan,
         machines,
         profiles,
@@ -4127,10 +4139,9 @@ def test_preemption_governor_drains_idle_capacity_before_busy_capacity():
         now=10,
     )
 
-    assert [
-        (action.kind, action.node_id)
-        for action in result.executable_actions
-    ] == [(ActionKind.DRAIN, "z-idle")]
+    assert [(action.kind, action.node_id) for action in result.executable_actions] == [
+        (ActionKind.DRAIN, "z-idle")
+    ]
 
 
 @pytest.mark.parametrize(
@@ -4188,9 +4199,7 @@ def test_capacity_unlocking_mutation_precedes_unrelated_low_priority_load(
     )
     assert plan.preempted_pairs == frozenset({("z-critical", "batch")})
 
-    result = Reconciler(
-        ReconcilePolicy(max_concurrent_mutations=1)
-    ).reconcile(
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
         plan,
         machines,
         profiles,
@@ -4199,8 +4208,7 @@ def test_capacity_unlocking_mutation_precedes_unrelated_low_priority_load(
     )
 
     assert [
-        (item.kind, item.node_id, item.model_id)
-        for item in result.executable_actions
+        (item.kind, item.node_id, item.model_id) for item in result.executable_actions
     ] == [(expected_action, "z-critical", "batch")]
 
 

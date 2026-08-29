@@ -169,9 +169,7 @@ class PlacementPlanner:
         placement_budget: dict[str, int] = {}
         for node in node_list:
             allocatable = node.capacity_mb - node.reserved_mb
-            usable = allocatable * (
-                1.0 - self.policy.memory_headroom_fraction
-            )
+            usable = allocatable * (1.0 - self.policy.memory_headroom_fraction)
             if node.state == NodeState.THROTTLED:
                 allocatable *= self.policy.throttled_capacity_fraction
                 usable *= self.policy.throttled_capacity_fraction
@@ -224,11 +222,28 @@ class PlacementPlanner:
         }
         profile_by_id = {item.model_id: item for item in model_list}
         compatibility_cache: dict[tuple[str, str, bool], str | None] = {}
+        runtime_requirement_cache: dict[tuple[str, str], bool] = {}
+        runtime_memory_cache: dict[tuple[str, str], int] = {}
         colocation_policy_active = any(
             profile.max_colocated_models or profile.colocation_excludes
             for profile in model_list
         )
         fit_cache: dict[tuple[str, str, int, int, int, int], bool] = {}
+
+        def requires_new_runtime(node: NodeSnapshot, model: ModelProfile) -> bool:
+            key = (node.node_id, model.model_id)
+            if key not in runtime_requirement_cache:
+                runtime_requirement_cache[key] = _requires_new_runtime(
+                    node.residency(model.model_id),
+                    model,
+                )
+            return runtime_requirement_cache[key]
+
+        def runtime_memory(node: NodeSnapshot, model: ModelProfile) -> int:
+            key = (node.node_id, model.model_id)
+            if key not in runtime_memory_cache:
+                runtime_memory_cache[key] = model.memory_for(node.runtimes)
+            return runtime_memory_cache[key]
 
         def compatibility(
             node: NodeSnapshot,
@@ -248,7 +263,7 @@ class PlacementPlanner:
             return compatibility_cache[key]
 
         def fits_node(node: NodeSnapshot, model: ModelProfile) -> bool:
-            model_memory_mb = model.memory_for(node.runtimes)
+            model_memory_mb = runtime_memory(node, model)
             if (
                 desired_memory[node.node_id] + model_memory_mb
                 > placement_budget[node.node_id]
@@ -291,9 +306,7 @@ class PlacementPlanner:
                 compatibility(
                     node,
                     model,
-                    for_new=_requires_new_runtime(
-                        node.residency(model.model_id), model
-                    ),
+                    for_new=requires_new_runtime(node, model),
                 )
                 is None
                 and fits_node(node, model)
@@ -318,18 +331,15 @@ class PlacementPlanner:
                 node = next(
                     (item for item in node_list if item.node_id == node_id), None
                 )
-                residency = node.residency(model.model_id) if node is not None else None
-                for_new = _requires_new_runtime(residency, model)
+                for_new = (
+                    requires_new_runtime(node, model) if node is not None else True
+                )
                 reason = (
                     compatibility(node, model, for_new=for_new)
                     if node is not None
                     else "node does not exist"
                 )
-                if (
-                    node is None
-                    or reason is not None
-                    or not fits_node(node, model)
-                ):
+                if node is None or reason is not None or not fits_node(node, model):
                     unsatisfied.append(
                         UnsatisfiedConstraint(
                             model_id=model.model_id,
@@ -557,13 +567,15 @@ class PlacementPlanner:
             for candidate_node in node_list:
                 if (placement_model.model_id, candidate_node.node_id) in assigned_pairs:
                     continue
-                residency = candidate_node.residency(placement_model.model_id)
-                for_new = _requires_new_runtime(residency, placement_model)
-                if compatibility(
-                    candidate_node,
-                    placement_model,
-                    for_new=for_new,
-                ) is not None:
+                for_new = requires_new_runtime(candidate_node, placement_model)
+                if (
+                    compatibility(
+                        candidate_node,
+                        placement_model,
+                        for_new=for_new,
+                    )
+                    is not None
+                ):
                     continue
                 compatible_nodes.append(candidate_node)
                 if not fits_node(candidate_node, placement_model):
@@ -775,16 +787,11 @@ class PlacementPlanner:
                     isolated_empty_cursors[model.model_id] = cursor
                     if (model.model_id, node.node_id) in assigned_pairs:
                         continue
-                    residency = node.residency(model.model_id)
-                    if (
-                        compatibility(
-                            node,
-                            model,
-                            for_new=_requires_new_runtime(residency, model),
-                        )
-                        is not None
-                        or not fits_node(node, model)
-                    ):
+                    if compatibility(
+                        node,
+                        model,
+                        for_new=requires_new_runtime(node, model),
+                    ) is not None or not fits_node(node, model):
                         continue
                     score, reasons = score_candidate(
                         node,
@@ -792,8 +799,7 @@ class PlacementPlanner:
                         capacity[node.node_id],
                         domains,
                         need_new_domain=(
-                            len(domains)
-                            < min(model.min_failure_domains, target)
+                            len(domains) < min(model.min_failure_domains, target)
                         ),
                     )
                     index = isolated_empty_next_indices[model.model_id]
@@ -821,8 +827,7 @@ class PlacementPlanner:
             for node in node_list:
                 if (model.model_id, node.node_id) in assigned_pairs:
                     continue
-                residency = node.residency(model.model_id)
-                for_new = _requires_new_runtime(residency, model)
+                for_new = requires_new_runtime(node, model)
                 reason = compatibility(node, model, for_new=for_new)
                 if reason is not None:
                     continue
@@ -906,9 +911,7 @@ class PlacementPlanner:
             """
 
             goal = placement_goal(model)
-            placed = sum(
-                item.model_id == model.model_id for item in assignments
-            )
+            placed = sum(item.model_id == model.model_id for item in assignments)
             missing = max(0, goal - placed)
             if not missing:
                 return
@@ -926,9 +929,7 @@ class PlacementPlanner:
                         residency is not None
                         and residency.state == ResidencyState.READY
                         and model.matches_artifact(residency)
-                        and sum(
-                            not _adds_model_slot(item) for item in node.residencies
-                        )
+                        and sum(not _adds_model_slot(item) for item in node.residencies)
                         == 1
                     )
                     for_new = False
@@ -937,13 +938,12 @@ class PlacementPlanner:
                         occupied_models[node.node_id] == 0
                         and desired_model_slots[node.node_id] == 0
                     )
-                    for_new = _requires_new_runtime(residency, model)
+                    for_new = requires_new_runtime(node, model)
                 if not candidate_shape_matches:
                     continue
-                if (
-                    compatibility(node, model, for_new=for_new) is not None
-                    or not fits_node(node, model)
-                ):
+                if compatibility(
+                    node, model, for_new=for_new
+                ) is not None or not fits_node(node, model):
                     continue
                 domain = node.failure_domain or node.node_id
                 candidate_domains.append(domain)
@@ -955,10 +955,9 @@ class PlacementPlanner:
                     need_new_domain=False,
                 )
                 candidates.append((score, node.node_id, node))
-            if (
-                len(candidate_domains) != len(set(candidate_domains))
-                or set(candidate_domains).intersection(domains)
-            ):
+            if len(candidate_domains) != len(set(candidate_domains)) or set(
+                candidate_domains
+            ).intersection(domains):
                 return
             for _, _, node in sorted(
                 candidates,
@@ -1003,16 +1002,11 @@ class PlacementPlanner:
             for node in node_list:
                 if (model.model_id, node.node_id) in assigned_pairs:
                     continue
-                residency = node.residency(model.model_id)
-                if (
-                    compatibility(
-                        node,
-                        model,
-                        for_new=_requires_new_runtime(residency, model),
-                    )
-                    is not None
-                    or not fits_node(node, model)
-                ):
+                if compatibility(
+                    node,
+                    model,
+                    for_new=requires_new_runtime(node, model),
+                ) is not None or not fits_node(node, model):
                     continue
                 if (
                     node.max_models != 1
@@ -1032,10 +1026,9 @@ class PlacementPlanner:
                     need_new_domain=False,
                 )
                 candidates.append((score, node.node_id, node))
-            if (
-                len(candidate_domains) != len(set(candidate_domains))
-                or set(candidate_domains).intersection(domains)
-            ):
+            if len(candidate_domains) != len(set(candidate_domains)) or set(
+                candidate_domains
+            ).intersection(domains):
                 return
             isolated_empty_orders[model.model_id] = tuple(
                 item[2]
@@ -1055,9 +1048,7 @@ class PlacementPlanner:
             remaining_contenders = [
                 model
                 for model in priority_models
-                if sum(
-                    item.model_id == model.model_id for item in assignments
-                )
+                if sum(item.model_id == model.model_id for item in assignments)
                 < placement_goal(model)
             ]
             if len(remaining_contenders) == 1:
@@ -1119,17 +1110,18 @@ class PlacementPlanner:
         for beneficiary in order:
             if len(preemptions) >= self.policy.max_staged_preemptions:
                 break
-            if _placement_demand_urgency(
-                beneficiary,
-                forecast_by_model.get(beneficiary.model_id),
-            ) < 2:
+            if (
+                _placement_demand_urgency(
+                    beneficiary,
+                    forecast_by_model.get(beneficiary.model_id),
+                )
+                < 2
+            ):
                 # Correlation-only demand is valuable for filling spare capacity, but it is not
                 # strong enough evidence to destroy live service. Wait for direct traffic/pressure
                 # or an explicit configured baseline before staging a preemption.
                 continue
-            placed = sum(
-                item.model_id == beneficiary.model_id for item in assignments
-            )
+            placed = sum(item.model_id == beneficiary.model_id for item in assignments)
             missing = max(0, desired_by_model[beneficiary.model_id] - placed)
             pending_pins = [
                 node_id
@@ -1171,9 +1163,7 @@ class PlacementPlanner:
                     existing_domains=staged_domains[beneficiary.model_id],
                     required_node_id=required_node_id,
                     excluded_nodes=preempted_nodes,
-                    max_victims=(
-                        self.policy.max_staged_preemptions - len(preemptions)
-                    ),
+                    max_victims=(self.policy.max_staged_preemptions - len(preemptions)),
                     assignments_by_node=assignments_by_node,
                     candidate_cache=preemption_cache,
                 )
@@ -1197,9 +1187,7 @@ class PlacementPlanner:
         # Host model ceilings can be lowered below live inventory. Preserve the winners selected by
         # ordinary priority placement and explicitly evict only the excess managed residencies;
         # otherwise replacement-readiness safety would retain a violating incumbent indefinitely.
-        preempted_pairs = {
-            (item.node_id, item.model_id) for item in preemptions
-        }
+        preempted_pairs = {(item.node_id, item.model_id) for item in preemptions}
         for node in node_list:
             if len(preemptions) >= self.policy.max_staged_preemptions:
                 break
@@ -1539,18 +1527,17 @@ def _next_replica_startup_seconds(
             candidates.append(warm_seconds)
             continue
         artifact_cached = (
-            (not model.artifact_sha256 and model.model_id in node.cached_models)
-            or bool(
-                residency
-                and residency.managed
-                and residency.state
-                in (
-                    ResidencyState.CACHED,
-                    ResidencyState.DRAINING,
-                    ResidencyState.FAILED,
-                )
-                and model.matches_artifact(residency)
+            not model.artifact_sha256 and model.model_id in node.cached_models
+        ) or bool(
+            residency
+            and residency.managed
+            and residency.state
+            in (
+                ResidencyState.CACHED,
+                ResidencyState.DRAINING,
+                ResidencyState.FAILED,
             )
+            and model.matches_artifact(residency)
         )
         candidates.append(
             warm_seconds if artifact_cached else model.load_seconds + warm_seconds
@@ -1736,9 +1723,7 @@ def _predictive_offered_concurrency(
     ):
         return offered_concurrency
     trend_growth = (
-        forecast.trend_per_minute
-        * (startup_horizon / 60.0)
-        * forecast.confidence
+        forecast.trend_per_minute * (startup_horizon / 60.0) * forecast.confidence
     )
     projected_rate = min(
         base_rate * policy.predictive_growth_limit,
@@ -1914,18 +1899,17 @@ def _ineligible_reason(
     if for_new and (node.manually_managed or "warm" not in node.actuator_capabilities):
         return "node cannot be actuated"
     artifact_cached = (
-        (not model.artifact_sha256 and model.model_id in node.cached_models)
-        or bool(
-            residency
-            and residency.managed
-            and residency.state
-            in (
-                ResidencyState.CACHED,
-                ResidencyState.DRAINING,
-                ResidencyState.FAILED,
-            )
-            and model.matches_artifact(residency)
+        not model.artifact_sha256 and model.model_id in node.cached_models
+    ) or bool(
+        residency
+        and residency.managed
+        and residency.state
+        in (
+            ResidencyState.CACHED,
+            ResidencyState.DRAINING,
+            ResidencyState.FAILED,
         )
+        and model.matches_artifact(residency)
     )
     if for_new and not artifact_cached and "load" not in node.actuator_capabilities:
         return "node cannot load uncached model weights"
@@ -2098,21 +2082,18 @@ def _priority_preemption_candidates(
                 beneficiary.warm_seconds,
             )
             beneficiary_cached = (
-                (
-                    not beneficiary.artifact_sha256
-                    and beneficiary.model_id in node.cached_models
+                not beneficiary.artifact_sha256
+                and beneficiary.model_id in node.cached_models
+            ) or bool(
+                residency
+                and residency.managed
+                and residency.state
+                in (
+                    ResidencyState.CACHED,
+                    ResidencyState.DRAINING,
+                    ResidencyState.FAILED,
                 )
-                or bool(
-                    residency
-                    and residency.managed
-                    and residency.state
-                    in (
-                        ResidencyState.CACHED,
-                        ResidencyState.DRAINING,
-                        ResidencyState.FAILED,
-                    )
-                    and beneficiary.matches_artifact(residency)
-                )
+                and beneficiary.matches_artifact(residency)
             )
             beneficiary_startup_seconds = beneficiary_warm_seconds
             if not beneficiary_cached:
@@ -2307,21 +2288,15 @@ def _colocation_allowed(
     colocated_count = len(other_models) + 1
     if set(model.colocation_excludes).intersection(other_models):
         return False
-    if (
-        model.max_colocated_models
-        and colocated_count > model.max_colocated_models
-    ):
+    if model.max_colocated_models and colocated_count > model.max_colocated_models:
         return False
     for other_model in other_models:
         peer = profile_by_id.get(other_model)
-        if (
-            peer is not None
-            and (
-                model.model_id in peer.colocation_excludes
-                or (
-                    peer.max_colocated_models
-                    and colocated_count > peer.max_colocated_models
-                )
+        if peer is not None and (
+            model.model_id in peer.colocation_excludes
+            or (
+                peer.max_colocated_models
+                and colocated_count > peer.max_colocated_models
             )
         ):
             return False
@@ -2348,9 +2323,14 @@ def _candidate_score(
     if residency and residency.state == ResidencyState.READY and artifact_matches:
         score += 100_000.0
         reasons.append("already resident and ready")
-    elif residency and artifact_matches and residency.state in (
-        ResidencyState.LOADING,
-        ResidencyState.WARMING,
+    elif (
+        residency
+        and artifact_matches
+        and residency.state
+        in (
+            ResidencyState.LOADING,
+            ResidencyState.WARMING,
+        )
     ):
         score += 75_000.0
         reasons.append("already loading")
@@ -2422,7 +2402,10 @@ def _candidate_score(
                 / policy.performance_full_confidence_samples,
             )
             freshness = (
-                max(0.0, 1.0 - max(0.0, performance_age) / policy.performance_ttl_seconds)
+                max(
+                    0.0,
+                    1.0 - max(0.0, performance_age) / policy.performance_ttl_seconds,
+                )
                 if policy.performance_ttl_seconds
                 else 1.0
             )
@@ -2430,8 +2413,7 @@ def _candidate_score(
             throughput_freshness = (
                 max(
                     0.0,
-                    1.0
-                    - max(0.0, throughput_age) / policy.performance_ttl_seconds,
+                    1.0 - max(0.0, throughput_age) / policy.performance_ttl_seconds,
                 )
                 if model_performance.throughput_updated_at
                 and -policy.max_future_clock_skew_seconds
@@ -2451,9 +2433,7 @@ def _candidate_score(
     node_metric_is_attributable = ready_models <= 1 and not model.artifact_sha256
     if model_performance is not None:
         measured_tokens_per_second = (
-            model_performance.tokens_per_second
-            if model_throughput_weight > 0
-            else 0.0
+            model_performance.tokens_per_second if model_throughput_weight > 0 else 0.0
         )
         measured_latency_ms = (
             model_performance.latency_ms if model_latency_weight > 0 else 0.0
@@ -2481,8 +2461,7 @@ def _candidate_score(
         # causes gratuitous migration.
         score += min(node.memory_bandwidth_gbps, 2_000.0) * 10.0 * hardware_weight
         score += (
-            min(math.log2(1.0 + node.compute_gflops) * 100.0, 2_000.0)
-            * hardware_weight
+            min(math.log2(1.0 + node.compute_gflops) * 100.0, 2_000.0) * hardware_weight
         )
         reasons.append("hardware performance estimate")
     if measured_latency_ms:
@@ -2639,8 +2618,7 @@ def _input_digest(
                 (item.model_id, item.node_id, item.memory_mb) for item in assignments
             ],
             "preemptions": [
-                (item.node_id, item.model_id, item.for_model_id)
-                for item in preemptions
+                (item.node_id, item.model_id, item.for_model_id) for item in preemptions
             ],
         }
     )
