@@ -7,11 +7,12 @@ Automatic mode is opt-in; recommend mode is the safe default.
 
 from __future__ import annotations
 
+import heapq
 import math
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -605,13 +606,14 @@ class AllocatorController:
                 "history": [_record_dict(item) for item in self._history[-100:]],
             }
 
-    def _append_record(self, record: MutationRecord) -> None:
+    def _append_record(self, record: MutationRecord, *, trim: bool = True) -> None:
         # One latest record per action/status transition is enough; repeated delivery acks are
         # idempotent and should not exhaust bounded history.
         if self._history and self._history[-1] == record:
             return
         self._history.append(record)
-        self._trim_history()
+        if trim:
+            self._trim_history()
 
     def _trim_history(self) -> None:
         """Bound completed history without ever forgetting an active command.
@@ -1013,6 +1015,54 @@ class AllocatorController:
         for action in self._commands.values():
             active_by_node[action.node_id] = active_by_node.get(action.node_id, 0) + 1
         active_count = len(self._commands)
+        action_by_id = dict(self._commands)
+        dependants_by_id: dict[str, list[str]] = {}
+        for action in self._commands.values():
+            for dependency in action.dependencies:
+                dependants_by_id.setdefault(dependency, []).append(action.action_id)
+
+        candidate_heaps: dict[str, list[tuple[int, int, float, str]]] = {
+            "": []
+        }
+        for action in self._commands.values():
+            if (
+                action.kind not in constructive
+                or action.action_id in self._delivered_command_ids
+            ):
+                continue
+            rank = service_rank(action.model_id)
+            candidate = (rank[0], rank[1], action.created_at, action.action_id)
+            candidate_heaps[""].append(candidate)
+            candidate_heaps.setdefault(action.node_id, []).append(candidate)
+        for candidates in candidate_heaps.values():
+            heapq.heapify(candidates)
+
+        def lowest_candidate(
+            node_id: str,
+            waiting_rank: tuple[int, int],
+        ) -> MutationAction | None:
+            candidates = candidate_heaps.get(node_id, [])
+            while candidates:
+                priority, urgency, _created_at, action_id = candidates[0]
+                action = self._commands.get(action_id)
+                if action is None or action_id in self._delivered_command_ids:
+                    heapq.heappop(candidates)
+                    continue
+                if (priority, urgency) >= waiting_rank:
+                    return None
+                return action
+            return None
+
+        def dependency_closure(action_id: str) -> set[str]:
+            removed: set[str] = set()
+            pending = [action_id]
+            while pending:
+                candidate_id = pending.pop()
+                if candidate_id in removed or candidate_id not in self._commands:
+                    continue
+                removed.add(candidate_id)
+                pending.extend(dependants_by_id.get(candidate_id, ()))
+            return removed
 
         waiting: list[tuple[tuple[int, int], str, str]] = []
         for assignment in plan.assignments:
@@ -1033,6 +1083,7 @@ class AllocatorController:
             )
         waiting.sort(key=lambda item: (-item[0][0], -item[0][1], item[1], item[2]))
 
+        cancelled_any = False
         for waiting_rank, node_id, _model_id in waiting:
             global_full = active_count >= self.reconciler.policy.max_concurrent_mutations
             node_full = (
@@ -1043,41 +1094,39 @@ class AllocatorController:
                 active_count += 1
                 active_by_node[node_id] = active_by_node.get(node_id, 0) + 1
                 continue
-            candidates = [
-                action
-                for action in self._commands.values()
-                if action.kind in constructive
-                and action.action_id not in self._delivered_command_ids
-                and service_rank(action.model_id) < waiting_rank
-                and (not node_full or action.node_id == node_id)
-            ]
-            if not candidates:
+            victim = lowest_candidate(node_id if node_full else "", waiting_rank)
+            if victim is None:
                 continue
-            victim = min(
-                candidates,
-                key=lambda action: (
-                    service_rank(action.model_id),
-                    action.created_at,
-                    action.action_id,
-                ),
-            )
+            removed_ids = dependency_closure(victim.action_id)
             self._cancel_command(
                 victim,
                 now,
                 "undelivered mutation yielded to higher-priority service",
+                dependants_by_id=dependants_by_id,
+                trim_history=False,
             )
-            # Cancelling a prerequisite recursively cancels queued dependants. Recount instead of
-            # assuming exactly one command disappeared.
-            active_count = len(self._commands)
-            active_by_node = {}
-            for action in self._commands.values():
-                active_by_node[action.node_id] = active_by_node.get(action.node_id, 0) + 1
+            cancelled_any = True
+            # Cancelling a prerequisite recursively cancels queued dependants.
+            active_count -= len(removed_ids)
+            for removed_id in removed_ids:
+                removed = action_by_id[removed_id]
+                active_by_node[removed.node_id] -= 1
             # Reserve the slot for this waiting assignment so one cancellation cannot be credited
             # repeatedly while scanning the remainder of the desired plan.
             active_count += 1
             active_by_node[node_id] = active_by_node.get(node_id, 0) + 1
+        if cancelled_any:
+            self._trim_history()
 
-    def _cancel_command(self, action: MutationAction, now: float, message: str) -> None:
+    def _cancel_command(
+        self,
+        action: MutationAction,
+        now: float,
+        message: str,
+        *,
+        dependants_by_id: Mapping[str, Iterable[str]] | None = None,
+        trim_history: bool = True,
+    ) -> None:
         if action.action_id not in self._commands:
             return
         self._append_record(
@@ -1092,7 +1141,8 @@ class AllocatorController:
                 failures=self._failure_streak(action.kind, action.node_id, action.model_id),
                 message=message,
                 artifact_sha256=action.artifact_sha256,
-            )
+            ),
+            trim=trim_history,
         )
         if (
             action.action_id in self._delivered_command_ids
@@ -1112,20 +1162,46 @@ class AllocatorController:
         )
         if cancelled_until >= prior_deadline:
             self._mutation_block_causes[key] = MutationStatus.CANCELLED
-        self._trim_history()
+        if trim_history:
+            self._trim_history()
         self._cancel_dependents(
             action.action_id,
             now,
             f"prerequisite {action.action_id} was cancelled",
+            dependants_by_id=dependants_by_id,
+            trim_history=trim_history,
         )
         self._restored_command_ids.discard(action.action_id)
         if not self._restored_command_ids:
             self._membership_recovery_started_at = None
 
-    def _cancel_dependents(self, action_id: str, now: float, message: str) -> None:
-        for dependent in list(self._commands.values()):
-            if action_id in dependent.dependencies:
-                self._cancel_command(dependent, now, message)
+    def _cancel_dependents(
+        self,
+        action_id: str,
+        now: float,
+        message: str,
+        *,
+        dependants_by_id: Mapping[str, Iterable[str]] | None = None,
+        trim_history: bool = True,
+    ) -> None:
+        if dependants_by_id is None:
+            dependents = tuple(
+                action.action_id
+                for action in self._commands.values()
+                if action_id in action.dependencies
+            )
+        else:
+            dependents = tuple(dependants_by_id.get(action_id, ()))
+        for dependent_id in dependents:
+            dependent = self._commands.get(dependent_id)
+            if dependent is not None:
+                self._cancel_command(
+                    dependent,
+                    now,
+                    message,
+                    dependants_by_id=dependants_by_id,
+                    trim_history=trim_history,
+                )
 
     def _cancel_commands_for_model(
         self,

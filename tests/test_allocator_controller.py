@@ -15,6 +15,7 @@ from shared.allocator.models import (
     DemandForecast,
     ModelProfile,
     ModelResidency,
+    MutationAction,
     NodeSnapshot,
     ResidencyState,
 )
@@ -326,6 +327,77 @@ def test_direct_demand_replaces_undelivered_speculative_prewarm(monkeypatch):
         and record.status == MutationStatus.CANCELLED
         for record in controller.history
     )
+
+
+def test_undelivered_reprioritization_indexes_large_command_queue_once():
+    count = 64
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(max_concurrent_mutations=count),
+        max_history=10,
+    )
+    profiles = tuple(
+        ModelProfile(
+            f"{service}-{index}",
+            8_000,
+            runtimes=("llama.cpp",),
+            pinned_nodes=(f"{service}-node-{index}",),
+            priority=1 if service == "low" else 1_000,
+            min_replicas=1,
+            max_replicas=1,
+        )
+        for service in ("low", "high")
+        for index in range(count)
+    )
+    machines = tuple(
+        NodeSnapshot(
+            f"{service}-node-{index}",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            cached_models=(f"{service}-{index}",),
+            last_heartbeat=10,
+        )
+        for service in ("low", "high")
+        for index in range(count)
+    )
+    plan = controller.planner.plan(machines, profiles, now=10)
+
+    class CountingCommands(dict):
+        values_calls = 0
+
+        def values(self):
+            self.values_calls += 1
+            return super().values()
+
+    commands = CountingCommands(
+        {
+            f"action-{index}": MutationAction(
+                f"action-{index}",
+                ActionKind.WARM,
+                f"low-node-{index}",
+                f"low-{index}",
+                8_000,
+                "queued low-priority warm",
+                plan.generation,
+                10,
+                executable=True,
+            )
+            for index in range(count)
+        }
+    )
+    controller._commands = commands
+
+    controller._reprioritize_undelivered_constructive(
+        plan,
+        machines,
+        profiles,
+        now=11,
+    )
+
+    assert controller._commands == {}
+    assert commands.values_calls <= 6
+    assert len(controller.history) == 10
 
 
 def test_controller_learns_and_persists_bounded_warm_duration(tmp_path):
