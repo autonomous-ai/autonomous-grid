@@ -209,7 +209,9 @@ ordinary task history, Goal branches and transcript refs do not expire by defaul
 already exported them may set `GOAL_TRAJECTORY_RETENTION_SECONDS` to a positive retention window.
 The evidence export is schema-versioned and includes each turn's prompt, output/error, harness,
 execution node, inference usage, worktree commits, transcript input/output commits, recorded tool
-events, and accepted or rejected independent eval runs.
+events, and accepted or rejected independent eval runs. Inference usage is grouped by turn, exact
+model, serving node, and transaction state. Failed requests remain useful failure evidence, but only
+`completed` requests can prove that a turn actually executed through Grid inference.
 
 ## Give Codex business read/write tools
 

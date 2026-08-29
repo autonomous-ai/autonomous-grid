@@ -275,9 +275,10 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 continue
             usage = [item for item in inference if isinstance(item, dict)
                      and item.get("turn_id") == turn.get("id")
-                     and isinstance(item.get("requests"), int)
-                     and not isinstance(item.get("requests"), bool)
+                    and isinstance(item.get("requests"), int)
+                    and not isinstance(item.get("requests"), bool)
                     and item["requests"] > 0
+                    and item.get("state") == "completed"
                     and item.get("model") and item.get("provider_node_id")
                     and (not requested_model or item.get("model") == requested_model)]
             if not usage:

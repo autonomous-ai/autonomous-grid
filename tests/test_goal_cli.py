@@ -497,9 +497,14 @@ def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
 
     record["inference"].append({
         "turn_id": "turn-1", "model": "grid-model", "provider_node_id": "gpu-A",
-        "requests": 1,
+        "state": "completed", "requests": 1,
     })
     assert _verify_evidence(record, require_inference=True) == []
+
+    record["inference"][0]["state"] = "failed"
+    assert any("no model requests attributed" in item
+               for item in _verify_evidence(record, require_inference=True))
+    record["inference"][0]["state"] = "completed"
 
     record["inference"][0]["model"] = "wrong-model"
     failures = _verify_evidence(record, require_inference=True)
