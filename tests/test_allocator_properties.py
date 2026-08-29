@@ -313,26 +313,24 @@ def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries
     rng = random.Random(0x8F1EE7)
     planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0.05))
     reconciler = Reconciler()
+    llama_models = (
+        "Qwen3.6-35B-A3B",
+        "Gemma-4-31B-it",
+        "GLM-4.7-Flash",
+    )
     profiles = (
-        ModelProfile(
-            "Qwen3.6-35B-A3B",
-            32_000,
-            runtimes=("llama.cpp",),
-            backends=("metal",),
-            min_replicas=0,
-            max_replicas=4,
-            min_residency_seconds=0,
-            scale_down_cooldown_seconds=0,
-        ),
-        ModelProfile(
-            "Gemma-4-31B-it",
-            32_000,
-            runtimes=("llama.cpp",),
-            backends=("metal",),
-            min_replicas=0,
-            max_replicas=4,
-            min_residency_seconds=0,
-            scale_down_cooldown_seconds=0,
+        *(
+            ModelProfile(
+                model_id,
+                32_000,
+                runtimes=("llama.cpp",),
+                backends=("metal",),
+                min_replicas=0,
+                max_replicas=4,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=0,
+            )
+            for model_id in llama_models
         ),
         *(
             ModelProfile(
@@ -354,19 +352,57 @@ def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries
         ),
     )
     profile_by_id = {item.model_id: item for item in profiles}
+    llama_inventory = (
+        "firmware-engineer-daniel",
+        "video-editor-tom",
+        "3d-artist-diego",
+        "ml-engineer-priya",
+    )
     fixed_inventory = (
-        ("comfyui-1", "comfyui", "mps", ("comfyui:krea2", "comfyui:z_image")),
-        ("vllm-1", "vllm", "cuda", ("Qwen3.8-Flash-Next",)),
-        ("vllm-2", "vllm", "cuda", ("DeepSeek-V4-Flash",)),
-        ("vllm-3", "vllm", "cuda", ("Qwen3.8-27B",)),
+        (
+            "mac-studio-turtle",
+            "comfyui",
+            "mps",
+            ("comfyui:krea2", "comfyui:z_image"),
+            196_608,
+            0,
+            (),
+        ),
+        (
+            "scholes-60002-01",
+            "vllm",
+            "cuda",
+            ("Qwen3.8-Flash-Next",),
+            196_608,
+            2,
+            (98_304, 98_304),
+        ),
+        (
+            "scholes-60001",
+            "vllm",
+            "cuda",
+            ("DeepSeek-V4-Flash",),
+            393_216,
+            4,
+            (98_304,) * 4,
+        ),
+        (
+            "8x50902-67-qwen38-27b",
+            "vllm",
+            "cuda",
+            ("Qwen3.8-27B",),
+            262_144,
+            8,
+            (32_768,) * 8,
+        ),
     )
 
     for _ in range(250):
         llama_nodes = tuple(
             NodeSnapshot(
-                node_id=f"llama-{index}",
-                capacity_mb=48_000,
-                reserved_mb=rng.choice((0, 4_000, 8_000)),
+                node_id=node_id,
+                capacity_mb=196_608,
+                reserved_mb=rng.choice((0, 16_384, 32_768, 65_536)),
                 runtimes=("llama.cpp",),
                 backends=("metal",),
                 state=rng.choice(
@@ -377,29 +413,29 @@ def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries
                         NodeState.PAUSED,
                     )
                 ),
-                failure_domain=f"mac-{index}",
+                failure_domain=node_id,
                 residencies=tuple(
                     ModelResidency(
                         model_id,
                         32_000,
                         rng.choice((ResidencyState.READY, ResidencyState.CACHED)),
                     )
-                    for model_id in ("Qwen3.6-35B-A3B", "Gemma-4-31B-it")
+                    for model_id in llama_models
                     if rng.random() < 0.25
                 ),
                 cached_models=tuple(
                     model_id
-                    for model_id in ("Qwen3.6-35B-A3B", "Gemma-4-31B-it")
+                    for model_id in llama_models
                     if rng.random() < 0.5
                 ),
                 last_heartbeat=100,
             )
-            for index in range(4)
+            for node_id in llama_inventory
         )
         immutable_nodes = tuple(
             NodeSnapshot(
                 node_id=node_id,
-                capacity_mb=196_608,
+                capacity_mb=capacity_mb,
                 runtimes=(runtime,),
                 backends=(backend,),
                 state=rng.choice(
@@ -415,11 +451,21 @@ def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries
                     )
                     for model_id in models
                 ),
+                gpu_count=gpu_count,
+                gpu_memory_mb=gpu_memory_mb,
                 manually_managed=True,
                 actuator_capabilities=(),
                 last_heartbeat=100,
             )
-            for node_id, runtime, backend, models in fixed_inventory
+            for (
+                node_id,
+                runtime,
+                backend,
+                models,
+                capacity_mb,
+                gpu_count,
+                gpu_memory_mb,
+            ) in fixed_inventory
         )
         nodes = (*llama_nodes, *immutable_nodes)
         demand = tuple(
@@ -453,7 +499,7 @@ def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries
             mode=AllocatorMode.AUTOMATIC,
             now=100,
         )
-        assert all(action.node_id.startswith("llama-") for action in result.actions)
+        assert all(action.node_id in llama_inventory for action in result.actions)
         assert all(
             profile_by_id[action.model_id].runtimes == ("llama.cpp",)
             for action in result.actions
