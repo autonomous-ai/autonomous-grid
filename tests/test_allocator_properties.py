@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import random
 
+import pytest
+
 from shared.allocator.demand import DemandTracker
 from shared.allocator.models import (
     AllocatorMode,
@@ -315,10 +317,11 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
                     )
 
 
-def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries():
+@pytest.mark.parametrize("seed", (0x8F1EE7, 0xA110CA7E, 0xC0DEDA7A, 0xD15A110C))
+def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries(seed):
     """Soak the actual 4 llama.cpp + 1 ComfyUI + 3 vLLM fleet shape."""
 
-    rng = random.Random(0x8F1EE7)
+    rng = random.Random(seed)
     planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0.05))
     reconciler = Reconciler()
     llama_models = (
