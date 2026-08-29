@@ -28273,6 +28273,57 @@ def test_post_spawn_goal_harness_failure_is_left_for_another_machine(monkeypatch
     assert "queued immediately" in capsys.readouterr().err
 
 
+def test_goal_checkpoint_handoff_refreshes_an_expired_token_exactly_once(monkeypatch):
+    """A long native Goal slice must not lose its accepted partial state at token rollover."""
+    from remote import relay, tasks
+
+    current = {"token": "expired"}
+    refreshes = []
+    calls = []
+    state = SimpleNamespace(
+        signaling_url="https://relay.example",
+        token=lambda: current["token"],
+        refresh=lambda stale_token=None: (
+            refreshes.append(stale_token), current.update(token="fresh"), True)[-1],
+    )
+
+    def handoff(_url, token, task_id, **checkpoint):
+        calls.append((token, task_id, checkpoint))
+        if token == "expired":
+            raise relay.RelayUnauthorized()
+        return {"state": "queued", "checkpoint_commit": "a" * 40}
+
+    monkeypatch.setattr(tasks.relay, "checkpoint_task_retry", handoff)
+    answer = tasks.checkpoint_retry_once(
+        state, "T1", reason="native process exited", result_commit="a" * 40)
+
+    assert answer["state"] == "queued"
+    assert refreshes == ["expired"]
+    assert [call[0] for call in calls] == ["expired", "fresh"]
+    assert calls[1][2] == {"reason": "native process exited", "result_commit": "a" * 40}
+
+
+def test_no_runnable_harness_retires_only_task_serving_without_claiming(monkeypatch, capsys):
+    """An invalid fail-closed policy must not hot-loop on relay 422 responses."""
+    from remote import tasks
+
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "unsupported")
+    claims = []
+    monkeypatch.setattr(tasks.relay, "claim_task", lambda *_a, **_k: claims.append(True))
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=threading.Event(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+
+    assert tasks.claim_once(state) is None
+    tasks.task_loop(state)
+
+    assert claims == []
+    assert state.tasks_stop.is_set() and not state.stop.is_set()
+    assert "no runnable configured agent harness" in capsys.readouterr().err
+
+
 def test_native_goal_impossible_checkpoint_is_reported_not_retried(monkeypatch):
     """A harness crash and the native Goal's own terminal verdict are intentionally different."""
     tasks, state, fake_claim = _task_loop_state([{

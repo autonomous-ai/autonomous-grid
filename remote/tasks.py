@@ -206,14 +206,29 @@ def claim_once(state: Any) -> dict[str, Any] | None:
 
     Mirrors `serve.poll_once` — the same credential, the same single-retry rule, a different queue.
     """
+    profiles = _agent_profiles()
+    # The relay intentionally rejects an empty profile list. Empty here means this node can execute
+    # no configured harness, so a claim could only produce a permanent 422 and a noisy retry loop.
+    # Fail closed without spending an attempt or learning anything about the queue.
+    if not profiles:
+        return None
     token = state.token()
     try:
-        return relay.claim_task(state.signaling_url, token, agent_kinds=_agent_kinds(),
-                                agent_profiles=_agent_profiles())
+        return relay.claim_task(
+            state.signaling_url, token,
+            agent_kinds=tuple(profile["kind"] for profile in profiles),
+            agent_profiles=profiles)
     except relay.RelayUnauthorized:
         if state.refresh(stale_token=token):
-            return relay.claim_task(state.signaling_url, state.token(), agent_kinds=_agent_kinds(),
-                                    agent_profiles=_agent_profiles())
+            # Capabilities are scheduling authority. Re-read them rather than replaying a stale
+            # advertisement after a potentially long credential refresh.
+            profiles = _agent_profiles()
+            if not profiles:
+                return None
+            return relay.claim_task(
+                state.signaling_url, state.token(),
+                agent_kinds=tuple(profile["kind"] for profile in profiles),
+                agent_profiles=profiles)
         raise
 
 
@@ -254,6 +269,25 @@ def report_once(serve_state: Any, task_id: str, *, state: str, output: str | Non
             goal_time_used_seconds=goal_time_used_seconds)
 
 
+def checkpoint_retry_once(serve_state: Any, task_id: str, **checkpoint: Any) -> dict[str, Any]:
+    """Hand off a native Goal checkpoint; refresh an expired provider token exactly once.
+
+    Goal slices can outlive an access token. Losing coherent partial work merely because the token
+    expired between the last lease beat and this request would turn an immediate handoff into a
+    lease-expiry rollback. Claims, events, lease renewal, and terminal reports already use this
+    one-refresh rule; checkpoint settlement must not be the lone stale-token gap.
+    """
+    token = serve_state.token()
+    try:
+        return relay.checkpoint_task_retry(
+            serve_state.signaling_url, token, task_id, **checkpoint)
+    except relay.RelayUnauthorized:
+        if not serve_state.refresh(stale_token=token):
+            raise
+        return relay.checkpoint_task_retry(
+            serve_state.signaling_url, serve_state.token(), task_id, **checkpoint)
+
+
 def _agent_kinds() -> tuple[str, ...]:
     """Harnesses this process can really execute; never advertise Codex optimistically."""
     configured = (os.getenv("GRID_TASK_AGENT_KINDS") or "claude,codex").replace(",", " ").split()
@@ -262,8 +296,7 @@ def _agent_kinds() -> tuple[str, ...]:
     for kind in invalid:
         _warn(f"ignoring unsupported harness {kind!r} in GRID_TASK_AGENT_KINDS")
     # Empty or wholly invalid is fail closed: this provider claims no tasks instead of running a
-    # harness its operator meant to disable. The task loop still polls with a non-empty wire shape,
-    # so retain Claude only for the legacy relay contract when the variable was not explicitly set.
+    # harness its operator meant to disable.
     kinds = ["claude"] if "claude" in allowed else []
     if "codex" in allowed and task_codex.available():
         kinds.append("codex")
@@ -1075,6 +1108,15 @@ def task_loop(state: Any, capacity: Any = None) -> None:
     not given one, and the task waits for a provider that can run it.
     """
     capacity = capacity if capacity is not None else task_capacity.shared()
+    if not _agent_profiles():
+        # A provider with no runnable configured harness must not send the relay an invalid empty
+        # profile list, nor hot-spin locally on a fail-closed no-op. Retire only task serving;
+        # inference stays online and an operator can restart task serving after fixing the policy.
+        _warn("task serving retired because this node has no runnable configured agent harness; "
+              "install/enable Codex or Claude, or fix GRID_TASK_AGENT_KINDS (inference is "
+              "unaffected)")
+        state.tasks_stop.set()
+        return
     # Two counters, not one: a provider alternating between a missing plane and a refusal would
     # otherwise retire on a pair of unrelated blips neither of which was persistent.
     consecutive_404s = 0
@@ -1336,8 +1378,8 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
                 # last output/tool events—the exact training evidence this path exists to retain.
                 publisher.flush()
                 try:
-                    retry_answer = relay.checkpoint_task_retry(
-                        state.signaling_url, state.token(), task_id,
+                    retry_answer = checkpoint_retry_once(
+                        state, task_id,
                         reason=reason,
                         result_commit=outcome.result_commit,
                         transcript_result_commit=outcome.transcript_result_commit,

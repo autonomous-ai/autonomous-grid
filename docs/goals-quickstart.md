@@ -29,6 +29,9 @@ are not advertised to the distributed queue, so they cannot claim and strand a G
 
 The provider advertises each native Goal harness it can actually run. Restrict a node explicitly
 with `GRID_TASK_AGENT_KINDS=codex` or `GRID_TASK_AGENT_KINDS=claude` when desired.
+An empty, unsupported, or unavailable-only policy fails closed: the node retires task serving
+without contacting the queue, while Grid inference remains online. Its local log names the policy
+problem; restart task serving after correcting it.
 
 The Goal's `--model` must name a model available through the Grid Responses API. Codex itself runs
 on the provider; its model requests go back through Grid, so the machine executing the agent and the
