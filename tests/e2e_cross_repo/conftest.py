@@ -6,12 +6,16 @@ already use. Pass a path explicitly to run them. See `README.md`.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -166,6 +170,79 @@ def goal_workspace_root():
 
 
 @pytest.fixture
+def business_api():
+    """A process-external API with an idempotent write, as a local business service would expose."""
+    state = {
+        "reads": [], "write_requests": [], "writes_by_key": {}, "side_effects": [],
+    }
+    lock = threading.Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def send_json(self, status: int, value: dict) -> None:
+            encoded = json.dumps(value, separators=(",", ":")).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler protocol name
+            parsed = urlparse(self.path)
+            if parsed.path != "/tickets/read":
+                self.send_json(404, {"error": "not found"})
+                return
+            ticket_id = (parse_qs(parsed.query).get("ticket_id") or [""])[0]
+            with lock:
+                state["reads"].append(ticket_id)
+            self.send_json(200, {
+                "ticket_id": ticket_id, "text": "Customer cannot reset their password",
+            })
+
+        def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler protocol name
+            if urlparse(self.path).path != "/tickets/reply":
+                self.send_json(404, {"error": "not found"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+                body = json.loads(self.rfile.read(length))
+            except (TypeError, ValueError):
+                self.send_json(400, {"error": "invalid JSON"})
+                return
+            key = self.headers.get("Idempotency-Key")
+            if not key:
+                self.send_json(400, {"error": "missing idempotency key"})
+                return
+            with lock:
+                state["write_requests"].append({"key": key, "body": body})
+                previous = state["writes_by_key"].get(key)
+                if previous is not None and previous != body:
+                    self.send_json(409, {"error": "idempotency conflict"})
+                    return
+                replayed = previous is not None
+                if not replayed:
+                    state["writes_by_key"][key] = body
+                    state["side_effects"].append(body)
+            self.send_json(200, {
+                "reply_id": "R-1", "applied": not replayed, "replayed": replayed,
+            })
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state["origin"] = f"http://127.0.0.1:{server.server_port}"
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
 def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, goal_workspace_root,
                         tmp_path_factory):
     """A real task-loop process advertising Codex and using a node-private task root."""
@@ -174,7 +251,7 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
 
     def _spawn(label: str, *, agent_kinds: str = "codex", scenario: str = "codex",
                disk_label: str | None = None, codex_capabilities: str = "",
-               claude_capabilities: str = ""):
+               claude_capabilities: str = "", tool_origins: str = ""):
         node_id, node_token = provider_nodes[label]
         env = {
             **os.environ,
@@ -192,6 +269,7 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
             "GRID_TASK_AGENT_KINDS": agent_kinds,
             "GRID_CODEX_GOAL_CAPABILITIES": codex_capabilities,
             "GRID_CLAUDE_TASK_CAPABILITIES": claude_capabilities,
+            "GRID_GOAL_TOOL_ORIGINS": tool_origins,
             # The task runner intentionally allowlists child env. This test-only selector is
             # explicit operator passthrough, not an accidental inheritance of provider secrets.
             "GRID_TASK_ENV_PASSTHROUGH": "GRID_E2E_GOAL_NODE,GRID_E2E_GOAL_SCENARIO",

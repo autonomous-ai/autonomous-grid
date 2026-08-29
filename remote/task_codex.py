@@ -305,7 +305,7 @@ def _resume_rollout(codex_home: Path, state: dict[str, Any], thread_id: str) -> 
 class ToolExecutor:
     """Execute the Goal's explicit observe/act HTTP capabilities and publish an audit event."""
 
-    def __init__(self, tools: list[dict[str, Any]], *, publish: Callable[..., None],
+    def __init__(self, tools: list[dict[str, Any]], *, publish: Callable[..., Any],
                  inference: GridInference, scope: str):
         self.tools: dict[str, dict[str, Any]] = {}
         invalid_names: set[str] = set()
@@ -409,9 +409,15 @@ class ToolExecutor:
                 or not 0.1 <= raw_timeout <= 300):
             return self._result(False, {"error": "tool HTTP timeout is invalid"})
         record_full = tool.get("record") == "full"
-        self.publish(
+        recorded = self.publish(
             f"goal.{mode}.request", tool=name, call_id=call_id,
+            _flush=True,
+            **({"idempotency_key": headers["Idempotency-Key"]} if mode == "act" else {}),
             **({"arguments": _recorded_tool_value(arguments)} if record_full else {}))
+        if recorded is False:
+            # An unrecorded action is not safe to perform. A later call/attempt can retry before
+            # any business side effect exists.
+            return self._result(False, {"error": "could not durably record tool request"})
         try:
             with httpx.Client(
                     timeout=float(raw_timeout), trust_env=False, follow_redirects=False) as client:
@@ -445,9 +451,16 @@ class ToolExecutor:
             # HTTP client exception strings commonly contain the fully expanded GET URL. Do not
             # leak argument values into an unstructured error that evades field-name redaction.
             success, result = False, {"error": "tool HTTP request failed"}
-        self.publish(
+        recorded = self.publish(
             f"goal.{mode}.result", tool=name, call_id=call_id, success=success,
+            _flush=True,
+            **({"idempotency_key": headers["Idempotency-Key"]} if mode == "act" else {}),
             **({"result": _recorded_tool_value(result)} if record_full else {}))
+        if recorded is False:
+            # The API may already have committed an action. Fail the turn so the same leased-turn
+            # scope and deterministic idempotency key are retried; never let Codex build more work
+            # on an outcome Grid cannot prove happened.
+            raise CodexGoalError("could not durably record tool result")
         return self._result(success, result)
 
     @staticmethod

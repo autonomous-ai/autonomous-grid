@@ -27203,6 +27203,20 @@ def test_publisher_says_whether_an_event_was_actually_accepted(monkeypatch):
     assert pub.publish("task.output", text="b") is False
 
 
+def test_publisher_reports_a_failed_forced_flush(monkeypatch):
+    """Tool actions use this as a durability fence rather than disposable progress."""
+    from remote import relay, task_events
+
+    def unavailable(_batch):
+        raise relay.RelayError("connection refused")
+
+    _capture_publishes(monkeypatch, unavailable)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    assert pub.publish("goal.act.request", tool="reply", _flush=True) is False
+    assert pub.publish("task.output", text="later") is True
+
+
 def test_publisher_can_decline_to_wait_for_a_channel_that_is_busy(monkeypatch):
     """The lease heartbeat publishes through this object, and waiting here costs the LEASE.
 

@@ -80,7 +80,8 @@ class TaskEventPublisher:
         # `flush`, which takes the lock itself.
         self._lock = threading.Lock()
 
-    def publish(self, event_type: str, *, blocking: bool = True, **fields: Any) -> bool:
+    def publish(self, event_type: str, *, blocking: bool = True, _flush: bool = False,
+                **fields: Any) -> bool:
         """Buffer one event, flushing if the buffer is full or has been sitting too long.
 
         Returns whether the event was ACCEPTED. "Never raises" hides two different outcomes — queued,
@@ -88,6 +89,9 @@ class TaskEventPublisher:
         tell them apart will record a lost event as delivered. Every caller may ignore the answer;
         the one that must not is `task_tree.WorkspaceTree`, which stops re-sending a snapshot once it
         believes it landed.
+
+        `_flush=True` turns acceptance into a synchronous relay acknowledgement. Goal tool actions
+        use it as a durability fence; ordinary high-volume output retains buffered best effort.
 
         `blocking=False` declines to wait for the lock instead of parking on it. The lock is held
         across a POST bounded only by `relay._TASK_EVENT_TIMEOUT`, and the lease heartbeat publishes
@@ -100,31 +104,35 @@ class TaskEventPublisher:
             if self._stopped:
                 return False
             self._buffer.append({"type": event_type, **fields})
-            if (len(self._buffer) >= _FLUSH_AT_EVENTS
+            if (_flush or len(self._buffer) >= _FLUSH_AT_EVENTS
                     or time.monotonic() - self._last_flush >= _FLUSH_AFTER_SECONDS):
-                self._locked_flush()
+                return self._locked_flush()
             return True
         finally:
             self._lock.release()
 
-    def flush(self) -> None:
+    def flush(self) -> bool:
         """Send whatever is buffered. Swallows every failure — deliberately, see the docstring."""
         with self._lock:
-            self._locked_flush()
+            return self._locked_flush()
 
-    def _locked_flush(self) -> None:
+    def _locked_flush(self) -> bool:
         """`flush`'s body, for callers that already hold the lock. See `_lock` for why that matters."""
-        if self._stopped or not self._buffer:
-            return
+        if self._stopped:
+            return False
+        if not self._buffer:
+            return True
         batch, self._buffer = self._buffer, []
         self._last_flush = time.monotonic()
         try:
             self._send(batch)
+            return True
         except relay.RelayUnauthorized:
             # One refresh, then stop: the same single-retry rule `claim_once` and `report_once` use.
             # Reaching here twice means no credential is available, and no later batch can land.
             self._stop(f"relay rejected the token while publishing events for task "
                        f"{self._task_id} — progress events stop (the result is unaffected)")
+            return False
         except (Exception, SystemExit) as exc:
             # `SystemExit` is this repo's clean-error idiom and is NOT an `Exception`; a guard that
             # named only `Exception` would let it through and kill the task loop's thread.
@@ -143,6 +151,7 @@ class TaskEventPublisher:
                 _warn(f"dropped {len(batch)} progress event(s) for task {self._task_id} "
                       f"(status={status}, {exc}) — the stream will have a gap; the task and its "
                       f"result are unaffected")
+            return False
 
     def close(self) -> None:
         """Flush the tail. The last lines of a task are the ones that say how it went."""

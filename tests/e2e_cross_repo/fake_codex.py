@@ -55,6 +55,50 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
     scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
     mixed = scenario == "mixed"
 
+    if scenario == "business_tools":
+        if call_tool is None:
+            raise RuntimeError("business Goal received no dynamic tool bridge")
+        if not (cwd / "ticket.json").exists():
+            if node != "B" or history:
+                raise RuntimeError(f"business observation reached wrong state: {node}, {history!r}")
+            result = call_tool("read_ticket", {"ticket_id": "T-42"})
+            envelope = json.loads(((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+            ticket = envelope.get("body") or {}
+            if not result.get("success") or ticket.get("ticket_id") != "T-42":
+                raise RuntimeError(f"ticket observation failed: {result!r}")
+            (cwd / "ticket.json").write_text(json.dumps(ticket, sort_keys=True) + "\n")
+            history.append({"node": "B", "observed": "T-42"})
+            save_history(history)
+            return "active", "B observed ticket T-42", 100
+
+        arguments = {
+            "ticket_id": "T-42",
+            "reply": "Use the verified password-reset link and contact support if it expires.",
+        }
+        if node == "B":
+            result = call_tool("send_reply", arguments)
+            if not result.get("success"):
+                raise RuntimeError(f"first reply action failed: {result!r}")
+            # The API committed the action, but neither this file nor this turn can cross the lease
+            # fence. C must retry the same logical action from B's last published checkpoint.
+            (cwd / "partial-reply.tmp").write_text("B died after the API accepted the reply\n")
+            time.sleep(90)
+            raise RuntimeError("node B was expected to be killed after its business action")
+        expected = [{"node": "B", "observed": "T-42"}]
+        if node != "C" or history != expected:
+            raise RuntimeError(f"business retry did not resume B's checkpoint: {node}, {history!r}")
+        if (cwd / "partial-reply.tmp").exists():
+            raise RuntimeError("B's uncommitted post-action file crossed the lease fence")
+        result = call_tool("send_reply", arguments)
+        envelope = json.loads(((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+        if not result.get("success") or not (envelope.get("body") or {}).get("replayed"):
+            raise RuntimeError(f"replacement action was not safely replayed: {result!r}")
+        (cwd / "DONE.md").write_text(
+            "# Ticket T-42 resolved\n\nThe reply action was idempotently confirmed after failover.\n")
+        history.append({"node": "C", "replayed": "R-1"})
+        save_history(history)
+        return "complete", "C safely confirmed the reply and completed the Goal", 200
+
     if scenario == "image":
         if node != "A" or history:
             raise RuntimeError(f"image Goal reached the wrong worker: {node}, {history!r}")
@@ -242,7 +286,12 @@ def main() -> int:
         elif method == "thread/start":
             dynamic_tools = request.get("params", {}).get("dynamicTools") or []
             rollout = rollout_path(thread_id)
-            rollout.write_text("{}\n")
+            # Real Codex 0.150.1 persists dynamic tool declarations in the rollout and restores
+            # them when a fresh app-server process resumes by path. Model that contract: otherwise
+            # multi-turn business/subgoal tests silently exercise a weaker fake than production.
+            rollout.write_text(json.dumps({
+                "dynamic_tools": dynamic_tools,
+            }, separators=(",", ":")) + "\n")
             reply(request, {"thread": {"id": thread_id, "path": str(rollout)}})
         elif method == "thread/resume":
             thread_id = request.get("params", {}).get("threadId") or thread_id
@@ -253,6 +302,8 @@ def main() -> int:
                 emit({"id": request["id"], "error": {
                     "code": -32600, "message": f"non-portable rollout path: {supplied}"}})
                 continue
+            checkpoint = json.loads(supplied.read_text().splitlines()[0])
+            dynamic_tools = checkpoint.get("dynamic_tools") or []
             reply(request, {"thread": {"id": thread_id, "path": str(supplied)}})
         elif method == "thread/goal/set":
             desired = request.get("params", {}).get("status")
@@ -264,8 +315,7 @@ def main() -> int:
                 emit({"method": "turn/started", "params": {"threadId": thread_id,
                                                                "turn": {"id": str(uuid.uuid4())}}})
                 try:
-                    bridge = call_tool if any(
-                        tool.get("name") == "grid_spawn_subgoal" for tool in dynamic_tools) else None
+                    bridge = call_tool if dynamic_tools else None
                     native_status, output, tokens = run_turn(node, bridge)
                     if early_pause and native_status != "complete":
                         native_status = "paused"

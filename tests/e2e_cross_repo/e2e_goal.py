@@ -295,6 +295,106 @@ def test_image_goal_waits_for_a_node_with_the_required_capability(
         relay_client.get_goal_evidence(relay, owner_token, conversation_id), 1)
 
 
+def test_business_goal_matches_api_origin_and_replays_action_across_nodes(
+        relay, owner_token, spawn_goal_provider, goal_workspace_root, business_api, tmp_path):
+    """Read on B, lose B after a committed write, then replay exactly once on C."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-business-tool-failover")['id']
+    H.seed_trunk(relay, owner_token, project_id)
+    origin = business_api["origin"]
+
+    # A is a perfectly healthy Codex Goal node, but its operator did not authorize this API.
+    # It must not spend an attempt or even materialize the Goal workspace.
+    node_a = spawn_goal_provider(
+        "A", agent_kinds="codex", scenario="business_tools", disk_label="business-A")
+    assert H.wait_for(lambda: "provider" in node_a.output(), timeout=5), node_a.output()
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Resolve support ticket T-42 using the approved business API",
+        done_when="DONE.md confirms the reply after an idempotent API action",
+        model="fake-grid-model", token_budget=5_000,
+        tools=[
+            {
+                "name": "read_ticket", "mode": "observe", "record": "full",
+                "input_schema": {"type": "object", "properties": {
+                    "ticket_id": {"type": "string"}}, "required": ["ticket_id"]},
+                "http": {"method": "GET", "url": f"{origin}/tickets/read"},
+            },
+            {
+                "name": "send_reply", "mode": "act", "record": "full",
+                "input_schema": {"type": "object", "properties": {
+                    "ticket_id": {"type": "string"}, "reply": {"type": "string"}},
+                    "required": ["ticket_id", "reply"]},
+                "http": {"method": "POST", "url": f"{origin}/tickets/reply"},
+            },
+        ],
+        evals=[{"type": "file", "name": "resolution proof", "path": "DONE.md"}])
+    conversation_id = goal["id"]
+    origin_caps = [item for item in goal["required_capabilities"]
+                   if item.startswith("tool_origin.")]
+    assert len(origin_caps) == 1
+    time.sleep(1.5)
+    waiting = _tasks(relay, owner_token, project_id, conversation_id)
+    assert len(waiting) == 1 and waiting[0]["state"] == "queued", waiting
+    assert waiting[0]["attempt"] == 0 and waiting[0]["provider_id"] is None
+    assert not (goal_workspace_root / "business-A").exists()
+
+    # B is authorized for the exact origin. It publishes its observation on turn 1, calls the
+    # mutation on turn 2, and is killed after the API commits but before Grid accepts the turn.
+    node_b = spawn_goal_provider(
+        "B", agent_kinds="codex", scenario="business_tools", disk_label="business-B",
+        tool_origins=origin)
+    assert H.wait_for(
+        lambda: _partial(goal_workspace_root / "business-B", "partial-reply.tmp"), timeout=30), (
+        f"B did not reach its post-action failure point; output:\n{node_b.output()}")
+    assert len(business_api["side_effects"]) == 1
+    rows = _tasks(relay, owner_token, project_id, conversation_id)
+    assert len(rows) == 2 and rows[0]["state"] == "completed", rows
+    assert rows[0]["provider_id"] == node_b.node_id
+    second_turn = rows[1]["id"]
+    assert rows[1]["state"] == "running" and rows[1]["attempt"] == 1
+    node_b.die()
+
+    # C has a separate disk but the same operator-approved origin. Its retry gets the same
+    # idempotency key, so the API reports a replay and performs no second side effect.
+    node_c = spawn_goal_provider(
+        "C", agent_kinds="codex", scenario="business_tools", disk_label="business-C",
+        tool_origins=origin)
+    complete = H.wait_for(
+        lambda: _completed_goal(relay, owner_token, conversation_id), timeout=75)
+    assert complete, f"C did not complete the business Goal; output:\n{node_c.output()}"
+    rows = _tasks(relay, owner_token, project_id, conversation_id)
+    assert len(rows) == 2 and rows[1]["id"] == second_turn, rows
+    assert rows[1]["attempt"] == 2 and rows[1]["provider_id"] == node_c.node_id
+    assert len(business_api["write_requests"]) == 2
+    assert len({item["key"] for item in business_api["write_requests"]}) == 1
+    assert business_api["write_requests"][0]["body"] == business_api["write_requests"][1]["body"]
+    assert len(business_api["side_effects"]) == 1
+
+    destination = tmp_path / "business-result"
+    destination.mkdir()
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=rows[-1]["branch"], commit=rows[-1]["result_commit"], project_id=project_id)
+    assert json.loads((destination / "ticket.json").read_text())["ticket_id"] == "T-42"
+    assert (destination / "DONE.md").is_file()
+    assert not (destination / "partial-reply.tmp").exists()
+
+    evidence = relay_client.get_goal_evidence(relay, owner_token, conversation_id)
+    _assert_transcript_chain(evidence, 2, min_nodes=2)
+    action_requests = [item["event"] for item in evidence["attempt_events"]
+                       if item["event"].get("type") == "goal.act.request"]
+    action_results = [item["event"] for item in evidence["attempt_events"]
+                      if item["event"].get("type") == "goal.act.result"]
+    assert len(action_requests) == 2 and len(action_results) == 2
+    assert all(item["success"] for item in action_results)
+    evidence_keys = {item["idempotency_key"] for item in action_requests + action_results}
+    assert evidence_keys == {business_api["write_requests"][0]["key"]}
+
+
 def test_parent_codex_spawns_claude_child_then_codex_fans_it_in(
         relay, owner_token, spawn_goal_provider, tmp_path):
     """A real dynamic tool call creates a second distributed Goal and Git-fans it into parent."""

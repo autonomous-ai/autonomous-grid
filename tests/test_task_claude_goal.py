@@ -6,6 +6,8 @@ import os
 import sys
 import time
 
+import pytest
+
 from remote import task_agent, task_codex, task_stream, tasks
 
 
@@ -373,3 +375,64 @@ def test_tool_arguments_and_response_bodies_are_hard_bounded(monkeypatch):
     assert "response exceeds" in oversized_response["contentItems"][0]["text"]
     assert calls[0]["trust_env"] is False
     assert calls[0]["follow_redirects"] is False
+
+
+def test_tool_does_not_act_until_its_request_audit_is_durable(monkeypatch):
+    monkeypatch.setenv("GRID_GOAL_TOOL_ORIGINS", "https://support.example")
+    calls = []
+    monkeypatch.setattr(
+        task_codex.httpx, "Client", lambda **_kwargs: calls.append("constructed"))
+    executor = task_codex.ToolExecutor([{
+        "name": "send_reply", "mode": "act",
+        "http": {"method": "POST", "url": "https://support.example/reply"},
+    }], publish=lambda *_a, **_k: False,
+        inference=task_codex.GridInference("https://grid.example", "secret"), scope="goal:1")
+    result = executor.call("send_reply", {"reply": "hello"}, "call-1")
+    assert result["success"] is False
+    assert "durably record tool request" in result["contentItems"][0]["text"]
+    assert calls == []
+
+
+def test_tool_fails_the_turn_if_its_committed_result_cannot_be_recorded(monkeypatch):
+    monkeypatch.setenv("GRID_GOAL_TOOL_ORIGINS", "https://support.example")
+    publishes = []
+
+    class Response:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def iter_bytes():
+            yield b'{"reply_id":"R-1"}'
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return Response()
+
+    def publish(event_type, **_fields):
+        publishes.append(event_type)
+        return len(publishes) == 1
+
+    monkeypatch.setattr(task_codex.httpx, "Client", Client)
+    executor = task_codex.ToolExecutor([{
+        "name": "send_reply", "mode": "act",
+        "http": {"method": "POST", "url": "https://support.example/reply"},
+    }], publish=publish,
+        inference=task_codex.GridInference("https://grid.example", "secret"), scope="goal:1")
+    with pytest.raises(task_codex.CodexGoalError, match="durably record tool result"):
+        executor.call("send_reply", {"reply": "hello"}, "call-1")
+    assert publishes == ["goal.act.request", "goal.act.result"]

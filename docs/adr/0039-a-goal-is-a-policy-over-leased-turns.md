@@ -76,6 +76,13 @@ relay's reserved internal action name. Only a relay-authored tool marker unlocks
 against the exact selected relay origin. Workers enforce these rules again because a mixed-version
 fleet must fail closed even when an older relay accepted an unsafe manifest.
 
+Tool request/result events are stronger than ordinary progress events. The request is synchronously
+accepted by the relay before the worker contacts an API. The result is synchronously accepted before
+it is returned to Codex. Losing the result after a possible side effect fails the leased turn; its
+replacement uses the same turn-scoped idempotency key, so a conforming API can return the committed
+outcome without repeating the mutation. This yields a durable action trajectory even across the
+otherwise unavoidable crash window after a remote commit.
+
 ### Native Goal mechanisms remain authoritative progress loops
 
 Grid invokes Codex's native Goal API and Claude Code's native `/goal`; it does not reproduce their
@@ -95,6 +102,13 @@ stores the rollout's path relative to the checkpointed Codex home, resolves it b
 worker's home, and supplies that relocated absolute `path` to `thread/resume`. Paths that escape the
 copied home, are missing, or are ambiguous fail closed. This was measured against real Codex 0.150.1
 with worker A's original home taken offline before worker B resumed.
+
+Dynamic tool declarations are native thread state rather than `thread/resume` parameters. Real
+Codex 0.150.1 was also measured by starting a thread with a custom tool, completing a turn against a
+captured Responses endpoint, terminating app-server, resuming by the relocated rollout path in a
+new app-server process, and completing another turn: both model requests contained the custom tool.
+Grid therefore supplies dynamic tools at `thread/start` and lets native Codex restore them from its
+rollout; the cross-repository fake must persist the same state or it is not a faithful resume test.
 
 Grid records the native status, evaluator reason when the harness exposes one, model, harness
 version, token/time usage, and checkpoint commit for every attempt. Native status can request
@@ -181,7 +195,8 @@ The feature is not production-proven by processes sharing one host. Release requ
 
 Required scenarios include Codex A -> Claude B -> Codex C, a capability-constrained image Goal that
 Claude cannot claim, evaluator retry and stale-commit rejection, cancellation during evaluation,
-and a parent Goal whose independently claimed children fan in after all required evaluations pass.
+an origin-constrained business Goal that fails over after an idempotent action commits, and a parent
+Goal whose independently claimed children fan in after all required evaluations pass.
 
 ## Consequences
 

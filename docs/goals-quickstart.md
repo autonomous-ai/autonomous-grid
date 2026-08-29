@@ -249,6 +249,13 @@ followed, and arguments and response bodies are capped at 64 KiB. `act` calls ca
 idempotency key scoped to the Goal turn, so the receiving API can reject a duplicate after a worker
 failure. Grid credentials are never placed in Codex's environment or stored in Git.
 
+Tool request and result events are durability fences, not buffered console progress. Grid flushes
+the request record before contacting the API. If that record cannot land, it does not make the
+call. It flushes the result before returning it to Codex; if the API may have committed but the
+result cannot be recorded, the turn fails and a replacement replays it with the same idempotency
+key. This closes the crash window between a business side effect and the training/audit trajectory.
+The relay evidence records that non-secret key on both action events so a verifier can join retries.
+
 `GRID_GOAL_TOOL_ORIGINS` is a comma-separated, exact-origin allowlist controlled by each node
 operator. It defaults to deny-all. Grid turns every manifest origin into an opaque scheduling
 capability, so a Goal stays queued instead of being claimed by a node that cannot reach or is not
@@ -274,7 +281,19 @@ This is a single-host distributed-protocol emulation, not physical multi-machine
 candidate must also pass [the three-machine acceptance runbook](goals-three-machine-acceptance.md),
 which forbids shared filesystems and records the node/lease/commit chain.
 
-The same suite also keeps a capability-constrained image Goal queued while an incapable Claude
-provider is actively polling, then proves a Codex provider advertising `image_generation` claims it,
-publishes a PNG, and passes the independent eval. A fourth scenario exercises a Codex parent,
-Claude child Goal, and Codex fan-in.
+The automated scenarios record the logical nodes explicitly (each uses an isolated task root):
+
+| Goal | Execution | Harnesses | Injected failure | Independent eval |
+|---|---|---|---|---|
+| Four-feature game | A -> B -> C | Codex -> Codex -> Codex | A dies in feature 2; B dies in 3–4 | Four required files |
+| Mixed game | A -> B -> C | Codex -> Claude -> Codex | A and B die mid-feature | Four required files |
+| Image artifact | B polls; A executes | Claude rejected; Codex selected | Capability mismatch | PNG file and size |
+| Support reply | A polls; B -> C execute | Codex | B dies after API commit | `DONE.md`; one API side effect |
+| Required child | A parent; B child; C parent | Codex -> Claude -> Codex | Parent moves while child runs | Child and parent files |
+| Optional child | A parent; B child; C parent | Codex | Child fails | Parent file; child failure retained |
+
+Every scenario uses `fake-grid-model` so the test measures Grid's queue, agent harness, tool,
+Git/checkpoint and eval protocols deterministically rather than model quality. The support-reply
+scenario additionally proves an unauthorized but otherwise healthy node spends zero attempts, the
+authorized successor restores Codex's dynamic tools, and both write attempts carry one identical
+idempotency key while the API performs exactly one side effect.
