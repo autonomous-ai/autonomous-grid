@@ -2507,6 +2507,48 @@ def test_priority_preemption_prefers_the_cheapest_learned_warm_back_cost():
     ] == [("z-cheap", "batch", "critical")]
 
 
+def test_priority_preemption_prefers_cached_beneficiary_after_equal_disruption():
+    low_a = model(
+        "low-a",
+        8_000,
+        min_replicas=0,
+        max_replicas=0,
+        priority=10,
+        min_residency_seconds=0,
+    )
+    low_z = replace(low_a, model_id="low-z")
+    critical = model(
+        "critical",
+        8_000,
+        priority=1_000,
+        load_seconds=60,
+        warm_seconds=5,
+        min_residency_seconds=0,
+    )
+    cold = node(
+        "a-cold",
+        8_000,
+        residencies=(ready("low-a", 8_000),),
+    )
+    cached = node(
+        "z-cached",
+        8_000,
+        residencies=(ready("low-z", 8_000),),
+        cached=("critical",),
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (cold, cached),
+        (low_a, low_z, critical),
+        now=10,
+    )
+
+    assert [
+        (item.node_id, item.model_id, item.for_model_id)
+        for item in plan.preemptions
+    ] == [("z-cached", "low-z", "critical")]
+
+
 def test_priority_preemption_prefers_idle_work_over_cheaper_busy_work():
     batch = model("batch", 8_000, priority=10, min_residency_seconds=0)
     critical = model("critical", 8_000, priority=1_000, min_residency_seconds=0)

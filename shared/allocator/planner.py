@@ -121,7 +121,7 @@ class _RepackSearchState:
 
 @dataclass(frozen=True, slots=True)
 class _PreemptionCandidate:
-    sort_key: tuple[int, int, int, int, float, int, int, str]
+    sort_key: tuple[int, int, int, int, float, float, int, int, str]
     node: NodeSnapshot
     victims: tuple[ModelResidency, ...]
     displaced_assignments: tuple[PlacementAssignment, ...]
@@ -1995,6 +1995,30 @@ def _priority_preemption_candidates(
             ):
                 continue
             victim_profiles = [profile_by_id[item.model_id] for item in selected]
+            beneficiary_warm_seconds = startup_seconds.get(
+                (node.node_id, beneficiary.model_id),
+                beneficiary.warm_seconds,
+            )
+            beneficiary_cached = (
+                (
+                    not beneficiary.artifact_sha256
+                    and beneficiary.model_id in node.cached_models
+                )
+                or bool(
+                    residency
+                    and residency.managed
+                    and residency.state
+                    in (
+                        ResidencyState.CACHED,
+                        ResidencyState.DRAINING,
+                        ResidencyState.FAILED,
+                    )
+                    and beneficiary.matches_artifact(residency)
+                )
+            )
+            beneficiary_startup_seconds = beneficiary_warm_seconds
+            if not beneficiary_cached:
+                beneficiary_startup_seconds += beneficiary.load_seconds
             candidates.append(
                 _PreemptionCandidate(
                     sort_key=(
@@ -2002,6 +2026,7 @@ def _priority_preemption_candidates(
                         sum(item.active_requests for item in selected),
                         sum(_preemption_state_cost(item.state) for item in selected),
                         node.queue_depth,
+                        beneficiary_startup_seconds,
                         sum(
                             startup_seconds.get(
                                 (node.node_id, item.model_id),
