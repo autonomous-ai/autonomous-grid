@@ -1347,11 +1347,21 @@ class PlacementPlanner:
                     minimum_placed = min(
                         placed_by_model[model.model_id] for model in unfinished
                     )
-                    current_level = [
-                        model
-                        for model in unfinished
-                        if placed_by_model[model.model_id] == minimum_placed
-                    ]
+                    current_level = sorted(
+                        (
+                            model
+                            for model in unfinished
+                            if placed_by_model[model.model_id] == minimum_placed
+                        ),
+                        key=lambda model: (
+                            -demand_urgency_by_model[model.model_id],
+                            _scarcity_service_pressure(
+                                model,
+                                forecast_by_model.get(model.model_id),
+                            ),
+                            model.model_id,
+                        ),
+                    )
                     progress = False
                     for model in current_level:
                         if place_next_replica(model):
@@ -1974,6 +1984,45 @@ def _placement_demand_urgency(
     if forecast.correlation_sources and forecast.correlated_requests_per_minute > 0:
         return 1
     return 0
+
+
+def _scarcity_service_pressure(
+    model: ModelProfile,
+    forecast: DemandForecast | None,
+) -> tuple[float, ...]:
+    """Order equal-share contenders by attributable harm, never caller-chosen breadth.
+
+    Fair rounds still give the next replica to the least-served models. This key only resolves a
+    tie at that level, which matters when budget or capacity runs out partway through the round.
+    Trusted cohort evidence is strongest; ordinary measured queue/SLO/error/load signals follow.
+    Untrusted ``active_cohorts`` is deliberately excluded so affinity-key fan-out cannot buy a
+    scarce slot.
+    """
+
+    if forecast is None:
+        return (0.0,) * 7
+    observed_rate = forecast.observed_requests_per_minute
+    if not observed_rate and not forecast.correlation_sources:
+        observed_rate = forecast.requests_per_minute
+    latency_ratio = (
+        min(100.0, forecast.p95_latency_ms / model.latency_slo_ms)
+        if model.latency_slo_ms > 0
+        else 0.0
+    )
+    trusted_breached = (
+        forecast.trusted_active_cohorts
+        * forecast.trusted_cohort_slo_breach_rate
+    )
+    # ``sorted`` is ascending; negate every descending service-impact component.
+    return (
+        -trusted_breached,
+        -float(forecast.trusted_active_cohorts),
+        -float(forecast.queue_depth),
+        -latency_ratio,
+        -forecast.error_rate,
+        -forecast.offered_concurrency,
+        -observed_rate,
+    )
 
 
 def _next_replica_startup_seconds(

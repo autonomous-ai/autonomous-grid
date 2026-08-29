@@ -178,7 +178,12 @@ Placement is deterministic. Hard pins are reserved first and higher-priority cla
 lower-priority work. Within one priority class, constrained and larger models define each round's
 order, but placement progresses one replica per model per round. Scarce capacity is therefore
 max-min fair among equally important compatible models instead of being monopolized by the first
-model ID before its peers receive a baseline. If lower-priority managed residencies already occupy
+model ID before its peers receive a baseline. If a hard budget or capacity limit ends partway
+through one equal-share round, the tie is resolved by attributable service harm: breached trusted
+cohorts first, then trusted cohort count, measured queue, latency/SLO ratio, errors, concurrency,
+and observed request rate. Caller-chosen cohort breadth is deliberately excluded. Model IDs remain
+only the final deterministic tie-break, so renaming two otherwise identical workloads cannot move
+the scarce slot away from the workload with greater measured harm. If lower-priority managed residencies already occupy
 all compatible capacity, Grid emits an explicit staged preemption: it first drains and unloads the
 lowest-priority sufficient victim set, continues reporting the important model as
 unsatisfied, and places it only after a later heartbeat proves that memory is actually free. The

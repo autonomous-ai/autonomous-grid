@@ -179,6 +179,64 @@ def test_hard_hourly_budget_reports_service_it_cannot_afford():
     assert any(item.code == "hourly_cost_budget" for item in plan.unsatisfied)
 
 
+@pytest.mark.parametrize(
+    ("high_id", "low_id"),
+    (("a-many-cohorts", "z-one-cohort"), ("z-many-cohorts", "a-one-cohort")),
+)
+def test_budget_scarcity_prefers_greater_trusted_cohort_harm_independent_of_name(
+    high_id,
+    low_id,
+):
+    planner = PlacementPlanner(
+        PlannerPolicy(memory_headroom_fraction=0, max_hourly_cost=0.5)
+    )
+    machines = tuple(
+        node(
+            node_id,
+            16_000,
+            max_models=1,
+            cost_per_hour=0.5,
+            cost_known=True,
+        )
+        for node_id in ("host-a", "host-b")
+    )
+    profiles = (
+        model(high_id, min_replicas=1, max_replicas=10, latency_slo_ms=1_000),
+        model(low_id, min_replicas=1, max_replicas=10, latency_slo_ms=1_000),
+    )
+    forecasts = (
+        DemandForecast(
+            high_id,
+            requests_per_minute=100,
+            observed_requests_per_minute=100,
+            offered_concurrency=10,
+            queue_depth=10,
+            p95_latency_ms=5_000,
+            trusted_active_cohorts=10,
+            trusted_cohort_slo_breach_rate=1.0,
+            trusted_cohort_graduated=True,
+        ),
+        DemandForecast(
+            low_id,
+            requests_per_minute=1,
+            observed_requests_per_minute=1,
+            offered_concurrency=0.1,
+            p95_latency_ms=100,
+            trusted_active_cohorts=1,
+            trusted_cohort_slo_breach_rate=0.0,
+            trusted_cohort_graduated=True,
+        ),
+    )
+
+    plan = planner.plan(machines, profiles, forecasts, now=10)
+
+    assert [assignment.model_id for assignment in plan.assignments] == [high_id]
+    assert any(
+        item.model_id == low_id and item.code == "hourly_cost_budget"
+        for item in plan.unsatisfied
+    )
+
+
 def test_budget_fails_closed_on_unknown_cost_unless_operator_allows_it():
     machine = node("unknown-price", cost_per_hour=0.0, cost_known=False)
     profile = model("coding")
