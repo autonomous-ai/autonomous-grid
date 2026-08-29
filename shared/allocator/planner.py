@@ -212,22 +212,33 @@ class PlacementPlanner:
             for model in model_list
         }
         profile_by_id = {item.model_id: item for item in model_list}
+        compatibility_cache: dict[tuple[str, str, bool], str | None] = {}
+        colocation_policy_active = any(
+            profile.max_colocated_models or profile.colocation_excludes
+            for profile in model_list
+        )
+        fit_cache: dict[tuple[str, str, int, int, int], bool] = {}
 
-        # Higher-priority and larger models place first.  Larger-first is the standard bin-packing
-        # guard against a collection of small replicas fragmenting every host before a large model.
-        def eligible_host_count(model: ModelProfile) -> int:
-            return sum(
-                _ineligible_reason(
+        def compatibility(
+            node: NodeSnapshot,
+            model: ModelProfile,
+            *,
+            for_new: bool,
+        ) -> str | None:
+            key = (node.node_id, model.model_id, for_new)
+            if key not in compatibility_cache:
+                compatibility_cache[key] = _ineligible_reason(
                     node,
                     model,
                     timestamp,
                     self.policy,
-                    for_new=_requires_new_runtime(
-                        node.residency(model.model_id), model
-                    ),
+                    for_new=for_new,
                 )
-                is None
-                and _fits(
+            return compatibility_cache[key]
+
+        def fits_node(node: NodeSnapshot, model: ModelProfile) -> bool:
+            if colocation_policy_active:
+                return _fits(
                     node,
                     model,
                     capacity,
@@ -236,6 +247,38 @@ class PlacementPlanner:
                     assignments,
                     profile_by_id,
                 )
+            key = (
+                node.node_id,
+                model.model_id,
+                capacity[node.node_id],
+                occupied_models[node.node_id],
+                desired_model_slots[node.node_id],
+            )
+            if key not in fit_cache:
+                fit_cache[key] = _fits(
+                    node,
+                    model,
+                    capacity,
+                    occupied_models,
+                    desired_model_slots,
+                    assignments,
+                    profile_by_id,
+                )
+            return fit_cache[key]
+
+        # Higher-priority and larger models place first.  Larger-first is the standard bin-packing
+        # guard against a collection of small replicas fragmenting every host before a large model.
+        def eligible_host_count(model: ModelProfile) -> int:
+            return sum(
+                compatibility(
+                    node,
+                    model,
+                    for_new=_requires_new_runtime(
+                        node.residency(model.model_id), model
+                    ),
+                )
+                is None
+                and fits_node(node, model)
                 for node in node_list
             )
 
@@ -259,25 +302,15 @@ class PlacementPlanner:
                 )
                 residency = node.residency(model.model_id) if node is not None else None
                 for_new = _requires_new_runtime(residency, model)
-                reason = _ineligible_reason(
-                    node,
-                    model,
-                    timestamp,
-                    self.policy,
-                    for_new=for_new,
+                reason = (
+                    compatibility(node, model, for_new=for_new)
+                    if node is not None
+                    else "node does not exist"
                 )
                 if (
                     node is None
                     or reason is not None
-                    or not _fits(
-                        node,
-                        model,
-                        capacity,
-                        occupied_models,
-                        desired_model_slots,
-                        assignments,
-                        profile_by_id,
-                    )
+                    or not fits_node(node, model)
                 ):
                     unsatisfied.append(
                         UnsatisfiedConstraint(
@@ -382,6 +415,42 @@ class PlacementPlanner:
             desired_model_slots.clear()
             desired_model_slots.update(saved_slots)
 
+        candidate_score_cache: dict[
+            tuple[str, str, int, bool, bool],
+            tuple[float, tuple[str, ...]],
+        ] = {}
+
+        def score_candidate(
+            node: NodeSnapshot,
+            model: ModelProfile,
+            remaining_mb: int,
+            domains: set[str],
+            *,
+            need_new_domain: bool,
+        ) -> tuple[float, tuple[str, ...]]:
+            domain_present = (node.failure_domain or node.node_id) in domains
+            key = (
+                node.node_id,
+                model.model_id,
+                remaining_mb,
+                domain_present,
+                need_new_domain,
+            )
+            cached = candidate_score_cache.get(key)
+            if cached is None:
+                cached = _candidate_score(
+                    node,
+                    model,
+                    remaining_mb,
+                    domains,
+                    self.policy,
+                    now=timestamp,
+                    need_new_domain=need_new_domain,
+                    startup_seconds=startup_by_pair,
+                )
+                candidate_score_cache[key] = cached
+            return cached
+
         def remove_regular_assignment(assignment: PlacementAssignment) -> None:
             assignment_node = node_by_id[assignment.node_id]
             residency = assignment_node.residency(assignment.model_id)
@@ -464,44 +533,28 @@ class PlacementPlanner:
                     continue
                 residency = candidate_node.residency(placement_model.model_id)
                 for_new = _requires_new_runtime(residency, placement_model)
-                if (
-                    _ineligible_reason(
-                        candidate_node,
-                        placement_model,
-                        timestamp,
-                        self.policy,
-                        for_new=for_new,
-                    )
-                    is not None
-                ):
-                    continue
-                compatible_nodes.append(candidate_node)
-                if not _fits(
+                if compatibility(
                     candidate_node,
                     placement_model,
-                    capacity,
-                    occupied_models,
-                    desired_model_slots,
-                    assignments,
-                    profile_by_id,
-                ):
+                    for_new=for_new,
+                ) is not None:
+                    continue
+                compatible_nodes.append(candidate_node)
+                if not fits_node(candidate_node, placement_model):
                     continue
                 candidate_domain = (
                     candidate_node.failure_domain or candidate_node.node_id
                 )
                 if len(domains | {candidate_domain}) < required_domain_floor:
                     continue
-                score, reasons = _candidate_score(
+                score, reasons = score_candidate(
                     candidate_node,
                     placement_model,
                     capacity[candidate_node.node_id],
                     domains,
-                    self.policy,
-                    now=timestamp,
                     need_new_domain=(
                         len(domains) < min(placement_model.min_failure_domains, target)
                     ),
-                    startup_seconds=startup_by_pair,
                 )
                 candidates.append(
                     (score, candidate_node.node_id, candidate_node, reasons)
@@ -617,15 +670,7 @@ class PlacementPlanner:
                             )
                         for victim in victim_group:
                             remove_regular_assignment(victim)
-                        if not _fits(
-                            target_node,
-                            placement_model,
-                            capacity,
-                            occupied_models,
-                            desired_model_slots,
-                            assignments,
-                            profile_by_id,
-                        ):
+                        if not fits_node(target_node, placement_model):
                             restore_placement_state(state)
                             continue
                         target_domain = (
@@ -641,18 +686,15 @@ class PlacementPlanner:
                         ):
                             restore_placement_state(state)
                             continue
-                        score, reasons = _candidate_score(
+                        score, reasons = score_candidate(
                             target_node,
                             placement_model,
                             capacity[target_node.node_id],
                             placement_domains,
-                            self.policy,
-                            now=timestamp,
                             need_new_domain=(
                                 len(placement_domains)
                                 < min(placement_model.min_failure_domains, target)
                             ),
-                            startup_seconds=startup_by_pair,
                         )
                         _place(
                             _assignment(
@@ -707,37 +749,24 @@ class PlacementPlanner:
                         continue
                     residency = node.residency(model.model_id)
                     if (
-                        _ineligible_reason(
+                        compatibility(
                             node,
                             model,
-                            timestamp,
-                            self.policy,
                             for_new=_requires_new_runtime(residency, model),
                         )
                         is not None
-                        or not _fits(
-                            node,
-                            model,
-                            capacity,
-                            occupied_models,
-                            desired_model_slots,
-                            assignments,
-                            profile_by_id,
-                        )
+                        or not fits_node(node, model)
                     ):
                         continue
-                    score, reasons = _candidate_score(
+                    score, reasons = score_candidate(
                         node,
                         model,
                         capacity[node.node_id],
                         domains,
-                        self.policy,
-                        now=timestamp,
                         need_new_domain=(
                             len(domains)
                             < min(model.min_failure_domains, target)
                         ),
-                        startup_seconds=startup_by_pair,
                     )
                     index = isolated_empty_next_indices[model.model_id]
                     isolated_empty_next_indices[model.model_id] = index + 1
@@ -765,34 +794,21 @@ class PlacementPlanner:
                     continue
                 residency = node.residency(model.model_id)
                 for_new = _requires_new_runtime(residency, model)
-                reason = _ineligible_reason(
-                    node, model, timestamp, self.policy, for_new=for_new
-                )
+                reason = compatibility(node, model, for_new=for_new)
                 if reason is not None:
                     continue
                 if (node.failure_domain or node.node_id) not in domains:
                     compatible_new_domain_exists = True
-                if not _fits(
-                    node,
-                    model,
-                    capacity,
-                    occupied_models,
-                    desired_model_slots,
-                    assignments,
-                    profile_by_id,
-                ):
+                if not fits_node(node, model):
                     continue
-                score, reasons = _candidate_score(
+                score, reasons = score_candidate(
                     node,
                     model,
                     capacity[node.node_id],
                     domains,
-                    self.policy,
-                    now=timestamp,
                     need_new_domain=(
                         len(domains) < min(model.min_failure_domains, target)
                     ),
-                    startup_seconds=startup_by_pair,
                 )
                 candidates.append((score, node.node_id, node, reasons))
             needed_domains = min(model.min_failure_domains, target)
@@ -895,32 +911,18 @@ class PlacementPlanner:
                 if not candidate_shape_matches:
                     continue
                 if (
-                    _ineligible_reason(
-                        node, model, timestamp, self.policy, for_new=for_new
-                    )
-                    is not None
-                    or not _fits(
-                        node,
-                        model,
-                        capacity,
-                        occupied_models,
-                        desired_model_slots,
-                        assignments,
-                        profile_by_id,
-                    )
+                    compatibility(node, model, for_new=for_new) is not None
+                    or not fits_node(node, model)
                 ):
                     continue
                 domain = node.failure_domain or node.node_id
                 candidate_domains.append(domain)
-                score, _ = _candidate_score(
+                score, _ = score_candidate(
                     node,
                     model,
                     capacity[node.node_id],
                     domains,
-                    self.policy,
-                    now=timestamp,
                     need_new_domain=False,
-                    startup_seconds=startup_by_pair,
                 )
                 candidates.append((score, node.node_id, node))
             if (
@@ -936,15 +938,12 @@ class PlacementPlanner:
                     model.min_failure_domains,
                     desired_by_model[model.model_id],
                 )
-                score, reasons = _candidate_score(
+                score, reasons = score_candidate(
                     node,
                     model,
                     capacity[node.node_id],
                     domains,
-                    self.policy,
-                    now=timestamp,
                     need_new_domain=need_new_domain,
-                    startup_seconds=startup_by_pair,
                 )
                 _place(
                     _assignment(
@@ -975,23 +974,13 @@ class PlacementPlanner:
                     continue
                 residency = node.residency(model.model_id)
                 if (
-                    _ineligible_reason(
+                    compatibility(
                         node,
                         model,
-                        timestamp,
-                        self.policy,
                         for_new=_requires_new_runtime(residency, model),
                     )
                     is not None
-                    or not _fits(
-                        node,
-                        model,
-                        capacity,
-                        occupied_models,
-                        desired_model_slots,
-                        assignments,
-                        profile_by_id,
-                    )
+                    or not fits_node(node, model)
                 ):
                     continue
                 if (
@@ -1004,15 +993,12 @@ class PlacementPlanner:
                     return
                 domain = node.failure_domain or node.node_id
                 candidate_domains.append(domain)
-                score, _ = _candidate_score(
+                score, _ = score_candidate(
                     node,
                     model,
                     capacity[node.node_id],
                     domains,
-                    self.policy,
-                    now=timestamp,
                     need_new_domain=False,
-                    startup_seconds=startup_by_pair,
                 )
                 candidates.append((score, node.node_id, node))
             if (
@@ -1349,10 +1335,7 @@ class PlacementPlanner:
                 eligible = [
                     node
                     for node in node_list
-                    if _ineligible_reason(
-                        node, model, timestamp, self.policy, for_new=True
-                    )
-                    is None
+                    if compatibility(node, model, for_new=True) is None
                 ]
                 colocation_eligible = [
                     node

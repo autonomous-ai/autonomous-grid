@@ -2462,6 +2462,55 @@ def test_equal_priority_isolated_fleet_scores_candidates_linearly(monkeypatch):
     assert score_calls <= len(machines) * (len(profiles) + 2)
 
 
+def test_shared_host_fairness_rounds_reuse_exact_candidate_state(monkeypatch):
+    machines = tuple(node(f"n{index:03d}", 16_000) for index in range(64))
+    profiles = tuple(
+        model(
+            f"model-{index}",
+            8_000,
+            min_replicas=32,
+            max_replicas=32,
+        )
+        for index in range(4)
+    )
+    calls = {"score": 0, "compatibility": 0, "fit": 0}
+    original_score = planner_module._candidate_score
+    original_compatibility = planner_module._ineligible_reason
+    original_fit = planner_module._fits
+
+    def counted_score(*args, **kwargs):
+        calls["score"] += 1
+        return original_score(*args, **kwargs)
+
+    def counted_compatibility(*args, **kwargs):
+        calls["compatibility"] += 1
+        return original_compatibility(*args, **kwargs)
+
+    def counted_fit(*args, **kwargs):
+        calls["fit"] += 1
+        return original_fit(*args, **kwargs)
+
+    monkeypatch.setattr(planner_module, "_candidate_score", counted_score)
+    monkeypatch.setattr(
+        planner_module,
+        "_ineligible_reason",
+        counted_compatibility,
+    )
+    monkeypatch.setattr(planner_module, "_fits", counted_fit)
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        machines,
+        profiles,
+        now=10,
+    )
+
+    assert len(plan.assignments) == 128
+    distinct_pairs = len(machines) * len(profiles)
+    assert calls["score"] <= distinct_pairs * 3
+    assert calls["compatibility"] <= distinct_pairs * 3
+    assert calls["fit"] <= distinct_pairs * 3
+
+
 def test_independent_preemption_wave_scans_the_fleet_once(monkeypatch):
     machines = tuple(
         node(

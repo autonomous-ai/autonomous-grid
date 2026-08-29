@@ -299,6 +299,11 @@ urgency, assignment memory, actual READY inventory, and mutation attempts once p
 safety-floor and retry construction scale with configured models, reported residencies, and retained
 history rather than their cross products.
 
+Planning likewise memoizes compatibility, capacity fit, and the exact dynamic score of a
+node/model/remaining-capacity/domain state within one tick. Fair replica rounds may revisit shared
+hosts, but repeated visits do not repeat performance, artifact-locality, hardware, or policy
+evaluation; colocation-enabled plans retain complete fit evaluation as their peer set changes.
+
 If a higher service class appears while the mutation governor is full, the controller may withdraw
 a lower-class constructive command only when it has never been delivered to its node. A delivered
 `pending` command is treated as potentially running and keeps its slot until the node acknowledges
