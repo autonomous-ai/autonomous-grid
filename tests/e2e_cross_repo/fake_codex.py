@@ -42,10 +42,39 @@ def save_history(value: list[dict]) -> None:
     history_path().write_text(json.dumps(value, separators=(",", ":")) + "\n")
 
 
-def run_turn(node: str) -> tuple[str, str, int]:
+def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
     cwd = Path.cwd()
     history = load_history()
-    mixed = os.environ.get("GRID_E2E_GOAL_SCENARIO") == "mixed"
+    scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
+    mixed = scenario == "mixed"
+
+    if scenario == "subgoal":
+        if node == "A" and not history:
+            if call_tool is None:
+                raise RuntimeError("subgoal scenario received no dynamic tool bridge")
+            result = call_tool("grid_spawn_subgoal", {
+                "objective": "Write the child instructions",
+                "done_when": "README.md exists",
+                "agents": ["claude"],
+                "evals": [{"type": "file", "name": "instructions", "path": "README.md"}],
+                "token_budget": 2_000,
+            })
+            content = ((result.get("contentItems") or [{}])[0]).get("text")
+            envelope = json.loads(content or "{}")
+            child_id = ((envelope.get("body") or {}).get("id"))
+            if not result.get("success") or not child_id:
+                raise RuntimeError(f"subgoal creation failed: {result!r}")
+            history.append({"node": "A", "spawned_child": child_id})
+            save_history(history)
+            return "active", f"A spawned child Goal {child_id}", 100
+        if node == "C" and len(history) == 1 and history[0].get("node") == "A":
+            if not (cwd / "README.md").exists():
+                raise RuntimeError("parent C resumed without the child README fan-in")
+            (cwd / "FINAL.md").write_text("# Parent complete\n\nChild instructions were merged.\n")
+            history.append({"node": "C", "fan_in": "README.md"})
+            save_history(history)
+            return "complete", "C verified child fan-in and completed parent", 200
+        raise RuntimeError(f"unexpected subgoal parent turn on {node}: {history!r}")
 
     if not (cwd / "index.html").exists():
         if node != "A" or history:
@@ -121,6 +150,30 @@ def main() -> int:
     thread_id = "grid-e2e-" + str(uuid.uuid4())
     native_status = "paused"
     tokens = 0
+    dynamic_tools: list[dict] = []
+    early_pause = False
+
+    def call_tool(name: str, arguments: dict) -> dict:
+        nonlocal early_pause
+        request_id = 90_000
+        emit({"id": request_id, "method": "item/tool/call", "params": {
+            "tool": name, "arguments": arguments, "callId": "subgoal-spawn"}})
+        while True:
+            response_line = sys.stdin.readline()
+            if not response_line:
+                raise RuntimeError("Grid closed before answering the subgoal tool call")
+            response = json.loads(response_line)
+            # Grid pauses native continuation as soon as it sees turn/started. A tool request can
+            # make that client request arrive before the tool response; service it without losing
+            # the in-flight call.
+            if (response.get("method") == "thread/goal/set"
+                    and response.get("params", {}).get("status") == "paused"):
+                early_pause = True
+                reply(response, {"goal": {"status": "paused"}})
+                continue
+            if response.get("id") != request_id or "result" not in response:
+                raise RuntimeError(f"unexpected subgoal tool response: {response!r}")
+            return response["result"]
     for line in sys.stdin:
         request = json.loads(line)
         method = request.get("method")
@@ -129,6 +182,7 @@ def main() -> int:
         if method == "initialize":
             reply(request, {"serverInfo": {"name": "fake-codex"}})
         elif method == "thread/start":
+            dynamic_tools = request.get("params", {}).get("dynamicTools") or []
             reply(request, {"thread": {"id": thread_id}})
         elif method == "thread/resume":
             thread_id = request.get("params", {}).get("threadId") or thread_id
@@ -143,7 +197,11 @@ def main() -> int:
                 emit({"method": "turn/started", "params": {"threadId": thread_id,
                                                                "turn": {"id": str(uuid.uuid4())}}})
                 try:
-                    native_status, output, tokens = run_turn(node)
+                    bridge = call_tool if any(
+                        tool.get("name") == "grid_spawn_subgoal" for tool in dynamic_tools) else None
+                    native_status, output, tokens = run_turn(node, bridge)
+                    if early_pause and native_status != "complete":
+                        native_status = "paused"
                     emit({"method": "thread/tokenUsage/updated", "params": {
                         "tokenUsage": {"total": {"totalTokens": tokens}}}})
                     emit({"method": "turn/completed", "params": {

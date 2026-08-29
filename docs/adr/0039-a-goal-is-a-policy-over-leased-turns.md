@@ -110,12 +110,19 @@ evaluators will introduce an `evaluating` state. User cancellation wins every ra
 A Goal may create child Goals only through a Grid-provided action capability. The relay records
 `parent_goal_id`, an idempotency key, required/optional dependency status, depth, and the budget
 allocation. The parent enters `waiting_children` once its current turn checkpoints. Children use
-ordinary Goal rows and ordinary task claims.
+ordinary Goal rows and ordinary task claims. Completed child branches are merged into the parent
+conversation branch before it becomes active again. A clean merge is relay-side Git plumbing; a
+conflict blocks the parent with the child id and paths rather than resuming from stale state. A
+future slice may turn that blocked merge into an ordinary leased conflict-resolution turn, but
+bypassing the missing ancestry is never an option.
 
-The relay enforces maximum depth, children per Goal, cumulative token/time budget, and unique
-idempotency keys. Required children must independently pass their evaluations. Their pinned result
-commits and summaries are included in the parent's next handoff. Child work is isolated until an
-ordinary Grid integration turn merges it; a parent never reads a child's live workspace.
+The relay enforces maximum depth, children per Goal, cumulative token budget, and unique idempotency
+keys. The child identity, immutable spec, edge and budget reservation commit before its first turn
+is exposed; an idempotent retry can finish publication after a crash but cannot alter or duplicate
+the child. Required children must independently pass their evaluations. Their pinned result commits
+and summaries are included in the parent's next handoff. Child turns advance only their own branch
+and never publish directly to global `main`; explicit fan-in merges committed child branches, and
+only the root Goal enters trunk apply. A parent never reads a child's live workspace.
 
 ### Evidence required for release
 

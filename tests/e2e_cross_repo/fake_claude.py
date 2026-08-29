@@ -291,6 +291,20 @@ def main() -> int:
         with (transcript / f"{session}.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"sessionId": session, "prompt": prompt}) + "\n")
 
+    if os.environ.get("GRID_E2E_GOAL_SCENARIO") == "subgoal":
+        node = os.environ.get("GRID_E2E_GOAL_NODE")
+        if node != "B" or not prompt.startswith("/goal ") or resume is not None:
+            sys.stderr.write("fake Claude received an invalid child Goal assignment\n")
+            return 2
+        pathlib.Path("README.md").write_text(
+            "# Child instructions\n\nOpen the finished parent artifact and follow the guide.\n")
+        _emit({"type": "assistant", "message": {"usage": {
+            "input_tokens": 15, "output_tokens": 10}, "content": [
+            {"type": "text", "text": "Claude completed the child instructions"}]}})
+        _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": True,
+               "reason": "README.md exists", "iterations": 1, "tokens": 25}})
+        return 0
+
     # The mixed-harness Goal E2E. This is intentionally inside the ordinary fake Claude binary:
     # the provider must select Claude through the real capability claim, build `/goal` on the first
     # slice, and `--resume` the session on the next. No test helper calls this behavior directly.

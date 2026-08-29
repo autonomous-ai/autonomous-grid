@@ -985,13 +985,15 @@ def create_goal(signaling_url: str, access_token: str, *, project_id: str, objec
                 tools: list[dict[str, Any]] | None = None, name: str | None = None,
                 agents: list[str] | None = None,
                 required_capabilities: list[str] | None = None,
-                evals: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                evals: list[dict[str, Any]] | None = None,
+                allow_subgoals: bool = False) -> dict[str, Any]:
     body: dict[str, Any] = {
         "project_id": project_id, "objective": objective, "done_when": done_when,
         "model": model, "token_budget": token_budget, "tools": tools or [],
         "agents": agents or ["codex"],
         "required_capabilities": required_capabilities or [],
         "evals": evals or [],
+        "allow_subgoals": allow_subgoals,
     }
     if name:
         body["name"] = name

@@ -54,6 +54,7 @@ def test_goal_run_loads_tools_and_posts_the_resolved_project(monkeypatch, tmp_pa
         "tools": [{"name": "tickets", "mode": "observe", "http": {"url": "/tickets"}}],
         "name": "support", "agents": ["codex"], "required_capabilities": [],
         "evals": [{"type": "file", "name": "README exists", "path": "README.md"}],
+        "allow_subgoals": False,
     }
     assert json.loads(capsys.readouterr().out)["id"] == "goal-1"
 

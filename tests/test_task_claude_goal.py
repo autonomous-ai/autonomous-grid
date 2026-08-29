@@ -137,3 +137,47 @@ def test_claude_goal_resume_does_not_reset_native_goal(tmp_path, monkeypatch):
     }, inference=task_codex.GridInference("https://grid.example/relay/v1", "secret"))
     assert seen == {"prompt": "Continue from the Grid checkpoint", "resume": "claude-session-1"}
     assert outcome.goal_status == "complete"
+
+
+def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(monkeypatch):
+    captured = {}
+
+    class Response:
+        status_code = 201
+
+        @staticmethod
+        def json():
+            return {"id": "child-goal"}
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def request(self, method, url, **kwargs):
+            captured.update(method=method, url=url, **kwargs)
+            return Response()
+
+    monkeypatch.setattr(task_codex.httpx, "Client", Client)
+    executor = task_codex.ToolExecutor([{
+        "name": "grid_spawn_subgoal", "mode": "act",
+        "http": {
+            "method": "POST", "url": "/relay/v1/goals/parent/children", "auth": "grid",
+            "headers": {"X-Grid-Goal-Turn": "turn-1", "X-Not-Allowed": "secret"},
+        },
+    }], publish=lambda *_a, **_k: None,
+        inference=task_codex.GridInference("https://grid.example", "grid-token"),
+        scope="parent:1")
+    result = executor.call(
+        "grid_spawn_subgoal", {"objective": "child"}, "call-1")
+    assert result["success"] is True
+    assert captured["url"] == "https://grid.example/relay/v1/goals/parent/children"
+    assert captured["headers"]["Authorization"] == "Bearer grid-token"
+    assert captured["headers"]["X-Grid-Goal-Turn"] == "turn-1"
+    assert "X-Not-Allowed" not in captured["headers"]
+    assert captured["headers"]["Idempotency-Key"].startswith("grid-goal-")

@@ -78,7 +78,8 @@ def cmd_goal(args: argparse.Namespace) -> int:
             tools=_tools(args.tools), name=args.name,
             agents=["codex", "claude"] if agent == "auto" else [agent],
             required_capabilities=getattr(args, "require", []),
-            evals=_evals(getattr(args, "evals", None)))
+            evals=_evals(getattr(args, "evals", None)),
+            allow_subgoals=getattr(args, "allow_subgoals", False))
         _show(goal, args.json)
         return 0
     if args.goal_action == "list":

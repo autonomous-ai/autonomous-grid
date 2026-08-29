@@ -203,3 +203,76 @@ def test_three_nodes_reclaim_one_goal_codex_then_claude_then_codex(
     ]
     claude_transcripts = list((goal_workspace_root / "mixed-C").rglob("*.jsonl"))
     assert claude_transcripts, "C did not fetch Claude B's opaque transcript side-ref"
+
+
+def test_parent_codex_spawns_claude_child_then_codex_fans_it_in(
+        relay, owner_token, spawn_goal_provider, tmp_path):
+    """A real dynamic tool call creates a second distributed Goal and Git-fans it into parent."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-distributed-subgoal")["id"]
+    H.seed_trunk(relay, owner_token, project_id)
+    node_a = spawn_goal_provider(
+        "A", agent_kinds="codex", scenario="subgoal", disk_label="subgoal-A")
+    parent = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Create instructions through a child Goal and verify them in the parent",
+        done_when="README.md and FINAL.md exist after child fan-in",
+        model="fake-grid-model", token_budget=10_000, tools=[], agents=["codex"],
+        allow_subgoals=True,
+        evals=[
+            {"type": "file", "name": "child instructions", "path": "README.md"},
+            {"type": "file", "name": "parent finish", "path": "FINAL.md"},
+        ])
+
+    waiting = H.wait_for(lambda: (lambda goal: goal if goal.get("status") == "waiting_children"
+                                  else None)(relay_client.get_goal(
+                                      relay, owner_token, parent["id"])), timeout=30)
+    assert waiting, (
+        f"parent never waited for its spawned child; "
+        f"goal={relay_client.get_goal(relay, owner_token, parent['id'])!r}; "
+        f"turns={_tasks(relay, owner_token, project_id, parent['id'])!r}; "
+        f"A output:\n{node_a.output()}")
+    assert len(waiting["children"]) == 1
+    child_id = waiting["children"][0]["id"]
+    parent_turns = _tasks(relay, owner_token, project_id, parent["id"])
+    assert len(parent_turns) == 1
+    assert parent_turns[0]["provider_id"] == node_a.node_id
+    assert parent_turns[0]["agent_kind"] == "codex"
+    node_a.die()
+
+    node_b = spawn_goal_provider(
+        "B", agent_kinds="claude", scenario="subgoal", disk_label="subgoal-B")
+    child_done = H.wait_for(lambda: (lambda goal: goal if goal.get("status") == "complete"
+                                    else None)(relay_client.get_goal(
+                                        relay, owner_token, child_id)), timeout=75)
+    assert child_done, f"Claude child did not complete; B output:\n{node_b.output()}"
+    child_turns = _tasks(relay, owner_token, project_id, child_id)
+    assert len(child_turns) == 1
+    assert child_turns[0]["provider_id"] == node_b.node_id
+    assert child_turns[0]["agent_kind"] == "claude"
+    node_b.die()
+
+    node_c = spawn_goal_provider(
+        "C", agent_kinds="codex", scenario="subgoal", disk_label="subgoal-C")
+    complete = H.wait_for(lambda: _completed_goal(
+        relay, owner_token, parent["id"]), timeout=75)
+    assert complete, f"Codex parent did not finish after fan-in; C output:\n{node_c.output()}"
+    parent_turns = _tasks(relay, owner_token, project_id, parent["id"])
+    assert len(parent_turns) == 2
+    assert parent_turns[1]["provider_id"] == node_c.node_id
+    assert parent_turns[1]["agent_kind"] == "codex"
+
+    destination = tmp_path / "subgoal-result"
+    destination.mkdir()
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=parent_turns[-1]["branch"], commit=parent_turns[-1]["result_commit"],
+        project_id=project_id)
+    assert (destination / "README.md").is_file()
+    assert (destination / "FINAL.md").is_file()
+    evidence = relay_client.get_goal_evidence(relay, owner_token, parent["id"])
+    assert evidence["relationships"]["children"][0]["id"] == child_id
+    assert all(run["passed"] for run in evidence["eval_runs"])

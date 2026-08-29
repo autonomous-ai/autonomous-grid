@@ -164,6 +164,14 @@ class ToolExecutor:
             if urlparse(url).netloc != urlparse(self.inference.base_url).netloc:
                 return self._result(False, {"error": "grid auth is restricted to the selected relay"})
             headers["Authorization"] = f"Bearer {self.inference.token}"
+            configured_headers = http.get("headers")
+            if isinstance(configured_headers, dict):
+                # The relay injects this lease fence for its built-in subgoal action. No arbitrary
+                # header forwarding: user manifests must not be able to smuggle credentials or
+                # override content negotiation through the provider.
+                turn_id = configured_headers.get("X-Grid-Goal-Turn")
+                if isinstance(turn_id, str) and turn_id:
+                    headers["X-Grid-Goal-Turn"] = turn_id
         if mode == "act":
             canonical = json.dumps([self.scope, name, arguments], sort_keys=True,
                                    separators=(",", ":"), ensure_ascii=False).encode()

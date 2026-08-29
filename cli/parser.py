@@ -1070,6 +1070,8 @@ def _add_goal(sub) -> None:
                      help="Allowed native Goal harness (default: codex; auto allows both).")
     run.add_argument("--require", action="append", default=[], metavar="CAPABILITY",
                      help="Required harness capability; repeat for multiple requirements.")
+    run.add_argument("--allow-subgoals", action="store_true",
+                     help="Allow the parent agent to create bounded distributed child Goals.")
     run.add_argument("--name", default=None, help="Optional short Goal name.")
     run.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     run.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
