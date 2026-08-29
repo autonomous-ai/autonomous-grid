@@ -251,7 +251,8 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
 
     def _spawn(label: str, *, agent_kinds: str = "codex", scenario: str = "codex",
                disk_label: str | None = None, codex_capabilities: str = "",
-               claude_capabilities: str = "", tool_origins: str = ""):
+               claude_capabilities: str = "", tool_origins: str = "",
+               one_task: bool = False):
         node_id, node_token = provider_nodes[label]
         env = {
             **os.environ,
@@ -266,6 +267,7 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
             "GRID_TASK_TIMEOUT_SECONDS": "120",
             "GRID_E2E_GOAL_NODE": label,
             "GRID_E2E_GOAL_SCENARIO": scenario,
+            "GRID_E2E_ONE_TASK": "1" if one_task else "0",
             "GRID_TASK_AGENT_KINDS": agent_kinds,
             "GRID_CODEX_GOAL_CAPABILITIES": codex_capabilities,
             "GRID_CLAUDE_TASK_CAPABILITIES": claude_capabilities,

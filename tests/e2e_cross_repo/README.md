@@ -16,6 +16,7 @@ The modules are `e2e_*.py`, not `test_*.py` — the same convention as `tests/e2
 
 ```bash
 .venv/bin/python -m pytest tests/e2e_cross_repo/e2e_cross_repo.py -q   # ~2 min, free
+.venv/bin/python -m pytest tests/e2e_cross_repo/e2e_goal.py -q         # ~2 min, free
 .venv/bin/python -m pytest tests/e2e_cross_repo/e2e_live_agent.py  -q   # ~45 s, SPENDS A SUBSCRIPTION
 .venv/bin/python -m pytest tests/e2e_agent_settings.py -q               # ~45 s, SPENDS A SUBSCRIPTION
 ```
@@ -38,6 +39,28 @@ up the same way.
 
 The lease is 6s against a 0.5s renewal rather than the production 120s/30s. The **ratio** is what is
 kept (ADR 0032 D-c: a TTL several beats wider than the interval), so what is tested is the mechanism.
+
+## Goal scenario matrix
+
+`e2e_goal.py` runs the private relay and every provider in separate OS processes with distinct
+task roots. It exercises HTTP auth, claims and leases, Git fetch/push and exact commit pins, native
+harness protocols, transcript checkpoints, independent evals, and relay-authored evidence. The
+fake model and fake native binaries keep failures deterministic; the Grid protocol between them is
+real.
+
+| Scenario | Nodes and harnesses | Failure or constraint | Proof |
+|---|---|---|---|
+| Four-feature game | A Codex -> B Codex -> C Codex | A and B are killed mid-turn | Same rows are reclaimed; only accepted Git checkpoints survive |
+| Native crash checkpoint | A Codex -> B Codex | A's app-server fails after partial work | Same turn immediately requeues; B restores partial tree and native thread |
+| Mixed game | A Codex -> B Claude -> C Codex | Two machine losses across unlike harnesses | Shared tree/transcript continuity plus harness-specific native state |
+| Image artifact | B Claude polls; A Codex executes | Goal requires `image_generation` | Ineligible node spends no attempt; independent PNG eval passes |
+| Support reply | A polls; B Codex -> C Codex | Origin restriction, crash after API commit, failed first eval | One business side effect, stable idempotency key, repair turn passes |
+| Required child | A parent; B Claude child; C parent | Parent waits while child runs | Independently evaluated child commit fans into parent exactly once |
+| Optional child | A parent; B child; C parent | Child returns native `failed` verdict | Failure remains evidence and does not block parent completion |
+
+The native-crash case starts each provider in one-claim mode so A withdraws after handing off its
+checkpoint and cannot race B for its own immediate retry. This changes only the test process
+lifecycle; production claim, checkpoint, retry, and settlement code remains untouched.
 
 ## Prerequisites
 

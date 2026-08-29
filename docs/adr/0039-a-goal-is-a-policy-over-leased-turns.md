@@ -217,7 +217,10 @@ The feature is not production-proven by processes sharing one host. Release requ
 Required scenarios include Codex A -> Claude B -> Codex C, a capability-constrained image Goal that
 Claude cannot claim, evaluator retry and stale-commit rejection, cancellation during evaluation,
 an origin-constrained business Goal that fails over after an idempotent action commits, and a parent
-Goal whose independently claimed children fan in after all required evaluations pass.
+Goal whose independently claimed children fan in after all required evaluations pass. The matrix
+must cover both failure boundaries: abrupt lease loss resumes the last relay-accepted checkpoint,
+while a detected post-spawn native-harness failure publishes coherent worktree and transcript pins
+and immediately requeues the same turn for another machine.
 
 ## Consequences
 

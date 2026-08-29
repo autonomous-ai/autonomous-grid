@@ -64,6 +64,18 @@ def main() -> int:
     task_lease.RENEW_INTERVAL_SECONDS = renew_seconds
 
     state = _State()
+    if os.environ.get("GRID_E2E_ONE_TASK") == "1":
+        # Test-only provider lifecycle: finish exactly one claimed turn, then withdraw before it can
+        # race the replacement machine for an immediately requeued retry checkpoint.
+        run_and_report = tasks._run_and_report
+
+        def once(*args, **kwargs):
+            try:
+                return run_and_report(*args, **kwargs)
+            finally:
+                state.tasks_stop.set()
+
+        tasks._run_and_report = once
     # How many turns this provider runs AT ONCE (ADR 0034 D-b, issue 40). **Default 1**, and that
     # default is load-bearing rather than conservative: `test_09` proves a cancel really stopped an
     # agent by observing that a second task becomes claimable, which only means anything while this

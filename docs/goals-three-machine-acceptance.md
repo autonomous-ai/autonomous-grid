@@ -61,6 +61,23 @@ inference but not actually polling the distributed task queue.
 7. Confirm Grid's independent checks pass against C's exact result commit. Confirm the Goal becomes
    `complete` and no active Goal task remains.
 
+## Detected native-harness crash scenario
+
+Run a second Goal to verify recovery while the machine remains alive but Codex fails after spawning:
+
+1. Leave only A serving, start a Codex Goal, and make the native harness fail after creating partial
+   committed files and native thread history but before a terminal Goal verdict.
+2. Confirm A's supervisor publishes exact worktree and transcript checkpoint pins and the relay
+   immediately requeues the same turn with reason `native_harness_failure`; do not wait for lease
+   expiry.
+3. Withdraw A and start C from an empty local task root. Confirm C claims attempt 2, receives both
+   accepted pins, restores the partial files and Codex thread beneath C's own root, and completes.
+4. Verify the final evals and evidence as below with `--min-execution-nodes 2`.
+
+This is deliberately separate from powering off A: an abruptly lost machine cannot publish state
+that the relay never accepted. After abrupt loss, replacement workers must ignore unacknowledged
+partial pushes and resume only the prior accepted checkpoint.
+
 ## Required evidence
 
 Save and verify the relay-authored JSON artifact with:
@@ -86,6 +103,7 @@ screenshots alone.
 | Turn 3 | B attempt 1 lease expiry; C attempt 2, Codex, same turn id, result commit and transcript input/output |
 | Isolation | both uncommitted markers absent on replacement machines and final tree |
 | Native path portability | B and C resume Codex using rollout paths beneath their own distinct task roots; A's absolute path is never reused |
+| Detected harness crash | Retry reason is `native_harness_failure`; accepted worktree/transcript checkpoint pins become attempt 2 inputs |
 | Evaluation | each definition hash, evaluator node, exact result commit, score and evidence |
 | Terminal state | Goal `complete`; zero queued/running turns for its conversation |
 

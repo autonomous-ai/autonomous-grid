@@ -240,6 +240,65 @@ def test_three_nodes_reclaim_one_goal_codex_then_claude_then_codex(
         relay_client.get_goal_evidence(relay, owner_token, conversation_id), 3, min_nodes=3)
 
 
+def test_native_codex_crash_immediately_checkpoints_same_turn_to_another_machine(
+        relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
+    """A graceful post-spawn harness failure preserves partial files *and* the native thread."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-native-crash-checkpoint")['id']
+    H.seed_trunk(relay, owner_token, project_id)
+    node_a = spawn_goal_provider(
+        "A", scenario="graceful_crash", disk_label="crash-A", one_task=True)
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Build a crash-safe browser game",
+        done_when="The four game artifacts exist after distributed native Goal recovery",
+        model="fake-grid-model", token_budget=5_000, tools=[], evals=GAME_EVALS)
+
+    # A exits cleanly only after its real task supervisor pushed both refs and the relay accepted
+    # the nonterminal retry. No lease-expiry sleep or test-side database mutation is involved.
+    assert H.wait_for(lambda: node_a.proc.poll() is not None, timeout=30), node_a.output()
+    rows = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(rows) == 1 and rows[0]["state"] == "queued", rows
+    assert rows[0]["attempt"] == 1 and rows[0]["checkpoint_commit"], rows
+
+    node_b = spawn_goal_provider(
+        "B", scenario="graceful_crash", disk_label="crash-B", one_task=True)
+    complete = H.wait_for(
+        lambda: _completed_goal(relay, owner_token, goal["id"]), timeout=45)
+    assert complete, f"node B did not resume the native Goal:\n{node_b.output()}"
+    rows = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(rows) == 1 and rows[0]["state"] == "completed", rows
+    assert rows[0]["attempt"] == 2 and rows[0]["provider_id"] == node_b.node_id
+
+    destination = tmp_path / "crash-checkpoint-game"
+    destination.mkdir()
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=rows[0]["branch"], commit=rows[0]["result_commit"], project_id=project_id)
+    assert {"PARTIAL.md", "index.html", "game.js", "style.css", "README.md"} <= {
+        path.name for path in destination.iterdir()}
+
+    histories = list((goal_workspace_root / "crash-B").rglob("fake-history.json"))
+    assert len(histories) == 1, histories
+    assert json.loads(histories[0].read_text()) == [
+        {"node": "A", "native_thread": "partial-feature-1"},
+        {"node": "B", "resumed_native_thread": True},
+    ]
+    evidence = relay_client.get_goal_evidence(relay, owner_token, goal["id"])
+    retries = [item for item in evidence["attempt_events"]
+               if item["event"].get("type") == "task.retry"]
+    assert len(retries) == 1 and retries[0]["event"]["reason"] == "native_harness_failure"
+    assert retries[0]["event"]["previous_provider_id"] == node_a.node_id
+    turn = evidence["turns"][0]
+    assert turn["checkpoint_commit"] and turn["transcript_checkpoint_commit"]
+    assert turn["transcript_result_commit"]
+    from cli.goal import _verify_evidence
+    assert _verify_evidence(evidence, min_execution_nodes=2) == []
+
+
 def test_image_goal_waits_for_a_node_with_the_required_capability(
         relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
     """An online native-Goal harness is not enough: the exact capability must match."""

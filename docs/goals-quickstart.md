@@ -302,6 +302,7 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 |---|---|---|---|---|
 | Four-feature game | A -> B -> C | Codex -> Codex -> Codex | A dies in feature 2; B dies in 3–4 | Four required files |
 | Mixed game | A -> B -> C | Codex -> Claude -> Codex | A and B die mid-feature | Four required files |
+| Crash-safe game | A -> B | Codex -> Codex | A's native harness crashes after writing partial work | Four required files |
 | Image artifact | B polls; A executes | Claude rejected; Codex selected | Capability mismatch | PNG file and size |
 | Support reply | A polls; B -> C execute | Codex | B dies after API commit; first eval fails | `DONE.md`; one API side effect |
 | Required child | A parent; B child; C parent | Codex -> Claude -> Codex | Parent moves while child runs | Child and parent files |
@@ -313,3 +314,9 @@ scenario additionally proves an unauthorized but otherwise healthy node spends z
 authorized successor restores Codex's dynamic tools, and all three writes (the failed attempt, its
 lease retry, and the eval-repair turn) carry one identical idempotency key while the API performs
 exactly one side effect. It also verifies each action event's relay-stamped turn, node and attempt.
+The crash-safe game covers the complementary failure boundary to a killed machine: while A still
+owns its lease, the supervisor flushes its native event history, publishes both worktree and
+transcript checkpoints, and asks the relay to requeue the same turn immediately. B receives attempt
+2 and proves it restored A's partial files and Codex thread. An abrupt process or machine loss cannot
+make that handshake and therefore correctly falls back to the last checkpoint the relay had already
+accepted.

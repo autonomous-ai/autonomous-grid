@@ -55,6 +55,33 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
     scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
     mixed = scenario == "mixed"
 
+    if scenario == "graceful_crash":
+        if node == "A" and not history:
+            (cwd / "index.html").write_text(
+                "<!doctype html><title>Crash-safe Grid Goal</title><button>Play</button>\n")
+            (cwd / "PARTIAL.md").write_text(
+                "Node A created the first feature before its native harness crashed.\n")
+            history.append({"node": "A", "native_thread": "partial-feature-1"})
+            save_history(history)
+            # The app-server remains responsive long enough to emit a failed native turn. Grid's
+            # provider classifies that as a harness failure, pushes a coherent checkpoint, and
+            # POSTs /retry while it still owns the lease.
+            raise RuntimeError("simulated Codex app-server failure after partial work")
+        expected = [{"node": "A", "native_thread": "partial-feature-1"}]
+        if node != "B" or history != expected:
+            raise RuntimeError(
+                f"node B did not resume A's native Codex checkpoint: {node}, {history!r}")
+        if not (cwd / "PARTIAL.md").is_file() or not (cwd / "index.html").is_file():
+            raise RuntimeError("node B received native history without A's partial worktree")
+        (cwd / "game.js").write_text(
+            "let score=0;document.querySelector('button').onclick=()=>score+=1;\n")
+        (cwd / "style.css").write_text("body{font:18px system-ui;text-align:center}\n")
+        (cwd / "README.md").write_text(
+            "# Crash-safe game\n\nNode B resumed node A's native Goal and completed it.\n")
+        history.append({"node": "B", "resumed_native_thread": True})
+        save_history(history)
+        return "complete", "B resumed A's mid-slice Codex thread and completed the game", 200
+
     if scenario == "business_tools":
         if call_tool is None:
             raise RuntimeError("business Goal received no dynamic tool bridge")
@@ -143,7 +170,9 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
             save_history(history)
             return "active", f"A spawned optional child Goal {child_id}", 100
         if node == "B" and not history:
-            raise RuntimeError("the optional experiment failed as intended")
+            # A semantic native Goal verdict, not a harness crash. Grid must store it terminally
+            # rather than exercising the bounded infrastructure-retry path.
+            return "failed", "the optional experiment is impossible as designed", 100
         if node == "C" and len(history) == 1 and history[0].get("node") == "A":
             (cwd / "FINAL.md").write_text(
                 "# Parent complete\n\nThe optional experiment failed without blocking delivery.\n")
@@ -318,8 +347,9 @@ def main() -> int:
             reply(request, {"thread": {"id": thread_id, "path": str(supplied)}})
         elif method == "thread/goal/set":
             desired = request.get("params", {}).get("status")
-            # Completion wins the runner's pause request, as it does in the native Goal state.
-            if native_status != "complete":
+            # Either terminal verdict wins the runner's pause request, as it does in native Goal
+            # state. A delayed pause must not resurrect an impossible Goal as active.
+            if native_status not in ("complete", "failed"):
                 native_status = desired or native_status
             reply(request, {"goal": {"status": native_status}})
             if desired == "active":
@@ -328,7 +358,7 @@ def main() -> int:
                 try:
                     bridge = call_tool if dynamic_tools else None
                     native_status, output, tokens = run_turn(node, bridge)
-                    if early_pause and native_status != "complete":
+                    if early_pause and native_status not in ("complete", "failed"):
                         native_status = "paused"
                     emit({"method": "thread/tokenUsage/updated", "params": {
                         "tokenUsage": {"total": {"totalTokens": tokens}}}})
