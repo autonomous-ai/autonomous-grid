@@ -193,3 +193,43 @@ def test_claude_profile_cannot_claim_grid_runner_capabilities_it_does_not_wire(m
     assert tasks._agent_profiles() == ({
         "kind": "claude", "capabilities": ["image_generation", "native_goal"],
     },)
+
+
+def test_full_tool_recording_captures_training_payloads_but_redacts_secrets(monkeypatch):
+    events = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ticket": {"text": "customer needs help", "access_token": "response-secret"}}
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def request(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(task_codex.httpx, "Client", Client)
+    executor = task_codex.ToolExecutor([{
+        "name": "read_ticket", "mode": "observe", "record": "full",
+        "http": {"method": "GET", "url": "https://support.example/ticket"},
+    }], publish=lambda event_type, **payload: events.append({"type": event_type, **payload}),
+        inference=task_codex.GridInference("https://grid.example", "grid-secret"), scope="goal:1")
+    result = executor.call(
+        "read_ticket", {"ticket_id": "T-1", "api_key": "argument-secret"}, "call-1")
+
+    assert result["success"] is True
+    assert events[0]["arguments"] == {"ticket_id": "T-1", "api_key": "[REDACTED]"}
+    assert events[1]["result"]["body"]["ticket"] == {
+        "text": "customer needs help", "access_token": "[REDACTED]"}
+    assert "argument-secret" not in repr(events)
+    assert "response-secret" not in repr(events)

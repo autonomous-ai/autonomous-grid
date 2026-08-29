@@ -160,6 +160,7 @@ manifest with explicit HTTP capabilities:
     {
       "name": "read_ticket",
       "mode": "observe",
+      "record": "full",
       "description": "Read one customer ticket",
       "input_schema": {
         "type": "object",
@@ -171,6 +172,7 @@ manifest with explicit HTTP capabilities:
     {
       "name": "send_reply",
       "mode": "act",
+      "record": "full",
       "description": "Send an approved reply",
       "input_schema": {
         "type": "object",
@@ -194,9 +196,12 @@ grid goal run --project <project-id> \
 ```
 
 Allowed modes are `observe`, `act` and `verify`. Grid emits an audit event for every request and
-result. `act` calls carry a deterministic idempotency key scoped to the Goal turn, so the receiving
-API can reject a duplicate after a worker failure. Grid credentials are never placed in Codex's
-environment or stored in Git.
+result. By default those events contain tool/call identity and success metadata only. Set
+`"record": "full"` when the arguments and returned observation should become local Goal evidence
+and future training data; credential-shaped object fields are recursively redacted and each stored
+value is hard-bounded. `act` calls carry a deterministic idempotency key scoped to the Goal turn, so
+the receiving API can reject a duplicate after a worker failure. Grid credentials are never placed
+in Codex's environment or stored in Git.
 
 The first MVP intentionally does not distribute arbitrary third-party secrets. A tool can request
 Grid authentication only for a URL on the selected relay origin; other internal endpoints must

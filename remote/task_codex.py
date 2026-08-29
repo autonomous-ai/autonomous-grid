@@ -29,6 +29,31 @@ AGENT_DIR = Path(".grid") / "agent" / "codex"
 STATE_FILE = "goal-state.json"
 HOME_DIR = "home"
 _MAX_TOOL_RESULT = 64 * 1024
+_MAX_RECORDED_TOOL_VALUE = 24 * 1024
+_SECRET_FIELD_PARTS = ("authorization", "api_key", "apikey", "password", "secret", "token")
+
+
+def _recorded_tool_value(value: Any) -> Any:
+    """Redact credential-shaped fields and bound one durable training/audit payload."""
+    def redact(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {
+                str(key): ("[REDACTED]" if any(part in str(key).lower()
+                                               for part in _SECRET_FIELD_PARTS)
+                           else redact(child))
+                for key, child in item.items()
+            }
+        if isinstance(item, list):
+            return [redact(child) for child in item]
+        return item
+
+    safe = redact(value)
+    encoded = json.dumps(safe, ensure_ascii=False, sort_keys=True, default=str)
+    raw = encoded.encode("utf-8")
+    if len(raw) <= _MAX_RECORDED_TOOL_VALUE:
+        return safe
+    prefix = raw[:_MAX_RECORDED_TOOL_VALUE].decode("utf-8", "ignore")
+    return {"truncated": True, "json_prefix": prefix + task_stream.TRUNCATION_MARKER}
 
 
 class CodexGoalError(RuntimeError):
@@ -176,7 +201,10 @@ class ToolExecutor:
             canonical = json.dumps([self.scope, name, arguments], sort_keys=True,
                                    separators=(",", ":"), ensure_ascii=False).encode()
             headers["Idempotency-Key"] = "grid-goal-" + hashlib.sha256(canonical).hexdigest()
-        self.publish(f"goal.{mode}.request", tool=name, call_id=call_id)
+        record_full = tool.get("record") == "full"
+        self.publish(
+            f"goal.{mode}.request", tool=name, call_id=call_id,
+            **({"arguments": _recorded_tool_value(arguments)} if record_full else {}))
         try:
             timeout = float(http.get("timeout_seconds") or 30)
             with httpx.Client(timeout=min(300.0, max(0.1, timeout))) as client:
@@ -192,7 +220,9 @@ class ToolExecutor:
             success = 200 <= response.status_code < 300
         except httpx.HTTPError as exc:
             success, result = False, {"error": str(exc)}
-        self.publish(f"goal.{mode}.result", tool=name, call_id=call_id, success=success)
+        self.publish(
+            f"goal.{mode}.result", tool=name, call_id=call_id, success=success,
+            **({"result": _recorded_tool_value(result)} if record_full else {}))
         return self._result(success, result)
 
     @staticmethod

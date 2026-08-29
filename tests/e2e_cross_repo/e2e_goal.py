@@ -276,3 +276,11 @@ def test_parent_codex_spawns_claude_child_then_codex_fans_it_in(
     evidence = relay_client.get_goal_evidence(relay, owner_token, parent["id"])
     assert evidence["relationships"]["children"][0]["id"] == child_id
     assert all(run["passed"] for run in evidence["eval_runs"])
+    request = next(item["event"] for item in evidence["attempt_events"]
+                   if item["event"].get("type") == "goal.act.request")
+    result = next(item["event"] for item in evidence["attempt_events"]
+                  if item["event"].get("type") == "goal.act.result")
+    assert request["tool"] == "grid_spawn_subgoal"
+    assert request["arguments"]["objective"] == "Write the child instructions"
+    assert result["success"] is True
+    assert result["result"]["body"]["id"] == child_id
