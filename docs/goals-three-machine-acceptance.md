@@ -141,4 +141,6 @@ file evaluator names anything other than the relay evaluator, even when its scor
 Fail the release if a replacement needs the previous laptop, sees an uncommitted marker, receives a
 new turn id instead of reclaiming the expired row, completes without the independent eval, loses a
 successful committed checkpoint, exposes a Grid bearer token to the agent process, or leaves active
-work after terminal completion.
+work after terminal completion. Also fail if pause discards an accepted checkpoint, cancellation
+publishes a checkpoint that lost its lease race, or a paused Goal can be resumed after its final
+attempt already ended with `retries_exhausted`.

@@ -334,3 +334,10 @@ accepted.
 Evidence includes a relay-computed `retry_checkpoint_chain` for every accepted native-harness
 checkpoint. `grid goal evidence --verify` requires each retry event's exact worktree/transcript pins
 to match the stored turn pins and proves both are Git-ancestral to that turn's final outputs.
+
+Owner controls are ordered against checkpoint settlement, not treated as best-effort UI state. A
+pause that races an accepted nonterminal checkpoint keeps its exact pins but makes the queued retry
+unclaimable until resume. A cancel in the same window terminals the turn and rejects the late pins.
+If the final allowed attempt has already terminalled as `retries_exhausted`, that terminal outcome
+overrides a pause arriving in the short turn-to-Goal reconciliation gap; the Goal is `failed` and
+cannot be resumed past its declared attempt budget.
