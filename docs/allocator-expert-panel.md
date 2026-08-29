@@ -72,3 +72,35 @@ Every later panel should record the exact revision, workload, hardware, real-ver
 scores, disagreements, reproduced failures, and whether each accepted finding gained an integration
 test. A panel opinion without a reproducible counterexample or measurable acceptance gate remains a
 hypothesis.
+
+## 2026-08-29 economics follow-up
+
+The same three independent roles reviewed revision `6e76c1d` specifically for price provenance,
+budget safety, distributed ownership, serving-quality tradeoffs, and cohort fairness. Their shared
+P0 finding was reproducible: a host-scoped worker credential could report its own zero price and
+make that host appear affordable. The serving judge rated accounting integrity 2/10 at that
+revision; the distributed-systems judge rated the implemented follow-up design 8/10 for pricing
+integrity and restart recovery while retaining a 4/10 multi-controller score.
+
+Revisions `83f3dde` and `77a8646` accepted and tested the immediate findings:
+
+1. Physical-host prices are now a bounded, durable operator registry. Worker values are stripped
+   before accounting, the registry is applied once after child records are merged, and direct
+   controller callers reapply it inside the planning lock. Explicit zero remains known-free;
+   absence is unknown. The authenticated API/CLI, persistence, rollback, restart, forged-node,
+   one-host/children, provenance, and direct-controller paths have regression coverage.
+2. Host-price and budget edits are desired-state transactions. Both compare current and proposed
+   placement against one demand forecast and reject a coverage loss unless the operator gives a
+   one-time `allow-service-shortfall` acknowledgement. This now protects active demand/SLO-driven
+   replicas even when a model's configured minimum is zero.
+3. A real four-logical-node test used llama.cpp/Metal and ComfyUI/MPS. Raising the coder host from
+   `$0.80/h` to `$20/h` made a `$1/h` budget reject with the exact `1 -> 0` coder impact. After an
+   explicit acknowledgement, Grid drained and unloaded the real coder. Lowering that host to
+   `$0.30/h` caused Grid to load and warm the measured coder winner again; desired known cost
+   converged to `$0.55/h`. The test Grid was then restored to no ceiling and its original
+   `$0.05/$0.20/$0.80` operator prices.
+
+Open findings from this follow-up are versioned/leader-fenced economics writes for active-active
+controllers, durable acknowledgement audit records, and name-independent cohort/SLO loss ordering
+under a budget that cannot serve every workload. Those are the next acceptance gates; they are not
+claimed as solved by the authoritative-price milestone.
