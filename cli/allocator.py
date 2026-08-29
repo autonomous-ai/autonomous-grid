@@ -267,7 +267,6 @@ def cmd_allocator_budget(args: argparse.Namespace) -> int:
         body={
             "max_hourly_cost": args.max_hourly_cost,
             "allow_unknown_cost": bool(args.allow_unknown_cost),
-            "allow_service_shortfall": bool(args.allow_service_shortfall),
         },
         token=_control_token(cfg, getattr(args, "token_file", None)),
         allow_insecure_http=getattr(args, "allow_insecure_http", False),
@@ -278,15 +277,7 @@ def cmd_allocator_budget(args: argparse.Namespace) -> int:
         maximum = float(payload["max_hourly_cost"])
         if maximum:
             unknown = "allowed" if payload["allow_unknown_cost"] else "blocked"
-            shortfall = (
-                " · minimum-service shortfall acknowledged"
-                if payload.get("allow_service_shortfall")
-                else ""
-            )
-            print(
-                f"Allocator hourly budget: ${maximum:g}/h · "
-                f"unknown-cost nodes {unknown}{shortfall}"
-            )
+            print(f"Allocator hourly budget: ${maximum:g}/h · unknown-cost nodes {unknown}")
         else:
             print("Allocator hourly budget disabled")
     return 0

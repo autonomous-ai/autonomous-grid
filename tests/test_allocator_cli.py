@@ -97,17 +97,6 @@ def test_parser_exposes_complete_allocator_surface():
     assert budget_args.handler is cli.cmd_allocator_budget
     assert budget_args.max_hourly_cost == 1.25
     assert budget_args.allow_unknown_cost is False
-    assert budget_args.allow_service_shortfall is False
-    acknowledged_budget = parser.parse_args(
-        [
-            "allocator",
-            "budget",
-            "--max-hourly-cost",
-            "1.25",
-            "--allow-service-shortfall",
-        ]
-    )
-    assert acknowledged_budget.allow_service_shortfall is True
     assert parser.parse_args(["allocator", "tick"]).handler is cli.cmd_allocator_tick
     assert parser.parse_args(
         ["allocator", "token", "write", "/tmp/token"]

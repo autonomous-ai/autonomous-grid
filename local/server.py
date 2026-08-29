@@ -829,14 +829,9 @@ def create_app(
             allow_unknown = body.get("allow_unknown_cost", False)
             if not isinstance(allow_unknown, bool):
                 raise ValueError("allow_unknown_cost must be a boolean")
-            allow_shortfall = body.get("allow_service_shortfall", False)
-            if not isinstance(allow_shortfall, bool):
-                raise ValueError("allow_service_shortfall must be a boolean")
             policy = _allocator(app).set_hourly_cost_budget(
                 maximum,
                 allow_unknown_cost=allow_unknown,
-                allow_service_shortfall=allow_shortfall,
-                nodes=_allocator_snapshots(app),
             )
         except (AttributeError, json.JSONDecodeError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -845,7 +840,6 @@ def create_app(
         return {
             "max_hourly_cost": policy.max_hourly_cost,
             "allow_unknown_cost": policy.allow_unknown_cost,
-            "allow_service_shortfall": allow_shortfall,
             "reconciliation": _reconcile_summary(result),
         }
 

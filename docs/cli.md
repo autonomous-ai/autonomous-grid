@@ -551,7 +551,6 @@ grid allocator mode observe|recommend|automatic
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
 grid allocator budget --max-hourly-cost <USD>
     [--allow-unknown-cost]
-    [--allow-service-shortfall]
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
 grid allocator tick
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
@@ -581,12 +580,10 @@ eligible computer; allocation never invents a download source.
 selected hosts' declared hourly costs. A host is charged once even when it serves several models.
 While a positive ceiling is active, a node without explicit cost metadata is ineligible by default;
 `--allow-unknown-cost` is an explicit fail-open override, and status continues to name every
-unknown-cost host. Setting the value to `0` disables the ceiling. If a tighter ceiling would reduce
-currently achievable minimum-replica coverage, Grid rejects the update without changing policy;
-`--allow-service-shortfall` explicitly acknowledges that service tradeoff for this update. After an
-acknowledged update, the allocator stages normal drain/unload transitions until the desired fleet
-fits. It never stops a pinned, manually managed, or external process merely to meet a budget; that
-unavoidable difference remains visible as current cost and an unmet constraint.
+unknown-cost host. Setting the value to `0` disables the ceiling. If a tighter ceiling makes live
+Grid-owned capacity unaffordable, the allocator stages normal drain/unload transitions until the
+desired fleet fits. It never stops a pinned, manually managed, or external process merely to meet a
+budget; that unavoidable difference remains visible as current cost and an unmet constraint.
 
 Repeat `--workload-score WORKLOAD=SCORE` to describe where a model fits the portfolio, for example
 `--workload-score coding=1 --workload-score research=.8`. Scores are capability hints in `(0, 1]`;

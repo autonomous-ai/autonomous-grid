@@ -533,13 +533,6 @@ def _add_allocator(sub) -> None:
         action="store_true",
         help="Permit nodes without explicit cost metadata (blocked by default under a budget).",
     )
-    budget.add_argument(
-        "--allow-service-shortfall",
-        action="store_true",
-        help=(
-            "Acknowledge that this budget may reduce currently achievable minimum replicas."
-        ),
-    )
     _add_allocator_grid(budget, token=True)
     budget.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     budget.set_defaults(handler=cmd_allocator_budget)

@@ -319,36 +319,6 @@ def test_allocator_model_mode_tick_and_persistence(tmp_path):
     assert client.delete("/allocator/models/qwen", headers=AUTH).status_code == 404
 
 
-def test_budget_api_requires_service_shortfall_acknowledgement(tmp_path):
-    app, client, _ = _app(tmp_path)
-    assert client.put(
-        "/allocator/models/qwen", json=_profile(), headers=AUTH
-    ).status_code == 200
-    _managed_node(client)
-
-    rejected = client.put(
-        "/allocator/budget",
-        json={"max_hourly_cost": 1.0, "allow_unknown_cost": False},
-        headers=AUTH,
-    )
-    assert rejected.status_code == 400
-    assert "allow_service_shortfall=true" in rejected.json()["detail"]
-    assert app.state.allocator.planner.policy.max_hourly_cost == 0.0
-
-    accepted = client.put(
-        "/allocator/budget",
-        json={
-            "max_hourly_cost": 1.0,
-            "allow_unknown_cost": False,
-            "allow_service_shortfall": True,
-        },
-        headers=AUTH,
-    )
-
-    assert accepted.status_code == 200
-    assert accepted.json()["allow_service_shortfall"] is True
-
-
 def test_allocator_profile_route_supports_namespaced_model_ids(tmp_path):
     _, client, _ = _app(tmp_path)
 

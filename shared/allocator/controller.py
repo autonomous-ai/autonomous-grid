@@ -234,28 +234,14 @@ class AllocatorController:
         max_hourly_cost: float,
         *,
         allow_unknown_cost: bool = False,
-        allow_service_shortfall: bool = False,
-        nodes: Iterable[NodeSnapshot] = (),
-        now: float | None = None,
     ) -> PlannerPolicy:
-        """Persist a hard fleet placement budget; zero disables the ceiling.
-
-        A policy update is a potentially destructive desired-state transaction. When live fleet
-        state is supplied, reject any newly introduced minimum-replica shortfall unless the
-        operator explicitly acknowledges that service tradeoff.
-        """
+        """Persist a hard fleet placement budget; zero disables the ceiling."""
 
         maximum = float(max_hourly_cost)
         if not math.isfinite(maximum) or maximum < 0:
             raise ValueError("max_hourly_cost must be finite and non-negative")
         if not isinstance(allow_unknown_cost, bool):
             raise ValueError("allow_unknown_cost must be a boolean")
-        if not isinstance(allow_service_shortfall, bool):
-            raise ValueError("allow_service_shortfall must be a boolean")
-        timestamp = time.time() if now is None else float(now)
-        if not math.isfinite(timestamp) or timestamp < 0:
-            raise ValueError("now must be finite and non-negative")
-        node_list = tuple(nodes)
         with self._lock:
             checkpoint = self._checkpoint()
             policy = replace(
@@ -263,56 +249,6 @@ class AllocatorController:
                 max_hourly_cost=maximum,
                 allow_unknown_cost=allow_unknown_cost,
             )
-            if node_list and not allow_service_shortfall:
-                profiles = tuple(
-                    self._profiles[model_id]
-                    for model_id in sorted(self._profiles)
-                    if model_id not in self._retiring
-                )
-                current = self.planner.plan(
-                    node_list,
-                    profiles,
-                    (),
-                    now=timestamp,
-                )
-                proposed = PlacementPlanner(policy).plan(
-                    node_list,
-                    profiles,
-                    (),
-                    now=timestamp,
-                )
-
-                def minimum_coverage(plan: PlacementPlan, model_id: str) -> int:
-                    return sum(
-                        assignment.model_id == model_id
-                        for assignment in plan.assignments
-                    )
-
-                regressions = {
-                    profile.model_id: (
-                        minimum_coverage(current, profile.model_id),
-                        minimum_coverage(proposed, profile.model_id),
-                        profile.min_replicas,
-                    )
-                    for profile in profiles
-                    if profile.min_replicas > 0
-                    and minimum_coverage(proposed, profile.model_id)
-                    < min(
-                        profile.min_replicas,
-                        minimum_coverage(current, profile.model_id),
-                    )
-                }
-                if regressions:
-                    detail = ", ".join(
-                        f"{model_id} {after}/{minimum} minimum replicas (currently {before})"
-                        for model_id, (before, after, minimum) in sorted(
-                            regressions.items()
-                        )
-                    )
-                    raise ValueError(
-                        "budget update would reduce minimum service coverage: "
-                        f"{detail}; repeat with allow_service_shortfall=true to acknowledge"
-                    )
             self.planner = PlacementPlanner(policy)
             self._save_or_rollback(checkpoint)
             return policy

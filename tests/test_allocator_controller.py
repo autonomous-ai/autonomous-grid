@@ -1760,40 +1760,6 @@ def test_controller_status_distinguishes_current_cost_from_desired_budget_cost()
     assert cost["compliance"] == "over_budget"
 
 
-def test_budget_update_requires_explicit_acknowledgement_for_new_minimum_shortfall():
-    controller = AllocatorController()
-    controller.put_profile(profile())
-    machine = NodeSnapshot(
-        "priced",
-        16_000,
-        runtimes=("llama.cpp",),
-        backends=("metal",),
-        residencies=(
-            ModelResidency(
-                "qwen",
-                8_000,
-                ResidencyState.READY,
-                loaded_at=1,
-            ),
-        ),
-        cost_per_hour=1.0,
-        cost_known=True,
-        last_heartbeat=10,
-    )
-
-    with pytest.raises(ValueError, match="reduce minimum service coverage"):
-        controller.set_hourly_cost_budget(0.5, nodes=(machine,), now=10)
-
-    assert controller.planner.policy.max_hourly_cost == 0.0
-    policy = controller.set_hourly_cost_budget(
-        0.5,
-        nodes=(machine,),
-        allow_service_shortfall=True,
-        now=10,
-    )
-    assert policy.max_hourly_cost == 0.5
-
-
 def test_status_projects_spend_windows_and_recommends_budget_for_missing_capacity():
     controller = AllocatorController(
         planner_policy=PlannerPolicy(memory_headroom_fraction=0, max_hourly_cost=0.5)
