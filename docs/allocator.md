@@ -202,6 +202,15 @@ Candidates otherwise prefer an existing ready residency, local cached weights, a
 domain, measured throughput, and best-fit memory. Before measured
 throughput exists, bounded memory-bandwidth and compute estimates break otherwise-cold ties; ready
 and cached bonuses remain much larger, so hardware estimates do not cause gratuitous migration.
+Placement also computes each desired model's future-compatible host set without pretending that
+live memory is already free. A flexible small model is penalized on a host needed by a more
+constrained model when it has another valid destination. If an immediately free host is materially
+worse after accounting for startup time, current work, hardware, fit, and hourly cost, Grid may
+stage a proactive repack instead: it assigns the incumbent to its replacement host, proves that
+replacement ready, drains and unloads the old copy, and only then warms the demanded model on the
+released host. The target remains sticky while the victim is `DRAINING`; an intermediate heartbeat
+cannot redirect the beneficiary to an avoidable cold or expensive host. Marginal improvements use
+immediate capacity, which bounds churn.
 Ready, loading, and warming incumbents on full one-model hosts are indexed and ranked in one pass
 when their failure domains are independent. Treating an in-progress incumbent as occupied prevents
 the empty-host fast path from starting a duplicate cold load while its heartbeat is still
@@ -225,7 +234,10 @@ expire after 30 days so a runtime or hardware upgrade can relearn. Invalid, non-
 over-one-hour reports are ignored rather than poisoning scheduling or receipt delivery. Persisted
 failed warm/load attempts apply a bounded per-model penalty, allowing a healthy peer to be tried
 after backoff instead of selecting the same broken cache forever; the failed node remains a fallback
-when it is the only feasible target. Explicit pins, per-host model limits, compatibility policies,
+when it is the only feasible target. Mutation acknowledgements and inventory snapshots are fenced
+by observation time: a snapshot older than a successful action cannot trigger a duplicate drain or
+unload, while a genuinely newer heartbeat that still reports the old state can start a new
+lifecycle. Explicit pins, per-host model limits, compatibility policies,
 and a feasible minimum failure-
 domain count are hard constraints. A failure-domain shortfall or capacity shortage is reported
 rather than hidden by overcommit. A throttled host exposes only its configured fraction of capacity
