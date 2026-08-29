@@ -323,6 +323,48 @@ def test_higher_priority_service_does_not_cancel_delivered_pending_warm():
     )
 
 
+def test_equal_service_class_does_not_churn_undelivered_pending_warm():
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(max_concurrent_mutations=1),
+    )
+    controller.put_profile(
+        profile("alpha", pinned_nodes=("a-alpha",), priority=100)
+    )
+
+    def cached_node(node_id: str, model_id: str, heartbeat: float) -> NodeSnapshot:
+        return NodeSnapshot(
+            node_id,
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            cached_models=(model_id,),
+            last_heartbeat=heartbeat,
+        )
+
+    first = controller.tick([cached_node("a-alpha", "alpha", 10)], now=10)
+    old_action = first.executable_actions[0]
+    controller.put_profile(
+        profile("beta", pinned_nodes=("z-beta",), priority=100)
+    )
+
+    second = controller.tick(
+        [
+            cached_node("a-alpha", "alpha", 11),
+            cached_node("z-beta", "beta", 11),
+        ],
+        now=11,
+    )
+
+    assert second.executable_actions == ()
+    assert controller.commands_for("a-alpha", now=11) == (old_action,)
+    assert not any(
+        record.action_id == old_action.action_id
+        and record.status == MutationStatus.CANCELLED
+        for record in controller.history
+    )
+
+
 def test_direct_demand_replaces_undelivered_speculative_prewarm(monkeypatch):
     controller = AllocatorController(
         mode=AllocatorMode.AUTOMATIC,
