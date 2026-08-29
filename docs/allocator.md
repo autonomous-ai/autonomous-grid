@@ -236,6 +236,15 @@ pinned processes remain untouched because a budget does not grant ownership. The
 resulting service shortfall stay explicit. Plan generations include the budget policy so a policy
 change is fenced like every other desired-state transition.
 
+Status turns the desired hourly run rate into explicit 1-hour, 24-hour, and 30-day projections.
+These are run-rate forecasts, not invoices: they carry the demand-confidence used for the current
+placement, a conservative confidence-adjusted known-cost band, the configured ceiling and remaining
+headroom for each window, and a `complete` flag. Any selected host without an explicit price keeps
+the projection incomplete instead of being silently valued at zero. Every missing replica also
+produces capacity advice with its minimum runtime, backend, memory and GPU shape; a budget-blocked
+replica includes the minimum additional known hourly allowance needed for the cheapest currently
+eligible host.
+
 Request routing uses the same heterogeneous capacity evidence after placement. Among engines in the
 same host-protection class that already serve the requested model, Grid compares active requests as
 a fraction of each engine's effective concurrency limit rather than comparing raw request counts.

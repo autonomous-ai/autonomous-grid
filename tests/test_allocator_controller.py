@@ -1495,6 +1495,39 @@ def test_controller_status_distinguishes_current_cost_from_desired_budget_cost()
     assert cost["compliance"] == "over_budget"
 
 
+def test_status_projects_spend_windows_and_recommends_budget_for_missing_capacity():
+    controller = AllocatorController(
+        planner_policy=PlannerPolicy(memory_headroom_fraction=0, max_hourly_cost=0.5)
+    )
+    for model_id in ("coding", "research"):
+        controller.put_profile(profile(model_id))
+    machines = tuple(
+        NodeSnapshot(
+            node_id,
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            cost_per_hour=0.4,
+            cost_known=True,
+            last_heartbeat=10,
+        )
+        for node_id in ("a", "b")
+    )
+
+    controller.tick(machines, now=10)
+    status = controller.status(machines, now=10)
+
+    forecast = status["spend_forecast"]
+    assert forecast["complete"] is True
+    assert forecast["windows"][0]["known_spend"] == pytest.approx(0.4)
+    assert forecast["windows"][1]["known_spend"] == pytest.approx(9.6)
+    recommendation = status["capacity_recommendations"][0]
+    assert recommendation["reason"] == "hourly_cost_budget"
+    assert recommendation["missing_replicas"] == 1
+    assert recommendation["minimum_additional_budget_per_hour"] == pytest.approx(0.3)
+
+
 def test_controller_prewarms_correlated_model_group_before_peer_request_arrives():
     controller = AllocatorController()
     for model_id in ("source", "target"):

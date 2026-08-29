@@ -959,6 +959,80 @@ class AllocatorController:
                 budget_compliance = "unknown"
             else:
                 budget_compliance = "within_budget"
+            desired_hourly_cost = self._last_plan.hourly_cost if self._last_plan else 0.0
+            desired_unknown_cost_nodes = (
+                self._last_plan.unknown_cost_nodes if self._last_plan else ()
+            )
+            demand_weight = sum(max(0.0, item.requests_per_minute) for item in forecasts)
+            demand_confidence = (
+                sum(
+                    max(0.0, item.requests_per_minute) * item.confidence
+                    for item in forecasts
+                )
+                / demand_weight
+                if demand_weight
+                else 1.0
+            )
+            spend_forecast = {
+                "basis": "desired_fleet_run_rate",
+                "demand_confidence": demand_confidence,
+                "complete": not desired_unknown_cost_nodes,
+                "unknown_cost_nodes": list(desired_unknown_cost_nodes),
+                "windows": [
+                    {
+                        "hours": hours,
+                        "known_spend": desired_hourly_cost * hours,
+                        "risk_adjusted_known_spend": desired_hourly_cost
+                        * hours
+                        * (1.0 + 0.25 * (1.0 - demand_confidence)),
+                        "budget_limit": (
+                            maximum_hourly_cost * hours if maximum_hourly_cost else 0.0
+                        ),
+                        "budget_headroom": (
+                            max(0.0, maximum_hourly_cost - desired_hourly_cost) * hours
+                            if maximum_hourly_cost
+                            else 0.0
+                        ),
+                    }
+                    for hours in (1, 24, 720)
+                ],
+            }
+            capacity_recommendations = []
+            if self._last_plan is not None:
+                for constraint in self._last_plan.unsatisfied:
+                    if constraint.missing_replicas <= 0:
+                        continue
+                    profile = self._profiles.get(constraint.model_id)
+                    hint = placement_hints.get(constraint.model_id) or {}
+                    if profile is None:
+                        continue
+                    cheapest_cost = float(hint.get("cost_per_hour") or 0.0)
+                    capacity_recommendations.append(
+                        {
+                            "model_id": constraint.model_id,
+                            "reason": constraint.code,
+                            "missing_replicas": constraint.missing_replicas,
+                            "minimum_memory_mb": profile.maximum_memory_mb,
+                            "runtimes": list(profile.runtimes),
+                            "backends": list(profile.backends),
+                            "minimum_gpu_count": profile.min_gpu_count,
+                            "minimum_gpu_memory_mb": profile.min_gpu_memory_mb,
+                            "cheapest_known_host_cost_per_hour": cheapest_cost,
+                            "minimum_additional_budget_per_hour": (
+                                max(
+                                    0.0,
+                                    cheapest_cost
+                                    - max(
+                                        0.0,
+                                        maximum_hourly_cost - desired_hourly_cost,
+                                    ),
+                                )
+                                if maximum_hourly_cost
+                                and constraint.code == "hourly_cost_budget"
+                                else 0.0
+                            ),
+                        }
+                    )
             return {
                 "schema_version": SCHEMA_VERSION,
                 "mode": self.mode.value,
@@ -973,15 +1047,15 @@ class AllocatorController:
                     "current_hourly_cost": current_hourly_cost,
                     "current_unknown_cost_nodes": list(current_unknown_cost_nodes),
                     "desired_hourly_cost": (
-                        self._last_plan.hourly_cost if self._last_plan else 0.0
+                        desired_hourly_cost
                     ),
                     "desired_unknown_cost_nodes": (
-                        list(self._last_plan.unknown_cost_nodes)
-                        if self._last_plan
-                        else []
+                        list(desired_unknown_cost_nodes)
                     ),
                     "compliance": budget_compliance,
                 },
+                "spend_forecast": spend_forecast,
+                "capacity_recommendations": capacity_recommendations,
                 "plan_sequence": self._plan_sequence,
                 "last_tick_at": self._last_tick_at,
                 "last_tick_duration_seconds": self._last_tick_duration_seconds,

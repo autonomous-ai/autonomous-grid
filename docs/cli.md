@@ -629,6 +629,10 @@ relax that rule. Use HTTPS between computers. See
 [Dynamic resource allocator](allocator.md) for placement rules, safety invariants, and the wire
 contract.
 
+The human status view also prints the 24-hour desired-fleet run-rate projection and up to three
+capacity shortfalls. JSON includes all 1-hour, 24-hour, and 720-hour windows plus complete
+runtime/backend/memory/GPU requirements and any minimum additional hourly budget.
+
 For allocator development on one machine, the `test` group separates modeled scale from real
 process actuation:
 

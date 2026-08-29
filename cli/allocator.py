@@ -98,6 +98,24 @@ def cmd_allocator_status(args: argparse.Namespace) -> int:
                 "  desired unknown    "
                 + ", ".join(str(item) for item in plan["unknown_cost_nodes"])
             )
+    spend_forecast = payload.get("spend_forecast") or {}
+    forecast_windows = spend_forecast.get("windows") or []
+    day = next((item for item in forecast_windows if item.get("hours") == 24), None)
+    if day is not None:
+        completeness = "complete" if spend_forecast.get("complete") else "known cost only"
+        print(
+            f"  projected 24h      ${float(day.get('known_spend') or 0):g} · "
+            f"{completeness} · confidence "
+            f"{100 * float(spend_forecast.get('demand_confidence') or 0):.0f}%"
+        )
+    recommendations = payload.get("capacity_recommendations") or []
+    if recommendations:
+        print(f"  capacity advice   {len(recommendations)} shortfall(s)")
+        for item in recommendations[:3]:
+            print(
+                f"    {item.get('model_id')} +{int(item.get('missing_replicas') or 0)} · "
+                f"{item.get('reason')} · >= {int(item.get('minimum_memory_mb') or 0)} MB"
+            )
     authority = payload.get("authority") or {}
     if authority:
         print(

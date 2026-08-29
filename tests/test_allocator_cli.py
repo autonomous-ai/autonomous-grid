@@ -156,6 +156,19 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
             "selected_models": ["general"],
             "exploration_models": ["general"],
         },
+        "spend_forecast": {
+            "complete": True,
+            "demand_confidence": 0.75,
+            "windows": [{"hours": 24, "known_spend": 9.6}],
+        },
+        "capacity_recommendations": [
+            {
+                "model_id": "coder",
+                "missing_replicas": 1,
+                "reason": "hourly_cost_budget",
+                "minimum_memory_mb": 8000,
+            }
+        ],
     }
     calls = []
 
@@ -172,6 +185,8 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
     assert "current cost       $0.8/h · over_budget" in output
     assert "joint portfolio    2 workloads -> 1 models" in output
     assert "exploration slot  general" in output
+    assert "projected 24h      $9.6 · complete · confidence 75%" in output
+    assert "coder +1 · hourly_cost_budget · >= 8000 MB" in output
     assert "secret-token" not in output
     assert calls[0][2]["headers"] == {}
 
