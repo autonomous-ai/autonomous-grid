@@ -71,10 +71,16 @@ def cmd_allocator_status(args: argparse.Namespace) -> int:
     pending = payload.get("pending_commands") or []
     plan = payload.get("plan") or {}
     cost = payload.get("cost") or {}
+    economics = payload.get("economics") or {}
     unsatisfied = plan.get("unsatisfied") or []
     print(f"Allocator {payload.get('mode', 'unknown')} · {len(nodes)} hosts · {len(models)} models")
     print(f"  pending mutations  {len(pending)}")
     print(f"  unmet constraints  {len(unsatisfied)}")
+    if "revision" in economics:
+        print(
+            f"  economics revision {int(economics.get('revision') or 0)} · "
+            f"{len(economics.get('audit') or [])} retained change(s)"
+        )
     hourly_cost_budget = float(
         plan.get("hourly_cost_budget") or cost.get("max_hourly_cost") or 0
     )
@@ -265,11 +271,13 @@ def cmd_allocator_mode(args: argparse.Namespace) -> int:
 
 def cmd_allocator_budget(args: argparse.Namespace) -> int:
     cfg = config.select_grid(getattr(args, "grid", None))
+    expected_revision = _expected_economics_revision(cfg, args)
     payload = _request(
         cfg,
         "PUT",
         "/allocator/budget",
         body={
+            "expected_revision": expected_revision,
             "max_hourly_cost": args.max_hourly_cost,
             "allow_unknown_cost": bool(args.allow_unknown_cost),
             "allow_service_shortfall": bool(args.allow_service_shortfall),
@@ -290,20 +298,26 @@ def cmd_allocator_budget(args: argparse.Namespace) -> int:
             )
             print(
                 f"Allocator hourly budget: ${maximum:g}/h · "
-                f"unknown-cost nodes {unknown}{shortfall}"
+                f"unknown-cost nodes {unknown}{shortfall} · "
+                f"revision {payload['economics_revision']}"
             )
         else:
-            print("Allocator hourly budget disabled")
+            print(
+                "Allocator hourly budget disabled · "
+                f"revision {payload['economics_revision']}"
+            )
     return 0
 
 
 def cmd_allocator_host_price_set(args: argparse.Namespace) -> int:
     cfg = config.select_grid(getattr(args, "grid", None))
+    expected_revision = _expected_economics_revision(cfg, args)
     payload = _request(
         cfg,
         "PUT",
         f"/allocator/hosts/{quote(args.host_id, safe='')}/price",
         body={
+            "expected_revision": expected_revision,
             "cost_per_hour": args.cost_per_hour,
             "allow_service_shortfall": bool(args.allow_service_shortfall),
         },
@@ -320,18 +334,23 @@ def cmd_allocator_host_price_set(args: argparse.Namespace) -> int:
         )
         print(
             f"Allocator host price: {payload['host_id']} = "
-            f"${float(payload['cost_per_hour']):g}/h · operator{shortfall}"
+            f"${float(payload['cost_per_hour']):g}/h · operator{shortfall} · "
+            f"revision {payload['economics_revision']}"
         )
     return 0
 
 
 def cmd_allocator_host_price_remove(args: argparse.Namespace) -> int:
     cfg = config.select_grid(getattr(args, "grid", None))
+    expected_revision = _expected_economics_revision(cfg, args)
     payload = _request(
         cfg,
         "DELETE",
         f"/allocator/hosts/{quote(args.host_id, safe='')}/price",
-        body={"allow_service_shortfall": bool(args.allow_service_shortfall)},
+        body={
+            "expected_revision": expected_revision,
+            "allow_service_shortfall": bool(args.allow_service_shortfall),
+        },
         token=_control_token(cfg, getattr(args, "token_file", None)),
         allow_insecure_http=getattr(args, "allow_insecure_http", False),
     )
@@ -339,9 +358,29 @@ def cmd_allocator_host_price_remove(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
     else:
         print(
-            f"Allocator host price removed: {payload['host_id']} · effective price unknown"
+            f"Allocator host price removed: {payload['host_id']} · effective price unknown · "
+            f"revision {payload['economics_revision']}"
         )
     return 0
+
+
+def _expected_economics_revision(
+    cfg: dict[str, Any],
+    args: argparse.Namespace,
+) -> int:
+    explicit = getattr(args, "expected_revision", None)
+    if explicit is not None:
+        return int(explicit)
+    status = _request(cfg, "GET", "/allocator/status")
+    try:
+        revision = status["economics"]["revision"]
+    except (KeyError, TypeError) as exc:
+        raise SystemExit(
+            "Allocator status did not include an economics revision; upgrade the Grid server"
+        ) from exc
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise SystemExit("Allocator returned an invalid economics revision")
+    return revision
 
 
 def cmd_allocator_tick(args: argparse.Namespace) -> int:

@@ -381,17 +381,24 @@ def run_worker(config_path: Path) -> int:
         with httpx.Client(base_url=endpoint, timeout=10.0, trust_env=False) as client:
             # Logical test economics are operator fixtures, not worker claims. Register them via
             # the same authenticated control surface a real Grid operator uses.
+            economics_revision = int(
+                client.get("/allocator/status").json().get("economics", {}).get(
+                    "revision", 0
+                )
+            )
             for index in range(text_machines):
                 response = client.put(
                     f"/allocator/hosts/logical-host-{index + 1}/price",
                     headers=headers,
                     json={
+                        "expected_revision": economics_revision,
                         "cost_per_hour": (
                             text_costs_per_hour[index] if text_costs_per_hour else 0.0
                         )
                     },
                 )
                 response.raise_for_status()
+                economics_revision = int(response.json()["economics_revision"])
             response = client.put(
                 f"/allocator/models/{model}",
                 headers=headers,
