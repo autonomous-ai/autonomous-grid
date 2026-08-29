@@ -59,6 +59,12 @@ grid goal run --project <project-id> \
   --evals ./game-evals.json
 ```
 
+`grid goal run` gives the create request a unique idempotency key and retries one ambiguous
+transport failure with that same key. If both acknowledgements are lost, the error prints the key;
+rerun the exact command with `--idempotency-key <key>`. The relay then returns or finishes the
+original Goal instead of creating a second autonomous Goal tree. A key is scoped to the member and
+cannot be reused for a different Goal request.
+
 The command prints a Goal id. Use that id to inspect or control the run:
 
 ```bash

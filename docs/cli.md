@@ -1543,7 +1543,7 @@ anything a client sends. `grid project status` reports which, so you never have 
 ```
 grid goal run --project <project-id> --objective <text> --done-when <text> --model <model>
               [--token-budget <n>] [--tools <json-file>] [--name <name>]
-              [--grid <grid>] [--json]
+              [--idempotency-key <key>] [--grid <grid>] [--json]
 grid goal list [--all] [--grid <grid>] [--json]
 grid goal status <goal-id> [--grid <grid>] [--json]
 grid goal evidence <goal-id> [--verify] [--min-execution-nodes <n>] [--require-inference]
@@ -1554,6 +1554,9 @@ grid goal pause|resume|cancel <goal-id> [--grid <grid>] [--json]
 **Remote-only and experimental.** A Goal is one measurable Codex objective continued across
 ordinary distributed task leases until native Codex Goal state says it is complete, blocked or
 limited. The Goal id is its conversation id. `list` omits ended Goals unless `--all` is supplied.
+Creation automatically uses a unique request key and retries one transport failure safely. If the
+response remains uncertain, reuse the key printed in the error with `--idempotency-key`; a different
+request cannot reuse that key.
 
 The computer running Codex and the computer serving `--model` need not be the same node. Agent state
 and project state move through the relay's Git refs at successful turn boundaries; a replacement

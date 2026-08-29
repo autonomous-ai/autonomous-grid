@@ -38,6 +38,14 @@ peer vanished after selection but before response delivery, Grid atomically rest
 queue clock and attempt counter and emits no retry event. An orphan HTTP handler therefore cannot
 steal a future Goal turn and make the fleet wait through a fictitious failed attempt.
 
+Root creation is also a recoverable distributed operation. The client supplies one member-scoped
+idempotency key for all transport attempts. Before policy or a first turn is published, the relay
+atomically reserves that key, the canonical request hash, and one conversation id. A retry with the
+same body completes or returns that identity, including after a crash between policy commit and
+first-turn publication; a different body gets a conflict. Replays never reinitialize policy,
+progress counters, or terminal state. Child spawn reservations obey the same no-reinitialization
+rule after their first policy commit.
+
 ### Harness policy and per-turn assignment
 
 A Goal stores an ordered allow-list of harnesses (`codex`, `claude`) and required capabilities.

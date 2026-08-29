@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sys
+import uuid
 from itertools import pairwise
 from pathlib import Path
 
@@ -465,7 +466,9 @@ def cmd_goal(args: argparse.Namespace) -> int:
             agents=["codex", "claude"] if agent == "auto" else [agent],
             required_capabilities=getattr(args, "require", []),
             evals=_evals(getattr(args, "evals", None)),
-            allow_subgoals=getattr(args, "allow_subgoals", False))
+            allow_subgoals=getattr(args, "allow_subgoals", False),
+            idempotency_key=(getattr(args, "idempotency_key", None)
+                             or str(uuid.uuid4())))
         _show(goal, args.json)
         return 0
     if args.goal_action == "list":

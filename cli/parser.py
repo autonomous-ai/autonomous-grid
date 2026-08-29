@@ -1082,6 +1082,9 @@ def _add_goal(sub) -> None:
                      help="Required harness capability; repeat for multiple requirements.")
     run.add_argument("--allow-subgoals", action="store_true",
                      help="Allow the parent agent to create bounded distributed child Goals.")
+    run.add_argument(
+        "--idempotency-key", default=None, metavar="KEY",
+        help="Reuse after an uncertain create response to recover the same Goal.")
     run.add_argument("--name", default=None, help="Optional short Goal name.")
     run.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     run.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")

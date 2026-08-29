@@ -18,6 +18,7 @@ def test_goal_run_parser_requires_a_measurable_condition_and_model():
     assert args.objective == "Build it"
     assert args.done_when == "All checks pass"
     assert args.model == "grid-model"
+    assert args.idempotency_key is None
 
     evidence = build_parser().parse_args([
         "goal", "evidence", "goal-1", "--verify", "--min-execution-nodes", "3",
@@ -54,6 +55,7 @@ def test_goal_run_loads_tools_and_posts_the_resolved_project(monkeypatch, tmp_pa
         goal_action="run", project="project-id", objective="Resolve tickets",
         done_when="Backlog is zero", model="grid-model", token_budget=1234,
         tools=str(manifest), evals=str(eval_manifest), name="support", grid=None, json=True,
+        idempotency_key="create-support-once",
     )
     assert goal.cmd_goal(args) == 0
     assert captured == {
@@ -64,8 +66,67 @@ def test_goal_run_loads_tools_and_posts_the_resolved_project(monkeypatch, tmp_pa
         "name": "support", "agents": ["codex"], "required_capabilities": [],
         "evals": [{"type": "file", "name": "README exists", "path": "README.md"}],
         "allow_subgoals": False,
+        "idempotency_key": "create-support-once",
     }
     assert json.loads(capsys.readouterr().out)["id"] == "goal-1"
+
+
+def test_goal_create_retries_transport_ambiguity_with_the_same_identity(monkeypatch):
+    from remote import relay
+
+    calls = []
+
+    def create_once(*args, **kwargs):
+        calls.append(kwargs["headers"]["Idempotency-Key"])
+        if len(calls) == 1:
+            raise SystemExit("Cannot reach the relay (POST /relay/v1/goals): response lost")
+        return {"id": "goal-1", "turn_id": "turn-1"}
+
+    monkeypatch.setattr(relay, "_task_oneshot", create_once)
+    answer = relay.create_goal(
+        "http://relay", "token", project_id="project-1", objective="Build it",
+        done_when="Checks pass", model="grid-model", token_budget=100,
+        idempotency_key="one-root-request")
+
+    assert answer == {"id": "goal-1", "turn_id": "turn-1"}
+    assert calls == ["one-root-request", "one-root-request"]
+
+
+def test_goal_create_does_not_retry_an_authoritative_refusal(monkeypatch):
+    from remote import relay
+
+    calls = 0
+
+    def refuse(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise relay.TaskRefusal("different body", code="goal_idempotency_key_reused", status=409)
+
+    monkeypatch.setattr(relay, "_task_oneshot", refuse)
+    with pytest.raises(relay.TaskRefusal, match="different body"):
+        relay.create_goal(
+            "http://relay", "token", project_id="project-1", objective="Build it",
+            done_when="Checks pass", model="grid-model", token_budget=100,
+            idempotency_key="one-root-request")
+    assert calls == 1
+
+
+def test_goal_create_reports_the_recovery_key_after_two_lost_responses(monkeypatch):
+    from remote import relay
+
+    calls = []
+
+    def lose(*args, **kwargs):
+        calls.append(kwargs["headers"]["Idempotency-Key"])
+        raise SystemExit("Cannot reach the relay (POST /relay/v1/goals): response lost")
+
+    monkeypatch.setattr(relay, "_task_oneshot", lose)
+    with pytest.raises(SystemExit, match="--idempotency-key recover-this-goal"):
+        relay.create_goal(
+            "http://relay", "token", project_id="project-1", objective="Build it",
+            done_when="Checks pass", model="grid-model", token_budget=100,
+            idempotency_key="recover-this-goal")
+    assert calls == ["recover-this-goal", "recover-this-goal"]
 
 
 @pytest.mark.parametrize("action", ["pause", "resume", "cancel"])

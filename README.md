@@ -577,6 +577,10 @@ grid goal pause <goal-id>
 grid goal resume <goal-id>
 ```
 
+Goal creation is idempotent. The CLI retries a lost response with the same request key; if the
+relay remains unreachable, it prints that key so the exact command can safely be retried with
+`--idempotency-key <key>` instead of creating a duplicate Goal.
+
 A Goal is not a second scheduler. It uses the existing distributed task table: each native Codex
 Goal turn is an ordinary leased task. The provider checks out the conversation branch and Codex
 checkpoint from relay Git, runs Codex with model requests routed through Grid inference, then pushes

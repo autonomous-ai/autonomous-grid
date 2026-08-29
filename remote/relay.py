@@ -20,6 +20,7 @@ module is the stateless wire boundary.
 from __future__ import annotations
 
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 from urllib.parse import quote
@@ -1031,7 +1032,8 @@ def create_goal(signaling_url: str, access_token: str, *, project_id: str, objec
                 agents: list[str] | None = None,
                 required_capabilities: list[str] | None = None,
                 evals: list[dict[str, Any]] | None = None,
-                allow_subgoals: bool = False) -> dict[str, Any]:
+                allow_subgoals: bool = False,
+                idempotency_key: str | None = None) -> dict[str, Any]:
     body: dict[str, Any] = {
         "project_id": project_id, "objective": objective, "done_when": done_when,
         "model": model, "token_budget": token_budget, "tools": tools or [],
@@ -1042,8 +1044,26 @@ def create_goal(signaling_url: str, access_token: str, *, project_id: str, objec
     }
     if name:
         body["name"] = name
-    return _task_oneshot(signaling_url, access_token, "POST", "/relay/v1/goals", json=body,
-                         missing_route_hint="This grid's relay does not support Grid Goal yet.")
+    # One identity for all transport attempts. A timeout says nothing about whether the relay
+    # committed the Goal; changing this key on retry would start a second autonomous tree.
+    key = idempotency_key or str(uuid.uuid4())
+    for attempt in range(2):
+        try:
+            return _task_oneshot(
+                signaling_url, access_token, "POST", "/relay/v1/goals", json=body,
+                headers={"Idempotency-Key": key},
+                missing_route_hint="This grid's relay does not support Grid Goal yet.")
+        except SystemExit as exc:
+            # Relay refusals are authoritative answers, never transport ambiguity. Retry only the
+            # bare SystemExit `_task_oneshot` uses when no HTTP response arrived.
+            if isinstance(exc, TaskRefusal):
+                raise
+            if attempt == 0:
+                continue
+            raise SystemExit(
+                f"{exc}\nGoal creation may already have succeeded. Retry the exact command with "
+                f"--idempotency-key {key}") from None
+    raise AssertionError("unreachable")
 
 
 def list_goals(signaling_url: str, access_token: str, *, all: bool = False) -> list[dict[str, Any]]:
