@@ -186,7 +186,9 @@ is exposed; an idempotent retry can finish publication after a crash but cannot 
 the child. A status-less reserved child is treated as live until provisioning recovers it. The
 periodic reconciler scans both active Goals missing a continuation and every waiting parent missing
 its fan-in callback; it addresses the parent directly so nested Goal hierarchies cannot confuse a
-waiting child-parent with its own parent. Required children must independently pass their
+waiting child-parent with its own parent. Relay processes reconcile through the parent Git ref's
+compare-and-swap: a loser recomputes from the new tip, where an already-merged child is detected by
+ancestry instead of misreported as a merge failure. Required children must independently pass their
 evaluations. Their pinned result commits and summaries are included in the parent's next handoff.
 Optional children may omit evaluations;
 their failure is preserved as trajectory evidence but cannot block the parent, and their branch is

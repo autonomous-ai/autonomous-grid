@@ -157,7 +157,8 @@ child turn is exposed, so a retried tool call cannot publish an orphan or duplic
 reserved child whose first turn was interrupted remains live—not failed—and the periodic
 reconciler provisions it. The same sweep retries every `waiting_children` parent, including a Goal
 that is itself a child, so a relay stop after child completion but before the fan-in callback cannot
-strand the hierarchy.
+strand the hierarchy. Concurrent relay reconcilers meet at Git's compare-and-swap; the loser rereads
+the new parent tip and retries, where already-merged child commits are ancestry-idempotent.
 
 ## What moves between computers
 
