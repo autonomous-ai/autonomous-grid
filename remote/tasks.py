@@ -887,7 +887,10 @@ def run_task(job: dict[str, Any],
             author=task_repo.identity_or_default(
                 job.get("author_name"), job.get("author_email")),
             workspace=workspace)
-        proxy = task_codex_proxy.InferenceProxy(inference.base_url, inference.token)
+        proxy = task_codex_proxy.InferenceProxy(
+            inference.base_url, inference.token,
+            turn_id=str(job.get("task_id") or "") or None,
+            conversation_id=str(job.get("conversation_id") or "") or None)
         # Map every Claude tier to the Goal's explicit Grid model. In particular `/goal` evaluates
         # with the configured small/fast model; leaving that alias untouched would send only the
         # actor through Grid while its native evaluator tried an Anthropic account on this node.

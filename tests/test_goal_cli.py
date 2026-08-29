@@ -19,6 +19,13 @@ def test_goal_run_parser_requires_a_measurable_condition_and_model():
     assert args.done_when == "All checks pass"
     assert args.model == "grid-model"
 
+    evidence = build_parser().parse_args([
+        "goal", "evidence", "goal-1", "--verify", "--min-execution-nodes", "3",
+        "--require-inference",
+    ])
+    assert evidence.min_execution_nodes == 3
+    assert evidence.require_inference is True
+
 
 def test_goal_run_loads_tools_and_posts_the_resolved_project(monkeypatch, tmp_path, capsys):
     from cli import goal, remote_task
@@ -196,6 +203,31 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
                   "previous_provider_id": "node-A", "reason": "lease_expired"},
     })
     assert _verify_evidence(record) == []
+
+
+def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
+    from cli.goal import _verify_evidence
+
+    record = {
+        "goal": {"status": "complete", "evals": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
+        "turns": [{
+            "id": "turn-1", "attempt": 1, "state": "completed", "agent_kind": "codex",
+            "provider_node_id": "node-A", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [], "inference": [], "eval_runs": [],
+    }
+    failures = _verify_evidence(record, min_execution_nodes=2, require_inference=True)
+    assert any("fewer than required 2" in item for item in failures)
+    assert any("no model requests attributed" in item for item in failures)
+
+    record["inference"].append({
+        "turn_id": "turn-1", "model": "grid-model", "provider_node_id": "gpu-A",
+        "requests": 1,
+    })
+    assert _verify_evidence(record, require_inference=True) == []
 
 
 def test_goal_status_shows_budget_blocker_and_distributed_children(capsys):

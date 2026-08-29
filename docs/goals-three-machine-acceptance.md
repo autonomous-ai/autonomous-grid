@@ -63,10 +63,17 @@ inference but not actually polling the distributed task queue.
 
 ## Required evidence
 
-Save and verify the relay-authored JSON artifact with
-`grid goal evidence <goal-id> --verify > goal-evidence.json`. The command exits nonzero if the Goal
-is not complete, a turn is nonterminal, the transcript chain is broken, or a required final eval has
-no accepted passing run. A release is not accepted from screenshots alone.
+Save and verify the relay-authored JSON artifact with:
+
+```bash
+grid goal evidence <goal-id> --verify \
+  --min-execution-nodes 3 --require-inference > goal-evidence.json
+```
+
+The command exits nonzero if the Goal is not complete, fewer than three task nodes executed it, any
+turn lacks model usage attributed to a Grid inference node, a reclaimed turn lacks authoritative
+retry evidence, the transcript chain is broken, or a required final eval has no accepted passing
+run. A release is not accepted from screenshots alone.
 
 | Evidence | Required assertion |
 |---|---|

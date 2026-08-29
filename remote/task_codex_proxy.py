@@ -13,9 +13,12 @@ import httpx
 class InferenceProxy:
     """Expose native agent inference dialects on loopback; keep Grid's bearer out of children."""
 
-    def __init__(self, upstream_base: str, upstream_token: str):
+    def __init__(self, upstream_base: str, upstream_token: str, *,
+                 turn_id: str | None = None, conversation_id: str | None = None):
         self.upstream_base = upstream_base.rstrip("/")
         self.upstream_token = upstream_token
+        self.turn_id = turn_id
+        self.conversation_id = conversation_id
         self.child_token = secrets.token_urlsafe(32)
         owner = self
 
@@ -64,7 +67,6 @@ class InferenceProxy:
         if destination is None:
             self._error(handler, 404, "Goal proxy only serves /responses and /v1/messages")
             return
-            return
         try:
             length = int(handler.headers.get("Content-Length", "0"))
         except ValueError:
@@ -75,11 +77,7 @@ class InferenceProxy:
             return
 
         body = handler.rfile.read(length)
-        headers = {
-            "Authorization": f"Bearer {self.upstream_token}",
-            "Content-Type": handler.headers.get("Content-Type", "application/json"),
-            "Accept": handler.headers.get("Accept", "text/event-stream"),
-        }
+        headers = self._upstream_headers(handler)
         started = False
         try:
             with httpx.Client(timeout=httpx.Timeout(30.0, read=None)) as client, client.stream(
@@ -103,6 +101,19 @@ class InferenceProxy:
                     pass
         finally:
             handler.close_connection = True
+
+    def _upstream_headers(self, handler: BaseHTTPRequestHandler) -> dict[str, str]:
+        """Bind every native-model request to the durable Grid Goal turn that caused it."""
+        headers = {
+            "Authorization": f"Bearer {self.upstream_token}",
+            "Content-Type": handler.headers.get("Content-Type", "application/json"),
+            "Accept": handler.headers.get("Accept", "text/event-stream"),
+        }
+        if self.turn_id:
+            headers["X-Request-Id"] = self.turn_id
+        if self.conversation_id:
+            headers["X-Grid-Conversation"] = self.conversation_id
+        return headers
 
     @staticmethod
     def _error(handler: BaseHTTPRequestHandler, status: int, message: str) -> None:

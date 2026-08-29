@@ -375,7 +375,10 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
                          publish=publish, inference=inference,
                          scope=f"{job.get('conversation_id')}:{turns_before + 1}")
 
-    proxy = InferenceProxy(inference.base_url.rstrip("/") + "/relay/v1", inference.token)
+    proxy = InferenceProxy(
+        inference.base_url.rstrip("/") + "/relay/v1", inference.token,
+        turn_id=str(job.get("task_id") or "") or None,
+        conversation_id=str(job.get("conversation_id") or "") or None)
     proxy.start()
     process: ProcessLike | None = None
     started = time.monotonic()

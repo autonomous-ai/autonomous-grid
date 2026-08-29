@@ -80,7 +80,8 @@ def _show(goal: dict, as_json: bool) -> None:
                   f"{child.get('objective')}")
 
 
-def _verify_evidence(record: dict) -> list[str]:
+def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
+                     require_inference: bool = False) -> list[str]:
     """Return deterministic release-gate failures in a relay-authored Goal evidence record."""
     failures: list[str] = []
     goal = record.get("goal") if isinstance(record.get("goal"), dict) else {}
@@ -114,6 +115,15 @@ def _verify_evidence(record: dict) -> list[str]:
         if not turn.get("transcript_result_commit"):
             failures.append(f"turn {index} has no verified transcript output commit")
 
+    execution_nodes = {
+        turn.get("provider_node_id") for turn in turns
+        if isinstance(turn, dict) and turn.get("provider_node_id")
+    }
+    if len(execution_nodes) < min_execution_nodes:
+        failures.append(
+            f"Goal used {len(execution_nodes)} distinct execution node(s), fewer than required "
+            f"{min_execution_nodes}")
+
     first = turns[0] if isinstance(turns[0], dict) else {}
     if first.get("transcript_commit") is not None:
         failures.append("turn 1 unexpectedly resumes a pre-existing transcript")
@@ -128,6 +138,20 @@ def _verify_evidence(record: dict) -> list[str]:
     runs = record.get("eval_runs") if isinstance(record.get("eval_runs"), list) else []
     attempt_events = (record.get("attempt_events")
                       if isinstance(record.get("attempt_events"), list) else [])
+    inference = record.get("inference") if isinstance(record.get("inference"), list) else []
+    if require_inference:
+        for index, turn in enumerate(turns, 1):
+            if not isinstance(turn, dict):
+                continue
+            usage = [item for item in inference if isinstance(item, dict)
+                     and item.get("turn_id") == turn.get("id")
+                     and isinstance(item.get("requests"), int)
+                     and not isinstance(item.get("requests"), bool)
+                     and item["requests"] > 0
+                     and item.get("model") and item.get("provider_node_id")]
+            if not usage:
+                failures.append(
+                    f"turn {index} has no model requests attributed to a Grid inference node")
     for index, turn in enumerate(turns, 1):
         if not isinstance(turn, dict):
             continue
@@ -201,7 +225,10 @@ def cmd_goal(args: argparse.Namespace) -> int:
         evidence = relay.get_goal_evidence(base, token, args.goal_id)
         print(json.dumps(evidence, indent=2))
         if getattr(args, "verify", False):
-            failures = _verify_evidence(evidence)
+            failures = _verify_evidence(
+                evidence,
+                min_execution_nodes=getattr(args, "min_execution_nodes", 1),
+                require_inference=getattr(args, "require_inference", False))
             if failures:
                 raise SystemExit("Goal evidence verification failed:\n- " + "\n- ".join(failures))
             print("Goal evidence verified: terminal turns, transcript chain and evaluations pass.",

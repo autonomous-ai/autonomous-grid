@@ -74,6 +74,16 @@ def _positive_task_count(raw: str) -> int:
     return count
 
 
+def _positive_node_count(raw: str) -> int:
+    try:
+        count = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a whole number of nodes") from None
+    if count < 1:
+        raise argparse.ArgumentTypeError(f"{raw!r} must be at least 1 node")
+    return count
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="grid",
@@ -1096,6 +1106,12 @@ def _add_goal(sub) -> None:
     evidence.add_argument(
         "--verify", action="store_true",
         help="Fail unless turns, transcript handoffs and final independent evals are complete.")
+    evidence.add_argument(
+        "--min-execution-nodes", type=_positive_node_count, default=1, metavar="N",
+        help="With --verify, require at least N distinct task execution nodes (default: 1).")
+    evidence.add_argument(
+        "--require-inference", action="store_true",
+        help="With --verify, require every turn to have model usage attributed to a Grid node.")
     evidence.set_defaults(handler=cmd_goal)
 
     for action, help_text in (("pause", "Stop scheduling new turns"),
