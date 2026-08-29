@@ -81,7 +81,9 @@ lowest-priority sufficient victim set, continues reporting the important model a
 unsatisfied, and places it only after a later heartbeat proves that memory is actually free. The
 same mechanism converges a host whose model ceiling was lowered below its live inventory. Each plan
 stages at most 64 individual evictions by default; larger changes converge over later heartbeats
-instead of producing an unbounded operational wave. External,
+instead of producing an unbounded operational wave. Within a single-domain unpinned wave,
+independent node-local victim sets are proven in one fleet scan and then consumed in disruption-cost
+order; pins and multi-domain placement retain fresh searches. External,
 manual, pinned, and minimum-residency-protected work is never bypassed. Correlation-only predictive
 demand may use spare capacity but cannot trigger a destructive preemption; a configured baseline,
 pin, or direct request/queue/SLO/error signal is required. Among equally low-priority choices, the

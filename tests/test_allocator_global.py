@@ -2245,11 +2245,17 @@ def test_priority_preemption_budget_bounds_large_fleet_wave_deterministically():
 
     forward = planner.plan(machines, profiles, now=10)
     reversed_input = planner.plan(tuple(reversed(machines)), profiles, now=10)
+    fresh_domain_search = planner.plan(
+        machines,
+        (profiles[0], replace(profiles[1], min_failure_domains=2)),
+        now=10,
+    )
 
     expected = frozenset((f"n{index:03d}", "batch") for index in range(16))
     assert len(forward.preemptions) == 16
     assert forward.preempted_pairs == expected
     assert reversed_input.preemptions == forward.preemptions
+    assert fresh_domain_search.preemptions == forward.preemptions
 
 
 def test_isolated_ready_bulk_placement_matches_general_scoring_exactly():

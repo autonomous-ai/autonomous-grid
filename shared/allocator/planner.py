@@ -120,6 +120,21 @@ class _RepackSearchState:
 
 
 @dataclass(frozen=True, slots=True)
+class _PreemptionCandidate:
+    sort_key: tuple[int, int, int, int, float, int, int, str]
+    node: NodeSnapshot
+    victims: tuple[ModelResidency, ...]
+    displaced_assignments: tuple[PlacementAssignment, ...]
+
+
+@dataclass(slots=True)
+class _PreemptionSearchCache:
+    """One beneficiary's independent candidate sets, built lazily once per plan."""
+
+    candidates: list[_PreemptionCandidate] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _PendingReplica:
     model_id: str
     replica_index: int
@@ -1096,6 +1111,11 @@ class PlacementPlanner:
                 *pending_pins,
                 *(None for _ in range(max(0, missing - len(pending_pins)))),
             ]
+            preemption_cache = (
+                _PreemptionSearchCache()
+                if not pending_pins and beneficiary.min_failure_domains <= 1
+                else None
+            )
             for required_node_id in preemption_targets:
                 if len(preemptions) >= self.policy.max_staged_preemptions:
                     break
@@ -1126,6 +1146,7 @@ class PlacementPlanner:
                         self.policy.max_staged_preemptions - len(preemptions)
                     ),
                     assignments_by_node=assignments_by_node,
+                    candidate_cache=preemption_cache,
                 )
                 if not staged:
                     break
@@ -1818,37 +1839,25 @@ def _fits(
     return _colocation_allowed(node, model, assignments, profile_by_id)
 
 
-def _stage_priority_preemption(
+def _priority_preemption_candidates(
     beneficiary: ModelProfile,
     nodes: list[NodeSnapshot],
-    assignments: list[PlacementAssignment],
+    assignments_by_node: Mapping[str, list[PlacementAssignment]],
     assigned_pairs: set[tuple[str, str]],
-    assigned_domains: dict[str, set[str]],
-    capacity: dict[str, int],
-    occupied_models: dict[str, int],
-    desired_model_slots: dict[str, int],
+    capacity: Mapping[str, int],
+    occupied_models: Mapping[str, int],
+    desired_model_slots: Mapping[str, int],
     profile_by_id: Mapping[str, ModelProfile],
     now: float,
     policy: PlannerPolicy,
     startup_seconds: Mapping[tuple[str, str], float],
     *,
-    require_new_domain: bool,
-    existing_domains: set[str],
     required_node_id: str | None,
     excluded_nodes: set[str],
-    max_victims: int,
-    assignments_by_node: dict[str, list[PlacementAssignment]],
-) -> tuple[str, tuple[ModelResidency, ...]] | None:
-    """Prove a lower-priority eviction path, then return its bounded next wave."""
+) -> list[_PreemptionCandidate]:
+    """Prove every currently independent node-local victim set in one fleet scan."""
 
-    candidates: list[
-        tuple[
-            tuple[int, int, int, int, float, int, int, str],
-            NodeSnapshot,
-            tuple[ModelResidency, ...],
-            tuple[PlacementAssignment, ...],
-        ]
-    ] = []
+    candidates: list[_PreemptionCandidate] = []
     for node in nodes:
         if required_node_id is not None and node.node_id != required_node_id:
             continue
@@ -1919,9 +1928,9 @@ def _stage_priority_preemption(
         )
         for assignment in displaced_assignments:
             simulated_assignments.remove(assignment)
-            residency = node.residency(assignment.model_id)
+            assignment_residency = node.residency(assignment.model_id)
             simulated_capacity[node.node_id] += _incremental_memory_mb(
-                residency,
+                assignment_residency,
                 assignment.memory_mb,
             )
             simulated_slots[node.node_id] -= 1
@@ -1936,8 +1945,7 @@ def _stage_priority_preemption(
                 (
                     item
                     for item in simulated_assignments
-                    if item.node_id == node.node_id
-                    and item.model_id == victim.model_id
+                    if item.model_id == victim.model_id
                 ),
                 None,
             )
@@ -1971,8 +1979,8 @@ def _stage_priority_preemption(
                 continue
             victim_profiles = [profile_by_id[item.model_id] for item in selected]
             candidates.append(
-                (
-                    (
+                _PreemptionCandidate(
+                    sort_key=(
                         sum(item.priority for item in victim_profiles),
                         sum(item.active_requests for item in selected),
                         sum(_preemption_state_cost(item.state) for item in selected),
@@ -1988,12 +1996,66 @@ def _stage_priority_preemption(
                         sum(item.memory_mb for item in selected),
                         node.node_id,
                     ),
-                    node,
-                    tuple(selected),
-                    displaced_assignments,
+                    node=node,
+                    victims=tuple(selected),
+                    displaced_assignments=displaced_assignments,
                 )
             )
             break
+    return candidates
+
+
+def _stage_priority_preemption(
+    beneficiary: ModelProfile,
+    nodes: list[NodeSnapshot],
+    assignments: list[PlacementAssignment],
+    assigned_pairs: set[tuple[str, str]],
+    assigned_domains: dict[str, set[str]],
+    capacity: dict[str, int],
+    occupied_models: dict[str, int],
+    desired_model_slots: dict[str, int],
+    profile_by_id: Mapping[str, ModelProfile],
+    now: float,
+    policy: PlannerPolicy,
+    startup_seconds: Mapping[tuple[str, str], float],
+    *,
+    require_new_domain: bool,
+    existing_domains: set[str],
+    required_node_id: str | None,
+    excluded_nodes: set[str],
+    max_victims: int,
+    assignments_by_node: dict[str, list[PlacementAssignment]],
+    candidate_cache: _PreemptionSearchCache | None,
+) -> tuple[str, tuple[ModelResidency, ...]] | None:
+    """Prove a lower-priority eviction path, then return its bounded next wave."""
+
+    if candidate_cache is not None and candidate_cache.candidates is not None:
+        candidates = [
+            item
+            for item in candidate_cache.candidates
+            if item.node.node_id not in excluded_nodes
+        ]
+    else:
+        candidates = _priority_preemption_candidates(
+            beneficiary,
+            nodes,
+            assignments_by_node,
+            assigned_pairs,
+            capacity,
+            occupied_models,
+            desired_model_slots,
+            profile_by_id,
+            now,
+            policy,
+            startup_seconds,
+            required_node_id=required_node_id,
+            excluded_nodes=excluded_nodes,
+        )
+        if candidate_cache is not None:
+            candidate_cache.candidates = sorted(
+                candidates,
+                key=lambda item: item.sort_key,
+            )
 
     if not candidates:
         return None
@@ -2001,14 +2063,19 @@ def _stage_priority_preemption(
         new_domain_candidates = [
             item
             for item in candidates
-            if (item[1].failure_domain or item[1].node_id) not in existing_domains
+            if (item.node.failure_domain or item.node.node_id) not in existing_domains
         ]
         if new_domain_candidates:
             candidates = new_domain_candidates
-    _, selected_node, victims, displaced_assignments = min(
+    selected_candidate = min(
         candidates,
-        key=lambda item: item[0],
+        key=lambda item: item.sort_key,
     )
+    selected_node = selected_candidate.node
+    victims = selected_candidate.victims
+    displaced_assignments = selected_candidate.displaced_assignments
+    if candidate_cache is not None and candidate_cache.candidates is not None:
+        candidate_cache.candidates.remove(selected_candidate)
     for assignment in displaced_assignments:
         assignments.remove(assignment)
         assignments_by_node[selected_node.node_id].remove(assignment)
