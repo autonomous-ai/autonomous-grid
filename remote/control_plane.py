@@ -16,6 +16,8 @@ from urllib.parse import quote
 
 import httpx
 
+from shared.system import os_grid
+
 from . import credentials
 
 
@@ -65,8 +67,25 @@ def poll_device_login(device_code: str, api_url: str | None = None) -> dict[str,
 
 
 def fetch_tokens(session_token: str, device_id: str, api_url: str | None = None) -> list[dict[str, Any]]:
+    """Every grid this account may reach from THIS machine, each with a fresh credential.
+
+    Carries the machine's **OS token** as ``os=`` beside ``device_id`` when it has one (ADR 0039 D-e),
+    which is what decides whether an OS grid is among them. Both call sites — `grid login` and
+    `grid sync` — go through here, so the machine speaks for itself once rather than in two places
+    that could answer differently.
+
+    The parameter is **omitted entirely** on a machine outside the closed token set, never sent empty:
+    the far end gates by equality against a grid's own token, and an empty string would be a second
+    spelling of "no claim" for it to recognise. It is also new on an existing endpoint, so an older
+    control plane simply ignores it and this call behaves exactly as it did before (ADR 0039 D-j — the
+    public CLI has no rollout ordering in either direction).
+    """
+    params = {"device_id": device_id}
+    machine_os = os_grid.os_token()
+    if machine_os:
+        params["os"] = machine_os
     with _client(api_url, session_token) as client:
-        resp = _send(client, "GET", "/v1/grid/tokens", params={"device_id": device_id})
+        resp = _send(client, "GET", "/v1/grid/tokens", params=params)
         # `or []` coerces both a missing key and an explicit null to an empty list.
         return list(resp.json().get("networks") or [])
 

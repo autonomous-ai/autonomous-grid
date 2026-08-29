@@ -3,8 +3,9 @@
 grid-src holds **two** copies of this literal — `grid_cli/network_runtime.py`, which decides whether
 `grid network create --network-type os-community` is even a legal argv, and
 `grid_cli/private_server/grid_auth.py`, which decides whether a token the control plane signed for
-that grid is admitted at the master. grid-apis will hold a third. There is no import path between
-any of them, so they are kept in step by editing every side — and by this test.
+that grid is admitted at the master. **grid-apis `grid_networks/store.py` is the third**, and it is
+the one that decides whether a grid of this type can exist in the database at all. There is no import
+path between any of them, so they are kept in step by editing every side — and by this test.
 
 ⚠️ **The deploy order is the REVERSE of the web-tool routes' and must not be inferred from them.**
 grid-src rolls out FIRST, before the control plane, because auto-provisioning an OS grid is not an
@@ -15,14 +16,15 @@ argparse exit 2, a failed create, and a grid stuck at `pending` retrying forever
 fail-closed, but wrong. (The *public* CLI in this repository has no ordering in either direction:
 `os=` is a new query parameter on an existing endpoint.)
 
-⚠️ Per this repository's rule for every cross-repo assertion, this **skips unless the grid-src
-worktree sits beside this one** — i.e. it skips in CI, and a green CI proves nothing about it. Run
-it locally, on a machine that has both.
+⚠️ Per this repository's rule for every cross-repo assertion, each case here **skips unless the
+worktree it reads sits beside this one** — grid-src for most, grid-apis for the last two — i.e. they
+skip in CI, and a green CI proves nothing about any of them. Run it locally, on a machine that has
+all three.
 
 Its own module rather than more of `tests/test_task_lease.py`: nothing here is about the task plane,
 and that file names one worktree by absolute path, which is why its checks skip in every *other*
-worktree. This one resolves grid-src from its own location (`tests/grid_src_repo.py`), the same way
-`tests/test_starter_engine_lockstep.py` does.
+worktree. This one resolves both siblings from its own location (`tests/grid_src_repo.py`), the same
+way `tests/test_starter_engine_lockstep.py` does.
 """
 from __future__ import annotations
 
@@ -30,17 +32,20 @@ import ast
 
 import pytest
 
-from tests.grid_src_repo import grid_src_root
+from tests.grid_src_repo import grid_apis_root, grid_src_root
 
-# This repository's side of the pin.
+# The literal, as ADR 0039 D-a fixes it.
 #
-# ⚠️ **A literal in the test, and deliberately so for now — this repository has no `os-community`
-# constant to read.** `cli/remote_grid.cmd_remote_ls` prints whatever `network_type` the control
-# plane hands it, so nothing here compares the string to anything; ADR 0039's own Consequences list
-# the copies as grid-apis, grid-src `network_runtime` and grid-src `grid_auth`, with no half in this
-# repo. That makes this an ADR-to-grid-src pin rather than a two-repo one, which is weaker than the
-# sibling starter-engine suite (that one reads `api_catalog.WHITELISTS`, a real authority).
-# **When the `os=` / `os_served` slice gives this repo a constant of its own, re-point this at it.**
+# ⚠️ **A literal in the test, and this repository still holds no `os-community` constant of its own
+# — deliberately.** `cli/remote_grid.cmd_remote_ls` prints whatever `network_type` the control plane
+# hands it, and the `os=` slice gave this repo an OS *token* vocabulary
+# (`shared/system/os_grid.OS_TOKENS` — `macos`/`windows`/`linux`) which is a **different value**:
+# that one names a machine, this one names a grid type. Do not "finally" re-point this constant at
+# `os_grid`; they would then agree by accident and this pin would be checking nothing.
+#
+# What HAS changed is that the pin now has two independent authorities on the other side rather than
+# one — grid-src and grid-apis — so a rename on either is caught by the other's copy, not merely by
+# a string written here.
 OS_COMMUNITY = "os-community"
 
 # The name both grid-src modules give their copy, and a literal that predates this slice — the
@@ -50,28 +55,37 @@ _CONSTANT = "NETWORK_TYPE_OS_COMMUNITY"
 _CONTROL_CONSTANT = "NETWORK_TYPE_PRIVATE_DOMAIN"
 _CONTROL_VALUE = "private-domain"
 
-_SKIP = "grid-src worktree is not beside this one; the lockstep cannot be checked here"
+_SKIP = "the {repo} worktree is not beside this one; the lockstep cannot be checked here"
 
 
-def _module(relative_path):
-    """Parse one grid-src module, or skip. Never returns something plausible on a miss.
+def _parse(root, repo, relative_path):
+    """Parse one module of a sibling repository, or skip. Never plausible-looking on a miss.
 
-    ⚠️ **Only "no grid-src at all" skips. A missing named module RAISES.** By the time this runs,
-    `grid_src_root()` has already proved `grid_cli/private_server/` exists under that root, so a
-    module absent from it has been renamed or moved — which is drift, exactly what this suite is
-    for, and reporting it as "the repository is not beside this one" would turn five of the six
-    assertions off with a message blaming the wrong thing. `_collection` and `_open_network_types`
-    raise for the same class of change one level down; this is the same rule at file granularity.
+    ⚠️ **Only "no such repository at all" skips. A missing named module RAISES.** By the time this
+    runs the resolver has already proved a marker directory exists under that root, so a module
+    absent from it has been renamed or moved — which is drift, exactly what this suite is for, and
+    reporting it as "the repository is not beside this one" would turn the assertions off with a
+    message blaming the wrong thing. `_collection` and `_open_network_types` raise for the same class
+    of change one level down; this is the same rule at file granularity.
     """
-    root = grid_src_root()
     if root is None:
-        pytest.skip(_SKIP)
+        pytest.skip(_SKIP.format(repo=repo))
     source = root / relative_path
     if not source.exists():
         raise AssertionError(
-            f"grid-src is at {root} but has no {relative_path} — the module was renamed or moved, "
+            f"{repo} is at {root} but has no {relative_path} — the module was renamed or moved, "
             f"so teach this check where it went rather than letting it skip")
     return ast.parse(source.read_text())
+
+
+def _module(relative_path):
+    """Parse one grid-src module."""
+    return _parse(grid_src_root(), "grid-src", relative_path)
+
+
+def _apis_module(relative_path):
+    """Parse one grid-apis module — the control plane, the literal's third copy."""
+    return _parse(grid_apis_root(), "grid-apis", relative_path)
 
 
 def _targets(node):
@@ -241,3 +255,45 @@ def test_the_master_admits_an_os_grid_with_no_allowlist_snapshot_entry():
         f"grid-src's _requires_allowlist does not admit {OS_COMMUNITY} without an allowlist entry, "
         f"so every member of every OS grid is refused at the master with no row anyone can add "
         f"(ADR 0039 D-a, D-e)")
+
+
+# --- the control plane's copy, the third one ------------------------------------------------------
+# grid-apis is the CLIENT for this literal, not the server, and that is what makes its rollout order
+# the reverse of the web-tool routes': `managed_networks.build_create_argv` shells out
+# `grid network create … --network-type os-community` and that binary is grid-src. So a mismatch here
+# is not a 404 to be degraded around — it is a failed create and a grid stuck at `pending`.
+
+_APIS_STORE = "grid_networks/store.py"
+
+
+def test_the_control_plane_spells_the_type_the_way_grid_src_does():
+    """A rename on one side alone is silent in the OTHER direction too.
+
+    grid-apis renamed and grid-src not: the create argv carries a literal grid-src's argparse has
+    never heard of, so the auto-provision exits 2 and the grid never comes up. grid-src renamed and
+    grid-apis not: every create succeeds and the master then refuses every member, because
+    `_requires_allowlist` no longer recognises what the token says.
+    """
+    constants = _string_constants(_apis_module(_APIS_STORE))
+    assert constants.get(_CONTROL_CONSTANT) == _CONTROL_VALUE, (
+        f"positive control: this check can no longer read even {_CONTROL_CONSTANT} out of "
+        f"grid-apis' {_APIS_STORE}, so its answer about {_CONSTANT} means nothing — fix the harness")
+    assert constants.get(_CONSTANT) == OS_COMMUNITY, (
+        f"grid-apis' {_APIS_STORE} spells the OS grid type {constants.get(_CONSTANT)!r}; grid-src and "
+        f"this repository say {OS_COMMUNITY!r} (ADR 0039 D-a) — edit EVERY side")
+
+
+def test_the_control_plane_admits_the_type_as_a_valid_one():
+    """Missing from `VALID_NETWORK_TYPES`, `normalize_network_type` RAISES rather than refuses.
+
+    Every gate, serializer and predicate in that store runs the value through it, so the type would
+    not merely be rejected — the grid would be unreadable, and each read would surface as a 500
+    rather than as anything naming the type.
+    """
+    members = _collection(_apis_module(_APIS_STORE), "VALID_NETWORK_TYPES", _APIS_STORE)
+    assert _CONTROL_VALUE in members, (
+        f"positive control: {_CONTROL_VALUE} is missing from grid-apis' VALID_NETWORK_TYPES too, so "
+        f"this check is reading the wrong thing — fix the harness before believing its verdict")
+    assert OS_COMMUNITY in members, (
+        f"{OS_COMMUNITY} is missing from grid-apis' VALID_NETWORK_TYPES, so `normalize_network_type` "
+        f"raises on every OS grid row the store reads")

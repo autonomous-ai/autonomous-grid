@@ -11657,6 +11657,60 @@ def test_control_plane_fetch_tokens_defaults_missing_networks_to_empty(monkeypat
     assert control_plane.fetch_tokens("sess", "dev-1") == []
 
 
+# --- the OS token on the token fetch (ADR 0039 D-b, D-c, D-e) --------------------------------------
+# `os=` is the ONLY channel a machine has to say what it runs: the device-login start and poll calls
+# carry nothing about the machine, and the browser that approves a sign-in may be a different device
+# entirely. Asserted AT THE WIRE rather than on `os_grid.os_token`'s internals — what matters is what a
+# machine of a given system ends up sending, and the parameter is what the control plane gates on.
+
+
+def _fetch_tokens_query(monkeypatch, system):
+    """The query string `fetch_tokens` builds on a machine whose ``platform.system()`` is ``system``."""
+    import platform
+
+    from remote import control_plane
+
+    monkeypatch.setattr(platform, "system", lambda: system)
+    seen = {}
+
+    def handler(request):
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"networks": []})
+
+    _mock_control_plane(monkeypatch, handler)
+    assert control_plane.fetch_tokens("sess-tok", "dev-1") == []
+    return seen["params"]
+
+
+@pytest.mark.parametrize(
+    "system,expected",
+    [("Darwin", "macos"), ("Linux", "linux"), ("Windows", "windows")])
+def test_fetch_tokens_sends_the_os_token_of_the_machine_it_runs_on(
+    monkeypatch, tmp_path, system, expected
+):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(monkeypatch, system)
+    assert params["os"] == expected
+    assert params["device_id"] == "dev-1"  # the OS rides ALONGSIDE the device id, never instead of it
+
+
+@pytest.mark.parametrize("system", ["FreeBSD", "Java", ""])
+def test_fetch_tokens_sends_no_os_parameter_when_the_system_resolves_to_nothing(
+    monkeypatch, tmp_path, system
+):
+    """ADR 0039 D-c: anything outside the closed set resolves to NOTHING, and the call still works.
+
+    Absent, never an empty string or a placeholder: the control plane's gate is an equality test
+    against a grid's own token, and `os=` sent empty would be one more value that has to be
+    recognised as "no claim" at the far end. The request itself must not fail — a machine with no OS
+    grid still has every other grid it belongs to.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(monkeypatch, system)
+    assert "os" not in params
+    assert params["device_id"] == "dev-1"
+
+
 def test_control_plane_raises_on_error_status(monkeypatch, tmp_path):
     from remote import control_plane
 
@@ -20769,6 +20823,28 @@ def test_remote_ls_json_emits_grid_and_type(monkeypatch, tmp_path, capsys):
     assert cli.main(["ls", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == [
         {"grid": "team", "type": "permissioned-public", "id": "n1"}]
+
+
+def test_remote_ls_prints_an_os_grid_like_any_other_type(monkeypatch, tmp_path, capsys):
+    """An OS grid is a row like any other, and its type is printed VERBATIM (ADR 0039 Consequences).
+
+    `grid ls` reads the locally-stored list `GET /tokens` filled, and this repository holds no
+    `os-community` constant to compare against — the type is whatever the control plane said. So the
+    thing worth pinning is that a type this CLI has never heard of still renders in full: a renderer
+    that mapped known types to labels would print a blank column for the one grid most users will
+    never have created, and `grid ls` is the ONLY surface an OS grid has (ADR 0039 D-e — a browser
+    session has no machine to report, so `/me` and the app show nothing).
+    """
+    _seed_remote(monkeypatch, tmp_path, networks=[
+        {"network_id": "n1", "name": "team", "network_type": "permissioned-public"},
+        {"network_id": "n2", "name": "macOS", "network_type": "os-community"}])
+    assert cli.main(["ls"]) == 0
+    out = capsys.readouterr().out
+    assert "macOS" in out and "os-community" in out
+    assert "team" in out and "permissioned-public" in out  # the ordinary row is untouched
+    assert cli.main(["ls", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)[1] == {
+        "grid": "macOS", "type": "os-community", "id": "n2"}
 
 
 def test_remote_list_alias_lists_like_ls(monkeypatch, tmp_path, capsys):

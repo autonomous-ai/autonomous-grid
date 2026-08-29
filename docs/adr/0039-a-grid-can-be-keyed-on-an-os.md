@@ -78,10 +78,18 @@ symptom is a person's grid changing every time they use their other machine.
 
 Two consequences are deliberate, not oversights:
 
-- **The roster is empty by construction.** No member holds an allowlist row and none can be
-  synthesized, so `list_grid_members` reports nobody. On a grid of strangers that is correct — it must
-  not publish ten thousand people's email addresses. (Note that `handler._require_managed_member`
-  otherwise lets *any* active member read the roster and invite.)
+- **The roster carries nobody the OS gate admitted.** No member admitted by the OS gate holds an
+  allowlist row and none can be synthesized, so none of them appears in `list_grid_members`. On a grid
+  of strangers that is what matters — it must not publish ten thousand people's email addresses.
+  (Note that `handler._require_managed_member` otherwise lets *any* active member read the roster and
+  invite.)
+
+  ⚠️ **Not literally "reports nobody", and the earlier wording here said so.** The grid's own
+  **owner** — the platform account that created it — holds an ordinary allowlist row like any other
+  grid's owner, and the roster returns it: `test_the_roster_of_an_os_grid_reports_nobody_and_that_is
+  _deliberate` asserts `== ["platform@autonomous.ai"]`, one row, not zero. The claim worth making is
+  the one the test actually proves, and it is the load-bearing one; "empty" was a shorter sentence
+  that would eventually be read as an invariant and relied on. Corrected 2026-08-28 after review.
 - **The grid exists only in the CLI.** `grid ls` reads the locally-stored list that `GET /tokens`
   filled (`cli/remote_grid.cmd_remote_ls`, `remote/control_plane.fetch_tokens`); a browser session has
   no CLI OS to report, so `/me` and `/networks` show nothing. The app is out of scope for this feature
@@ -89,6 +97,41 @@ Two consequences are deliberate, not oversights:
 
 The membership fact is therefore about a **session on a machine**, not about a person: *you are a
 macOS user for as long as the machine you are typing on is a macOS machine.*
+
+⚠️ **A third consequence, found while building issue 02 and NOT yet decided: the refresh-credential
+path carries no OS claim, so it cannot renew an OS grid's token.** `POST /v1/grid/tokens/{id}` with a
+`refresh_token` re-resolves the caller through `store.member_for_access`, and on this type that call
+has nothing to match on — so it answers 403 *"Member is not active"*. `GET /tokens` still issues a
+bundle whose `refresh_token` is therefore inert on this one type.
+
+It bites where the CLI refreshes by itself rather than by a person's command: `remote/serve.py`'s
+serve loop and `cli/grid_credential.py` both exchange the refresh credential on a 401, and a 401 is
+what every `network_epoch` bump produces. The access token's own TTL is a year, so this is not a
+routine expiry — it is what happens the first time an OS grid's epoch moves under a machine that is
+serving on it. The recovery exists and is a person's command (`grid sync` re-fetches with `os=`).
+
+⚠️ **This paragraph originally ended "which is why this is a gap rather than a break". That was
+wrong, and the correction matters more than the original claim.** The refusal is **not read-only**:
+`handler.refresh_token` calls `store.rotate_refresh_credential(...)` — which commits an `UPDATE`
+replacing `refresh_token_hash` — *before* it consults `member_for_access`. On this type that check
+is guaranteed to fail, so the credential is rotated away, the replacement is generated, and the 403
+discards it. The CLI persists nothing on a failed refresh, so the machine is left holding a token
+the server no longer knows: every later attempt answers `401 "Invalid or expired refresh
+credential"`, not this 403, and **shipping the `os=`-on-refresh fix does not heal a machine it has
+already happened to** — only a person re-running `grid login`/`grid sync` does. "The recovery
+exists" was reasoning about a refusal that does not consume what it refuses; this one does.
+
+That makes the ordering a defect in its own right, independent of the wire shape chosen below: a
+refusal on this route must not spend the credential it is refusing, on **any** network type. This
+type merely reaches the path every single time, which is why it surfaced here.
+`.scratch/os-grid-type/issues/10-an-os-grids-credential-can-be-renewed.md` carries both halves.
+
+Deciding it means choosing between two shapes, and the choice belongs with whoever owns the serving
+slice: carry `os` on the refresh request too (the request stays the whole membership fact, at the
+cost of a second wire value in a second place), or let a refusal on this type mean *re-sync* to the
+CLI rather than *end of run*. What must NOT happen is the third option — persisting the OS the bundle
+was minted with — which is exactly the stored-`grid_users.os` shape rejected above, arriving through
+a side door.
 
 ## D-f — `name` is the label, `access_os` is the gate, the unique index is on `access_os`
 
@@ -124,9 +167,43 @@ condition has to be re-derived rather than copied.
 
 ## D-i — The task plane is refused at the door on this type
 
-Project creation and task creation are refused on an `os-community` grid. Because the type is new
-there is no existing project anywhere on it, so refusing the entry points refuses the whole plane
-without a gate on each of the thirty-odd modules that make it up.
+**Project creation** is refused on an `os-community` grid, and that single refusal is the whole
+plane's gate. A project is never minted as a side effect — `projects.ensure_project` is the only
+thing on the relay that writes a `ProjectRow` and `POST /relay/v1/projects` is its only caller (a
+projectless task create is *refused*, not helped, since ADR 0033 D-a). So with creation refused no
+project can ever exist on such a grid, and every task create, turn create, commit, read and stream
+downstream is addressing a project that is not there and answers exactly what it already answers for
+one — no gate on each of the thirty-odd modules that make the plane up, and no hand-maintained table
+of which routes need one.
+
+⚠️ **This paragraph previously read "Project creation and task creation are refused", which was
+wrong in a way worth recording: it describes the OUTCOME (the task plane is unusable) as though it
+were the MECHANISM (two gates).** Issue 05's acceptance criterion 3 requires a task create on such a
+grid to answer the ordinary project-not-found 404 — asserted, so that the "nothing downstream needs
+a gate" claim is checked rather than assumed — and a second refusal on `POST /tasks` would both
+contradict that and start the per-route list this decision exists to avoid. The reasoning sentence
+that follows the claim always argued for one gate; only the claim sentence was loose. Amended
+2026-08-28 when issue 05 was built, after the conflict was flagged rather than silently reconciled.
+
+⚠️ **The premise "because the type is new there is no existing project anywhere on it" is not
+strictly true, and the residue is known.** A grid *re-typed* onto `os-community` returns after the
+restart carrying whatever projects it already had — grid-apis refuses that re-type in both
+directions (issue 02), but grid-src's own `VALID_NETWORK_TYPE_INPUTS` still admits it, so a
+self-hosted operator can reach the state. What survives is: no NEW project can be created (403), a
+stranger gets the project-shaped 404 because `grid_access_enabled()` is False on this type and
+nothing is grid-visible, and only a pre-existing project still serves the members whose rows already
+exist.
+
+⚠️ **Those rows are NOT "access the owner granted by hand", and an earlier draft of this paragraph
+said they were.** On the likeliest source grid — a `private-domain` one, where `grid_access_enabled()`
+is True — a membership row is **self-minted on read**: `project_access` admits any authenticated
+caller to a grid-visible project (`:295`) and then writes the `ProjectMemberRow` (`:401`). So the
+surviving cohort is *everyone who ever opened a grid-visible project on that grid*, including the
+invited outsiders D-k admits, who are on other email domains entirely. That is a materially larger
+and less deliberate set than "the people the owner admitted", and it is the reason issue 09 is worth
+doing rather than filing as a curiosity. Corrected 2026-08-28 after review. Pinned by
+`TestTheOnePlaceTheSingleGateDoesNotReach` rather than left to be rediscovered. Closing it is a
+separate slice — see `.scratch/os-grid-type/issues/09-the-grid-src-re-type-door-onto-an-os-grid.md`.
 
 grid-src's `task_domains` — the mechanism built to stop a provider receiving a checkout of somebody
 else's repository — is an **email-domain allowlist**, and its own docstring explains why it cannot serve here:

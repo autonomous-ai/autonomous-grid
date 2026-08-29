@@ -31,7 +31,13 @@ class HostInfo:
 def platform_kind() -> str:
     """Coarse OS/arch class advertised in the heartbeat so the grid knows what a node runs:
     ``linux`` · ``macos-arm64`` (Apple Silicon) · ``macos-x86_64`` (Intel Mac) · ``windows`` · ``other``.
-    Same classification drives the VRAM path in ``gpu.load_snapshot`` (Apple Silicon vs Intel Mac)."""
+    Same classification drives the VRAM path in ``gpu.load_snapshot`` (Apple Silicon vs Intel Mac).
+
+    ⚠️ **Not the OS-grid vocabulary — see `shared.system.os_grid.os_token`.** This answers *"which
+    binaries run here"*, a compute question, and splits macOS by CPU generation; the OS token answers
+    *"which community does this machine belong to"*. Two questions, two vocabularies, deliberately
+    kept apart (ADR 0039 D-c) even where today's values overlap — folding them together would put
+    Apple Silicon and Intel Mac users in two different grids."""
     system = platform.system()
     if system == "Linux":
         return "linux"
