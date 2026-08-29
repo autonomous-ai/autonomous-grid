@@ -54,6 +54,7 @@ _STARTUP_ESTIMATE_TTL_SECONDS = 30 * 24 * 60 * 60
 _MAX_JOINT_PORTFOLIO_CANDIDATES = 4
 _MAX_JOINT_PORTFOLIO_EVALUATIONS = 64
 _MAX_JOINT_EXPLORATION_MODELS = 1
+_MAX_JOINT_PREEMPTION_MODELS = 1
 
 
 class AllocatorController:
@@ -897,7 +898,7 @@ class AllocatorController:
                 profiles,
                 now=timestamp,
             )
-            forecasts, portfolio_selection = self._forecast_bundle(
+            forecasts, portfolio_selection, selection_hints = self._forecast_bundle(
                 timestamp,
                 placement_hints=placement_hints,
                 nodes=node_list,
@@ -910,7 +911,7 @@ class AllocatorController:
                 portfolio_projections = self.intelligence.projections(
                     profiles,
                     now=timestamp,
-                    placement_hints=placement_hints,
+                    placement_hints=selection_hints,
                     chosen_models=portfolio_selection,
                 )
                 model_workload_outcomes = self.intelligence.outcomes
@@ -984,10 +985,11 @@ class AllocatorController:
                     "max_candidates_per_workload": _MAX_JOINT_PORTFOLIO_CANDIDATES,
                     "max_evaluations": _MAX_JOINT_PORTFOLIO_EVALUATIONS,
                     "max_exploration_models": _MAX_JOINT_EXPLORATION_MODELS,
+                    "max_preemption_models": _MAX_JOINT_PREEMPTION_MODELS,
                 },
                 "portfolio_placement_hints": [
-                    placement_hints[model_id]
-                    for model_id in sorted(placement_hints)
+                    selection_hints[model_id]
+                    for model_id in sorted(selection_hints)
                     if self._profiles[model_id].workload_scores
                 ],
                 "model_workload_outcomes": [
@@ -1060,7 +1062,7 @@ class AllocatorController:
         placement_hints: Mapping[str, Mapping[str, Any]] | None = None,
         nodes: Iterable[NodeSnapshot] = (),
     ) -> tuple[DemandForecast, ...]:
-        forecasts, _ = self._forecast_bundle(
+        forecasts, _, _ = self._forecast_bundle(
             now,
             placement_hints=placement_hints,
             nodes=nodes,
@@ -1073,7 +1075,11 @@ class AllocatorController:
         *,
         placement_hints: Mapping[str, Mapping[str, Any]] | None = None,
         nodes: Iterable[NodeSnapshot] = (),
-    ) -> tuple[tuple[DemandForecast, ...], dict[str, str] | None]:
+    ) -> tuple[
+        tuple[DemandForecast, ...],
+        dict[str, str] | None,
+        dict[str, dict[str, Any]],
+    ]:
         active_models = tuple(
             model_id for model_id in self._profiles if model_id not in self._retiring
         )
@@ -1085,22 +1091,29 @@ class AllocatorController:
             # bounded telemetry under its own mutex, then release it before any optimization so
             # inference finalizers can keep recording demand while the controller holds `_lock`.
             intelligence = WorkloadIntelligence.from_dict(self.intelligence.to_dict())
+        selection_hints = _portfolio_selection_hints(
+            profiles,
+            direct,
+            intelligence,
+            placement_hints,
+            now=now,
+        )
         selection = self._joint_portfolio_selection(
             profiles,
             direct,
             node_list,
             now=now,
-            placement_hints=placement_hints,
+            placement_hints=selection_hints,
             intelligence=intelligence,
         )
         forecasts = intelligence.portfolio_forecasts(
             profiles,
             direct,
             now=now,
-            placement_hints=placement_hints,
+            placement_hints=selection_hints,
             chosen_models=selection,
         )
-        return forecasts, selection
+        return forecasts, selection, selection_hints
 
     def _joint_portfolio_selection(
         self,
@@ -1216,6 +1229,24 @@ class AllocatorController:
                 result = (float("-inf"),)
                 evaluation_cache[key] = result
                 return result
+            preemption_only_models = {
+                model_id
+                for workload, model_id in candidate_selection.items()
+                if (
+                    candidate_by_workload[workload][model_id]
+                    .get("placement", {})
+                    .get("feasible_after_preemption")
+                    is True
+                    and candidate_by_workload[workload][model_id]
+                    .get("placement", {})
+                    .get("feasible_now")
+                    is not True
+                )
+            }
+            if len(preemption_only_models) > _MAX_JOINT_PREEMPTION_MODELS:
+                result = (float("-inf"),)
+                evaluation_cache[key] = result
+                return result
             forecasts = intelligence.portfolio_forecasts(
                 profiles,
                 direct,
@@ -1227,6 +1258,21 @@ class AllocatorController:
             placed: dict[str, int] = {}
             for assignment in plan.assignments:
                 placed[assignment.model_id] = placed.get(assignment.model_id, 0) + 1
+            authorized_preemption_models = {
+                item.for_model_id for item in plan.preemptions if item.for_model_id
+            }
+            # A placement hint proves only that some structurally safe transition exists. The
+            # evaluated full-fleet plan is authoritative about whether that transition remains
+            # safe alongside every other selected workload. Never credit a preemption-only model
+            # unless this exact plan places it or explicitly stages a victim for it.
+            if any(
+                placed.get(model_id, 0) == 0
+                and model_id not in authorized_preemption_models
+                for model_id in preemption_only_models
+            ):
+                result = (float("-inf"),)
+                evaluation_cache[key] = result
+                return result
             baseline_coverage = sum(
                 min(placed.get(model_id, 0), target)
                 * (1.0 + profile_by_id[model_id].priority)
@@ -2323,6 +2369,82 @@ def _failure_backoff_seconds(policy: ReconcilePolicy, failures: int) -> float:
     if not math.isfinite(delay):
         return policy.failure_backoff_max_seconds
     return min(policy.failure_backoff_max_seconds, delay)
+
+
+def _portfolio_selection_hints(
+    profiles: Iterable[ModelProfile],
+    direct: Iterable[DemandForecast],
+    intelligence: WorkloadIntelligence,
+    placement_hints: Mapping[str, Mapping[str, Any]] | None,
+    *,
+    now: float,
+) -> dict[str, dict[str, Any]]:
+    """Fence speculative replacement against demand visible in the same snapshot.
+
+    Fleet feasibility is occupancy-aware but intentionally demand-agnostic. Before portfolio
+    selection treats a safe-preemption path as selectable, protect every required baseline and every
+    victim that can serve an active workload or has direct model demand. The final planner remains
+    authoritative and can reject a path when full-fleet interactions reveal another conflict.
+    """
+
+    profile_list = tuple(profiles)
+    if placement_hints is None:
+        return {
+            profile.model_id: {
+                "model_id": profile.model_id,
+                "feasible": True,
+                "feasible_now": True,
+                "feasible_after_preemption": False,
+                "portfolio_preemption_safe": False,
+                "portfolio_preemption_blockers": [],
+                "reason": "placement hints unavailable",
+            }
+            for profile in profile_list
+        }
+    active_workloads = {
+        str(row.get("workload") or "")
+        for row in intelligence.projections(profile_list, now=now)
+        if int(row.get("samples") or 0) >= intelligence.portfolio_min_samples
+        and float(row.get("requests_per_minute") or 0.0) > 0
+    }
+    protected_models = {
+        profile.model_id
+        for profile in profile_list
+        if profile.min_replicas > 0
+        or profile.pinned_nodes
+        or any(profile.workload_score(workload) > 0 for workload in active_workloads)
+    }
+    for forecast in direct:
+        observed_rate = forecast.observed_requests_per_minute
+        if not observed_rate and not forecast.correlation_sources:
+            observed_rate = forecast.requests_per_minute
+        if (
+            observed_rate > 0
+            or forecast.queue_depth > 0
+            or forecast.p95_latency_ms > 0
+            or forecast.error_rate > 0
+            or (forecast.offered_concurrency > 0 and not forecast.correlation_sources)
+        ):
+            protected_models.add(forecast.model_id)
+
+    guarded: dict[str, dict[str, Any]] = {}
+    for profile in profile_list:
+        hint = dict(placement_hints.get(profile.model_id) or {})
+        victims = {str(item) for item in hint.get("preemption_victims") or ()}
+        blockers = sorted(victims.intersection(protected_models))
+        preemption_safe = bool(
+            hint.get("feasible_after_preemption") is True and not blockers
+        )
+        hint["portfolio_preemption_safe"] = preemption_safe
+        hint["portfolio_preemption_blockers"] = blockers
+        if hint.get("feasible_after_preemption") is True and blockers:
+            hint["reason"] = (
+                str(hint.get("reason") or "planner-authorized preemption path")
+                + "; protected by current workload demand: "
+                + ", ".join(blockers)
+            )
+        guarded[profile.model_id] = hint
+    return guarded
 
 
 def _portfolio_admissions(

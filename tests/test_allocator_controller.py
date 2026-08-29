@@ -605,6 +605,171 @@ def test_portfolio_admission_reports_safe_residency_transition_blocker():
     assert "relocation/preemption" in admission["reason"]
 
 
+def test_new_workload_can_replace_a_stale_speculative_residency():
+    controller = AllocatorController(
+        planner_policy=PlannerPolicy(memory_headroom_fraction=0)
+    )
+    controller.put_profile(
+        ModelProfile(
+            "stale-specialist",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=0,
+            workload_scores=(("research", 1.0),),
+        )
+    )
+    controller.put_profile(
+        ModelProfile(
+            "new-specialist",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("coding", 1.0),),
+        )
+    )
+    for timestamp in (98, 99, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("chat/completions", "auto", "coding"),
+            service_seconds=10,
+            timestamp=timestamp,
+        )
+    saturated = NodeSnapshot(
+        "one-slot",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        max_models=1,
+        residencies=(
+            ModelResidency(
+                "stale-specialist",
+                8_000,
+                ResidencyState.READY,
+                loaded_at=1,
+                last_used_at=1,
+                managed=True,
+            ),
+        ),
+        last_heartbeat=100,
+    )
+
+    result = controller.tick((saturated,), now=100)
+    status = controller.status((saturated,), now=100)
+
+    assert {
+        row["workload"]: row["chosen_model"]
+        for row in status["portfolio_projections"]
+    } == {"coding": "new-specialist"}
+    assert controller.last_plan is not None
+    assert {
+        (item.node_id, item.model_id, item.for_model_id)
+        for item in controller.last_plan.preemptions
+    } == {("one-slot", "stale-specialist", "new-specialist")}
+    assert any(
+        action.kind == ActionKind.DRAIN
+        and action.model_id == "stale-specialist"
+        for action in result.actions
+    )
+    admission = status["portfolio_admissions"][0]
+    assert admission["state"] == "blocked-by-residency"
+    assert admission["model_id"] == "new-specialist"
+    assert admission["blocking_models"] == ["stale-specialist"]
+
+    freed = replace(saturated, residencies=(), last_heartbeat=101)
+    load_result = controller.tick((freed,), now=101)
+    assert controller.last_plan is not None
+    assert controller.last_plan.nodes_for("new-specialist") == ("one-slot",)
+    assert any(
+        action.kind == ActionKind.LOAD and action.model_id == "new-specialist"
+        for action in load_result.actions
+    )
+
+    ready_node = replace(
+        freed,
+        residencies=(
+            ModelResidency(
+                "new-specialist",
+                8_000,
+                ResidencyState.READY,
+                loaded_at=101,
+                last_used_at=101,
+                managed=True,
+            ),
+        ),
+        last_heartbeat=102,
+    )
+    controller.tick((ready_node,), now=102)
+    ready_admission = controller.status((ready_node,), now=102)[
+        "portfolio_admissions"
+    ][0]
+    assert ready_admission["state"] == "ready"
+    assert ready_admission["model_id"] == "new-specialist"
+
+
+def test_late_binding_does_not_replace_a_model_for_an_active_workload():
+    controller = AllocatorController(
+        planner_policy=PlannerPolicy(memory_headroom_fraction=0)
+    )
+    for model_id, score in (("incumbent", 0.8), ("challenger", 1.0)):
+        controller.put_profile(
+            ModelProfile(
+                model_id,
+                8_000,
+                runtimes=("llama.cpp",),
+                backends=("metal",),
+                min_replicas=0,
+                max_replicas=1,
+                min_residency_seconds=0,
+                workload_scores=(("coding", score),),
+            )
+        )
+    for timestamp in (98, 99, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("chat/completions", "auto", "coding"),
+            served_model="incumbent",
+            service_seconds=10,
+            timestamp=timestamp,
+        )
+    saturated = NodeSnapshot(
+        "one-slot",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        max_models=1,
+        residencies=(
+            ModelResidency(
+                "incumbent",
+                8_000,
+                ResidencyState.READY,
+                loaded_at=1,
+                last_used_at=100,
+                managed=True,
+            ),
+        ),
+        last_heartbeat=100,
+    )
+
+    result = controller.tick((saturated,), now=100)
+    status = controller.status((saturated,), now=100)
+    projection = status["portfolio_projections"][0]
+    candidates = {row["model_id"]: row for row in projection["candidates"]}
+
+    assert projection["chosen_model"] == "incumbent"
+    assert candidates["challenger"]["selectable"] is False
+    assert candidates["challenger"]["placement"][
+        "portfolio_preemption_blockers"
+    ] == ["incumbent"]
+    assert controller.last_plan is not None
+    assert controller.last_plan.preemptions == ()
+    assert not any(action.kind == ActionKind.DRAIN for action in result.actions)
+
+
 def test_portfolio_admission_reports_ready_but_undersupplied_capacity():
     controller = AllocatorController()
     controller.put_profile(
@@ -817,7 +982,7 @@ def test_joint_portfolio_search_has_a_hard_planner_evaluation_bound(monkeypatch)
 
     monkeypatch.setattr(controller.planner, "plan", counted_plan)
 
-    _, selection = controller._forecast_bundle(
+    _, selection, _ = controller._forecast_bundle(
         100,
         placement_hints=hints,
         nodes=machines,

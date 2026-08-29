@@ -835,7 +835,16 @@ def _placement_feasible(
     if placement_hints is None:
         return True
     hint = placement_hints.get(model_id)
-    return bool(hint and hint.get("feasible") is True)
+    return bool(
+        hint
+        and (
+            hint.get("feasible") is True
+            or (
+                hint.get("feasible_after_preemption") is True
+                and hint.get("portfolio_preemption_safe") is True
+            )
+        )
+    )
 
 
 def _placement_transition_penalty(hint: Mapping[str, Any]) -> float:

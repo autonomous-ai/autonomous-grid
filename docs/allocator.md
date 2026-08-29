@@ -81,8 +81,13 @@ planner-authorized preemption path, eligible-node count, best host, startup esti
 transition penalty, and rejection reason. A candidate with an avoidable cold start must show a
 meaningful score improvement over a resident peer; after a justified switch the penalty reverses,
 providing state-dependent hysteresis without a stale controller-side lease. Portfolio canaries may
-use only current headroom; direct observed demand can use a planner-authorized safe relocation or
-preemption path after the planner proves victim priority, ownership, pins, active work, and capacity.
+use current headroom or request a planner-authorized replacement of stale speculative capacity.
+They cannot evict directly observed service or another speculative model's only active canary;
+configured/pinned baselines are likewise never relocation victims for speculative demand. Direct
+observed demand has broader relocation and preemption authority. Every path still requires
+the planner to prove victim priority, ownership, pins, active work, minimum residency, and capacity,
+and the reconciler drains before unloading. This bounded late binding lets a newly active workload
+replace an idle specialist instead of remaining permanently invisible behind a full model slot.
 
 When two or more workload classes are active, Grid no longer picks each model independently. It
 starts from the evidence-backed choices and runs a deterministic bounded coordinate search over
@@ -99,7 +104,11 @@ Each bounded workload set reserves representation for its exploitation leader an
 cross-workload candidate; a fifth-ranked generalist can therefore remain discoverable when four
 narrow specialists would make every independently preferred portfolio infeasible.
 Only one distinct model may differ from the exploitation-only portfolio because of uncertainty at a
-time; this is an explicit fleet exploration budget, not one canary allowance per workload. Status
+time; this is an explicit fleet exploration budget, not one canary allowance per workload. A joint
+portfolio may likewise introduce at most one preemption-only model per control tick, and receives no
+coverage credit for it unless the evaluated full-fleet plan either places it or explicitly stages
+its safe victim transition. This prevents individually plausible swaps from becoming an impossible
+set of simultaneous promises on a saturated fleet. Status
 shows the joint mapping, selected model set, and the model currently consuming that exploration
 slot. It also reports one admission row per active unbound workload using the authoritative plan
 and observed node state: `ready`, `starting`, `planned`, `undersupplied`, `capacity-contended`,

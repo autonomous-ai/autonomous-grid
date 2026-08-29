@@ -456,6 +456,7 @@ def test_uncertain_preemption_only_candidate_pays_more_than_exploration_bonus():
             "feasible": False,
             "feasible_now": False,
             "feasible_after_preemption": True,
+            "portfolio_preemption_safe": True,
         },
     }
 
@@ -466,6 +467,21 @@ def test_uncertain_preemption_only_candidate_pays_more_than_exploration_bonus():
         preempting, "coding", hints, now=100
     )
     assert feasible_score > preempting_score
+    intelligence.observe(
+        RequestFeatures("chat/completions", "auto", "coding"),
+        portfolio_unbound=True,
+        timestamp=100,
+    )
+    projection = intelligence.projections(
+        (feasible, preempting),
+        now=100,
+        placement_hints=hints,
+    )[0]
+    candidates = {
+        row["model_id"]: row for row in projection["candidates"]
+    }
+    assert candidates["z-preempting"]["selectable"] is True
+    assert projection["chosen_model"] == "a-feasible"
 
 
 def test_portfolio_falls_back_from_preferred_but_infeasible_model():
