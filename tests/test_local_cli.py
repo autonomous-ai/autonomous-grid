@@ -28185,6 +28185,107 @@ def test_task_loop_reports_a_failed_run_without_raising(monkeypatch):
          "result_commit": None, "session_reset_reason": None}]
 
 
+def test_post_spawn_goal_harness_failure_is_left_for_another_machine(monkeypatch, capsys):
+    """A local native-process crash is not allowed to terminally fail a durable Grid Goal."""
+    tasks, state, fake_claim = _task_loop_state([{
+        "task_id": "T1", "project_id": "P1", "member_key": "M1",
+        "conversation_id": "G1", "agent_kind": "codex", "prompt": "continue",
+        "goal": {"objective": "build", "done_when": "tests pass", "model": "grid-model"},
+    }])
+    events = []
+    reports = []
+    attached = []
+    closed = []
+
+    class Publisher:
+        def publish(self, event, **fields):
+            events.append((event, fields))
+            return True
+
+        def close(self):
+            closed.append("publisher")
+
+    class Renewer:
+        lost = False
+        cancelled = False
+
+        def start(self):
+            pass
+
+        def attach(self, proc):
+            attached.append(proc)
+
+        def close(self):
+            closed.append("renewer")
+
+    def run(_job, *_args, on_spawn=None, **_kwargs):
+        on_spawn(SimpleNamespace(pid=1234))
+        return tasks.TaskOutcome(
+            "failed", None, "app-server protocol disconnected", retryable=True)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", run)
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *_args: Publisher())
+    monkeypatch.setattr(tasks, "_lease_renewer", lambda *_args, **_kwargs: Renewer())
+    monkeypatch.setattr(tasks, "_tree_beat", lambda *_args: None)
+    monkeypatch.setattr(tasks, "report_once", lambda *_args, **kwargs: reports.append(kwargs))
+
+    tasks.task_loop(state)
+
+    assert attached and reports == []
+    assert events == [("task.retrying", {"reason": "app-server protocol disconnected"})]
+    assert closed == ["renewer", "publisher"]
+    assert "another provider" in capsys.readouterr().err
+
+
+def test_native_goal_impossible_checkpoint_is_reported_not_retried(monkeypatch):
+    """A harness crash and the native Goal's own terminal verdict are intentionally different."""
+    tasks, state, fake_claim = _task_loop_state([{
+        "task_id": "T1", "project_id": "P1", "member_key": "M1",
+        "conversation_id": "G1", "agent_kind": "codex", "prompt": "continue",
+        "goal": {"objective": "build", "done_when": "tests pass", "model": "grid-model"},
+    }])
+    reports = []
+
+    class Publisher:
+        def publish(self, *_args, **_kwargs):
+            return True
+
+        def close(self):
+            pass
+
+    class Renewer:
+        lost = False
+        cancelled = False
+
+        def start(self):
+            pass
+
+        def attach(self, _proc):
+            pass
+
+        def close(self):
+            pass
+
+    def run(_job, *_args, on_spawn=None, **_kwargs):
+        on_spawn(SimpleNamespace(pid=1234))
+        return tasks.TaskOutcome("completed", "impossible", None, goal_status="failed",
+                                 goal_turns_completed=1, goal_tokens_used=10,
+                                 goal_time_used_seconds=1)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", run)
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *_args: Publisher())
+    monkeypatch.setattr(tasks, "_lease_renewer", lambda *_args, **_kwargs: Renewer())
+    monkeypatch.setattr(tasks, "_tree_beat", lambda *_args: None)
+    monkeypatch.setattr(tasks, "report_once", lambda *_args, **kwargs: reports.append(kwargs))
+
+    tasks.task_loop(state)
+
+    assert len(reports) == 1
+    assert reports[0]["state"] == "completed" and reports[0]["goal_status"] == "failed"
+
+
 def test_task_loop_survives_a_failure_to_report(monkeypatch):
     """Losing the report loses one task's result. It must not lose the loop as well."""
     from remote import relay

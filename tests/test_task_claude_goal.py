@@ -144,6 +144,73 @@ def test_claude_goal_resume_does_not_reset_native_goal(tmp_path, monkeypatch):
     assert outcome.goal_status == "complete"
 
 
+@pytest.mark.parametrize("failure", [
+    pytest.param("timeout", id="timeout"),
+    pytest.param("exit", id="nonzero-exit"),
+    pytest.param("no-checkpoint", id="missing-native-checkpoint"),
+])
+def test_post_spawn_claude_harness_failures_are_retryable(tmp_path, monkeypatch, failure):
+    """These failures describe one native process, not whether the distributed Goal is possible."""
+    import subprocess
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "tasks"))
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "/fake/claude")
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "link_transcript", lambda *_args: tmp_path / "transcript")
+    monkeypatch.setattr(task_agent, "resumable_session", lambda *_args: task_agent.ResumeDecision())
+    monkeypatch.setattr(task_agent, "child_env", lambda **_kwargs: {"PATH": os.environ["PATH"]})
+    monkeypatch.setattr(task_agent, "agent_argv", lambda *_args, **_kwargs: ["/fake/claude"])
+    monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "stop", lambda self: None)
+
+    def run_child(_argv, **_kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(cmd="claude", timeout=1)
+        if failure == "exit":
+            raise tasks._ChildFailed(17, "native process crashed")
+        return 0, ""  # no Goal attachment/evaluator checkpoint
+
+    monkeypatch.setattr(tasks, "_run_child", run_child)
+    outcome = tasks.run_task({
+        "task_id": "turn-1", "conversation_id": "goal-1", "project_id": "project-1",
+        "member_key": "member-1", "agent_kind": "claude", "prompt": "continue",
+        "goal": {"objective": "Build it", "done_when": "tests pass", "model": "grid-model"},
+    }, inference=task_codex.GridInference("https://grid.example/relay/v1", "secret"))
+
+    assert outcome.state == "failed" and outcome.retryable is True
+
+
+def test_native_claude_impossible_verdict_remains_terminal(tmp_path, monkeypatch):
+    """The native Goal's explicit impossible verdict is semantic; another node must not loop it."""
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "tasks"))
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "/fake/claude")
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "link_transcript", lambda *_args: tmp_path / "transcript")
+    monkeypatch.setattr(task_agent, "resumable_session", lambda *_args: task_agent.ResumeDecision())
+    monkeypatch.setattr(task_agent, "child_env", lambda **_kwargs: {"PATH": os.environ["PATH"]})
+    monkeypatch.setattr(task_agent, "agent_argv", lambda *_args, **_kwargs: ["/fake/claude"])
+    monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "stop", lambda self: None)
+
+    def run_child(_argv, **kwargs):
+        translator = kwargs["translator"]
+        translator.feed(json.dumps({
+            "type": "attachment", "attachment": {"type": "goal_status", "met": False,
+                "impossible": True, "reason": "required system does not exist"},
+        }) + "\n")
+        return 0, ""
+
+    monkeypatch.setattr(tasks, "_run_child", run_child)
+    outcome = tasks.run_task({
+        "task_id": "turn-1", "conversation_id": "goal-1", "project_id": "project-1",
+        "member_key": "member-1", "agent_kind": "claude", "prompt": "continue",
+        "goal": {"objective": "Build it", "done_when": "tests pass", "model": "grid-model"},
+    }, inference=task_codex.GridInference("https://grid.example/relay/v1", "secret"))
+
+    assert outcome.state == "completed" and outcome.goal_status == "failed"
+    assert outcome.retryable is False
+
+
 def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(monkeypatch):
     captured = []
 

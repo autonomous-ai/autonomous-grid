@@ -103,6 +103,21 @@ def test_codex_goal_capability_requires_a_measured_native_goal_version(monkeypat
     assert task_codex.resolve_binary() == "/fake/codex"
 
 
+def test_unknown_native_goal_status_is_retryable_protocol_drift():
+    """An upgraded Codex must not turn a status this worker does not know into `failed`.
+
+    That would be a fabricated terminal verdict. Raising lets the provider classify it as a
+    harness failure and hand the durable Goal to another compatible machine within its retry cap.
+    """
+    assert task_codex._public_status("failed") == "failed"
+    try:
+        task_codex._public_status("awaitingHumanReview")
+    except task_codex.CodexGoalError as exc:
+        assert "unsupported native Goal status" in str(exc)
+    else:
+        raise AssertionError("unknown Codex Goal status became a terminal verdict")
+
+
 def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch):
     events = []
     monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)

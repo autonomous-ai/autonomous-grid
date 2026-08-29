@@ -172,6 +172,12 @@ class TaskOutcome:
     goal_turns_completed: int | None = None
     goal_tokens_used: int | None = None
     goal_time_used_seconds: int | None = None
+    #: True only when this outcome describes the local/native harness rather than the Goal's
+    #: verdict. A durable Goal must not become terminal because one machine's Codex app-server or
+    #: Claude process crashed after spawn; the supervisor preserves what it can and lets the lease
+    #: reaper hand the same turn to another capable node. Kept last so every historical positional
+    #: construction of ``TaskOutcome`` retains its meaning.
+    retryable: bool = False
 
 
 def task_timeout() -> float:
@@ -644,8 +650,11 @@ def run_task(job: dict[str, Any],
     # carries it without having to remember — the same property `_failed` gives the scrub.
     reset_reason: str | None = None
 
-    def failed(error: str) -> TaskOutcome:
-        return _failed(translator, error, session_reset_reason=reset_reason)
+    def failed(error: str, *, retryable: bool = False) -> TaskOutcome:
+        return replace(
+            _failed(translator, error, session_reset_reason=reset_reason),
+            retryable=retryable,
+        )
 
     prompt = job.get("prompt")
     if not isinstance(prompt, str):
@@ -833,7 +842,10 @@ def run_task(job: dict[str, Any],
                 goal_time_used_seconds=result.time_used_seconds,
             )
         except (task_codex.CodexGoalError, OSError) as exc:
-            return failed(f"could not run Codex Goal slice: {exc}")
+            # Once the native process exists, an app-server exit, protocol fault or local timeout
+            # is evidence about this attempt/node, not a terminal verdict about a durable Goal.
+            # `_supervise_one_task` knows whether `on_spawn` fired and retries only that case.
+            return failed(f"could not run Codex Goal slice: {exc}", retryable=True)
 
     # AFTER the checkout, for two reasons that both bite: the link's target has to survive
     # `reset --hard`/`clean`, and the transcript this task may resume only exists once the input
@@ -930,18 +942,22 @@ def run_task(job: dict[str, Any],
                                    and not translator.goal_met
                                    and not translator.goal_impossible))
         except subprocess.TimeoutExpired:
-            return failed(f"Claude Goal slice timed out after {timeout:.0f}s")
+            return failed(f"Claude Goal slice timed out after {timeout:.0f}s", retryable=True)
         except _ChildFailed as exc:
-            return failed(f"Claude Goal exited {exc.returncode}: {exc.stderr[-500:].strip()}")
+            return failed(
+                f"Claude Goal exited {exc.returncode}: {exc.stderr[-500:].strip()}",
+                retryable=True,
+            )
         except (Exception, SystemExit) as exc:
-            return failed(f"could not run Claude Goal slice: {exc}")
+            return failed(f"could not run Claude Goal slice: {exc}", retryable=True)
         finally:
             try:
                 proxy.stop()
             except (Exception, SystemExit):
                 pass
         if not translator.goal_evaluated:
-            return failed("Claude Goal exited without a native evaluator checkpoint")
+            return failed(
+                "Claude Goal exited without a native evaluator checkpoint", retryable=True)
 
         def goal_counter(name: str) -> int:
             value = goal.get(name)
@@ -1289,8 +1305,10 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
             run_kwargs["inference"] = task_codex.GridInference(
                 state.signaling_url, state.token())
         outcome = run_task(job, publisher.publish, **run_kwargs)
-        if (isinstance(job.get("goal"), dict) and outcome.state == "failed"
-                and not spawned["yes"]):
+        is_goal = isinstance(job.get("goal"), dict)
+        retry_goal_failure = (is_goal and outcome.state == "failed"
+                              and (not spawned["yes"] or outcome.retryable))
+        if retry_goal_failure and not spawned["yes"]:
             # A native Goal is durable and has a bounded attempt budget. Failure before the child
             # process exists is evidence about THIS NODE (binary vanished after advertisement,
             # local permissions, socket setup), not about the Goal. Report nothing terminal: the
@@ -1301,6 +1319,17 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
             abandoned_because = "'s native Goal harness could not start"
         else:
             outcome, landed = _push_result(job, outcome, spawned["yes"], remote, publisher)
+            if retry_goal_failure and landed:
+                # The process did start, so `_push_result` publishes its worktree and native
+                # history before we relinquish the lease. This is still NOT a terminal report:
+                # the relay's bounded reaper moves the same logical turn to another machine. The
+                # relay-authenticated event makes the reason and the handoff visible in the Goal's
+                # trajectory without trusting the agent to declare its own verdict.
+                reason = task_stream.redact(outcome.error or "native Goal harness failed")[
+                    :_MAX_SESSION_RESET_REASON_CHARS]
+                publisher.publish("task.retrying", reason=reason)
+                landed = False
+                abandoned_because = "'s native Goal harness failed retryably"
     except task_repo.InputFetchError:
         # The input never arrived, so this attempt has produced no evidence about the task at all —
         # not even a failed one. Routed to the same silence a failed push takes: report nothing,

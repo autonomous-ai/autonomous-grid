@@ -735,9 +735,15 @@ def _stop(process: ProcessLike) -> None:
 
 
 def _public_status(native: str) -> str:
-    return {"active": "active", "paused": "paused", "blocked": "blocked",
-            "usageLimited": "usage_limited", "budgetLimited": "budget_limited",
-            "complete": "complete"}.get(native, "failed")
+    mapped = {"active": "active", "paused": "paused", "blocked": "blocked",
+              "usageLimited": "usage_limited", "budgetLimited": "budget_limited",
+              "complete": "complete", "failed": "failed"}.get(native)
+    if mapped is None:
+        # Version/protocol drift is a harness fault, not proof that the Goal is impossible. The
+        # caller turns this into a bounded distributed retry so another compatible node can claim
+        # the turn instead of storing an invented terminal failure.
+        raise CodexGoalError(f"Codex returned unsupported native Goal status {native!r}")
+    return mapped
 
 
 def _counter(source: dict[str, Any], field: str, label: str) -> int:
