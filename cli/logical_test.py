@@ -199,8 +199,13 @@ def _status_payload(record: dict[str, Any] | None = None) -> dict[str, Any]:
             workload_forecasts=status.get("workload_forecasts") or [],
             cohort_summaries=status.get("cohort_summaries") or [],
             portfolio_projections=status.get("portfolio_projections") or [],
+            portfolio_selection=status.get("portfolio_selection") or {},
+            portfolio_policy=status.get("portfolio_policy") or {},
             portfolio_placement_hints=status.get("portfolio_placement_hints") or [],
             model_workload_outcomes=status.get("model_workload_outcomes") or [],
+            cost=status.get("cost") or {},
+            spend_forecast=status.get("spend_forecast") or {},
+            capacity_recommendations=status.get("capacity_recommendations") or [],
             pending_commands=status.get("pending_commands") or [],
             history=status.get("history") or [],
             plan=status.get("plan") or {},
@@ -267,7 +272,11 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
         capacity_gib = float(node.get("capacity_mb") or 0) / 1024.0
         ownership = "managed" if node.get("actuator_capabilities") else "inventory"
         hourly_cost = float(node.get("cost_per_hour") or 0.0)
-        cost = f" · ${hourly_cost:g}/h" if hourly_cost else ""
+        cost = (
+            f" · ${hourly_cost:g}/h"
+            if node.get("cost_known")
+            else " · price unknown"
+        )
         print(
             f"  {node.get('node_id')}  {node.get('state')}  "
             f"{runtimes}/{backends} · {capacity_gib:.1f} GiB{cost} · {ownership}  {placement}"
@@ -281,6 +290,39 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
     )
     if active_hourly_cost:
         print(f"  active cost ${active_hourly_cost:g}/h across ready logical hosts")
+    spend = payload.get("spend_forecast") or {}
+    day = next(
+        (
+            row
+            for row in spend.get("windows") or []
+            if float(row.get("hours") or 0) == 24
+        ),
+        None,
+    )
+    if day is not None:
+        completeness = "complete" if spend.get("complete") else "known-cost only"
+        print(
+            f"  projected ${float(day.get('known_spend') or 0):g}/24h · "
+            f"risk-adjusted ${float(day.get('risk_adjusted_known_spend') or 0):g} · "
+            f"{100 * float(spend.get('demand_confidence') or 0):.0f}% demand confidence · "
+            f"{completeness}"
+        )
+    portfolio_policy = payload.get("portfolio_policy") or {}
+    if portfolio_policy.get("joint"):
+        print(
+            f"  portfolio {int(portfolio_policy.get('workloads') or 0)} workloads jointly · "
+            f"models {', '.join(portfolio_policy.get('selected_models') or []) or 'none'}"
+        )
+    for recommendation in (payload.get("capacity_recommendations") or [])[:3]:
+        shape = recommendation.get("minimum_shape") or {}
+        runtimes = ",".join(shape.get("runtimes") or []) or "any runtime"
+        backends = ",".join(shape.get("backends") or []) or "any backend"
+        print(
+            f"  capacity  {recommendation.get('model_id')} missing "
+            f"{int(recommendation.get('missing_replicas') or 0)} · "
+            f">={float(shape.get('memory_mb') or 0) / 1024:.1f} GiB · "
+            f"{runtimes}/{backends} · {recommendation.get('reason') or 'more capacity needed'}"
+        )
     pending = payload.get("pending_commands") or []
     if pending:
         print(f"  pending   {len(pending)} allocator action(s)")
