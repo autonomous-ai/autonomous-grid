@@ -163,6 +163,11 @@ class Reconciler:
         if not destructive:
             return {}
         node_by_id = {node.node_id: node for node in nodes}
+        residency_by_pair = {
+            (node.node_id, residency.model_id): residency
+            for node in node_by_id.values()
+            for residency in node.residencies
+        }
         profile_by_id = {profile.model_id: profile for profile in profiles}
         safety = _destructive_safety_state(plan, node_by_id, profile_by_id)
         desired_pairs = plan.desired_pairs
@@ -182,7 +187,7 @@ class Reconciler:
                 continue
             node = node_by_id.get(action.node_id)
             profile = profile_by_id.get(action.model_id)
-            residency = node.residency(action.model_id) if node is not None else None
+            residency = residency_by_pair.get(pair)
             if node is None or profile is None or residency is None:
                 deferrals[action.action_id] = DeferredMutation(
                     action.kind,
@@ -244,6 +249,11 @@ class Reconciler:
                 raise ValueError("startup estimates must be finite and non-negative")
             startup_by_pair[key] = duration
         node_by_id = {node.node_id: node for node in nodes}
+        residency_by_pair = {
+            (node.node_id, residency.model_id): residency
+            for node in node_by_id.values()
+            for residency in node.residencies
+        }
         profile_by_id = {profile.model_id: profile for profile in profiles}
         # Controller history is an append-only transition log: one action commonly has PENDING,
         # RUNNING, then SUCCEEDED rows.  Only its latest row is current state.  Treating the old
@@ -313,7 +323,7 @@ class Reconciler:
             candidate = node_by_id.get(record.node_id)
             if candidate is None:
                 continue
-            current = candidate.residency(record.model_id)
+            current = residency_by_pair.get((record.node_id, record.model_id))
             if current is None or current.state != ResidencyState.READY:
                 continue
             active_drain_pairs.add((record.node_id, record.model_id))
@@ -338,7 +348,7 @@ class Reconciler:
                     )
                 )
                 continue
-            residency = node.residency(assignment.model_id)
+            residency = residency_by_pair.get(pair)
             if residency and residency.state in (ResidencyState.LOADING, ResidencyState.WARMING):
                 deferred.append(
                     DeferredMutation(
@@ -622,9 +632,8 @@ class Reconciler:
             if preemption is not None:
                 wait_seconds = 0.0
                 if action.kind == ActionKind.DRAIN:
-                    node = node_by_id.get(action.node_id)
-                    victim = (
-                        node.residency(action.model_id) if node is not None else None
+                    victim = residency_by_pair.get(
+                        (action.node_id, action.model_id)
                     )
                     victim_profile = profile_by_id.get(action.model_id)
                     if victim is not None and victim_profile is not None:

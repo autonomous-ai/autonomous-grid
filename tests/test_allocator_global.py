@@ -3400,6 +3400,53 @@ def test_dense_host_retirement_reuses_observed_residencies(monkeypatch):
     assert residency_lookups <= 1
 
 
+def test_dense_preemption_wave_indexes_victim_residencies_once(monkeypatch):
+    count = 64
+    residencies = tuple(ready(f"batch-{index}", 1_000) for index in range(count))
+    machine = node("dense", count * 1_000, residencies=residencies)
+    profiles = (
+        *(
+            model(
+                f"batch-{index}",
+                1_000,
+                min_replicas=0,
+                max_replicas=0,
+                priority=1,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=0,
+            )
+            for index in range(count)
+        ),
+        model(
+            "critical",
+            count * 1_000,
+            priority=1_000,
+            min_residency_seconds=0,
+        ),
+    )
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        profiles,
+        now=10,
+    )
+    assert len(plan.preemptions) == count
+    residency_lookups = 0
+    original_residency = NodeSnapshot.residency
+
+    def counted_residency(snapshot, model_id):
+        nonlocal residency_lookups
+        residency_lookups += 1
+        return original_residency(snapshot, model_id)
+
+    monkeypatch.setattr(NodeSnapshot, "residency", counted_residency)
+
+    result = Reconciler().reconcile(plan, (machine,), profiles, now=10)
+
+    assert len(result.actions) == count
+    assert {action.kind for action in result.actions} == {ActionKind.DRAIN}
+    assert residency_lookups == 0
+
+
 def test_mutation_governor_prioritizes_drain_for_preemption_beneficiary():
     machines = [
         node("a-routine", 8_000, residencies=(ready("obsolete", 8_000),)),
