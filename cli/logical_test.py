@@ -1986,7 +1986,7 @@ def _cmd_test_adaptive_workday(
             scale_down_cooldown_seconds=1,
         )
         time.sleep(1.1)
-        quiet = _wait_for_placement(
+        _wait_for_placement(
             record,
             replicas={baseline: 1, **{model: 0 for model in candidate_models}},
             timeout=args.timeout,
@@ -1998,6 +1998,13 @@ def _cmd_test_adaptive_workday(
         expected_shift_models = {
             workload_models[workload] for workload in shifted_workloads
         }
+        # Freeze actuation before extending the candidate horizon. Retained morning observations
+        # are intentionally durable; changing the cooldown while automatic can briefly resurrect
+        # them and start a cold load before the fresh afternoon workload mix is established.
+        response = client.put(
+            "/allocator/mode", headers=headers, json={"mode": "recommend"}
+        )
+        response.raise_for_status()
         # Active demand must outlive the real load+warm path. Keep unrelated candidates at the
         # one-second expiry used above so yesterday's workload mix cannot reappear merely because
         # one afternoon capability became active again.
@@ -2015,10 +2022,6 @@ def _cmd_test_adaptive_workday(
                     workload_models, candidate
                 ),
             )
-        response = client.put(
-            "/allocator/mode", headers=headers, json={"mode": "recommend"}
-        )
-        response.raise_for_status()
         for workload in shifted_workloads:
             _send_real_unresolved_workload(
                 endpoint,
