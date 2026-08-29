@@ -436,6 +436,224 @@ def test_joint_portfolio_uses_service_time_aware_resource_pressure():
         projections["video"]["offered_concurrency"]
         > projections["embedding"]["offered_concurrency"]
     )
+    admissions = {
+        row["workload"]: row for row in status["portfolio_admissions"]
+    }
+    assert admissions["video"]["state"] == "starting"
+    assert admissions["embedding"]["state"] == "capacity-contended"
+    assert admissions["embedding"]["ready_replicas"] == 0
+
+
+def test_portfolio_admission_distinguishes_infeasible_workload():
+    controller = AllocatorController()
+    controller.put_profile(
+        ModelProfile(
+            "image-only",
+            8_000,
+            runtimes=("comfyui",),
+            backends=("cuda",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("image", 1.0),),
+        )
+    )
+    for timestamp in (98, 99, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("images/generations", "auto", "image"),
+            service_seconds=10,
+            timestamp=timestamp,
+        )
+    incompatible = NodeSnapshot(
+        "text-only",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        max_models=1,
+        last_heartbeat=100,
+    )
+
+    controller.tick((incompatible,), now=100)
+    admission = controller.status((incompatible,), now=100)[
+        "portfolio_admissions"
+    ][0]
+
+    assert admission["workload"] == "image"
+    assert admission["state"] == "infeasible"
+    assert admission["model_id"] == ""
+    assert admission["candidate_models"] == ["image-only"]
+    assert "fleet-feasible" in admission["reason"]
+
+
+def test_portfolio_admission_distinguishes_compatible_capacity_contention():
+    controller = AllocatorController()
+    controller.put_profile(
+        ModelProfile(
+            "coder",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("coding", 1.0),),
+        )
+    )
+    for timestamp in (98, 99, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("chat/completions", "auto", "coding"),
+            service_seconds=10,
+            timestamp=timestamp,
+        )
+    occupied = NodeSnapshot(
+        "occupied",
+        17_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        max_models=1,
+        residencies=(
+            ModelResidency(
+                "external-model",
+                8_000,
+                ResidencyState.READY,
+                managed=False,
+            ),
+        ),
+        last_heartbeat=100,
+    )
+
+    controller.tick((occupied,), now=100)
+    admission = controller.status((occupied,), now=100)[
+        "portfolio_admissions"
+    ][0]
+
+    assert admission["state"] == "capacity-contended"
+    assert admission["model_id"] == ""
+    assert "model slots are full" in admission["reason"]
+
+
+def test_portfolio_admission_reports_safe_residency_transition_blocker():
+    controller = AllocatorController(
+        planner_policy=PlannerPolicy(memory_headroom_fraction=0)
+    )
+    controller.put_profile(
+        ModelProfile(
+            "baseline",
+            256,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=1,
+            max_replicas=1,
+            min_residency_seconds=0,
+        )
+    )
+    controller.put_profile(
+        ModelProfile(
+            "specialist",
+            714,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("coding", 1.0),),
+        )
+    )
+    for timestamp in (98, 99, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("chat/completions", "auto", "coding"),
+            service_seconds=10,
+            timestamp=timestamp,
+        )
+    machines = (
+        NodeSnapshot(
+            "small",
+            512,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            residencies=(
+                ModelResidency("baseline", 256, ResidencyState.CACHED),
+            ),
+            last_heartbeat=100,
+        ),
+        NodeSnapshot(
+            "large",
+            4_096,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            residencies=(
+                ModelResidency(
+                    "baseline",
+                    256,
+                    ResidencyState.READY,
+                    loaded_at=1,
+                ),
+                ModelResidency("specialist", 714, ResidencyState.CACHED),
+            ),
+            last_heartbeat=100,
+        ),
+    )
+
+    controller.tick(machines, now=100)
+    admission = controller.status(machines, now=100)["portfolio_admissions"][0]
+
+    assert admission["state"] == "blocked-by-residency"
+    assert admission["model_id"] == ""
+    assert admission["blocking_models"] == ["baseline"]
+    assert "relocation/preemption" in admission["reason"]
+
+
+def test_portfolio_admission_reports_ready_but_undersupplied_capacity():
+    controller = AllocatorController()
+    controller.put_profile(
+        ModelProfile(
+            "video-model",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=2,
+            replica_concurrency=1,
+            target_utilization=0.7,
+            min_residency_seconds=0,
+            workload_scores=(("video", 1.0),),
+        )
+    )
+    for timestamp in (98, 99, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("videos/generations", "auto", "video"),
+            service_seconds=60,
+            timestamp=timestamp,
+        )
+    one_ready = NodeSnapshot(
+        "only-host",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        max_models=1,
+        residencies=(
+            ModelResidency(
+                "video-model",
+                8_000,
+                ResidencyState.READY,
+                loaded_at=1,
+            ),
+        ),
+        last_heartbeat=100,
+    )
+
+    controller.tick((one_ready,), now=100)
+    admission = controller.status((one_ready,), now=100)[
+        "portfolio_admissions"
+    ][0]
+
+    assert admission["state"] == "undersupplied"
+    assert admission["desired_replicas"] == 2
+    assert admission["planned_replicas"] == 1
+    assert admission["ready_replicas"] == 1
+    assert admission["missing_replicas"] == 1
 
 
 def test_joint_portfolio_keeps_fifth_ranked_shared_model_inside_bounded_search():

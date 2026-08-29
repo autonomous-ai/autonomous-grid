@@ -213,6 +213,7 @@ def _status_payload(record: dict[str, Any] | None = None) -> dict[str, Any]:
             workload_forecasts=status.get("workload_forecasts") or [],
             portfolio_projections=status.get("portfolio_projections") or [],
             portfolio_selection=status.get("portfolio_selection") or {},
+            portfolio_admissions=status.get("portfolio_admissions") or [],
             portfolio_policy=status.get("portfolio_policy") or {},
             portfolio_placement_hints=status.get("portfolio_placement_hints") or [],
             model_workload_outcomes=status.get("model_workload_outcomes") or [],
@@ -305,6 +306,16 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
         )
         if portfolio_policy.get("objective"):
             print(f"  objective {portfolio_policy['objective']}")
+    for admission in payload.get("portfolio_admissions") or []:
+        print(
+            f"  workload {admission.get('workload') or 'unknown'} · "
+            f"{admission.get('state') or 'unknown'} · "
+            f"{admission.get('model_id') or 'no-model'} · "
+            f"{int(admission.get('ready_replicas') or 0)}/"
+            f"{int(admission.get('desired_replicas') or 0)} ready"
+        )
+        if admission.get("state") != "ready" and admission.get("reason"):
+            print(f"    why {admission['reason']}")
     for recommendation in (payload.get("capacity_recommendations") or [])[:3]:
         shape = recommendation.get("minimum_shape") or {}
         runtimes = ",".join(shape.get("runtimes") or []) or "any runtime"

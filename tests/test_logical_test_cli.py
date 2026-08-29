@@ -64,6 +64,16 @@ def test_logical_status_explains_fleet_and_capacity(capsys):
                 "workloads": 2,
                 "selected_models": ["generalist"],
             },
+            "portfolio_admissions": [
+                {
+                    "workload": "video",
+                    "state": "capacity-contended",
+                    "model_id": "video-model",
+                    "ready_replicas": 0,
+                    "desired_replicas": 1,
+                    "reason": "fleet-feasible alone; other demand was admitted",
+                }
+            ],
             "capacity_recommendations": [
                 {
                     "model_id": "video",
@@ -84,6 +94,8 @@ def test_logical_status_explains_fleet_and_capacity(capsys):
     assert "llama.cpp/metal · 8.0 GiB · managed" in output
     assert "2 workloads jointly · models generalist" in output
     assert "objective resource pressure then request coverage" in output
+    assert "workload video · capacity-contended · video-model · 0/1 ready" in output
+    assert "why fleet-feasible alone; other demand was admitted" in output
     assert "video missing 1 · >=24.0 GiB · comfyui/cuda" in output
 
 

@@ -101,7 +101,12 @@ narrow specialists would make every independently preferred portfolio infeasible
 Only one distinct model may differ from the exploitation-only portfolio because of uncertainty at a
 time; this is an explicit fleet exploration budget, not one canary allowance per workload. Status
 shows the joint mapping, selected model set, and the model currently consuming that exploration
-slot. The controller snapshots bounded demand and outcome state under the telemetry mutex, releases
+slot. It also reports one admission row per active unbound workload using the authoritative plan
+and observed node state: `ready`, `starting`, `planned`, `undersupplied`, `capacity-contended`,
+`blocked-by-residency`, `infeasible`, or `awaiting-plan`. Each row includes the chosen model,
+offered concurrency, desired/planned/ready/missing replica counts, eligible hosts, startup estimate,
+and the concrete reason. These rows explain the existing decision; they do not run a second solver
+or alter router behavior. The controller snapshots bounded demand and outcome state under the telemetry mutex, releases
 it, and performs planner-backed search on that immutable snapshot; request completion telemetry is
 therefore not serialized behind portfolio optimization.
 

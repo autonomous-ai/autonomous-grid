@@ -98,6 +98,17 @@ def cmd_allocator_status(args: argparse.Namespace) -> int:
                     str(item) for item in portfolio_policy["exploration_models"]
                 )
             )
+    for admission in payload.get("portfolio_admissions") or []:
+        model_id = admission.get("model_id") or "no-model"
+        ready = int(admission.get("ready_replicas") or 0)
+        desired = int(admission.get("desired_replicas") or 0)
+        print(
+            f"  workload {admission.get('workload') or 'unknown':<10} "
+            f"{admission.get('state') or 'unknown'} via {model_id} · "
+            f"{ready}/{desired} ready"
+        )
+        if admission.get("state") != "ready" and admission.get("reason"):
+            print(f"    why              {admission['reason']}")
     if payload.get("last_error"):
         print(f"  error              {payload['last_error']}")
     if payload.get("warning"):

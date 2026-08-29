@@ -144,6 +144,16 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
             "selected_models": ["general"],
             "exploration_models": ["general"],
         },
+        "portfolio_admissions": [
+            {
+                "workload": "video",
+                "state": "starting",
+                "model_id": "video-model",
+                "ready_replicas": 0,
+                "desired_replicas": 1,
+                "reason": "selected capacity is loading or warming",
+            }
+        ],
     }
     calls = []
 
@@ -159,6 +169,9 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
     assert "joint portfolio    2 workloads -> 1 models" in output
     assert "objective          resource pressure then request coverage" in output
     assert "exploration slot  general" in output
+    assert "workload video" in output
+    assert "starting via video-model · 0/1 ready" in output
+    assert "why              selected capacity is loading or warming" in output
     assert "secret-token" not in output
     assert calls[0][2]["headers"] == {}
 

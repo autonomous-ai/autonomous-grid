@@ -125,6 +125,34 @@ def test_portfolio_hints_explain_when_no_live_node_can_host_a_model():
     assert "model slots are disabled" in str(hint["reason"])
 
 
+def test_portfolio_hint_distinguishes_compatible_but_occupied_capacity():
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    occupied = node(
+        "occupied",
+        16_000,
+        max_models=1,
+        residencies=(
+            ModelResidency(
+                "external-model",
+                8_000,
+                ResidencyState.READY,
+                managed=False,
+            ),
+        ),
+    )
+
+    hint = planner.portfolio_placement_hints(
+        (occupied,),
+        (model("coder", 8_000, min_replicas=0),),
+        now=10,
+    )["coder"]
+
+    assert hint["feasible"] is False
+    assert hint["hard_compatible"] is True
+    assert hint["feasible_after_preemption"] is False
+    assert "model slots are full" in str(hint["reason"])
+
+
 def test_portfolio_hint_accepts_candidate_after_safe_incumbent_relocation():
     baseline = model("baseline", 256, min_replicas=1, max_replicas=1)
     specialist = model("specialist", 714, min_replicas=0, max_replicas=1)

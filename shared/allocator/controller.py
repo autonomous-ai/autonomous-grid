@@ -31,6 +31,7 @@ from shared.allocator.models import (
     ModelResidency,
     MutationAction,
     NodeSnapshot,
+    NodeState,
     PlacementPlan,
     ResidencyState,
     canonical_sha256,
@@ -913,6 +914,13 @@ class AllocatorController:
                     chosen_models=portfolio_selection,
                 )
                 model_workload_outcomes = self.intelligence.outcomes
+            portfolio_admissions = _portfolio_admissions(
+                portfolio_projections,
+                node_list,
+                profiles,
+                self._last_plan,
+                self._last_result,
+            )
             selected_portfolio_models = sorted(set((portfolio_selection or {}).values()))
             exploration_models: set[str] = set()
             for row in portfolio_projections:
@@ -962,6 +970,7 @@ class AllocatorController:
                 ],
                 "portfolio_projections": list(portfolio_projections),
                 "portfolio_selection": dict(portfolio_selection or {}),
+                "portfolio_admissions": portfolio_admissions,
                 "portfolio_policy": {
                     "joint": bool(portfolio_selection is not None),
                     "objective": (
@@ -2314,6 +2323,212 @@ def _failure_backoff_seconds(policy: ReconcilePolicy, failures: int) -> float:
     if not math.isfinite(delay):
         return policy.failure_backoff_max_seconds
     return min(policy.failure_backoff_max_seconds, delay)
+
+
+def _portfolio_admissions(
+    projections: Iterable[Mapping[str, Any]],
+    nodes: Iterable[NodeSnapshot],
+    profiles: Iterable[ModelProfile],
+    plan: PlacementPlan | None,
+    result: ReconcileResult | None,
+) -> list[dict[str, Any]]:
+    """Explain workload admission from the same evidence used by the allocator.
+
+    This is intentionally diagnostic, not another policy or solver. It classifies the latest joint
+    portfolio choice against the authoritative plan, observed runtime state, and planner placement
+    hint so operators can distinguish an impossible workload from contention or normal startup.
+    """
+
+    node_list = tuple(nodes)
+    profile_by_id = {profile.model_id: profile for profile in profiles}
+    planned_by_model: dict[str, int] = {}
+    desired_by_model: dict[str, int] = {}
+    missing_by_model: dict[str, int] = {}
+    if plan is not None:
+        desired_by_model = dict(plan.desired_replicas)
+        for assignment in plan.assignments:
+            planned_by_model[assignment.model_id] = (
+                planned_by_model.get(assignment.model_id, 0) + 1
+            )
+        for constraint in plan.unsatisfied:
+            missing_by_model[constraint.model_id] = max(
+                missing_by_model.get(constraint.model_id, 0),
+                constraint.missing_replicas,
+            )
+    starting_models = {
+        action.model_id
+        for action in (result.actions if result is not None else ())
+        if action.kind in (ActionKind.LOAD, ActionKind.WARM)
+    }
+    rows: list[dict[str, Any]] = []
+    for projection in sorted(projections, key=lambda item: str(item.get("workload") or "")):
+        workload = str(projection.get("workload") or "")
+        requests_per_minute = float(projection.get("requests_per_minute") or 0.0)
+        offered_concurrency = float(projection.get("offered_concurrency") or 0.0)
+        if requests_per_minute <= 0 and offered_concurrency <= 0:
+            continue
+        model_id = str(projection.get("chosen_model") or "")
+        candidates = tuple(projection.get("candidates") or ())
+        base: dict[str, Any] = {
+            "workload": workload,
+            "model_id": model_id,
+            "requests_per_minute": requests_per_minute,
+            "offered_concurrency": offered_concurrency,
+            "candidate_models": sorted(
+                {
+                    str(candidate.get("model_id") or "")
+                    for candidate in candidates
+                    if candidate.get("model_id")
+                }
+            ),
+        }
+        if not model_id:
+            blocked_candidate = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if (candidate.get("placement") or {}).get(
+                        "feasible_after_preemption"
+                    )
+                    is True
+                ),
+                None,
+            )
+            compatible_candidate = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if (candidate.get("placement") or {}).get("hard_compatible")
+                    is True
+                ),
+                None,
+            )
+            diagnostic_candidate = blocked_candidate or compatible_candidate
+            placement = dict(
+                (diagnostic_candidate or {}).get("placement") or {}
+            )
+            if blocked_candidate is not None:
+                state = "blocked-by-residency"
+                reason = str(
+                    placement.get("reason")
+                    or "compatible capacity requires a safe residency transition"
+                )
+            elif compatible_candidate is not None:
+                state = "capacity-contended"
+                reason = str(
+                    placement.get("reason")
+                    or "compatible hardware exists but current capacity cannot admit the model"
+                )
+            else:
+                state = "infeasible"
+                reason = str(projection.get("reason") or "no selectable model")
+            base.update(
+                state=state,
+                reason=reason,
+                desired_replicas=0,
+                planned_replicas=0,
+                ready_replicas=0,
+                missing_replicas=0,
+                eligible_nodes=int(placement.get("eligible_nodes") or 0),
+                startup_seconds=float(placement.get("startup_seconds") or 0.0),
+                blocking_models=list(placement.get("preemption_victims") or ()),
+            )
+            rows.append(base)
+            continue
+
+        profile = profile_by_id.get(model_id)
+        placement = dict(projection.get("placement") or {})
+        desired = desired_by_model.get(model_id, 0)
+        planned = planned_by_model.get(model_id, 0)
+        missing = max(
+            missing_by_model.get(model_id, 0),
+            max(0, desired - planned),
+        )
+        ready = 0
+        live_starting = False
+        for node in node_list:
+            if node.state not in (NodeState.ACCEPTING, NodeState.THROTTLED):
+                continue
+            residency = node.residency(model_id)
+            if residency is None:
+                continue
+            if residency.state in (ResidencyState.LOADING, ResidencyState.WARMING):
+                live_starting = True
+            if (
+                residency.state == ResidencyState.READY
+                and profile is not None
+                and profile.matches_artifact(residency)
+            ):
+                ready += 1
+        base.update(
+            desired_replicas=desired,
+            planned_replicas=planned,
+            ready_replicas=ready,
+            missing_replicas=missing,
+            eligible_nodes=int(placement.get("eligible_nodes") or 0),
+            startup_seconds=float(placement.get("startup_seconds") or 0.0),
+            blocking_models=list(placement.get("preemption_victims") or ()),
+        )
+        if plan is None or (desired == 0 and planned == 0):
+            base.update(
+                state="awaiting-plan",
+                reason="current workload choice is not represented in the latest allocation plan",
+            )
+        elif ready > 0 and (missing > 0 or ready < desired):
+            base.update(
+                state="undersupplied",
+                reason=(
+                    f"{ready} ready of {desired} desired replicas; "
+                    f"{max(missing, desired - ready)} still missing"
+                ),
+            )
+        elif ready > 0:
+            base.update(
+                state="ready",
+                reason=f"{ready} ready replica{'s' if ready != 1 else ''} serving the workload",
+            )
+        elif live_starting or model_id in starting_models:
+            base.update(
+                state="starting",
+                reason="selected capacity is loading or warming and is not ready yet",
+            )
+        elif planned > 0:
+            base.update(
+                state="planned",
+                reason="selected in the latest plan; runtime startup is not yet visible",
+            )
+        elif placement.get("feasible_after_preemption") is True:
+            base.update(
+                state="blocked-by-residency",
+                reason=str(
+                    placement.get("reason")
+                    or "compatible capacity requires a safe residency transition"
+                ),
+            )
+        elif placement.get("feasible_now") is True or placement.get("feasible") is True:
+            base.update(
+                state="capacity-contended",
+                reason="fleet-feasible alone, but the latest joint plan admitted other demand",
+            )
+        elif placement.get("hard_compatible") is True:
+            base.update(
+                state="capacity-contended",
+                reason=str(
+                    placement.get("reason")
+                    or "compatible hardware exists but current capacity cannot admit the model"
+                ),
+            )
+        else:
+            base.update(
+                state="infeasible",
+                reason=str(
+                    placement.get("reason")
+                    or projection.get("reason")
+                    or "no compatible live host"
+                ),
+            )
+        rows.append(base)
+    return rows
 
 
 def _action_dict(action: MutationAction) -> dict[str, Any]:

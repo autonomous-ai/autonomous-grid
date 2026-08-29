@@ -280,6 +280,7 @@ class PlacementPlanner:
                     if reason is not None:
                         rejected[reason] += 1
                         continue
+                    hard_compatible_nodes += 1
 
                     reason = _portfolio_dynamic_fit_reason(
                         node,
