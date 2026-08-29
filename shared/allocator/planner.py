@@ -108,6 +108,10 @@ _MAX_REPACK_DEPTH = 64
 # whose only capable host is occupied by a flexible model that can move elsewhere. This penalty is
 # applied only while another desired model has strictly fewer future-compatible hosts.
 _SCARCE_HOST_OPPORTUNITY_PENALTY = 200_000.0
+# Repacking delays placement by at least one controller wave, so require a material improvement
+# over an immediately usable host. Candidate scores already price load/warm time, live traffic,
+# hardware, and hourly cost; this guard prevents marginal score noise from causing churn.
+_PROACTIVE_REPACK_SCORE_MARGIN = 5_000.0
 
 
 @dataclass(slots=True)
@@ -941,6 +945,100 @@ class PlacementPlanner:
                 if item.model_id == assignment.model_id
             }
 
+        def proactive_repack_is_better(
+            model: ModelProfile,
+            immediate_score: float,
+            domains: set[str],
+        ) -> bool:
+            """Prefer a materially better blocked host when every victim is already relocated."""
+
+            assignment_counts = Counter(item.model_id for item in assignments)
+            for candidate_node in node_list:
+                if (model.model_id, candidate_node.node_id) in assigned_pairs:
+                    continue
+                if compatibility(
+                    candidate_node,
+                    model,
+                    for_new=requires_new_runtime(candidate_node, model),
+                ) is not None or not budget_allows(candidate_node):
+                    continue
+                victims: list[ModelResidency] = []
+                relocation_delay_seconds = 0.0
+                for residency in candidate_node.residencies:
+                    if _adds_model_slot(residency):
+                        continue
+                    victim = profile_by_id.get(residency.model_id)
+                    destination = next(
+                        (
+                            item.node_id
+                            for item in assignments
+                            if item.model_id == residency.model_id
+                            and item.node_id != candidate_node.node_id
+                        ),
+                        "",
+                    )
+                    if (
+                        residency.model_id == model.model_id
+                        or residency.state != ResidencyState.READY
+                        or not residency.managed
+                        or residency.pinned
+                        or candidate_node.manually_managed
+                        or victim is None
+                        or candidate_node.node_id in victim.pinned_nodes
+                        or desired_by_model.get(residency.model_id, 0) <= 0
+                        or assignment_counts[residency.model_id]
+                        < desired_by_model[residency.model_id]
+                        or not destination
+                    ):
+                        victims = []
+                        break
+                    victims.append(residency)
+                    relocation_delay_seconds += startup_by_pair.get(
+                        (destination, residency.model_id),
+                        victim.warm_seconds,
+                    )
+                    relocation_delay_seconds += (
+                        residency.active_requests * victim.expected_service_seconds
+                    )
+                if not victims:
+                    continue
+                projected = replace(
+                    candidate_node,
+                    residencies=tuple(
+                        item for item in candidate_node.residencies if item not in victims
+                    ),
+                )
+                if (
+                    _portfolio_dynamic_fit_reason(
+                        projected,
+                        model,
+                        profile_by_id,
+                        self.policy,
+                    )
+                    is not None
+                ):
+                    continue
+                projected_remaining = capacity[candidate_node.node_id] + sum(
+                    item.memory_mb for item in victims
+                )
+                score, _ = score_candidate(
+                    candidate_node,
+                    model,
+                    projected_remaining,
+                    domains,
+                    need_new_domain=(
+                        len(domains)
+                        < min(
+                            model.min_failure_domains,
+                            desired_by_model[model.model_id],
+                        )
+                    ),
+                )
+                score -= min(relocation_delay_seconds, 1_000_000_000_000.0) * 20.0
+                if score > immediate_score + _PROACTIVE_REPACK_SCORE_MARGIN:
+                    return True
+            return False
+
         def place_pending_replicas(
             pending: tuple[_PendingReplica, ...],
             *,
@@ -1238,6 +1336,8 @@ class PlacementPlanner:
                             len(domains) < min(model.min_failure_domains, target)
                         ),
                     )
+                    if proactive_repack_is_better(model, score, domains):
+                        return False
                     index = isolated_empty_next_indices[model.model_id]
                     isolated_empty_next_indices[model.model_id] = index + 1
                     _place(
@@ -1316,6 +1416,11 @@ class PlacementPlanner:
             score, _, node, reasons = min(
                 candidates, key=lambda item: (-item[0], item[1])
             )
+            if proactive_repack_is_better(model, score, domains):
+                # Leave this replica missing for the bounded preemption stage below. It will emit
+                # the relocation drain only after reconciliation proves the victim's replacement
+                # READY, then place this model on the better host in the following control wave.
+                return False
             index = sum(1 for item in assignments if item.model_id == model.model_id)
             assignment = _assignment(
                 model, node, index=index, score=score, reasons=reasons
@@ -1411,6 +1516,10 @@ class PlacementPlanner:
                 candidate_domains
             ).intersection(domains):
                 return
+            if missing == 1 and candidates:
+                immediate_score = max(item[0] for item in candidates)
+                if proactive_repack_is_better(model, immediate_score, domains):
+                    return
             for _, _, node in sorted(
                 candidates,
                 key=lambda item: (-item[0], item[1]),

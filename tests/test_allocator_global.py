@@ -4182,6 +4182,101 @@ def test_planner_does_not_relocate_without_demand_for_the_constrained_model():
     assert plan.preemptions == ()
 
 
+def test_planner_repacks_onto_a_materially_better_host_instead_of_cold_loading():
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    baseline = model(
+        "baseline",
+        256,
+        min_replicas=1,
+        max_replicas=1,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=0,
+    )
+    specialist = model(
+        "specialist",
+        714,
+        min_replicas=0,
+        max_replicas=1,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=0,
+    )
+    forecast = DemandForecast(
+        "specialist",
+        requests_per_minute=10,
+        offered_concurrency=0.5,
+        observed_requests_per_minute=10,
+        updated_at=10,
+    )
+    machines = (
+        node(
+            "small",
+            512,
+            max_models=1,
+            cost_per_hour=0.05,
+            cost_known=True,
+            residencies=(
+                ModelResidency("baseline", 256, ResidencyState.CACHED),
+            ),
+        ),
+        node(
+            "medium",
+            2_048,
+            max_models=1,
+            cost_per_hour=0.20,
+            cost_known=True,
+            residencies=(
+                ready("baseline", 256, last_used_at=10),
+                ModelResidency("specialist", 714, ResidencyState.CACHED),
+            ),
+        ),
+        node(
+            "large",
+            4_096,
+            max_models=1,
+            cost_per_hour=0.80,
+            cost_known=True,
+        ),
+    )
+
+    staged = planner.plan(
+        machines,
+        (baseline, specialist),
+        forecasts=(forecast,),
+        now=10,
+    )
+
+    assert staged.nodes_for("baseline") == ("small",)
+    assert staged.nodes_for("specialist") == ()
+    assert staged.preemptions == (
+        PlacementPreemption("medium", "baseline", "specialist"),
+    )
+
+    converged = planner.plan(
+        (
+            replace(
+                machines[0],
+                residencies=(ready("baseline", 256, last_used_at=11),),
+            ),
+            replace(
+                machines[1],
+                residencies=(
+                    ModelResidency("baseline", 256, ResidencyState.CACHED),
+                    ModelResidency("specialist", 714, ResidencyState.CACHED),
+                ),
+            ),
+            machines[2],
+        ),
+        (baseline, specialist),
+        forecasts=(replace(forecast, updated_at=11),),
+        now=11,
+    )
+
+    assert {
+        (item.model_id, item.node_id) for item in converged.assignments
+    } == {("baseline", "small"), ("specialist", "medium")}
+    assert converged.hourly_cost == pytest.approx(0.25)
+
+
 def test_planner_repacking_finds_capacity_path_independent_of_ineligible_nodes():
     machines = [
         node(
