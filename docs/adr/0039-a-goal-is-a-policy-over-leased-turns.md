@@ -126,9 +126,12 @@ The relay enforces maximum depth, children per Goal, cumulative token budget, an
 keys. The child identity, immutable spec, edge and budget reservation commit before its first turn
 is exposed; an idempotent retry can finish publication after a crash but cannot alter or duplicate
 the child. Required children must independently pass their evaluations. Their pinned result commits
-and summaries are included in the parent's next handoff. Child turns advance only their own branch
-and never publish directly to global `main`; explicit fan-in merges committed child branches, and
-only the root Goal enters trunk apply. A parent never reads a child's live workspace.
+and summaries are included in the parent's next handoff. Optional children may omit evaluations;
+their failure is preserved as trajectory evidence but cannot block the parent, and their branch is
+merged only when they complete. The parent waits until every child is terminal so it receives one
+deterministic snapshot of all child outcomes. Child turns advance only their own branch and never
+publish directly to global `main`; explicit fan-in merges completed child branches, and only the
+root Goal enters trunk apply. A parent never reads a child's live workspace.
 
 Pause and cancel apply to the dependency subtree. A pause does not kill a leased process; every
 affected Goal preserves `paused` when that slice reports and receives no continuation. Resume

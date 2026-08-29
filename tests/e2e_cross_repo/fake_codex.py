@@ -61,6 +61,36 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
         save_history(history)
         return "complete", "A generated the requested PNG", 100
 
+    if scenario == "optional_subgoal":
+        if node == "A" and not history:
+            if call_tool is None:
+                raise RuntimeError("optional subgoal scenario received no dynamic tool bridge")
+            result = call_tool("grid_spawn_subgoal", {
+                "objective": "Explore a disposable game mechanic",
+                "done_when": "Report whether the experiment worked",
+                "agents": ["codex"],
+                "required_capabilities": ["optional_worker"],
+                "required": False,
+                "token_budget": 2_000,
+            })
+            content = ((result.get("contentItems") or [{}])[0]).get("text")
+            envelope = json.loads(content or "{}")
+            child_id = ((envelope.get("body") or {}).get("id"))
+            if not result.get("success") or not child_id:
+                raise RuntimeError(f"optional subgoal creation failed: {result!r}")
+            history.append({"node": "A", "spawned_optional_child": child_id})
+            save_history(history)
+            return "active", f"A spawned optional child Goal {child_id}", 100
+        if node == "B" and not history:
+            raise RuntimeError("the optional experiment failed as intended")
+        if node == "C" and len(history) == 1 and history[0].get("node") == "A":
+            (cwd / "FINAL.md").write_text(
+                "# Parent complete\n\nThe optional experiment failed without blocking delivery.\n")
+            history.append({"node": "C", "ignored_optional_failure": True})
+            save_history(history)
+            return "complete", "C completed the parent after optional child failure", 200
+        raise RuntimeError(f"unexpected optional subgoal turn on {node}: {history!r}")
+
     if scenario == "subgoal":
         if node == "A" and not history:
             if call_tool is None:

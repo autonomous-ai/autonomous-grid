@@ -354,3 +354,57 @@ def test_parent_codex_spawns_claude_child_then_codex_fans_it_in(
     assert request["arguments"]["objective"] == "Write the child instructions"
     assert result["success"] is True
     assert result["result"]["body"]["id"] == child_id
+
+
+def test_failed_optional_child_does_not_block_parent_on_another_node(
+        relay, owner_token, spawn_goal_provider):
+    """A failed exploratory child stays in evidence while a third node finishes the parent."""
+    from remote import relay as relay_client
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-optional-subgoal")["id"]
+    H.seed_trunk(relay, owner_token, project_id)
+    node_a = spawn_goal_provider(
+        "A", agent_kinds="codex", scenario="optional_subgoal", disk_label="optional-A")
+    parent = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Finish a release even if an optional experiment fails",
+        done_when="FINAL.md exists and the parent Goal passes its independent eval",
+        model="fake-grid-model", token_budget=10_000, tools=[], agents=["codex"],
+        allow_subgoals=True,
+        evals=[{"type": "file", "name": "parent finish", "path": "FINAL.md"}])
+
+    waiting = H.wait_for(lambda: (lambda goal: goal if goal.get("status") == "waiting_children"
+                                  else None)(relay_client.get_goal(
+                                      relay, owner_token, parent["id"])), timeout=30)
+    assert waiting, f"parent never waited for optional child; A output:\n{node_a.output()}"
+    assert len(waiting["children"]) == 1
+    assert waiting["children"][0]["required"] is False
+    child_id = waiting["children"][0]["id"]
+    node_a.die()
+
+    # This node can run the optional child but cannot steal the subgoal-capable parent continuation.
+    node_b = spawn_goal_provider(
+        "B", agent_kinds="codex", scenario="optional_subgoal", disk_label="optional-B",
+        codex_capabilities="native_goal optional_worker")
+    child_failed = H.wait_for(lambda: (lambda goal: goal if goal.get("status") == "failed"
+                                       else None)(relay_client.get_goal(
+                                           relay, owner_token, child_id)), timeout=45)
+    assert child_failed, f"optional child did not fail as intended; B output:\n{node_b.output()}"
+    child_turns = _tasks(relay, owner_token, project_id, child_id)
+    assert len(child_turns) == 1
+    assert child_turns[0]["provider_id"] == node_b.node_id
+    node_b.die()
+
+    node_c = spawn_goal_provider(
+        "C", agent_kinds="codex", scenario="optional_subgoal", disk_label="optional-C")
+    complete = H.wait_for(lambda: _completed_goal(
+        relay, owner_token, parent["id"]), timeout=75)
+    assert complete, f"parent did not resume after optional failure; C output:\n{node_c.output()}"
+    assert complete["blocked_reason"] is None
+    assert complete["children"][0]["status"] == "failed"
+    assert complete["children"][0]["required"] is False
+    parent_turns = _tasks(relay, owner_token, project_id, parent["id"])
+    assert [row["provider_id"] for row in parent_turns] == [node_a.node_id, node_c.node_id]
+    _assert_transcript_chain(
+        relay_client.get_goal_evidence(relay, owner_token, parent["id"]), 2)
