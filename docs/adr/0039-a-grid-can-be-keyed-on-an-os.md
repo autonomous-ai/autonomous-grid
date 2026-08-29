@@ -405,6 +405,16 @@ like the roster* — it is *what does this surface publish on a grid of stranger
 gate*. The predicate is shared for this reason: `member_identity_access` owns both answers, so the
 fourth surface finds one module rather than two conventions.
 
+**The enumeration this paragraph asked for has since been done** (issue 15, 2026-08-29), and its
+answer is *no fourth unclosed email mechanism on the relay*: six sites emit an address, two are
+closed here (D-l, D-m), three are unreachable behind D-i, one is a token's own subject. D-i's
+premise was tested against the paths its own scan cannot see — `apply_sync_snapshot` writes no
+`ProjectRow`, no raw or bulk insert exists, no migration seeds one — rather than trusted. ⚠️ It also
+found one **residue this decision did not consider**: the node's `name` on the same public payload
+is the provider's hostname, and consumer systems commonly derive a default machine name from the
+owner's. Weaker than an address and **not yet measured**; issue 15 carries the measurement to take
+and the candidate answers. D-m is not amended on the strength of an unmeasured claim.
+
 ## Considered options
 
 - **An onboarding default (auto-join, private-domain shape, for everyone).** Rejected: it reintroduces
