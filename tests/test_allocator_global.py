@@ -4252,6 +4252,34 @@ def test_planner_repacks_onto_a_materially_better_host_instead_of_cold_loading()
         PlacementPreemption("medium", "baseline", "specialist"),
     )
 
+    draining = planner.plan(
+        (
+            replace(
+                machines[0],
+                residencies=(ready("baseline", 256, last_used_at=10.5),),
+            ),
+            replace(
+                machines[1],
+                residencies=(
+                    replace(
+                        machines[1].residencies[0],
+                        state=ResidencyState.DRAINING,
+                    ),
+                    machines[1].residencies[1],
+                ),
+            ),
+            machines[2],
+        ),
+        (baseline, specialist),
+        forecasts=(replace(forecast, updated_at=10.5),),
+        now=10.5,
+    )
+
+    assert draining.nodes_for("specialist") == ()
+    assert draining.preemptions == (
+        PlacementPreemption("medium", "baseline", "specialist"),
+    )
+
     converged = planner.plan(
         (
             replace(

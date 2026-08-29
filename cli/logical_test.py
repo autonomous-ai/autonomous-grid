@@ -2037,6 +2037,24 @@ def _cmd_test_adaptive_workday(
             shifted_observed, shifted_workloads
         )
         shifted_models = set(shifted.values())
+        shifted_plan = dict(shifted_observed.get("plan") or {})
+        planned_pairs = [
+            (str(item.get("model_id") or ""), str(item.get("node_id") or ""))
+            for item in shifted_plan.get("assignments") or []
+            if str(item.get("model_id") or "") in {baseline, *shifted_models}
+        ]
+        if planned_pairs:
+            print(
+                "  planned placement: "
+                + " · ".join(f"{model} on {node}" for model, node in planned_pairs)
+            )
+        for preemption in shifted_plan.get("preemptions") or []:
+            if str(preemption.get("for_model_id") or "") in shifted_models:
+                print(
+                    "  planned repack: move "
+                    f"{preemption.get('model_id')} off {preemption.get('node_id')} for "
+                    f"{preemption.get('for_model_id')}"
+                )
         response = client.put(
             "/allocator/mode", headers=headers, json={"mode": "automatic"}
         )

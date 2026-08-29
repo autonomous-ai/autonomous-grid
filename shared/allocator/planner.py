@@ -979,7 +979,11 @@ class PlacementPlanner:
                     )
                     if (
                         residency.model_id == model.model_id
-                        or residency.state != ResidencyState.READY
+                        or residency.state
+                        not in (
+                            ResidencyState.READY,
+                            ResidencyState.DRAINING,
+                        )
                         or not residency.managed
                         or residency.pinned
                         or candidate_node.manually_managed
