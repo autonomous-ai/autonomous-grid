@@ -457,6 +457,85 @@ def test_direct_demand_replaces_undelivered_speculative_prewarm(monkeypatch):
     )
 
 
+def test_direct_demand_is_delivered_before_older_speculative_prewarm(monkeypatch):
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(
+            max_concurrent_mutations=2,
+            max_mutations_per_node=2,
+        ),
+    )
+    profiles = (
+        ModelProfile(
+            "speculative",
+            8_000,
+            runtimes=("llama.cpp",),
+            min_replicas=0,
+            max_replicas=1,
+        ),
+        ModelProfile(
+            "direct",
+            8_000,
+            runtimes=("llama.cpp",),
+            min_replicas=0,
+            max_replicas=1,
+        ),
+    )
+    for item in profiles:
+        controller.put_profile(item)
+    machine = NodeSnapshot(
+        "shared",
+        32_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        cached_models=("direct", "speculative"),
+        last_heartbeat=10,
+    )
+    speculative = DemandForecast(
+        "speculative",
+        requests_per_minute=60,
+        correlated_requests_per_minute=60,
+        correlation_confidence=1,
+        correlation_sources=("source",),
+        updated_at=10,
+    )
+    current_forecasts = [(speculative,)]
+    monkeypatch.setattr(
+        AllocatorController,
+        "_forecasts",
+        lambda _controller, _now: current_forecasts[0],
+    )
+    first = controller.tick((machine,), now=10)
+    assert [action.model_id for action in first.executable_actions] == [
+        "speculative"
+    ]
+
+    current_forecasts[0] = (
+        speculative,
+        DemandForecast(
+            "direct",
+            requests_per_minute=60,
+            observed_requests_per_minute=60,
+            offered_concurrency=1,
+            updated_at=11,
+        ),
+    )
+    second = controller.tick(
+        (replace(machine, last_heartbeat=11),),
+        now=11,
+    )
+    assert [action.model_id for action in second.executable_actions] == ["direct"]
+
+    delivered = controller.commands_for("shared", now=11)
+
+    assert [action.model_id for action in delivered] == ["direct", "speculative"]
+    assert not any(
+        record.model_id == "speculative"
+        and record.status == MutationStatus.CANCELLED
+        for record in controller.history
+    )
+
+
 def test_undelivered_reprioritization_indexes_large_command_queue_once():
     count = 64
     controller = AllocatorController(
