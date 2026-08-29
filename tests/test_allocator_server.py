@@ -1004,70 +1004,10 @@ def test_engine_and_agent_records_for_one_host_do_not_double_capacity(tmp_path):
     assert len(nodes) == 1
     assert nodes[0]["node_id"] == "host-1"
     assert nodes[0]["capacity_mb"] == 16_000
-    assert nodes[0]["cost_per_hour"] == 0
-    assert nodes[0]["cost_known"] is False
-    assert nodes[0]["cost_source"] == "unknown"
+    assert nodes[0]["cost_per_hour"] == 2.5
     assert nodes[0]["max_models"] == 2
     assert nodes[0]["max_concurrency"] == 1
     assert [item["model_id"] for item in nodes[0]["residencies"]] == ["qwen"]
-
-
-def test_operator_host_price_overrides_node_claim_and_persists(tmp_path):
-    app, client, state_path = _app(tmp_path)
-    _managed_node(client)
-
-    unauthorized = client.put(
-        "/allocator/hosts/host-1/price",
-        headers=_node_auth("host-1"),
-        json={"cost_per_hour": 0.6},
-    )
-    assert unauthorized.status_code in (401, 403)
-
-    response = client.put(
-        "/allocator/hosts/host-1/price",
-        headers=AUTH,
-        json={"cost_per_hour": 0.6},
-    )
-    assert response.status_code == 200, response.text
-    assert response.json()["cost_source"] == "operator"
-    effective = client.get("/allocator/status").json()["nodes"][0]
-    assert effective["cost_per_hour"] == 0.6
-    assert effective["cost_known"] is True
-    assert effective["cost_source"] == "operator"
-    assert json.loads(state_path.read_text())["host_prices"] == {"host-1": 0.6}
-
-    # A later worker heartbeat cannot make the host free.
-    app.state.nodes[CONTROL_NODE_ID].allocator["cost_per_hour"] = 0.0
-    app.state.nodes[CONTROL_NODE_ID].allocator["cost_known"] = True
-    effective = client.get("/allocator/status").json()["nodes"][0]
-    assert effective["cost_per_hour"] == 0.6
-    assert effective["cost_source"] == "operator"
-
-
-def test_operator_zero_is_known_and_removal_returns_host_to_unknown(tmp_path):
-    _, client, _ = _app(tmp_path)
-    _managed_node(client)
-    response = client.put(
-        "/allocator/hosts/host-1/price",
-        headers=AUTH,
-        json={"cost_per_hour": 0},
-    )
-    assert response.status_code == 200
-    effective = client.get("/allocator/status").json()["nodes"][0]
-    assert effective["cost_per_hour"] == 0
-    assert effective["cost_known"] is True
-    assert effective["cost_source"] == "operator"
-
-    response = client.request(
-        "DELETE",
-        "/allocator/hosts/host-1/price",
-        headers=AUTH,
-        json={},
-    )
-    assert response.status_code == 200, response.text
-    effective = client.get("/allocator/status").json()["nodes"][0]
-    assert effective["cost_known"] is False
-    assert effective["cost_source"] == "unknown"
 
 
 def test_control_only_ready_replacement_cannot_drain_live_route(tmp_path):

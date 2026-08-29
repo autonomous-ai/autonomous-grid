@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 from shared import jsonio
-from shared.allocator.auth import validate_host_id
 from shared.allocator.demand import DemandTracker
 from shared.allocator.intelligence import RequestFeatures, WorkloadIntelligence
 from shared.allocator.models import (
@@ -54,7 +53,6 @@ _STARTUP_ESTIMATE_TTL_SECONDS = 30 * 24 * 60 * 60
 _MAX_JOINT_PORTFOLIO_CANDIDATES = 4
 _MAX_JOINT_PORTFOLIO_EVALUATIONS = 64
 _MAX_JOINT_EXPLORATION_MODELS = 1
-_MAX_HOST_PRICES = 10_000
 
 
 class AllocatorController:
@@ -102,7 +100,6 @@ class AllocatorController:
         self.max_history = max_history
         self.membership_recovery_grace_seconds = float(membership_recovery_grace_seconds)
         self._profiles: dict[str, ModelProfile] = {}
-        self._host_prices: dict[str, float] = {}
         self._retiring: set[str] = set()
         self._history: list[MutationRecord] = []
         self._commands: dict[str, MutationAction] = {}
@@ -161,98 +158,6 @@ class AllocatorController:
     def controller_term(self) -> int:
         with self._lock:
             return self._controller_term
-
-    @property
-    def host_prices(self) -> dict[str, float]:
-        """Return a copy of controller-owned physical-host prices."""
-
-        with self._lock:
-            return dict(self._host_prices)
-
-    def apply_host_prices(
-        self,
-        nodes: Iterable[NodeSnapshot],
-        *,
-        prices: Mapping[str, float] | None = None,
-    ) -> tuple[NodeSnapshot, ...]:
-        """Apply authoritative prices after discovery records are merged by physical host.
-
-        The caller decides whether a non-registry snapshot is trusted. The local signaling server
-        deliberately strips node claims first; other control planes may supply already-authorized
-        snapshots. A registry entry always wins.
-        """
-
-        with self._lock:
-            authoritative = dict(self._host_prices if prices is None else prices)
-        return tuple(
-            replace(
-                node,
-                cost_per_hour=authoritative[node.node_id],
-                cost_known=True,
-                cost_source="operator",
-            )
-            if node.node_id in authoritative
-            else node
-            for node in nodes
-        )
-
-    def set_host_price(
-        self,
-        host_id: str,
-        cost_per_hour: float | None,
-        *,
-        allow_service_shortfall: bool = False,
-        nodes: Iterable[NodeSnapshot] = (),
-        now: float | None = None,
-    ) -> dict[str, float]:
-        """Set or clear an operator price as a durable, service-safe transaction."""
-
-        host_id = str(host_id)
-        validate_host_id(host_id)
-        if cost_per_hour is not None:
-            cost_per_hour = float(cost_per_hour)
-            if not math.isfinite(cost_per_hour) or cost_per_hour < 0:
-                raise ValueError("cost_per_hour must be finite and non-negative")
-        if not isinstance(allow_service_shortfall, bool):
-            raise ValueError("allow_service_shortfall must be a boolean")
-        timestamp = time.time() if now is None else float(now)
-        if not math.isfinite(timestamp) or timestamp < 0:
-            raise ValueError("now must be finite and non-negative")
-        current_nodes = tuple(nodes)
-        with self._lock:
-            checkpoint = self._checkpoint()
-            proposed_prices = dict(self._host_prices)
-            if cost_per_hour is None:
-                proposed_prices.pop(host_id, None)
-            else:
-                if host_id not in proposed_prices and len(proposed_prices) >= _MAX_HOST_PRICES:
-                    raise ValueError("allocator host price registry is full")
-                proposed_prices[host_id] = cost_per_hour
-            proposed_nodes = self.apply_host_prices(
-                tuple(
-                    replace(
-                        node,
-                        cost_per_hour=0.0,
-                        cost_known=False,
-                        cost_source="unknown",
-                    )
-                    if node.node_id == host_id and node.cost_source == "operator"
-                    else node
-                    for node in current_nodes
-                ),
-                prices=proposed_prices,
-            )
-            if current_nodes and not allow_service_shortfall:
-                self._reject_minimum_coverage_regression(
-                    current_nodes,
-                    proposed_nodes,
-                    timestamp,
-                    "host price update",
-                )
-            self._host_prices = proposed_prices
-            self._save_or_rollback(checkpoint)
-            return dict(self._host_prices)
-
     def set_mode(self, mode: AllocatorMode) -> None:
         with self._lock:
             checkpoint = self._checkpoint()
@@ -352,7 +257,6 @@ class AllocatorController:
             raise ValueError("now must be finite and non-negative")
         node_list = tuple(nodes)
         with self._lock:
-            node_list = self.apply_host_prices(node_list)
             checkpoint = self._checkpoint()
             policy = replace(
                 self.planner.policy,
@@ -360,77 +264,58 @@ class AllocatorController:
                 allow_unknown_cost=allow_unknown_cost,
             )
             if node_list and not allow_service_shortfall:
-                self._reject_minimum_coverage_regression(
-                    node_list,
-                    node_list,
-                    timestamp,
-                    "budget update",
-                    proposed_planner=PlacementPlanner(policy),
+                profiles = tuple(
+                    self._profiles[model_id]
+                    for model_id in sorted(self._profiles)
+                    if model_id not in self._retiring
                 )
+                current = self.planner.plan(
+                    node_list,
+                    profiles,
+                    (),
+                    now=timestamp,
+                )
+                proposed = PlacementPlanner(policy).plan(
+                    node_list,
+                    profiles,
+                    (),
+                    now=timestamp,
+                )
+
+                def minimum_coverage(plan: PlacementPlan, model_id: str) -> int:
+                    return sum(
+                        assignment.model_id == model_id
+                        for assignment in plan.assignments
+                    )
+
+                regressions = {
+                    profile.model_id: (
+                        minimum_coverage(current, profile.model_id),
+                        minimum_coverage(proposed, profile.model_id),
+                        profile.min_replicas,
+                    )
+                    for profile in profiles
+                    if profile.min_replicas > 0
+                    and minimum_coverage(proposed, profile.model_id)
+                    < min(
+                        profile.min_replicas,
+                        minimum_coverage(current, profile.model_id),
+                    )
+                }
+                if regressions:
+                    detail = ", ".join(
+                        f"{model_id} {after}/{minimum} minimum replicas (currently {before})"
+                        for model_id, (before, after, minimum) in sorted(
+                            regressions.items()
+                        )
+                    )
+                    raise ValueError(
+                        "budget update would reduce minimum service coverage: "
+                        f"{detail}; repeat with allow_service_shortfall=true to acknowledge"
+                    )
             self.planner = PlacementPlanner(policy)
             self._save_or_rollback(checkpoint)
             return policy
-
-    def _reject_minimum_coverage_regression(
-        self,
-        current_nodes: tuple[NodeSnapshot, ...],
-        proposed_nodes: tuple[NodeSnapshot, ...],
-        timestamp: float,
-        change: str,
-        *,
-        proposed_planner: PlacementPlanner | None = None,
-    ) -> None:
-        profiles = tuple(
-            self._profiles[model_id]
-            for model_id in sorted(self._profiles)
-            if model_id not in self._retiring
-        )
-        placement_hints = self.planner.portfolio_placement_hints(
-            current_nodes,
-            profiles,
-            now=timestamp,
-        )
-        forecasts = self._forecasts(
-            timestamp,
-            placement_hints=placement_hints,
-            nodes=current_nodes,
-        )
-        current = self.planner.plan(
-            current_nodes,
-            profiles,
-            forecasts,
-            now=timestamp,
-        )
-        proposed = (proposed_planner or self.planner).plan(
-            proposed_nodes, profiles, forecasts, now=timestamp
-        )
-
-        def minimum_coverage(plan: PlacementPlan, model_id: str) -> int:
-            return sum(
-                assignment.model_id == model_id for assignment in plan.assignments
-            )
-
-        desired = dict(current.desired_replicas)
-        regressions = {
-            profile.model_id: (
-                minimum_coverage(current, profile.model_id),
-                minimum_coverage(proposed, profile.model_id),
-                desired.get(profile.model_id, profile.min_replicas),
-            )
-            for profile in profiles
-            if desired.get(profile.model_id, profile.min_replicas) > 0
-            and minimum_coverage(proposed, profile.model_id)
-            < minimum_coverage(current, profile.model_id)
-        }
-        if regressions:
-            detail = ", ".join(
-                f"{model_id} {after}/{target} desired replicas (currently {before})"
-                for model_id, (before, after, target) in sorted(regressions.items())
-            )
-            raise ValueError(
-                f"{change} would reduce minimum service coverage: {detail}; "
-                "repeat with allow_service_shortfall=true to acknowledge"
-            )
 
     def put_profile(self, profile: ModelProfile) -> None:
         with self._lock:
@@ -1088,7 +973,6 @@ class AllocatorController:
         timestamp = time.time() if now is None else float(now)
         node_list = tuple(nodes)
         with self._lock:
-            node_list = self.apply_host_prices(node_list)
             profiles = self.profiles
             placement_hints = self.planner.portfolio_placement_hints(
                 node_list,
@@ -1260,7 +1144,6 @@ class AllocatorController:
                         list(desired_unknown_cost_nodes)
                     ),
                     "compliance": budget_compliance,
-                    "operator_host_prices": dict(sorted(self._host_prices.items())),
                 },
                 "spend_forecast": spend_forecast,
                 "capacity_recommendations": capacity_recommendations,
@@ -2250,7 +2133,6 @@ class AllocatorController:
             "last_plan_generation": self._last_plan_generation,
             "membership_recovery_grace_seconds": self.membership_recovery_grace_seconds,
             "planner_policy": asdict(self.planner.policy),
-            "host_prices": dict(sorted(self._host_prices.items())),
             "reconcile_policy": asdict(self.reconciler.policy),
             "profiles": [profile.to_dict() for profile in self.profiles],
             "retiring_models": sorted(self._retiring),
@@ -2310,7 +2192,6 @@ class AllocatorController:
         return {
             "mode": self.mode,
             "planner": self.planner,
-            "host_prices": dict(self._host_prices),
             "profiles": dict(self._profiles),
             "retiring": set(self._retiring),
             "history": list(self._history),
@@ -2354,7 +2235,6 @@ class AllocatorController:
 
         self.mode = checkpoint["mode"]
         self.planner = checkpoint["planner"]
-        self._host_prices = checkpoint["host_prices"]
         self._profiles = checkpoint["profiles"]
         self._retiring = checkpoint["retiring"]
         self._history = checkpoint["history"]
@@ -2447,22 +2327,6 @@ class AllocatorController:
                 raise ValueError("invalid persisted membership recovery grace")
             self.membership_recovery_grace_seconds = grace
         self.planner = PlacementPlanner(PlannerPolicy(**dict(value.get("planner_policy") or {})))
-        host_prices = value.get("host_prices") or {}
-        if not isinstance(host_prices, dict):
-            raise ValueError("invalid persisted allocator host prices")
-        self._host_prices = {}
-        for host_id, raw_cost in host_prices.items():
-            host_id = str(host_id)
-            cost = float(raw_cost)
-            try:
-                validate_host_id(host_id)
-            except ValueError as exc:
-                raise ValueError("invalid persisted allocator host price") from exc
-            if not math.isfinite(cost) or cost < 0:
-                raise ValueError("invalid persisted allocator host price")
-            self._host_prices[host_id] = cost
-        if len(self._host_prices) > _MAX_HOST_PRICES:
-            raise ValueError("persisted allocator host price registry is too large")
         self.reconciler = Reconciler(
             ReconcilePolicy(**dict(value.get("reconcile_policy") or {}))
         )

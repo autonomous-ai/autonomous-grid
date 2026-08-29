@@ -553,12 +553,6 @@ grid allocator budget --max-hourly-cost <USD>
     [--allow-unknown-cost]
     [--allow-service-shortfall]
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
-grid allocator host price set <host-id> <USD>
-    [--allow-service-shortfall]
-    [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
-grid allocator host price remove|rm <host-id>
-    [--allow-service-shortfall]
-    [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
 grid allocator tick
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
 
@@ -583,19 +577,12 @@ load/warm/drain/unload commands within the allocator's safety limits. For the in
 runtime, `<model>` must be the exact filename of a GGUF already cached with `grid pull` on each
 eligible computer; allocation never invents a download source.
 
-`grid allocator host price set host-1 0.60` registers a durable, operator-authoritative physical
-host price. Node heartbeats cannot create or override accounting values. An explicit zero is known
-free; `grid allocator host price remove host-1` returns the host to unknown price. A price update
-that reduces achievable desired service, including demand-driven replicas above the minimum, needs
-`--allow-service-shortfall`. Status prints effective
-price provenance for every host.
-
 `grid allocator budget --max-hourly-cost 2.50` sets a durable hard ceiling on the sum of the
-selected hosts' operator prices. A host is charged once even when it serves several models.
-While a positive ceiling is active, a node without an operator price is ineligible by default;
+selected hosts' declared hourly costs. A host is charged once even when it serves several models.
+While a positive ceiling is active, a node without explicit cost metadata is ineligible by default;
 `--allow-unknown-cost` is an explicit fail-open override, and status continues to name every
 unknown-cost host. Setting the value to `0` disables the ceiling. If a tighter ceiling would reduce
-currently achievable desired-replica coverage, Grid rejects the update without changing policy;
+currently achievable minimum-replica coverage, Grid rejects the update without changing policy;
 `--allow-service-shortfall` explicitly acknowledges that service tradeoff for this update. After an
 acknowledged update, the allocator stages normal drain/unload transitions until the desired fleet
 fits. It never stops a pinned, manually managed, or external process merely to meet a budget; that

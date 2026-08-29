@@ -108,14 +108,6 @@ def test_parser_exposes_complete_allocator_surface():
         ]
     )
     assert acknowledged_budget.allow_service_shortfall is True
-    host_price = parser.parse_args(
-        ["allocator", "host", "price", "set", "host-1", "0.75"]
-    )
-    assert host_price.handler is cli.cmd_allocator_host_price_set
-    assert host_price.cost_per_hour == 0.75
-    assert parser.parse_args(
-        ["allocator", "host", "price", "remove", "host-1"]
-    ).handler is cli.cmd_allocator_host_price_remove
     assert parser.parse_args(["allocator", "tick"]).handler is cli.cmd_allocator_tick
     assert parser.parse_args(
         ["allocator", "token", "write", "/tmp/token"]
@@ -436,16 +428,6 @@ def test_model_set_rejects_invalid_bounds_before_network(monkeypatch):
             "PUT",
             "/allocator/budget",
         ),
-        (
-            ["allocator", "host", "price", "set", "host-1", "0.75"],
-            "PUT",
-            "/allocator/hosts/host-1/price",
-        ),
-        (
-            ["allocator", "host", "price", "remove", "host-1"],
-            "DELETE",
-            "/allocator/hosts/host-1/price",
-        ),
         (["allocator", "tick"], "POST", "/allocator/tick"),
     ],
 )
@@ -463,14 +445,6 @@ def test_mutating_commands_use_authenticated_routes(
             payload = {"max_hourly_cost": 1.25, "allow_unknown_cost": False}
         elif path == "/allocator/tick":
             payload = {"actions": [], "deferred": []}
-        elif path.startswith("/allocator/hosts/") and method == "PUT":
-            payload = {
-                "host_id": "host-1",
-                "cost_per_hour": 0.75,
-                "cost_source": "operator",
-            }
-        elif path.startswith("/allocator/hosts/"):
-            payload = {"host_id": "host-1", "deleted": True}
         else:
             payload = {"deleted": "qwen.gguf"}
         return response(payload=payload)

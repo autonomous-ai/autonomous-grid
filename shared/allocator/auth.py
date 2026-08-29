@@ -38,7 +38,7 @@ class NodeCredential:
     expires_at: int
 
     def __post_init__(self) -> None:
-        validate_host_id(self.host_id)
+        _validate_host_id(self.host_id)
         if not self.token_id or len(self.token_id) > 128:
             raise ValueError("allocator node credential has an invalid token id")
         if self.issued_at < 0 or self.expires_at <= self.issued_at:
@@ -61,7 +61,7 @@ def mint_node_token(
     """
 
     secret = _operator_secret(operator_token)
-    validate_host_id(host_id)
+    _validate_host_id(host_id)
     issued_at = _whole_time(time.time() if now is None else now)
     if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
         raise ValueError("allocator node credential TTL must be a positive integer")
@@ -219,7 +219,7 @@ def secure_control_transport(url: str) -> bool:
 def control_node_id(host_id: str) -> str:
     """Return the only registry ID a host may use for its allocator control record."""
 
-    validate_host_id(host_id)
+    _validate_host_id(host_id)
     digest = hashlib.sha256(f"control\0{host_id}".encode()).hexdigest()[:20]
     return f"allocator-control-{digest}"
 
@@ -227,7 +227,7 @@ def control_node_id(host_id: str) -> str:
 def engine_node_id(host_id: str, model_id: str) -> str:
     """Return the only registry ID a host may use for one managed model child."""
 
-    validate_host_id(host_id)
+    _validate_host_id(host_id)
     if not isinstance(model_id, str) or not model_id or len(model_id) > 1_024:
         raise ValueError("allocator model id is required and must be at most 1024 characters")
     digest = hashlib.sha256(f"engine\0{host_id}\0{model_id}".encode()).hexdigest()[:20]
@@ -299,7 +299,7 @@ def _operator_secret(value: str) -> bytes:
     return value.encode("utf-8")
 
 
-def validate_host_id(value: str) -> None:
+def _validate_host_id(value: str) -> None:
     if not isinstance(value, str) or _HOST_ID.fullmatch(value) is None:
         raise ValueError(
             "allocator host id must be 1-128 URL-safe ASCII letters, numbers, '.', '_', '~', or '-'"
