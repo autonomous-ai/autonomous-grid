@@ -90,11 +90,15 @@ grid goal evidence <goal-id> --verify \
 ```
 
 The command exits nonzero if the Goal is not complete, fewer than three task nodes executed it, any
-turn lacks a completed request for the Goal's exact requested model attributed to a Grid inference
-node, any attributed request names a different model, a reclaimed turn lacks authoritative retry
+turn lacks a completed request attributed to a Grid inference node, a concrete-model Goal has an
+attributed request naming a different model, a reclaimed turn lacks authoritative retry
 evidence, a transcript handoff is broken, a prior result is not Git-ancestral to the next pinned
 input, or a required final eval has no accepted passing run. Failed/in-flight inference rows remain
-audit evidence but never satisfy this gate. A release is not accepted from screenshots alone.
+audit evidence but never satisfy this gate. For an `auto`/effort Goal, the evidence names the actual
+model selected by Grid. The relay admits Goal-attributed inference only from the current leased task
+node with the matching conversation and requested Goal model, and repeats that check atomically at
+transaction insertion so a lease lost during routing cannot leave forged evidence. A release is
+not accepted from screenshots alone.
 
 | Evidence | Required assertion |
 |---|---|

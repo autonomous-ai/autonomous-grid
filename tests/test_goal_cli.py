@@ -511,6 +511,9 @@ def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
     assert any("not the Goal's requested model" in item for item in failures)
     assert any("no model requests attributed" in item for item in failures)
 
+    record["goal"]["model"] = "auto"
+    assert _verify_evidence(record, require_inference=True) == []
+
 
 def test_goal_status_shows_budget_blocker_and_distributed_children(capsys):
     from cli.goal import _show

@@ -213,6 +213,14 @@ events, and accepted or rejected independent eval runs. Inference usage is group
 model, serving node, and transaction state. Failed requests remain useful failure evidence, but only
 `completed` requests can prove that a turn actually executed through Grid inference.
 
+Inference attribution is relay-enforced, not trusted from agent headers. If `X-Request-Id` names a
+Goal turn, the request must come from that turn's current leased node, carry the matching
+`X-Grid-Conversation`, and request the Goal's model. The relay checks once at ingress and again while
+holding the turn row lock in the same database transaction that writes the inference row. A worker
+that loses its lease during model routing therefore cannot manufacture training or release
+evidence. A concrete Goal model is recorded exactly; an `auto`/effort Goal records the concrete
+model Grid selected after validating the original routed model name.
+
 ## Give Codex business read/write tools
 
 The project repository is Codex's file observation/action surface. For business systems, pass a JSON

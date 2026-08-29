@@ -96,6 +96,22 @@ unresolved mutations, malformed idempotency keys, and tool events without that a
 killed attempt's unmatched action request is valid only when a later result reconciles the same
 Goal-wide key.
 
+### Inference evidence is lease-bound
+
+Goal workers group model calls with `X-Request-Id: <turn-id>` and
+`X-Grid-Conversation: <goal-id>`, but caller-supplied headers are not evidence by themselves. When a
+request id resolves to a Goal turn, the relay requires the authenticated node to hold that running
+turn's lease and requires both the conversation and original requested model to match the Goal.
+Unknown ordinary request ids retain the inference API's existing caller-grouping behavior.
+
+The relay checks at ingress for a fast refusal, then repeats the check with `SELECT FOR UPDATE` on
+the turn inside the same transaction that inserts the inference transaction. This creates one
+ordering with reclaim and cancellation: either the inference row commits while the node owns the
+lease, or the lease transition wins and no attributed row is written. For routed `auto` and effort
+requests, authorization compares the original routed name while the transaction records the
+concrete model Grid actually selected. Evidence exports retain every transaction state, but only a
+completed transaction can satisfy the physical inference gate.
+
 ### Native Goal mechanisms remain authoritative progress loops
 
 Grid invokes Codex's native Goal API and Claude Code's native `/goal`; it does not reproduce their
