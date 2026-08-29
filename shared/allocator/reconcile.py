@@ -315,6 +315,29 @@ class Reconciler:
             (assignment.node_id, assignment.model_id): assignment.replica_index
             for assignment in plan.assignments
         }
+        next_preemption_round: dict[str, int] = {}
+        for assignment in plan.assignments:
+            next_preemption_round[assignment.model_id] = max(
+                next_preemption_round.get(assignment.model_id, 0),
+                assignment.replica_index + 1,
+            )
+        preemption_round_by_pair: dict[tuple[str, str], int] = {}
+        preemption_group_round: dict[tuple[str, str], int] = {}
+        for preemption in plan.preemptions:
+            if not preemption.for_model_id:
+                continue
+            group = (preemption.node_id, preemption.for_model_id)
+            if group not in preemption_group_round:
+                preemption_group_round[group] = next_preemption_round.get(
+                    preemption.for_model_id,
+                    0,
+                )
+                next_preemption_round[preemption.for_model_id] = (
+                    preemption_group_round[group] + 1
+                )
+            preemption_round_by_pair[
+                (preemption.node_id, preemption.model_id)
+            ] = preemption_group_round[group]
         preemptions = {
             (item.node_id, item.model_id): item for item in plan.preemptions
         }
@@ -659,12 +682,16 @@ class Reconciler:
             action: MutationAction,
         ) -> tuple[int, int, float, int, int, str, str]:
             admin_priority, demand_urgency = service_priority(action)
+            pair = (action.node_id, action.model_id)
             return (
                 -admin_priority,
                 -demand_urgency,
                 time_to_ready(action),
                 action_stage(action),
-                replica_index_by_pair.get((action.node_id, action.model_id), 0),
+                preemption_round_by_pair.get(
+                    pair,
+                    replica_index_by_pair.get(pair, 0),
+                ),
                 action.node_id,
                 action.model_id,
             )

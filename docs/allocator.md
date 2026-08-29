@@ -267,8 +267,9 @@ The planner and reconciler keep these rules even when demand, membership, or clo
    equal-urgency work uses its estimated remaining cold-start path, so a cached model that can serve
    soon is not stranded behind an unrelated artifact download. Within the same readiness class,
    mutation slots are filled one replica round per model, preventing one service's second replica
-   from starting before a peer's first. Within one preemption wave, already-drained and idle
-   capacity is released before a newly draining or busy victim.
+   from starting before a peer's first; capacity-release preemptions retain the same beneficiary
+   round. Within one preemption wave, already-drained and idle capacity is released before a newly
+   draining or busy victim.
 9. **Make retries idempotent.** Actions have stable IDs, pending equivalents are suppressed, and
    duplicate acknowledgements are harmless. Command delivery is durably marked before the response
    is returned to a node. A late success or failure may complete an action that the controller had

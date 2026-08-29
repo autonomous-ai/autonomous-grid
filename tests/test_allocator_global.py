@@ -3259,6 +3259,80 @@ def test_mutation_governor_preserves_replica_round_fairness():
     ]
 
 
+def test_mutation_governor_preserves_replica_round_fairness_during_preemption():
+    incumbent_pairs = (
+        ("a-alpha-0", "old-a"),
+        ("b-alpha-1", "old-b"),
+        ("y-beta-0", "old-y"),
+        ("z-beta-1", "old-z"),
+    )
+    machines = [
+        node(
+            node_id,
+            capacity_mb=8_000,
+            max_models=1,
+            residencies=(
+                ModelResidency(
+                    incumbent,
+                    8_000,
+                    ResidencyState.READY,
+                    loaded_at=1,
+                ),
+            ),
+        )
+        for node_id, incumbent in incumbent_pairs
+    ]
+    profiles = [
+        model(
+            incumbent,
+            min_replicas=0,
+            max_replicas=0,
+            priority=1,
+            min_residency_seconds=0,
+        )
+        for _, incumbent in incumbent_pairs
+    ]
+    profiles.extend(
+        (
+            model(
+                "alpha",
+                min_replicas=2,
+                max_replicas=2,
+                priority=100,
+                pinned_nodes=("a-alpha-0", "b-alpha-1"),
+            ),
+            model(
+                "beta",
+                min_replicas=2,
+                max_replicas=2,
+                priority=100,
+                pinned_nodes=("y-beta-0", "z-beta-1"),
+            ),
+        )
+    )
+    plan = PlacementPlanner().plan(machines, profiles, now=10)
+
+    result = Reconciler(
+        ReconcilePolicy(max_concurrent_mutations=2)
+    ).reconcile(
+        plan,
+        machines,
+        profiles,
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+
+    beneficiary_by_pair = {
+        (item.node_id, item.model_id): item.for_model_id
+        for item in plan.preemptions
+    }
+    assert [
+        beneficiary_by_pair[(item.node_id, item.model_id)]
+        for item in result.executable_actions
+    ] == ["alpha", "beta"]
+    assert all(item.kind == ActionKind.DRAIN for item in result.executable_actions)
+
+
 def test_reconciler_indexes_high_cardinality_inputs_once(
     monkeypatch,
 ):
