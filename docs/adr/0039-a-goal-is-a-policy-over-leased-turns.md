@@ -237,6 +237,9 @@ Goal whose independently claimed children fan in after all required evaluations 
 must cover both failure boundaries: abrupt lease loss resumes the last relay-accepted checkpoint,
 while a detected post-spawn native-harness failure publishes coherent worktree and transcript pins
 and immediately requeues the same turn for another machine.
+Release evidence includes relay-computed ancestry from every accepted retry checkpoint to the
+turn's final worktree and transcript outputs; offline verification binds those checks back to the
+exact retry event and latest checkpoint columns.
 It must also include Codex A -> Claude B -> Codex C -> Claude D where C's completion nomination
 fails an independent commit-pinned check and D resumes B's native Claude session, consumes the
 relay-authored failure evidence, repairs the worktree, and passes a fresh evaluation. This proves

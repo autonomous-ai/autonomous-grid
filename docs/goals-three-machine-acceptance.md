@@ -115,6 +115,9 @@ turn 1's `transcript_result_commit`, and turn 3's input equals turn 2's output. 
 each output from `refs/grid/agent/<goal-id>` rather than trusting the worker's report. Opaque Codex
 and Claude records inside that checkpoint remain harness-specific; a returning harness restores its
 own native state while every harness receives the shared tree, Goal metadata and event history.
+For detected native-harness retries, the evidence artifact's `retry_checkpoint_chain` must match the
+retry event sequence and exact accepted pins, with both `worktree_ancestor` and
+`transcript_ancestor` true against the turn's final result commits.
 
 For each reclaimed turn, use the relay-authored `task.retry.previous_provider_id` as the authority
 for the machine that disappeared, and the settled turn's `provider_node_id` as the authority for its

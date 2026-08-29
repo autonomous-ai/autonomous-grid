@@ -331,3 +331,6 @@ transcript checkpoints, and asks the relay to requeue the same turn immediately.
 2 and proves it restored A's partial files and Codex thread. An abrupt process or machine loss cannot
 make that handshake and therefore correctly falls back to the last checkpoint the relay had already
 accepted.
+Evidence includes a relay-computed `retry_checkpoint_chain` for every accepted native-harness
+checkpoint. `grid goal evidence --verify` requires each retry event's exact worktree/transcript pins
+to match the stored turn pins and proves both are Git-ancestral to that turn's final outputs.

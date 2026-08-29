@@ -237,6 +237,9 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
 
     worktree_chain = (trajectory.get("worktree_chain")
                       if isinstance(trajectory.get("worktree_chain"), list) else [])
+    retry_checkpoint_chain = (
+        trajectory.get("retry_checkpoint_chain")
+        if isinstance(trajectory.get("retry_checkpoint_chain"), list) else [])
     for index, (previous, current) in enumerate(pairwise(turns), 2):
         if not isinstance(previous, dict) or not isinstance(current, dict):
             continue
@@ -286,6 +289,49 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"turn {index} attempt {attempt} has no authoritative retry event naming the "
                 "previous provider")
+    native_retries = [item for item in attempt_events if isinstance(item, dict)
+                      and isinstance(item.get("event"), dict)
+                      and item["event"].get("type") == "task.retry"
+                      and item["event"].get("reason") == "native_harness_failure"
+                      and item["event"].get("checkpoint_commit")]
+    for retry in native_retries:
+        event = retry["event"]
+        matching = [check for check in retry_checkpoint_chain if isinstance(check, dict)
+                    and check.get("turn_id") == retry.get("turn_id")
+                    and check.get("event_seq") == retry.get("seq")
+                    and check.get("checkpoint_commit") == event.get("checkpoint_commit")
+                    and check.get("transcript_checkpoint_commit")
+                    == event.get("transcript_checkpoint_commit")]
+        if not matching:
+            failures.append(
+                f"turn {retry.get('turn_id')} native retry has no relay-authored checkpoint "
+                "ancestry proof")
+            continue
+        check = matching[-1]
+        if check.get("worktree_ancestor") is not True:
+            failures.append(
+                f"turn {retry.get('turn_id')} final worktree does not contain its accepted retry "
+                f"checkpoint: {check.get('worktree_error') or 'the commits are unrelated'}")
+        if check.get("transcript_ancestor") is not True:
+            failures.append(
+                f"turn {retry.get('turn_id')} final transcript does not contain its accepted "
+                f"retry checkpoint: {check.get('transcript_error') or 'the commits are unrelated'}")
+    turns_by_id = {turn.get("id"): turn for turn in turns if isinstance(turn, dict)}
+    for turn_id in {retry.get("turn_id") for retry in native_retries}:
+        retries = sorted(
+            (retry for retry in native_retries if retry.get("turn_id") == turn_id),
+            key=lambda item: item.get("seq") if isinstance(item.get("seq"), int) else -1)
+        latest = retries[-1]["event"]
+        turn = turns_by_id.get(turn_id) or {}
+        if turn.get("checkpoint_commit") != latest.get("checkpoint_commit"):
+            failures.append(
+                f"turn {turn_id} stored worktree checkpoint does not equal its latest accepted "
+                "native retry pin")
+        if (turn.get("transcript_checkpoint_commit")
+                != latest.get("transcript_checkpoint_commit")):
+            failures.append(
+                f"turn {turn_id} stored transcript checkpoint does not equal its latest accepted "
+                "native retry pin")
     final_turn = turns[-1] if isinstance(turns[-1], dict) else {}
     final_turn_id = final_turn.get("id")
     final_commit = final_turn.get("result_commit")

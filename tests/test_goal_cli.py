@@ -209,6 +209,54 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
     assert any("no accepted passing run" in failure for failure in goal._verify_evidence(record))
 
 
+def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
+    from cli import goal
+
+    checkpoint, result = "2" * 40, "3" * 40
+    transcript_checkpoint, transcript_result = "a" * 40, "b" * 40
+    record = {
+        "schema_version": 1,
+        "goal": {"id": "goal-1", "status": "complete", "evals": []},
+        "trajectory": {
+            "transcript_pruned": False, "pruned_turn_branches": [],
+            "worktree_chain": [],
+            "retry_checkpoint_chain": [{
+                "turn_id": "turn-1", "event_seq": 1, "attempt": 1,
+                "checkpoint_commit": checkpoint, "result_commit": result,
+                "worktree_ancestor": True, "worktree_error": None,
+                "transcript_checkpoint_commit": transcript_checkpoint,
+                "transcript_result_commit": transcript_result,
+                "transcript_ancestor": True, "transcript_error": None,
+            }],
+        },
+        "turns": [{
+            "id": "turn-1", "state": "completed", "attempt": 2,
+            "agent_kind": "codex", "provider_node_id": "node-B",
+            "input_commit": "1" * 40, "checkpoint_commit": checkpoint,
+            "result_commit": result, "transcript_commit": None,
+            "transcript_checkpoint_commit": transcript_checkpoint,
+            "transcript_result_commit": transcript_result,
+        }],
+        "attempt_events": [{
+            "turn_id": "turn-1", "seq": 1, "event": {
+                "type": "task.retry", "reason": "native_harness_failure", "attempt": 1,
+                "previous_provider_id": "node-A", "checkpoint_commit": checkpoint,
+                "transcript_checkpoint_commit": transcript_checkpoint,
+            },
+        }],
+        "inference": [], "eval_runs": [],
+    }
+    assert goal._verify_evidence(record, min_execution_nodes=2) == []
+
+    record["trajectory"]["retry_checkpoint_chain"][0]["worktree_ancestor"] = False
+    assert any("final worktree does not contain" in failure
+               for failure in goal._verify_evidence(record, min_execution_nodes=2))
+    record["trajectory"]["retry_checkpoint_chain"][0]["worktree_ancestor"] = True
+    record["turns"][0]["transcript_checkpoint_commit"] = "c" * 40
+    assert any("stored transcript checkpoint" in failure
+               for failure in goal._verify_evidence(record, min_execution_nodes=2))
+
+
 def test_goal_evidence_verify_refuses_a_broken_handoff(monkeypatch, capsys):
     from cli import goal
     from remote import relay
