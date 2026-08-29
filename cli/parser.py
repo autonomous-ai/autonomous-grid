@@ -1051,8 +1051,8 @@ def _add_project(sub) -> None:
 
 
 def _add_goal(sub) -> None:
-    """A measurable Codex Goal whose turns are ordinary distributed Grid tasks."""
-    goal = sub.add_parser("goal", help="Run measurable Codex Goals across Grid nodes (remote)")
+    """A measurable native-agent Goal whose turns are ordinary distributed Grid tasks."""
+    goal = sub.add_parser("goal", help="Run measurable agent Goals across Grid nodes (remote)")
     actions = goal.add_subparsers(dest="goal_action", required=True)
 
     run = actions.add_parser("run", help="Start a Goal and let Grid continue it until done")
@@ -1064,6 +1064,12 @@ def _add_goal(sub) -> None:
                      help="Maximum cumulative tokens (default 100000).")
     run.add_argument("--tools", default=None, metavar="JSON",
                      help="Observe/act HTTP capability manifest.")
+    run.add_argument("--evals", default=None, metavar="JSON",
+                     help="Independent evaluation manifest checked against result commits.")
+    run.add_argument("--agent", choices=("codex", "claude", "auto"), default="codex",
+                     help="Allowed native Goal harness (default: codex; auto allows both).")
+    run.add_argument("--require", action="append", default=[], metavar="CAPABILITY",
+                     help="Required harness capability; repeat for multiple requirements.")
     run.add_argument("--name", default=None, help="Optional short Goal name.")
     run.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     run.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
@@ -1080,6 +1086,12 @@ def _add_goal(sub) -> None:
     status.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     status.set_defaults(handler=cmd_goal)
+
+    evidence = actions.add_parser(
+        "evidence", help="Export turn, machine, model, commit and evaluation evidence")
+    evidence.add_argument("goal_id")
+    evidence.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    evidence.set_defaults(handler=cmd_goal)
 
     for action, help_text in (("pause", "Stop scheduling new turns"),
                               ("resume", "Resume scheduling turns"),

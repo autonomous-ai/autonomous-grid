@@ -28,6 +28,10 @@ def test_goal_run_loads_tools_and_posts_the_resolved_project(monkeypatch, tmp_pa
     manifest.write_text(json.dumps({"version": 1, "tools": [{
         "name": "tickets", "mode": "observe", "http": {"url": "/tickets"},
     }]}))
+    eval_manifest = tmp_path / "evals.json"
+    eval_manifest.write_text(json.dumps({"version": 1, "evals": [{
+        "type": "file", "name": "README exists", "path": "README.md",
+    }]}))
     monkeypatch.setattr(goal, "_resolve", lambda _args: ("http://relay", "token", "grid"))
     monkeypatch.setattr(remote_task, "_resolve_project", lambda *_args: "project-id")
     captured = {}
@@ -41,14 +45,15 @@ def test_goal_run_loads_tools_and_posts_the_resolved_project(monkeypatch, tmp_pa
     args = SimpleNamespace(
         goal_action="run", project="project-id", objective="Resolve tickets",
         done_when="Backlog is zero", model="grid-model", token_budget=1234,
-        tools=str(manifest), name="support", grid=None, json=True,
+        tools=str(manifest), evals=str(eval_manifest), name="support", grid=None, json=True,
     )
     assert goal.cmd_goal(args) == 0
     assert captured == {
         "project_id": "project-id", "objective": "Resolve tickets",
         "done_when": "Backlog is zero", "model": "grid-model", "token_budget": 1234,
         "tools": [{"name": "tickets", "mode": "observe", "http": {"url": "/tickets"}}],
-        "name": "support",
+        "name": "support", "agents": ["codex"], "required_capabilities": [],
+        "evals": [{"type": "file", "name": "README exists", "path": "README.md"}],
     }
     assert json.loads(capsys.readouterr().out)["id"] == "goal-1"
 
@@ -74,3 +79,18 @@ def test_goal_tools_rejects_a_non_array_manifest(tmp_path):
     manifest.write_text('{"version":1,"tools":"not a list"}')
     with pytest.raises(SystemExit, match="tools array"):
         _tools(str(manifest))
+
+
+def test_goal_evidence_prints_machine_readable_audit_record(monkeypatch, capsys):
+    from cli import goal
+    from remote import relay
+
+    monkeypatch.setattr(goal, "_resolve", lambda _args: ("http://relay", "token", "grid"))
+    monkeypatch.setattr(relay, "get_goal_evidence", lambda *_args: {
+        "goal": {"id": "goal-1"}, "turns": [{"provider_node_id": "node-A"}],
+        "inference": [{"provider_node_id": "gpu-B", "model": "model-1"}],
+        "eval_runs": [],
+    })
+    args = SimpleNamespace(goal_action="evidence", goal_id="goal-1", grid=None)
+    assert goal.cmd_goal(args) == 0
+    assert json.loads(capsys.readouterr().out)["turns"][0]["provider_node_id"] == "node-A"

@@ -1,6 +1,6 @@
-# Distributed Goals — Codex across Grid nodes
+# Distributed Goals — native agents across Grid nodes
 
-`grid goal` gives Codex a durable objective with one measurable stopping condition. It is remote
+`grid goal` gives an agent a durable objective with one measurable stopping condition. It is remote
 mode only. Model inference goes through Grid; agent execution moves among computers already serving
 distributed tasks.
 
@@ -14,15 +14,16 @@ grid project create --name click-game
 grid project init <project-id>
 ```
 
-On every computer allowed to execute Goals, install Codex and run the normal task provider:
+On every computer allowed to execute Goals, install Codex or Claude Code and run the normal task
+provider:
 
 ```bash
 codex --version
 grid join <grid-name> --tasks --tasks-root /short/grid-tasks
 ```
 
-The provider advertises Codex capability only when the `codex` executable is present. Computers
-without it continue serving Claude tasks and inference, but do not claim Codex Goal turns.
+The provider advertises each native Goal harness it can actually run. Restrict a node explicitly
+with `GRID_TASK_AGENT_KINDS=codex` or `GRID_TASK_AGENT_KINDS=claude` when desired.
 
 The Goal's `--model` must name a model available through the Grid Responses API. Codex itself runs
 on the provider; its model requests go back through Grid, so the machine executing the agent and the
@@ -35,7 +36,9 @@ grid goal run --project <project-id> \
   --objective "Build a small playable browser click game" \
   --done-when "index.html, game.js, style.css and README.md exist and the game works" \
   --model <model-name> \
-  --token-budget 100000
+  --token-budget 100000 \
+  --agent auto \
+  --evals ./game-evals.json
 ```
 
 The command prints a Goal id. Use that id to inspect or control the run:
@@ -44,14 +47,33 @@ The command prints a Goal id. Use that id to inspect or control the run:
 grid goal list                    # active, paused and blocked
 grid goal list --all              # includes ended Goal history
 grid goal status <goal-id>
+grid goal evidence <goal-id> > goal-evidence.json
 grid goal pause <goal-id>         # current leased turn may finish; no next turn is queued
 grid goal resume <goal-id>
 grid goal cancel <goal-id>        # ends the Goal and cancels queued/running work
 ```
 
-`objective` says what to achieve. `done-when` is one clear, verifiable finish line. Codex owns the
-decision to stop through its native Goal mechanism; Grid records the resulting native Goal status
-and counters rather than grading the work with a second agent.
+`objective` says what to achieve. `done-when` is one clear, verifiable finish line. The native Goal
+mechanism decides when to nominate completion. If independent evals are configured, Grid checks the
+exact result commit and is the only component allowed to accept that nomination.
+
+For example, `game-evals.json` can require artifacts without trusting the acting agent's report:
+
+```json
+{
+  "version": 1,
+  "evals": [
+    {"type": "file", "name": "page", "path": "index.html", "min_bytes": 10},
+    {"type": "file", "name": "logic", "path": "game.js", "min_bytes": 10},
+    {"type": "file", "name": "styles", "path": "style.css", "min_bytes": 10},
+    {"type": "file", "name": "instructions", "path": "README.md", "min_bytes": 10}
+  ]
+}
+```
+
+Each definition is immutable. Every score is stored with its definition hash, turn, evaluator node,
+and exact Git commit. A failed check keeps the Goal active and becomes relay-authored guidance for
+the next worker. With no eval manifest, native Goal completion remains the stopping decision.
 
 ## What moves between computers
 
@@ -141,6 +163,6 @@ GRID_SRC_REPO=/path/to/autonomous-grid-cli uv run pytest \
   -q tests/e2e_cross_repo/e2e_goal.py -s
 ```
 
-This is topology-equivalent to three machines but still runs on one test host. A release candidate
-should repeat the scenario on three physical nodes to cover networking, sleep and process-manager
-behavior outside the deterministic integration harness.
+This is a single-host distributed-protocol emulation, not physical multi-machine proof. A release
+candidate must also pass [the three-machine acceptance runbook](goals-three-machine-acceptance.md),
+which forbids shared filesystems and records the node/lease/commit chain.

@@ -45,6 +45,7 @@ def save_history(value: list[dict]) -> None:
 def run_turn(node: str) -> tuple[str, str, int]:
     cwd = Path.cwd()
     history = load_history()
+    mixed = os.environ.get("GRID_E2E_GOAL_SCENARIO") == "mixed"
 
     if not (cwd / "index.html").exists():
         if node != "A" or history:
@@ -79,6 +80,21 @@ target.addEventListener('click', () => {
         return "active", "B completed feature 2", 200
 
     if not (cwd / "style.css").exists():
+        if mixed:
+            if node != "C" or history != [{"node": "A", "feature": 1}]:
+                raise RuntimeError(
+                    f"Codex C did not resume its own A checkpoint after Claude B: {history!r}")
+            if "addEventListener('click'" not in (cwd / "game.js").read_text():
+                raise RuntimeError("Codex C did not receive Claude B's committed feature 2")
+            assert not (cwd / "partial-feature-34.tmp").exists(), (
+                "Claude B's uncommitted file crossed machines")
+            (cwd / "style.css").write_text(
+                "body{font:18px system-ui;background:#111827;color:#f9fafb;text-align:center}\n")
+            (cwd / "README.md").write_text(
+                "# Grid Click\n\nCodex, Claude, and Codex completed this game across Grid nodes.\n")
+            history.append({"node": "C", "features": [3, 4], "after": "claude-B"})
+            save_history(history)
+            return "complete", "C completed features 3 and 4 after Claude B", 300
         if node == "B":
             (cwd / "partial-feature-34.tmp").write_text("B died here\n")
             time.sleep(90)

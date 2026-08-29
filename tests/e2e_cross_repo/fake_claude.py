@@ -56,7 +56,7 @@ def _emit(record: dict) -> None:
 # 23, because `--settings` is the one flag that fails OPEN on a binary too old to understand its
 # contents — so a stand-in that could not answer `--version` would fail every task here for a reason
 # that has nothing to do with what these tests are about.
-_VERSION = "2.1.223 (Claude Code)"
+_VERSION = "2.1.251 (Claude Code)"
 
 
 def _parse_argv(argv: list[str]) -> tuple[str, str | None]:
@@ -290,6 +290,40 @@ def main() -> int:
         # Appended, never rewritten: a resume continues the same file and keeps the same id.
         with (transcript / f"{session}.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"sessionId": session, "prompt": prompt}) + "\n")
+
+    # The mixed-harness Goal E2E. This is intentionally inside the ordinary fake Claude binary:
+    # the provider must select Claude through the real capability claim, build `/goal` on the first
+    # slice, and `--resume` the session on the next. No test helper calls this behavior directly.
+    if os.environ.get("GRID_E2E_GOAL_SCENARIO") == "mixed":
+        node = os.environ.get("GRID_E2E_GOAL_NODE")
+        if node != "B":
+            sys.stderr.write(f"fake claude goal unexpectedly reached node {node!r}\n")
+            return 2
+        if not pathlib.Path("game.js").exists():
+            if not prompt.startswith("/goal ") or resume is not None:
+                sys.stderr.write("fake claude did not receive native /goal on its first slice\n")
+                return 2
+            if not pathlib.Path("index.html").exists():
+                sys.stderr.write("fake claude did not receive Codex's committed feature 1\n")
+                return 2
+            pathlib.Path("game.js").write_text(
+                "let score=0;document.querySelector('#target').addEventListener('click',()=>{"
+                "document.querySelector('#score').textContent=String(++score)});\n")
+            _emit({"type": "assistant", "message": {"usage": {
+                "input_tokens": 20, "output_tokens": 10}, "content": [
+                {"type": "text", "text": "Claude completed feature 2"}]}})
+            _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": False,
+                   "reason": "features 3 and 4 remain"}})
+            # Grid interrupts here, after the evaluator checkpoint. If it does not, this timeout
+            # makes the defect loud instead of letting one process consume the whole Goal.
+            time.sleep(90)
+            return 2
+        if resume != session or prompt.startswith("/goal "):
+            sys.stderr.write("fake claude reset /goal instead of resuming its native session\n")
+            return 2
+        pathlib.Path("partial-feature-34.tmp").write_text("Claude B died here\n")
+        time.sleep(90)
+        return 2
 
     merge = _MERGE_INSTRUCTION.search(prompt)
     if merge:

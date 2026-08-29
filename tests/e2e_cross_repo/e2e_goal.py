@@ -16,6 +16,13 @@ import _harness as H
 
 sys.path.insert(0, str(H.GRID_REPO))
 
+GAME_EVALS = [
+    {"type": "file", "name": "game page", "path": "index.html", "min_bytes": 10},
+    {"type": "file", "name": "game logic", "path": "game.js", "min_bytes": 10},
+    {"type": "file", "name": "game styles", "path": "style.css", "min_bytes": 10},
+    {"type": "file", "name": "game instructions", "path": "README.md", "min_bytes": 10},
+]
+
 
 def _tasks(relay: str, token: str, project_id: str, conversation_id: str) -> list[dict]:
     from remote import relay as relay_client
@@ -50,7 +57,7 @@ def test_three_nodes_reclaim_goal_turns_and_finish_one_game(
         relay, owner_token, project_id=project_id,
         objective="Build a small playable browser click game with four features",
         done_when="index.html, game.js, style.css and README.md exist and the Goal is complete",
-        model="fake-grid-model", token_budget=10_000, tools=[])
+        model="fake-grid-model", token_budget=10_000, tools=[], evals=GAME_EVALS)
     conversation_id = goal["id"]
 
     # A finishes feature 1 (turn 1), receives a new relay row, then disappears during feature 2.
@@ -120,3 +127,79 @@ def test_three_nodes_reclaim_goal_turns_and_finish_one_game(
         {"node": "B", "feature": 2},
         {"node": "C", "features": [3, 4]},
     ]
+
+
+def test_three_nodes_reclaim_one_goal_codex_then_claude_then_codex(
+        relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
+    """The production topology in miniature: no shared disk and two opaque native histories."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-mixed-distributed-goal")["id"]
+    H.seed_trunk(relay, owner_token, project_id)
+
+    node_a = spawn_goal_provider(
+        "A", agent_kinds="codex", scenario="mixed", disk_label="mixed-A")
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Build a small playable browser click game with four features",
+        done_when="index.html, game.js, style.css and README.md exist and the Goal is complete",
+        model="fake-grid-model", token_budget=10_000, tools=[],
+        agents=["codex", "claude"], evals=GAME_EVALS)
+    conversation_id = goal["id"]
+
+    assert H.wait_for(
+        lambda: _partial(goal_workspace_root / "mixed-A", "partial-feature-2.tmp"), timeout=20), (
+        f"Codex A never reached feature 2; output:\n{node_a.output()}")
+    rows = _tasks(relay, owner_token, project_id, conversation_id)
+    assert [row["agent_kind"] for row in rows] == ["codex", "codex"]
+    second_turn = rows[1]["id"]
+    node_a.die()
+
+    # B advertises Claude only. It must reclaim A's exact second turn, use native `/goal`, publish
+    # feature 2 and its Claude transcript, then resume that same Claude session for turn 3.
+    node_b = spawn_goal_provider(
+        "B", agent_kinds="claude", scenario="mixed", disk_label="mixed-B")
+    assert H.wait_for(
+        lambda: _partial(goal_workspace_root / "mixed-B", "partial-feature-34.tmp"), timeout=75), (
+        f"Claude B never reclaimed, checkpointed, and resumed; output:\n{node_b.output()}")
+    assert not _partial(goal_workspace_root / "mixed-B", "partial-feature-2.tmp")
+    rows = _tasks(relay, owner_token, project_id, conversation_id)
+    assert len(rows) == 3, rows
+    assert rows[1]["id"] == second_turn and rows[1]["attempt"] == 2
+    assert rows[1]["provider_id"] == node_b.node_id and rows[1]["agent_kind"] == "claude"
+    third_turn = rows[2]["id"]
+    assert rows[2]["agent_kind"] == "claude" and rows[2]["state"] == "running"
+    node_b.die()
+
+    # C advertises Codex only. It resumes Codex's own A-era app-server state while receiving the
+    # files and Claude transcript B published through the shared side ref.
+    node_c = spawn_goal_provider(
+        "C", agent_kinds="codex", scenario="mixed", disk_label="mixed-C")
+    complete = H.wait_for(lambda: _completed_goal(
+        relay, owner_token, conversation_id), timeout=75)
+    assert complete, f"Codex C did not complete the mixed Goal; output:\n{node_c.output()}"
+    rows = _tasks(relay, owner_token, project_id, conversation_id)
+    assert rows[2]["id"] == third_turn and rows[2]["attempt"] == 2
+    assert rows[2]["provider_id"] == node_c.node_id and rows[2]["agent_kind"] == "codex"
+    assert complete["turns_completed"] == 3
+
+    destination = tmp_path / "mixed-game"
+    destination.mkdir()
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=rows[2]["branch"], commit=rows[2]["result_commit"], project_id=project_id)
+    assert {"index.html", "game.js", "style.css", "README.md"} <= {
+        path.name for path in destination.iterdir()}
+    assert not (destination / "partial-feature-2.tmp").exists()
+    assert not (destination / "partial-feature-34.tmp").exists()
+
+    codex_histories = list((goal_workspace_root / "mixed-C").rglob("fake-history.json"))
+    assert len(codex_histories) == 1
+    assert json.loads(codex_histories[0].read_text()) == [
+        {"node": "A", "feature": 1},
+        {"node": "C", "features": [3, 4], "after": "claude-B"},
+    ]
+    claude_transcripts = list((goal_workspace_root / "mixed-C").rglob("*.jsonl"))
+    assert claude_transcripts, "C did not fetch Claude B's opaque transcript side-ref"

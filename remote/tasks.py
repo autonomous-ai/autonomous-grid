@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import os
 import queue
+import re
+import signal
 import subprocess
 import sys
 import threading
@@ -30,7 +32,8 @@ from collections import deque
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
-from . import relay, task_agent, task_capacity, task_codex, task_evict, task_repo, task_stream
+from . import (relay, task_agent, task_capacity, task_codex, task_codex_proxy, task_evict,
+               task_repo, task_stream)
 
 # Queue sentinels. Plain `object()`s rather than None or "" — a task's output legitimately contains
 # blank lines, and both would be indistinguishable from one. `_EOF` is posted once per pipe.
@@ -196,10 +199,12 @@ def claim_once(state: Any) -> dict[str, Any] | None:
     """
     token = state.token()
     try:
-        return relay.claim_task(state.signaling_url, token, agent_kinds=_agent_kinds())
+        return relay.claim_task(state.signaling_url, token, agent_kinds=_agent_kinds(),
+                                agent_profiles=_agent_profiles())
     except relay.RelayUnauthorized:
         if state.refresh(stale_token=token):
-            return relay.claim_task(state.signaling_url, state.token(), agent_kinds=_agent_kinds())
+            return relay.claim_task(state.signaling_url, state.token(), agent_kinds=_agent_kinds(),
+                                    agent_profiles=_agent_profiles())
         raise
 
 
@@ -239,10 +244,50 @@ def report_once(serve_state: Any, task_id: str, *, state: str, output: str | Non
 
 def _agent_kinds() -> tuple[str, ...]:
     """Harnesses this process can really execute; never advertise Codex optimistically."""
-    kinds = ["claude"]
-    if task_codex.available():
+    configured = (os.getenv("GRID_TASK_AGENT_KINDS") or "claude,codex").replace(",", " ").split()
+    allowed = {kind for kind in configured if kind in ("claude", "codex")}
+    invalid = [kind for kind in configured if kind not in ("claude", "codex")]
+    for kind in invalid:
+        _warn(f"ignoring unsupported harness {kind!r} in GRID_TASK_AGENT_KINDS")
+    # Empty or wholly invalid is fail closed: this provider claims no tasks instead of running a
+    # harness its operator meant to disable. The task loop still polls with a non-empty wire shape,
+    # so retain Claude only for the legacy relay contract when the variable was not explicitly set.
+    kinds = ["claude"] if "claude" in allowed else []
+    if "codex" in allowed and task_codex.available():
         kinds.append("codex")
     return tuple(kinds)
+
+
+_CAPABILITY = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
+
+
+def _declared_capabilities(env_name: str) -> set[str]:
+    """Operator-declared harness features. Invalid names fail closed and are said locally."""
+    answer: set[str] = set()
+    for value in (os.getenv(env_name) or "").replace(",", " ").split():
+        if _CAPABILITY.fullmatch(value):
+            answer.add(value)
+        else:
+            _warn(f"ignoring invalid Goal capability {value!r} in {env_name}")
+    return answer
+
+
+def _agent_profiles() -> tuple[dict[str, Any], ...]:
+    """Capabilities are harness-scoped; a binary alone proves no privileged integration."""
+    kinds = _agent_kinds()
+    profiles: list[dict[str, Any]] = []
+    if "claude" in kinds:
+        claude_capabilities = _declared_capabilities("GRID_CLAUDE_TASK_CAPABILITIES")
+        if task_agent.distributed_goal_available():
+            claude_capabilities.add("native_goal")
+        profiles.append({"kind": "claude", "capabilities": sorted(claude_capabilities)})
+    if "codex" in kinds:
+        profiles.append({
+            "kind": "codex",
+            "capabilities": sorted({"native_goal", "dynamic_tools"}
+                                   | _declared_capabilities("GRID_CODEX_GOAL_CAPABILITIES")),
+        })
+    return tuple(profiles)
 
 
 class _Collected:
@@ -420,7 +465,8 @@ def _drain(stream, sink: _Tail, queued: "queue.Queue | None" = None) -> None:
 def _run_child(argv: list[str], *, timeout: float, publish: Callable[..., None],
                cwd: str | None = None, env: dict[str, str] | None = None,
                translator: Any = None,
-               on_spawn: Callable[[subprocess.Popen], None] | None = None) -> tuple[int, str]:
+               on_spawn: Callable[[subprocess.Popen], None] | None = None,
+               stop_when: Callable[[], bool] | None = None) -> tuple[int, str]:
     """Run `argv`, publishing each stdout line as it arrives. Returns `(returncode, stdout)`.
 
     Raises `subprocess.TimeoutExpired` when the wall-clock budget is spent, so the caller's existing
@@ -482,6 +528,7 @@ def _run_child(argv: list[str], *, timeout: float, publish: Callable[..., None],
     # is exactly the run whose last lines matter most. Both reach EOF when the child exits, and the
     # deadline still governs a child that closes one and holds the other open.
     open_pipes = 2
+    intentionally_stopped = False
     try:
         while open_pipes:
             remaining = deadline - time.monotonic()
@@ -505,6 +552,13 @@ def _run_child(argv: list[str], *, timeout: float, publish: Callable[..., None],
             if channel is _STDOUT:
                 lines.add(line)
                 reporter.stdout(line)
+                if (not intentionally_stopped and stop_when is not None and stop_when()
+                        and proc.poll() is None):
+                    # Claude Code documents Ctrl-C as the way to stop a non-interactive `/goal`
+                    # while preserving an active Goal for `--resume`. We send it only AFTER its
+                    # evaluator attachment was translated and durably published.
+                    intentionally_stopped = True
+                    proc.send_signal(signal.SIGINT)
             else:
                 reporter.stderr(line)
 
@@ -518,7 +572,7 @@ def _run_child(argv: list[str], *, timeout: float, publish: Callable[..., None],
             except (Exception, SystemExit):
                 pass
 
-    if proc.returncode != 0:
+    if proc.returncode != 0 and not intentionally_stopped:
         # `!= 0`, never `> 0`: a killed child carries a NEGATIVE code (`-9` for SIGKILL), and `> 0`
         # would report the one outcome this seam exists to catch — a task whose agent was killed —
         # as a success (ADR 0032 D-e).
@@ -584,6 +638,11 @@ def run_task(job: dict[str, Any],
     agent_kind = str(job.get("agent_kind") or "claude")
     if agent_kind not in ("claude", "codex"):
         return failed(f"the relay requested unsupported agent kind {agent_kind!r}")
+    goal = job.get("goal")
+    is_claude_goal = agent_kind == "claude" and isinstance(goal, dict)
+    if is_claude_goal:
+        translator = task_stream.GoalStreamTranslator(
+            on_rate_limit=capacity.observe if capacity is not None else None)
 
     # WHOSE workspace this task runs in (ADR 0033 D-g). Refused rather than defaulted, and this is
     # the one wire field on this path that gets that treatment: a missing key would put the agent in
@@ -798,6 +857,85 @@ def run_task(job: dict[str, Any],
         # attempt on a task whose agent succeeded every time, and the durable log would blame
         # `lease_expired`. One truncation is worth more than that whole failure mode.
         reset_reason = task_stream.redact(resume.reason)[:_MAX_SESSION_RESET_REASON_CHARS]
+
+    if is_claude_goal:
+        assert isinstance(translator, task_stream.GoalStreamTranslator)
+        if inference is None:
+            return failed("the Claude Goal task has no Grid inference endpoint")
+        objective = goal.get("objective")
+        done_when = goal.get("done_when")
+        model = goal.get("model")
+        if any(not isinstance(value, str) or not value.strip()
+               for value in (objective, done_when, model)):
+            return failed("the Claude Goal metadata is missing objective, done_when, or model")
+        first_prompt = f"/goal {objective.strip()}\n\nDone when: {done_when.strip()}"
+        argv = task_agent.agent_argv(
+            binary, prompt if resume.session_id else first_prompt,
+            workspace=workspace, resume=resume.session_id)
+        child_env = task_agent.child_env(
+            author=task_repo.identity_or_default(
+                job.get("author_name"), job.get("author_email")),
+            workspace=workspace)
+        proxy = task_codex_proxy.InferenceProxy(inference.base_url, inference.token)
+        # Map every Claude tier to the Goal's explicit Grid model. In particular `/goal` evaluates
+        # with the configured small/fast model; leaving that alias untouched would send only the
+        # actor through Grid while its native evaluator tried an Anthropic account on this node.
+        child_env.update({
+            "ANTHROPIC_BASE_URL": proxy.anthropic_base_url,
+            "ANTHROPIC_AUTH_TOKEN": proxy.child_token,
+            "ANTHROPIC_MODEL": model.strip(),
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model.strip(),
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model.strip(),
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model.strip(),
+        })
+        child_env.pop("ANTHROPIC_API_KEY", None)
+        started = time.monotonic()
+        try:
+            proxy.start()
+            _returncode, _raw = _run_child(
+                argv, timeout=timeout, publish=sink, cwd=str(workspace), env=child_env,
+                translator=translator, on_spawn=on_spawn,
+                # A terminal verdict makes Claude exit itself. An unmet verdict would immediately
+                # start another native turn, so Ctrl-C at this exact attachment is Grid's slice.
+                stop_when=lambda: (translator.goal_evaluated
+                                   and not translator.goal_met
+                                   and not translator.goal_impossible))
+        except subprocess.TimeoutExpired:
+            return failed(f"Claude Goal slice timed out after {timeout:.0f}s")
+        except _ChildFailed as exc:
+            return failed(f"Claude Goal exited {exc.returncode}: {exc.stderr[-500:].strip()}")
+        except (Exception, SystemExit) as exc:
+            return failed(f"could not run Claude Goal slice: {exc}")
+        finally:
+            try:
+                proxy.stop()
+            except (Exception, SystemExit):
+                pass
+        if not translator.goal_evaluated:
+            return failed("Claude Goal exited without a native evaluator checkpoint")
+
+        def goal_counter(name: str) -> int:
+            value = goal.get(name)
+            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+        slice_tokens = max(translator.observed_tokens, translator.goal_tokens or 0)
+        status = ("failed" if translator.goal_impossible else
+                  "complete" if translator.goal_met else "active")
+        total_tokens = goal_counter("tokens_used") + slice_tokens
+        token_budget = goal.get("token_budget")
+        if (status == "active" and isinstance(token_budget, int)
+                and not isinstance(token_budget, bool) and total_tokens >= token_budget):
+            status = "budget_limited"
+        output = translator.last_output or translator.result_text or translator.goal_reason
+        return TaskOutcome(
+            "completed", output[:_TASK_OUTPUT_MAX_CHARS] if output else None, None,
+            session_id=translator.session_id, session_reset_reason=reset_reason,
+            goal_status=status,
+            goal_turns_completed=goal_counter("turns_completed") + 1,
+            goal_tokens_used=total_tokens,
+            goal_time_used_seconds=(goal_counter("time_used_seconds")
+                                    + max(1, int(time.monotonic() - started))),
+        )
 
     # The workspace goes in because the confinement policy is built around it: it is the one
     # directory the agent must be able to read and write while `$HOME` around it is denied.
@@ -1116,10 +1254,9 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
             "on_spawn": lambda proc: _spawned(spawned, renewer, proc),
             "capacity": capacity,
         }
-        # Keep the established Claude runner call contract byte-for-byte compatible. Grid's bearer
-        # token is needed only by the loopback proxy for Codex model calls, and should not be
-        # constructed or threaded through ordinary tasks.
-        if str(job.get("agent_kind") or "claude") == "codex":
+        # Ordinary Claude tasks keep their established call contract. Native Goal turns of either
+        # harness use a loopback credential boundary and route their model calls through Grid.
+        if str(job.get("agent_kind") or "claude") == "codex" or isinstance(job.get("goal"), dict):
             run_kwargs["inference"] = task_codex.GridInference(
                 state.signaling_url, state.token())
         outcome = run_task(job, publisher.publish, **run_kwargs)
@@ -1212,7 +1349,7 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
             # Preserve the established Claude report shape. Besides compatibility with older
             # relays, omitting absent Goal fields keeps `goal_status: null` from being mistaken for
             # an attempted checkpoint by an intermediary that validates keys rather than values.
-            if str(job.get("agent_kind") or "claude") == "codex":
+            if isinstance(job.get("goal"), dict):
                 report_kwargs.update({
                     "goal_status": outcome.goal_status,
                     "goal_turns_completed": outcome.goal_turns_completed,

@@ -11,7 +11,7 @@ import httpx
 
 
 class InferenceProxy:
-    """Expose only Responses on loopback; keep the Grid bearer token out of Codex's env."""
+    """Expose native agent inference dialects on loopback; keep Grid's bearer out of children."""
 
     def __init__(self, upstream_base: str, upstream_token: str):
         self.upstream_base = upstream_base.rstrip("/")
@@ -36,6 +36,11 @@ class InferenceProxy:
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.server.server_address[1]}/v1"
 
+    @property
+    def anthropic_base_url(self) -> str:
+        # Claude Code appends `/v1/messages` itself.
+        return f"http://127.0.0.1:{self.server.server_address[1]}"
+
     def start(self) -> None:
         self.thread.start()
 
@@ -49,8 +54,16 @@ class InferenceProxy:
         if not secrets.compare_digest(supplied, self.child_token):
             self._error(handler, 401, "invalid Goal inference token")
             return
-        if handler.path.split("?", 1)[0] not in ("/responses", "/v1/responses"):
-            self._error(handler, 404, "Goal proxy only serves /responses")
+        path = handler.path.split("?", 1)[0]
+        destinations = {
+            "/responses": "responses",
+            "/v1/responses": "responses",
+            "/v1/messages": "messages",
+        }
+        destination = destinations.get(path)
+        if destination is None:
+            self._error(handler, 404, "Goal proxy only serves /responses and /v1/messages")
+            return
             return
         try:
             length = int(handler.headers.get("Content-Length", "0"))
@@ -70,7 +83,7 @@ class InferenceProxy:
         started = False
         try:
             with httpx.Client(timeout=httpx.Timeout(30.0, read=None)) as client, client.stream(
-                "POST", f"{self.upstream_base}/responses", content=body, headers=headers
+                "POST", f"{self.upstream_base}/{destination}", content=body, headers=headers
             ) as response:
                 handler.send_response(response.status_code)
                 for name in ("content-type", "cache-control", "openai-processing-ms"):

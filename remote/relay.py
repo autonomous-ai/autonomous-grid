@@ -315,6 +315,7 @@ def claim_task(
     access_token: str,
     *,
     agent_kinds: tuple[str, ...] = ("claude",),
+    agent_profiles: tuple[dict[str, Any], ...] | None = None,
     timeout: float = TASK_CLAIM_TIMEOUT,
 ) -> dict[str, Any] | None:
     """Long-poll for one task and claim it (``POST /relay/v1/tasks/claim``).
@@ -344,8 +345,12 @@ def claim_task(
     """
     try:
         with _client(signaling_url, access_token, timeout=timeout) as client:
-            kwargs = ({"json": {"agent_kinds": list(agent_kinds)}}
-                      if agent_kinds != ("claude",) else {})
+            body: dict[str, Any] = {}
+            if agent_kinds != ("claude",) or agent_profiles is not None:
+                body["agent_kinds"] = list(agent_kinds)
+            if agent_profiles is not None:
+                body["agent_profiles"] = list(agent_profiles)
+            kwargs = {"json": body} if body else {}
             resp = client.post("/relay/v1/tasks/claim", **kwargs)
     except httpx.HTTPError as exc:
         raise RelayError(f"claim_task transport error: {exc}") from None
@@ -977,10 +982,16 @@ def create_task(
 
 def create_goal(signaling_url: str, access_token: str, *, project_id: str, objective: str,
                 done_when: str, model: str, token_budget: int | None,
-                tools: list[dict[str, Any]] | None = None, name: str | None = None) -> dict[str, Any]:
+                tools: list[dict[str, Any]] | None = None, name: str | None = None,
+                agents: list[str] | None = None,
+                required_capabilities: list[str] | None = None,
+                evals: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     body: dict[str, Any] = {
         "project_id": project_id, "objective": objective, "done_when": done_when,
         "model": model, "token_budget": token_budget, "tools": tools or [],
+        "agents": agents or ["codex"],
+        "required_capabilities": required_capabilities or [],
+        "evals": evals or [],
     }
     if name:
         body["name"] = name
@@ -999,6 +1010,11 @@ def list_goals(signaling_url: str, access_token: str, *, all: bool = False) -> l
 def get_goal(signaling_url: str, access_token: str, goal_id: str) -> dict[str, Any]:
     return _task_oneshot(signaling_url, access_token, "GET",
                          f"/relay/v1/goals/{quote(goal_id, safe='')}")
+
+
+def get_goal_evidence(signaling_url: str, access_token: str, goal_id: str) -> dict[str, Any]:
+    return _task_oneshot(signaling_url, access_token, "GET",
+                         f"/relay/v1/goals/{quote(goal_id, safe='')}/evidence")
 
 
 def control_goal(signaling_url: str, access_token: str, goal_id: str,

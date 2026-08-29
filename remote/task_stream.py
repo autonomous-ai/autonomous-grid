@@ -284,6 +284,78 @@ class StreamTranslator:
         return True
 
 
+class GoalStreamTranslator(StreamTranslator):
+    """Claude Code stream plus the native `/goal` attachment that ends one Grid slice."""
+
+    def __init__(self, on_rate_limit: Callable[[Any], None] | None = None) -> None:
+        super().__init__(on_rate_limit=on_rate_limit)
+        self.goal_condition: str | None = None
+        self.goal_evaluated = False
+        self.goal_met = False
+        self.goal_impossible = False
+        self.goal_reason: str | None = None
+        self.goal_iterations: int | None = None
+        self.goal_duration_ms: int | None = None
+        self.goal_tokens: int | None = None
+        self.observed_tokens = 0
+        self.last_output: str | None = None
+
+    def _translate(self, record: dict[str, Any]) -> list[Event]:
+        if record.get("type") == "attachment":
+            attachment = record.get("attachment")
+            if isinstance(attachment, dict) and attachment.get("type") == "goal_status":
+                return self._goal_status(attachment)
+        events = super()._translate(record)
+        if record.get("type") == "assistant":
+            message = record.get("message")
+            usage = message.get("usage") if isinstance(message, dict) else None
+            if isinstance(usage, dict):
+                for key in ("input_tokens", "output_tokens"):
+                    value = usage.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        self.observed_tokens += value
+            content = message.get("content") if isinstance(message, dict) else None
+            for block in content if isinstance(content, list) else []:
+                text = block.get("text") if isinstance(block, dict) else None
+                if isinstance(text, str) and text and not record.get("is_meta"):
+                    self.last_output = redact(text)
+        return events
+
+    def _goal_status(self, attachment: dict[str, Any]) -> list[Event]:
+        condition = attachment.get("condition")
+        if isinstance(condition, str):
+            self.goal_condition = condition
+        # The first attachment only says the slash command installed its session hook. Stopping
+        # here would create a zero-work loop, so only an evaluator reason or terminal flag ends a
+        # Grid slice.
+        if attachment.get("sentinel") is True:
+            return [("goal.claude.set", {"condition": bounded(condition)
+                     if isinstance(condition, str) else None})]
+        reason = attachment.get("reason")
+        impossible = attachment.get("impossible") is True or attachment.get("failed") is True
+        met = attachment.get("met") is True
+        if not isinstance(reason, str) and not (met or impossible):
+            return []
+        self.goal_evaluated = True
+        self.goal_met = met
+        self.goal_impossible = impossible
+        self.goal_reason = redact(reason) if isinstance(reason, str) else None
+        for field, attr in (("iterations", "goal_iterations"),
+                            ("durationMs", "goal_duration_ms"),
+                            ("tokens", "goal_tokens")):
+            value = attachment.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                setattr(self, attr, value)
+        return [("goal.claude.evaluated", {
+            "met": met,
+            "impossible": impossible,
+            "reason": bounded(self.goal_reason) if self.goal_reason else None,
+            "iterations": self.goal_iterations,
+            "duration_ms": self.goal_duration_ms,
+            "tokens": self.goal_tokens,
+        })]
+
+
 # The keys a tool uses to name the thing it is acting on, in the order they are preferred. Only
 # these — a tool's `input` is its whole argument object, and an `Edit` carries the entire old and new
 # text, so anything broader would put a 90 KB blob inside an event the relay caps at 64 KiB.

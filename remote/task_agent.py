@@ -674,6 +674,9 @@ def agent_argv(binary: str, prompt: str, *, workspace: Path,
 # contents: unknown settings keys are dropped in silence, so an old agent would run unconfined and
 # report success. The flags refuse themselves; the policy cannot.
 MIN_CLAUDE_VERSION = (2, 1, 221)
+# Claude restored active Goals on every `--resume` route from this release. Earlier builds can run
+# `/goal`, but a distributed worker may silently lose it on the handoff route Grid uses.
+MIN_DISTRIBUTED_GOAL_VERSION = (2, 1, 239)
 _VERSION_TIMEOUT_SECONDS = 10
 # `claude --version` answers `2.1.223 (Claude Code)`. Anchored at the start so a wrapper that prints
 # its own banner first is treated as unreadable rather than having a number picked out of its prose.
@@ -746,6 +749,14 @@ def resolve_binary() -> str:
         + (f" (couldn't check: {unchecked})" if unchecked else "")
         + f"; install it with: {claude_install.install_instruction()}"
     )
+
+
+def distributed_goal_available() -> bool:
+    """Whether this provider can resume Claude's native `/goal` without a known route gap."""
+    try:
+        return _binary_version(resolve_binary()) >= MIN_DISTRIBUTED_GOAL_VERSION
+    except (Exception, SystemExit):
+        return False
 
 
 def preflight() -> None:

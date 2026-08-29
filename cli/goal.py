@@ -26,6 +26,22 @@ def _tools(path: str | None) -> list[dict]:
     return value
 
 
+def _evals(path: str | None) -> list[dict]:
+    if not path:
+        return []
+    source = Path(path).expanduser()
+    try:
+        value = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Could not read Goal evals from {source}: {exc}") from None
+    if isinstance(value, dict) and value.get("version") == 1:
+        value = value.get("evals")
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise SystemExit(
+            "Goal evals must be a JSON array, or an object with version 1 and evals array.")
+    return value
+
+
 def _show(goal: dict, as_json: bool) -> None:
     if as_json:
         print(json.dumps(goal, indent=2))
@@ -35,6 +51,12 @@ def _show(goal: dict, as_json: bool) -> None:
     print(f"  done when  {goal.get('done_when')}")
     print(f"  progress   {goal.get('turns_completed', 0)} turns · "
           f"{goal.get('tokens_used', 0)} tokens")
+    if goal.get("evals"):
+        last = goal.get("last_eval") or {}
+        results = last.get("results") or []
+        passed = sum(bool(item.get("passed")) for item in results)
+        suffix = f" · last {passed}/{len(results)} passed" if results else ""
+        print(f"  evals      {len(goal['evals'])} checks{suffix}")
     if goal.get("turn_id"):
         print(f"  first turn {goal['turn_id']}")
 
@@ -49,10 +71,14 @@ def cmd_goal(args: argparse.Namespace) -> int:
     base, token, _label = _resolve(args)
     if args.goal_action == "run":
         project_id = _resolve_project(base, token, args.project)
+        agent = getattr(args, "agent", "codex")
         goal = relay.create_goal(
             base, token, project_id=project_id, objective=args.objective,
             done_when=args.done_when, model=args.model, token_budget=args.token_budget,
-            tools=_tools(args.tools), name=args.name)
+            tools=_tools(args.tools), name=args.name,
+            agents=["codex", "claude"] if agent == "auto" else [agent],
+            required_capabilities=getattr(args, "require", []),
+            evals=_evals(getattr(args, "evals", None)))
         _show(goal, args.json)
         return 0
     if args.goal_action == "list":
@@ -67,6 +93,9 @@ def cmd_goal(args: argparse.Namespace) -> int:
         return 0
     if args.goal_action == "status":
         goal = relay.get_goal(base, token, args.goal_id)
+    elif args.goal_action == "evidence":
+        print(json.dumps(relay.get_goal_evidence(base, token, args.goal_id), indent=2))
+        return 0
     else:
         goal = relay.control_goal(base, token, args.goal_id, args.goal_action)
     _show(goal, args.json)

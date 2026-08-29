@@ -166,28 +166,32 @@ def goal_workspace_root():
 
 
 @pytest.fixture
-def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, goal_workspace_root,
+def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, goal_workspace_root,
                         tmp_path_factory):
     """A real task-loop process advertising Codex and using a node-private task root."""
     started: list[H.Provider] = []
     handles: list = []
 
-    def _spawn(label: str):
+    def _spawn(label: str, *, agent_kinds: str = "codex", scenario: str = "codex",
+               disk_label: str | None = None):
         node_id, node_token = provider_nodes[label]
         env = {
             **os.environ,
-            "PATH": f"{fake_codex_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "PATH": (f"{fake_codex_bin}{os.pathsep}{fake_agent_bin}{os.pathsep}"
+                     f"{os.environ.get('PATH', '')}"),
             "GRID_REPO": str(H.GRID_REPO),
             "GRID_SIGNALING_URL": relay,
             "GRID_NODE_ID": node_id,
             "GRID_TOKEN": node_token,
             "GRID_RENEW_SECONDS": str(H.RENEW_SECONDS),
-            "GRID_TASK_ROOT": str(goal_workspace_root / label),
+            "GRID_TASK_ROOT": str(goal_workspace_root / (disk_label or label)),
             "GRID_TASK_TIMEOUT_SECONDS": "120",
             "GRID_E2E_GOAL_NODE": label,
+            "GRID_E2E_GOAL_SCENARIO": scenario,
+            "GRID_TASK_AGENT_KINDS": agent_kinds,
             # The task runner intentionally allowlists child env. This test-only selector is
             # explicit operator passthrough, not an accidental inheritance of provider secrets.
-            "GRID_TASK_ENV_PASSTHROUGH": "GRID_E2E_GOAL_NODE",
+            "GRID_TASK_ENV_PASSTHROUGH": "GRID_E2E_GOAL_NODE,GRID_E2E_GOAL_SCENARIO",
         }
         log_path = tmp_path_factory.mktemp(f"goal-provider-{label}") / "provider.log"
         handle = open(log_path, "w", buffering=1)
