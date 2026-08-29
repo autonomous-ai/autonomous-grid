@@ -72,6 +72,7 @@ from .logical_test import (
     positive_tokens,
     positive_gib_csv,
     nonnegative_cost_csv,
+    workload_model_binding,
     real_request_count,
     real_user_count,
 )
@@ -225,6 +226,18 @@ def _add_logical_test(sub) -> None:
         default=[],
         metavar="GGUF",
         help="Additional cached GGUF candidate for real portfolio competition; repeatable.",
+    )
+    start.add_argument(
+        "--workload-model",
+        dest="workload_models",
+        action="append",
+        type=workload_model_binding,
+        default=[],
+        metavar="WORKLOAD=GGUF",
+        help=(
+            "Bind a real workload capability to a cached GGUF for autonomous portfolio "
+            "selection; repeatable (for example coding=qwen-coder.gguf)."
+        ),
     )
     start.add_argument("--port", type=int, default=22_100, help="Grid control/API port.")
     start.add_argument(

@@ -26,7 +26,7 @@ import httpx
 
 from shared import jsonio, paths, run_records
 from shared.allocator.auth import mint_tenant_attestation
-from shared.allocator.intelligence import anonymous_tenant_cohort
+from shared.allocator.intelligence import KNOWN_WORKLOADS, anonymous_tenant_cohort
 from shared.allocator.runtime import LlamaCppBackend
 
 DEFAULT_MODEL = "SmolLM2-135M-Instruct-Q3_K_M.gguf"
@@ -116,6 +116,36 @@ def nonnegative_cost_csv(raw: str) -> tuple[float, ...]:
     return values
 
 
+def workload_model_binding(raw: str) -> tuple[str, str]:
+    """Parse one real-demo capability binding such as ``coding=coder.gguf``."""
+
+    workload, separator, model = raw.partition("=")
+    workload = workload.strip().lower()
+    model = model.strip()
+    if not separator or workload not in KNOWN_WORKLOADS or not model:
+        choices = ", ".join(sorted(KNOWN_WORKLOADS))
+        raise argparse.ArgumentTypeError(
+            f"{raw!r} must be WORKLOAD=GGUF, where WORKLOAD is one of: {choices}"
+        )
+    if len(model) > 1_024:
+        raise argparse.ArgumentTypeError("model filename is too long")
+    return workload, model
+
+
+def _workload_model_map(
+    bindings: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for workload, model in bindings:
+        prior = result.get(workload)
+        if prior is not None and prior != model:
+            raise SystemExit(
+                f"Workload {workload!r} is bound to both {prior!r} and {model!r}."
+            )
+        result[workload] = model
+    return result
+
+
 def _root() -> Path:
     return paths.run_dir() / "logical-test"
 
@@ -170,6 +200,7 @@ def _status_payload(record: dict[str, Any] | None = None) -> dict[str, Any]:
         "model": str(record.get("model") or "") if record else "",
         "portfolio_model": str(record.get("portfolio_model") or "") if record else "",
         "portfolio_models": list(record.get("portfolio_models") or []) if record else [],
+        "workload_models": dict(record.get("workload_models") or {}) if record else {},
         "text_machines": int(record.get("text_machines") or 0) if record else 0,
         "include_comfyui": bool(record.get("include_comfyui", False)) if record else False,
         "media_bundle": str(record.get("media_bundle") or "") if record else "",
@@ -240,6 +271,15 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
     )
     if portfolio_models:
         print(f"  portfolio {', '.join(portfolio_models)}")
+    workload_models = payload.get("workload_models") or {}
+    if workload_models:
+        print(
+            "  capabilities "
+            + " · ".join(
+                f"{workload}→{candidate}"
+                for workload, candidate in sorted(workload_models.items())
+            )
+        )
     frameworks = ["llama.cpp"]
     if payload.get("include_comfyui"):
         frameworks.append(f"comfyui/{payload.get('media_bundle') or 'media'}")
@@ -376,10 +416,15 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
 
 
 def cmd_test_start(args: argparse.Namespace) -> int:
+    workload_models = _workload_model_map(args.workload_models or [])
     portfolio_models = tuple(
         dict.fromkeys(
             model
-            for model in (args.portfolio_model, *(args.candidate_models or ()))
+            for model in (
+                args.portfolio_model,
+                *(args.candidate_models or ()),
+                *workload_models.values(),
+            )
             if model and model != args.model
         )
     )
@@ -390,6 +435,7 @@ def cmd_test_start(args: argparse.Namespace) -> int:
             or str(existing.get("model") or "") != args.model
             or str(existing.get("portfolio_model") or "") != args.portfolio_model
             or tuple(existing.get("portfolio_models") or ()) != portfolio_models
+            or dict(existing.get("workload_models") or {}) != workload_models
             or bool(existing.get("include_comfyui", False)) != args.include_comfyui
             or str(existing.get("media_bundle") or "")
             != (args.media_bundle if args.include_comfyui else "")
@@ -468,6 +514,7 @@ def cmd_test_start(args: argparse.Namespace) -> int:
             "model": args.model,
             "portfolio_model": args.portfolio_model,
             "portfolio_models": list(portfolio_models),
+            "workload_models": workload_models,
             "include_comfyui": args.include_comfyui,
             "media_bundle": args.media_bundle if args.include_comfyui else "",
             "comfyui_port": args.comfyui_port,
@@ -502,6 +549,7 @@ def cmd_test_start(args: argparse.Namespace) -> int:
         "model": args.model,
         "portfolio_model": args.portfolio_model,
         "portfolio_models": list(portfolio_models),
+        "workload_models": workload_models,
         "include_comfyui": args.include_comfyui,
         "media_bundle": args.media_bundle if args.include_comfyui else "",
         "text_capacities_gib": list(args.text_capacities_gib or ()),
@@ -863,20 +911,37 @@ def _real_users(count: int, *, baseline: str, specialist: str) -> tuple[_RealUse
     return tuple(users)
 
 
-def _distinct_affinity_user_ids(count: int) -> tuple[str, ...]:
+def _distinct_affinity_user_ids(
+    count: int,
+    *,
+    namespace: str = "unresolved-coding",
+) -> tuple[str, ...]:
     """Create deterministic fixture IDs that occupy distinct anonymous allocator cohorts."""
 
     result: list[str] = []
     cohorts: set[str] = set()
     index = 1
     while len(result) < count:
-        user_id = f"user-unresolved-coding-{index}"
+        user_id = f"user-{namespace}-{index}"
         cohort = anonymous_tenant_cohort(hashlib.sha256(user_id.encode()).digest())
         if cohort not in cohorts:
             result.append(user_id)
             cohorts.add(cohort)
         index += 1
     return tuple(result)
+
+
+_WORKLOAD_PROMPTS = {
+    "coding": "Debug this Python API function and propose one regression unit test.",
+    "research": "Research and compare two retrieval approaches using evidence from papers.",
+    "marketing": "Write a marketing campaign headline for a privacy-first local AI product.",
+    "sales": "Draft a sales follow-up for a customer evaluating private AI infrastructure.",
+    "design": "Design a simple dashboard layout and explain its typography and hierarchy.",
+    "general": "Explain one practical benefit of running AI models locally.",
+    "embedding": "Explain how embedding vectors support semantic retrieval.",
+    "image": "Create an image concept for a privacy-first local AI product.",
+    "video": "Create a video concept for a privacy-first local AI product.",
+}
 
 
 def _real_chat_request(
@@ -1601,6 +1666,459 @@ def cmd_test_compete(args: argparse.Namespace) -> int:
     return 0
 
 
+def _workload_scores_for_model(
+    workload_models: dict[str, str], model_id: str
+) -> list[list[Any]]:
+    return [
+        [workload, 1.0]
+        for workload, candidate in sorted(workload_models.items())
+        if candidate == model_id
+    ]
+
+
+def _send_real_unresolved_workload(
+    endpoint: str,
+    workload: str,
+    *,
+    token: str,
+    max_tokens: int,
+    timeout: float,
+) -> tuple[_RealChatResult, ...]:
+    prompt = _WORKLOAD_PROMPTS[workload]
+    user_ids = _distinct_affinity_user_ids(3, namespace=f"unresolved-{workload}")
+    results = tuple(
+        _real_chat_request(
+            endpoint,
+            _RealUser(
+                user_id=user_ids[index % len(user_ids)],
+                role=workload,
+                model="auto",
+                prompt=prompt,
+            ),
+            max_tokens=max_tokens,
+            timeout=timeout,
+            tenant_attestation_secret=token,
+        )
+        for index in range(12)
+    )
+    unexpected = [item for item in results if item.status_code != 503]
+    if unexpected:
+        raise SystemExit(
+            f"Expected router-free {workload} discovery requests to return HTTP 503; "
+            f"got {unexpected[0].status_code}."
+        )
+    return results
+
+
+def _selected_models_for_workloads(
+    status: dict[str, Any], workloads: tuple[str, ...]
+) -> dict[str, str]:
+    projections = {
+        str(row.get("workload")): str(row.get("chosen_model") or "")
+        for row in status.get("portfolio_projections") or []
+    }
+    selected = {workload: projections.get(workload, "") for workload in workloads}
+    missing = [workload for workload, model in selected.items() if not model]
+    if missing:
+        raise SystemExit(
+            "Allocator did not select a fleet-feasible model for: " + ", ".join(missing)
+        )
+    return selected
+
+
+def _cmd_test_adaptive_workday(
+    args: argparse.Namespace,
+    record: dict[str, Any],
+    status: dict[str, Any],
+) -> int:
+    """Exercise real multi-workload portfolio changes on the persistent logical Grid."""
+
+    baseline = str(record["model"])
+    workload_models = {
+        str(workload): str(model)
+        for workload, model in dict(record.get("workload_models") or {}).items()
+    }
+    workloads = tuple(sorted(workload_models))
+    candidate_models = tuple(sorted(set(workload_models.values())))
+    text_machines = int(record.get("text_machines") or record["machines"])
+    if len(candidate_models) > text_machines - 1:
+        raise SystemExit(
+            f"This workload map needs {len(candidate_models) + 1} simultaneous text slots "
+            f"(including the baseline), but the Grid has {text_machines}."
+        )
+    by_model = {
+        str(row.get("model_id")): row for row in status.get("models") or []
+    }
+    missing_profiles = [
+        model for model in (baseline, *candidate_models) if model not in by_model
+    ]
+    if missing_profiles:
+        raise SystemExit(f"Allocator profiles are missing real models: {missing_profiles}")
+
+    endpoint = str(record["endpoint"])
+    token = Path(str(record["token_file"])).read_text(encoding="utf-8").strip()
+    headers = {"X-Grid-Allocator-Token": token}
+    print(
+        f"Real adaptive workday · {text_machines} llama.cpp logical machines on this Mac"
+    )
+    print(f"Baseline: {baseline}")
+    for workload, model in sorted(workload_models.items()):
+        print(f"Capability: {workload:<10} → {model}")
+    if record.get("include_comfyui"):
+        print(
+            f"Media: {_media_model_for_bundle(str(record.get('media_bundle') or ''))} "
+            "through real ComfyUI/PyTorch-MPS"
+        )
+    print(
+        "All placement changes below come from observed HTTP requests and real engine "
+        "load/warm/drain/unload actions.\n"
+    )
+
+    with httpx.Client(base_url=endpoint, timeout=10.0, trust_env=False) as client:
+        print("[1/5] Idle fleet: keep one safe baseline and free every optional slot")
+        response = client.put(
+            "/allocator/mode", headers=headers, json={"mode": "automatic"}
+        )
+        response.raise_for_status()
+        _put_test_profile(
+            client,
+            headers,
+            by_model[baseline],
+            min_replicas=1,
+            max_replicas=text_machines,
+            min_failure_domains=1,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=1,
+        )
+        for candidate in candidate_models:
+            _put_test_profile(
+                client,
+                headers,
+                by_model[candidate],
+                min_replicas=0,
+                max_replicas=1,
+                min_failure_domains=1,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=1,
+                workload_scores=_workload_scores_for_model(
+                    workload_models, candidate
+                ),
+            )
+        time.sleep(1.1)
+        idle = _wait_for_placement(
+            record,
+            replicas={baseline: 1, **{model: 0 for model in candidate_models}},
+            timeout=args.timeout,
+            initial=status,
+        )
+        print(f"  Placement: {baseline}=1; {text_machines - 1} text slot(s) free.\n")
+
+        # Freeze actuation before lengthening the optional models' active horizon. Forecast history
+        # is deliberately durable, so doing this in automatic mode could resurrect an earlier demo
+        # before the new real requests below establish the current workload mix.
+        response = client.put(
+            "/allocator/mode", headers=headers, json={"mode": "recommend"}
+        )
+        response.raise_for_status()
+        for candidate in candidate_models:
+            _put_test_profile(
+                client,
+                headers,
+                by_model[candidate],
+                min_replicas=0,
+                max_replicas=1,
+                min_failure_domains=1,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=300,
+                workload_scores=_workload_scores_for_model(
+                    workload_models, candidate
+                ),
+            )
+
+        print("[2/5] Morning mix: multiple users ask for different kinds of work")
+        for workload in workloads:
+            _send_real_unresolved_workload(
+                endpoint,
+                workload,
+                token=token,
+                max_tokens=args.max_tokens,
+                timeout=args.timeout,
+            )
+            print(f"  observed 3 users × 4 {workload} requests")
+        response = client.post("/allocator/tick", headers=headers)
+        response.raise_for_status()
+        observed = _status_payload(record)
+        selected = _selected_models_for_workloads(observed, workloads)
+        for workload, model in selected.items():
+            expected = workload_models[workload]
+            if model != expected:
+                raise SystemExit(
+                    f"Configured {workload} capability is {expected!r}, but allocator selected "
+                    f"{model!r}."
+                )
+            print(f"  decision: {workload:<10} → {model}")
+        response = client.put(
+            "/allocator/mode", headers=headers, json={"mode": "automatic"}
+        )
+        response.raise_for_status()
+        morning = _wait_for_placement(
+            record,
+            replicas={baseline: 1, **{model: 1 for model in candidate_models}},
+            timeout=args.timeout,
+            initial=observed,
+        )
+
+        proof_results = tuple(
+            _real_chat_request(
+                endpoint,
+                _RealUser(
+                    user_id=f"workday-{workload}",
+                    role=workload,
+                    model=model,
+                    prompt=_WORKLOAD_PROMPTS[workload],
+                ),
+                max_tokens=args.max_tokens,
+                timeout=args.timeout,
+                retries=3,
+                tenant_attestation_secret=token,
+            )
+            for workload, model in selected.items()
+        )
+        _require_real_chat(proof_results, label="multi-workload portfolio")
+        print(
+            f"  served {len(proof_results)}/{len(proof_results)} real specialist responses; "
+            f"median {statistics.median(item.elapsed_seconds for item in proof_results):.3f}s.\n"
+        )
+
+        if record.get("include_comfyui"):
+            image = _run_real_image(record, timeout=args.timeout)
+            print(
+                f"  media proof: real PNG {image['bytes'] / 1024:.1f} KiB in "
+                f"{image['elapsed_seconds']:.1f}s → {image['path']}\n"
+            )
+
+        print("[3/5] General-demand surge: replace idle specialists with baseline replicas")
+        for candidate in candidate_models:
+            _put_test_profile(
+                client,
+                headers,
+                by_model[candidate],
+                min_replicas=0,
+                max_replicas=1,
+                min_failure_domains=1,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=1,
+                workload_scores=_workload_scores_for_model(
+                    workload_models, candidate
+                ),
+            )
+        # Establish a fresh successful baseline observation before extending its residency horizon;
+        # this makes a repeated demo respond to this run rather than merely reviving retained EWMA.
+        surge_seed = _real_chat_request(
+            endpoint,
+            _RealUser(
+                user_id="surge-seed",
+                role="general",
+                model=baseline,
+                prompt="Reply with exactly: surge ready",
+            ),
+            max_tokens=args.max_tokens,
+            timeout=args.timeout,
+            retries=3,
+            tenant_attestation_secret=token,
+        )
+        _require_real_chat((surge_seed,), label="general-demand seed")
+        _put_test_profile(
+            client,
+            headers,
+            by_model[baseline],
+            min_replicas=1,
+            max_replicas=text_machines,
+            min_failure_domains=1,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=300,
+        )
+        surge_users = tuple(
+            _RealUser(
+                user_id=f"surge-user-{index + 1:03d}",
+                role="general",
+                model=baseline,
+                prompt="Explain one practical benefit of private local AI in one sentence.",
+            )
+            for index in range(max(2, args.users))
+        )
+        surge_results = _run_real_chat_batch(
+            endpoint,
+            surge_users,
+            requests=max(args.requests, text_machines * 4),
+            max_tokens=args.max_tokens,
+            timeout=args.timeout,
+            tenant_attestation_secret=token,
+        )
+        _require_real_chat(surge_results, label="general-demand surge")
+        scaled = _wait_for_placement(
+            record,
+            replicas={
+                baseline: text_machines,
+                **{model: 0 for model in candidate_models},
+            },
+            timeout=args.timeout,
+            initial=morning,
+        )
+        retries = sum(item.attempts - 1 for item in surge_results)
+        print(
+            f"  Decision: baseline {1}→{text_machines} replicas; optional specialists offloaded."
+        )
+        print(
+            f"  {len(surge_results)} real responses · {retries} cold/saturation retries · "
+            f"median {statistics.median(item.elapsed_seconds for item in surge_results):.3f}s.\n"
+        )
+
+        print("[4/5] Afternoon shift: general surge ends; non-coding work remains")
+        _put_test_profile(
+            client,
+            headers,
+            by_model[baseline],
+            min_replicas=1,
+            max_replicas=text_machines,
+            min_failure_domains=1,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=1,
+        )
+        time.sleep(1.1)
+        quiet = _wait_for_placement(
+            record,
+            replicas={baseline: 1, **{model: 0 for model in candidate_models}},
+            timeout=args.timeout,
+            initial=scaled,
+        )
+        shifted_workloads = tuple(
+            workload for workload in workloads if workload != "coding"
+        )[:2] or (workloads[-1],)
+        expected_shift_models = {
+            workload_models[workload] for workload in shifted_workloads
+        }
+        # Active demand must outlive the real load+warm path. Keep unrelated candidates at the
+        # one-second expiry used above so yesterday's workload mix cannot reappear merely because
+        # one afternoon capability became active again.
+        for candidate in expected_shift_models:
+            _put_test_profile(
+                client,
+                headers,
+                by_model[candidate],
+                min_replicas=0,
+                max_replicas=1,
+                min_failure_domains=1,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=300,
+                workload_scores=_workload_scores_for_model(
+                    workload_models, candidate
+                ),
+            )
+        response = client.put(
+            "/allocator/mode", headers=headers, json={"mode": "recommend"}
+        )
+        response.raise_for_status()
+        for workload in shifted_workloads:
+            _send_real_unresolved_workload(
+                endpoint,
+                workload,
+                token=token,
+                max_tokens=args.max_tokens,
+                timeout=args.timeout,
+            )
+        response = client.post("/allocator/tick", headers=headers)
+        response.raise_for_status()
+        shifted_observed = _status_payload(record)
+        shifted = _selected_models_for_workloads(
+            shifted_observed, shifted_workloads
+        )
+        shifted_models = set(shifted.values())
+        response = client.put(
+            "/allocator/mode", headers=headers, json={"mode": "automatic"}
+        )
+        response.raise_for_status()
+        afternoon = _wait_for_placement(
+            record,
+            replicas={
+                baseline: 1,
+                **{
+                    model: int(model in shifted_models)
+                    for model in candidate_models
+                },
+            },
+            timeout=args.timeout,
+            initial=shifted_observed,
+        )
+        for workload, model in shifted.items():
+            print(f"  decision: {workload:<10} → {model}")
+        afternoon_proofs = tuple(
+            _real_chat_request(
+                endpoint,
+                _RealUser(
+                    user_id=f"afternoon-{workload}",
+                    role=workload,
+                    model=model,
+                    prompt=_WORKLOAD_PROMPTS[workload],
+                ),
+                max_tokens=args.max_tokens,
+                timeout=args.timeout,
+                retries=3,
+                tenant_attestation_secret=token,
+            )
+            for workload, model in shifted.items()
+        )
+        _require_real_chat(afternoon_proofs, label="shifted afternoon portfolio")
+        print(
+            "  Coding capacity stayed off because no fresh coding demand remained; "
+            "the shared non-coding model was loaded once and served real responses.\n"
+        )
+
+        print("[5/5] Demand cools: converge back to the one-replica idle floor")
+        for candidate in expected_shift_models:
+            _put_test_profile(
+                client,
+                headers,
+                by_model[candidate],
+                min_replicas=0,
+                max_replicas=1,
+                min_failure_domains=1,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=1,
+                workload_scores=_workload_scores_for_model(
+                    workload_models, candidate
+                ),
+            )
+        time.sleep(1.1)
+        final = _wait_for_placement(
+            record,
+            replicas={baseline: 1, **{model: 0 for model in candidate_models}},
+            timeout=args.timeout,
+            initial=afternoon,
+        )
+
+    history_delta = [
+        row
+        for row in final.get("history") or []
+        if float(row.get("attempted_at") or 0)
+        >= float((idle.get("plan") or {}).get("created_at") or 0)
+    ]
+    succeeded = sum(row.get("status") == "succeeded" for row in history_delta)
+    print("Result")
+    print(
+        "  real user requests served: "
+        f"{len(proof_results) + len(surge_results) + len(afternoon_proofs) + 1}"
+    )
+    print(f"  autonomous lifecycle actions succeeded: {succeeded}")
+    print(
+        f"  placement sequence: idle baseline=1 → mixed models={1 + len(candidate_models)} "
+        f"→ baseline replicas={text_machines} → shifted models={1 + len(shifted_models)} "
+        "→ idle baseline=1"
+    )
+    print("  final state: one ready baseline; every optional text model offloaded")
+    return 0
+
+
 def cmd_test_demo(args: argparse.Namespace) -> int:
     record = _running_record()
     if not record:
@@ -1608,6 +2126,8 @@ def cmd_test_demo(args: argparse.Namespace) -> int:
     status = _status_payload(record)
     if status.get("status_error"):
         raise SystemExit(f"Cannot read logical Grid status: {status['status_error']}")
+    if record.get("workload_models"):
+        return _cmd_test_adaptive_workday(args, record, status)
     model = str(record["model"])
     portfolio_model = str(record.get("portfolio_model") or "")
     machines = int(record["machines"])

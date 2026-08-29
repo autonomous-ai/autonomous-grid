@@ -665,6 +665,7 @@ process actuation:
 grid test scenario [--machines N] [--models N] [--users N]
     [--duration 30m|2h] [--seed N] [--timeline] [--json]
 grid test start [--machines N] [--candidate-model GGUF]...
+    [--workload-model WORKLOAD=GGUF]...
     [--include-comfyui --media-bundle z_image]
     [--comfyui-port N] [--media-port N]
     [--text-capacities-gib GIB,...] [--text-costs-per-hour USD,...]
@@ -676,10 +677,13 @@ grid test stop
 ```
 
 `test scenario` runs deterministic heterogeneous planning with changing user demand and failures;
-it starts no engine processes and is not an inference test. `test demo` sends real concurrent
-OpenAI-compatible requests to small llama.cpp processes across persistent logical hosts and proves
-proactive workload classification (without the router), load, warm, routing, response, drain, and
-unload behavior. `test compete` benchmarks repeatable, distinct `--candidate-model` GGUFs with real
+it starts no engine processes and is not an inference test. `--workload-model` gives the real test
+Grid explicit model capabilities such as `coding=qwen-coder.gguf` or
+`research=qwen-instruct.gguf`; several workloads may share one model. With those bindings,
+`test demo` runs a five-phase adaptive workday: idle, mixed specialist demand, a general-demand
+replica surge, a changed workload mix, and cooldown. It requires real responses and real lifecycle
+actions at every placement. Without bindings, the original single-specialist demo remains
+available. `test compete` benchmarks repeatable, distinct `--candidate-model` GGUFs with real
 inference, records authenticated quality/latency evidence without creating demand, then proves the
 allocator selects the measured winner and places it on the cheapest capable logical node.
 `--text-capacities-gib` and `--text-costs-per-hour` define one heterogeneous value per text node;

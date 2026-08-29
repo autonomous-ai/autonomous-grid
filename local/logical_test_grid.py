@@ -193,6 +193,10 @@ def run_worker(config_path: Path) -> int:
             if str(item)
         )
     )
+    workload_models = {
+        str(workload): str(candidate)
+        for workload, candidate in dict(cfg.get("workload_models") or {}).items()
+    }
     control_token = Path(str(cfg["control_token_path"])).read_text(encoding="utf-8").strip()
     if not control_token:
         raise RuntimeError("logical Grid control token is empty")
@@ -406,6 +410,13 @@ def run_worker(config_path: Path) -> int:
             )
             response.raise_for_status()
             for candidate in portfolio_models:
+                workload_scores = tuple(
+                    sorted(
+                        (workload, 1.0)
+                        for workload, configured_model in workload_models.items()
+                        if configured_model == candidate
+                    )
+                ) or (("coding", 1.0),)
                 response = client.put(
                     f"/allocator/models/{quote(candidate, safe='')}",
                     headers=headers,
@@ -414,7 +425,7 @@ def run_worker(config_path: Path) -> int:
                         text_machines,
                         portfolio_sha256[candidate],
                         min_replicas=0,
-                        workload_scores=(("coding", 1.0),),
+                        workload_scores=workload_scores,
                         memory_mb=_estimated_model_memory_mb(candidate),
                     ).to_dict(),
                 )

@@ -9,9 +9,6 @@ safety rules.
 The allocator is experimental. It defaults to **recommend** mode and does not change a process
 until an operator explicitly selects **automatic** mode.
 
-The living [allocator expert panel](allocator-expert-panel.md) records independent scores,
-reproduced failures, accepted fixes, and the remaining gaps behind that experimental label.
-
 ## Two cooperating loops
 
 The global loop optimizes the grid. The local loop protects one computer. They exchange desired and
@@ -972,12 +969,28 @@ candidates plus one capacity and hourly cost per text node, then run the real co
 
 ```bash
 uv run grid test start --machines 4 --include-comfyui --media-bundle z_image \
-  --candidate-model qwen2.5-coder-0.5b-instruct-q4_k_m.gguf \
+  --portfolio-model qwen2.5-coder-0.5b-instruct-q4_k_m.gguf \
   --candidate-model qwen2.5-0.5b-instruct-q4_k_m.gguf \
+  --workload-model coding=qwen2.5-coder-0.5b-instruct-q4_k_m.gguf \
+  --workload-model research=qwen2.5-0.5b-instruct-q4_k_m.gguf \
+  --workload-model marketing=qwen2.5-0.5b-instruct-q4_k_m.gguf \
+  --workload-model sales=qwen2.5-0.5b-instruct-q4_k_m.gguf \
   --text-capacities-gib 3.5,5,25.5 \
   --text-costs-per-hour 0.05,0.20,0.80
+uv run grid test demo --users 6 --requests 12 --max-tokens 24
 uv run grid test compete
 ```
+
+With explicit workload bindings, `grid test demo` is a real adaptive workday rather than a static
+smoke test. It starts from one tiny baseline, observes four user workload classes, and requires the
+allocator to load a coding specialist and one shared research/marketing/sales model on the two
+larger hosts. A real general-demand surge must then offload both specialists and scale the baseline
+from one to three replicas. When that surge expires and only research/marketing remain, Grid must
+return to one baseline plus the shared non-coding model while leaving coding capacity off. Final
+cooldown must drain/unload every optional model. The command prints every residency transition and
+requires genuine OpenAI-compatible responses at each mix; `--include-comfyui` additionally requires
+a real generated PNG. Forecast history is retained between runs, so the demo deliberately converges
+to idle and freezes actuation before admitting the next request mix instead of clearing demand.
 
 `grid test compete` loads one candidate at a time through the production lifecycle, runs eight
 deterministic coding questions through real llama.cpp/Metal inference, and submits authenticated
@@ -998,7 +1011,8 @@ Configured logical capacities must fit within this machine's real usable memory.
 must equal the number of text nodes (`--machines` minus the optional ComfyUI node), so a too-small
 cheap node, a medium economical node, and a large expensive fallback can be tested explicitly.
 
-`grid test demo` performs no synthetic inference or demand injection. It first converges the
+Without `--workload-model` bindings, `grid test demo` performs the original focused coding flow. It
+uses no synthetic inference or demand injection. It first converges the
 baseline to one real replica and verifies a genuine OpenAI-compatible response. Twelve genuine
 requests using distinct caller-selected affinity keys first target unresolved `auto`; the report
 requires them to remain untrusted canary evidence at urgency one. Twelve more requests from three

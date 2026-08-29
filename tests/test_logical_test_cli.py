@@ -16,6 +16,7 @@ from cli.logical_test import (
     _real_chat_request,
     _real_users,
     _wait_for_competition_choice,
+    workload_model_binding,
 )
 from shared.allocator.intelligence import anonymous_tenant_cohort
 
@@ -27,6 +28,7 @@ def test_logical_test_parser_defaults_to_four_machines():
     assert args.model == "SmolLM2-135M-Instruct-Q3_K_M.gguf"
     assert args.portfolio_model == "SmolLM2-135M-Instruct-Q3_K_S.gguf"
     assert args.candidate_models == []
+    assert args.workload_models == []
     assert args.port == 22_100
     assert args.engine_port_base == 22_110
     assert args.include_comfyui is False
@@ -216,6 +218,10 @@ def test_mixed_framework_parser_exposes_real_media_and_user_controls():
             "coder.gguf",
             "--candidate-model",
             "general.gguf",
+            "--workload-model",
+            "coding=coder.gguf",
+            "--workload-model",
+            "research=general.gguf",
             "--text-capacities-gib",
             "3.4,5,17",
             "--text-costs-per-hour",
@@ -240,11 +246,23 @@ def test_mixed_framework_parser_exposes_real_media_and_user_controls():
     assert start.comfyui_port == 23000
     assert start.media_port == 23001
     assert start.candidate_models == ["coder.gguf", "general.gguf"]
+    assert start.workload_models == [
+        ("coding", "coder.gguf"),
+        ("research", "general.gguf"),
+    ]
     assert start.text_capacities_gib == (3.4, 5.0, 17.0)
     assert start.text_costs_per_hour == (0.05, 0.2, 0.8)
     assert demo.users == 9
     assert demo.requests == 18
     assert demo.max_tokens == 48
+
+
+def test_workload_model_binding_rejects_unknown_or_missing_values():
+    assert workload_model_binding("coding=coder.gguf") == ("coding", "coder.gguf")
+    with pytest.raises(Exception, match="WORKLOAD=GGUF"):
+        workload_model_binding("finance=model.gguf")
+    with pytest.raises(Exception, match="WORKLOAD=GGUF"):
+        workload_model_binding("coding=")
 
 
 @pytest.mark.parametrize(
