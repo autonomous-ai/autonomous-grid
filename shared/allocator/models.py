@@ -670,6 +670,7 @@ class PlacementPlan:
     objective_score: float = 0.0
     input_digest: str = ""
     preemptions: tuple[PlacementPreemption, ...] = ()
+    model_urgencies: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.generation:
@@ -686,6 +687,18 @@ class PlacementPlan:
         desired_pairs = {(node_id, model_id) for model_id, node_id in pairs}
         if desired_pairs.intersection(preemption_pairs):
             raise ValueError("a residency cannot be both desired and preempted")
+        urgency_models = [model_id for model_id, _ in self.model_urgencies]
+        if len(urgency_models) != len(set(urgency_models)) or any(
+            not model_id
+            or not isinstance(model_id, str)
+            or len(model_id) > MAX_ID_LENGTH
+            or isinstance(urgency, bool)
+            or not isinstance(urgency, int)
+            or not 0 <= urgency <= 3
+            for model_id, urgency in self.model_urgencies
+        ):
+            raise ValueError("model urgencies must be unique integer tiers in [0, 3]")
+        object.__setattr__(self, "model_urgencies", tuple(sorted(self.model_urgencies)))
 
     @property
     def desired_pairs(self) -> frozenset[tuple[str, str]]:
@@ -708,6 +721,9 @@ class PlacementPlan:
     def target_for(self, model_id: str) -> int:
         return dict(self.desired_replicas).get(model_id, 0)
 
+    def urgency_for(self, model_id: str) -> int:
+        return dict(self.model_urgencies).get(model_id, 0)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -719,6 +735,7 @@ class PlacementPlan:
             "objective_score": self.objective_score,
             "input_digest": self.input_digest,
             "preemptions": [asdict(item) for item in self.preemptions],
+            "model_urgencies": dict(self.model_urgencies),
         }
 
 

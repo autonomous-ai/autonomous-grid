@@ -539,27 +539,36 @@ class Reconciler:
             ActionKind.UNLOAD: 3,
         }
 
-        def service_priority(action: MutationAction) -> int:
+        def service_priority(action: MutationAction) -> tuple[int, int]:
             preemption = preemptions.get((action.node_id, action.model_id))
             if preemption is not None and preemption.for_model_id:
                 beneficiary = profile_by_id.get(preemption.for_model_id)
                 if beneficiary is not None:
-                    return beneficiary.priority
+                    return (
+                        beneficiary.priority,
+                        plan.urgency_for(beneficiary.model_id),
+                    )
             if action.kind in (ActionKind.LOAD, ActionKind.WARM):
                 profile = profile_by_id.get(action.model_id)
-                return profile.priority if profile is not None else 0
+                return (
+                    profile.priority if profile is not None else 0,
+                    plan.urgency_for(action.model_id),
+                )
             # Routine removal is maintenance, not service for the retired model. Keep it behind
             # every availability action and explicit capacity-unlocking preemption.
-            return -1
+            return (-1, -1)
 
-        proposals.sort(
-            key=lambda item: (
-                -service_priority(item),
-                priority[item.kind],
-                item.node_id,
-                item.model_id,
+        def proposal_sort_key(action: MutationAction) -> tuple[int, int, int, str, str]:
+            admin_priority, demand_urgency = service_priority(action)
+            return (
+                -admin_priority,
+                -demand_urgency,
+                priority[action.kind],
+                action.node_id,
+                action.model_id,
             )
-        )
+
+        proposals.sort(key=proposal_sort_key)
         selected: list[MutationAction] = []
         scheduled_by_node = dict(active_by_node)
         for proposal in proposals:

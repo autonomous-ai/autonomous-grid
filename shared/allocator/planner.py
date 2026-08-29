@@ -1432,6 +1432,18 @@ class PlacementPlanner:
             objective_score=objective,
             input_digest=input_digest,
             preemptions=tuple(preemptions),
+            model_urgencies=tuple(
+                sorted(
+                    (
+                        model.model_id,
+                        _placement_demand_urgency(
+                            model,
+                            forecast_by_model.get(model.model_id),
+                        ),
+                    )
+                    for model in model_list
+                )
+            ),
         )
 
 

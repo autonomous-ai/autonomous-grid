@@ -132,6 +132,30 @@ def test_plan_rejects_a_residency_that_is_both_desired_and_preempted():
         )
 
 
+@pytest.mark.parametrize(
+    "urgencies",
+    [
+        (("qwen", 4),),
+        (("qwen", True),),
+        (("qwen", 1), ("qwen", 2)),
+    ],
+)
+def test_plan_rejects_invalid_model_urgencies(urgencies):
+    plan = PlacementPlanner().plan((node("n"),), (model(),), now=10)
+
+    with pytest.raises(ValueError, match="model urgencies"):
+        replace(plan, model_urgencies=urgencies)
+
+
+def test_plan_canonicalizes_model_urgencies():
+    plan = PlacementPlanner().plan((node("n"),), (model(),), now=10)
+
+    canonical = replace(plan, model_urgencies=(("z", 1), ("a", 3)))
+
+    assert canonical.model_urgencies == (("a", 3), ("z", 1))
+    assert canonical.to_dict()["model_urgencies"] == {"a": 3, "z": 1}
+
+
 @pytest.mark.parametrize("value", [-1, True, 1.5])
 def test_max_colocated_models_rejects_invalid_values(value):
     with pytest.raises(ValueError, match="max_colocated_models"):
@@ -3093,6 +3117,61 @@ def test_mutation_governor_starts_higher_priority_model_before_node_id_order():
 
     assert [(item.kind, item.model_id) for item in result.executable_actions] == [
         (ActionKind.WARM, "critical")
+    ]
+
+
+def test_mutation_governor_starts_direct_demand_before_speculative_prewarm():
+    machines = [
+        node("a-speculative", cached=("speculative",), tags=("speculative",)),
+        node("z-direct", cached=("direct",), tags=("direct",)),
+    ]
+    profiles = [
+        model(
+            "speculative",
+            min_replicas=0,
+            max_replicas=1,
+            required_tags=("speculative",),
+        ),
+        model(
+            "direct",
+            min_replicas=0,
+            max_replicas=1,
+            required_tags=("direct",),
+        ),
+    ]
+    forecasts = [
+        DemandForecast(
+            "speculative",
+            requests_per_minute=60,
+            correlated_requests_per_minute=60,
+            correlation_confidence=1,
+            correlation_sources=("source",),
+            updated_at=10,
+        ),
+        DemandForecast(
+            "direct",
+            requests_per_minute=60,
+            observed_requests_per_minute=60,
+            offered_concurrency=1,
+            updated_at=10,
+        ),
+    ]
+    plan = PlacementPlanner().plan(machines, profiles, forecasts, now=10)
+    assert plan.urgency_for("speculative") == 1
+    assert plan.urgency_for("direct") == 2
+
+    result = Reconciler(
+        ReconcilePolicy(max_concurrent_mutations=1)
+    ).reconcile(
+        plan,
+        machines,
+        profiles,
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+
+    assert [(item.kind, item.model_id) for item in result.executable_actions] == [
+        (ActionKind.WARM, "direct")
     ]
 
 
