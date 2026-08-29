@@ -585,9 +585,6 @@ class DemandForecast:
     active_cohorts: int = 0
     cohort_slo_breach_rate: float = 0.0
     cohort_fairness: float = 1.0
-    trusted_active_cohorts: int = 0
-    trusted_cohort_slo_breach_rate: float = 0.0
-    trusted_cohort_graduated: bool = False
 
     def __post_init__(self) -> None:
         if not self.model_id:
@@ -603,18 +600,12 @@ class DemandForecast:
             "observed_requests_per_minute",
             "cohort_slo_breach_rate",
             "cohort_fairness",
-            "trusted_cohort_slo_breach_rate",
             "updated_at",
         ):
             _finite_nonnegative(float(getattr(self, name)), name)
-        if (
-            self.queue_depth < 0
-            or self.sample_count < 0
-            or self.active_cohorts < 0
-            or self.trusted_active_cohorts < 0
-        ):
+        if self.queue_depth < 0 or self.sample_count < 0 or self.active_cohorts < 0:
             raise ValueError(
-                "queue_depth, sample_count, and cohort counts must be non-negative"
+                "queue_depth, sample_count, and active_cohorts must be non-negative"
             )
         if (
             self.error_rate > 1
@@ -622,15 +613,12 @@ class DemandForecast:
             or self.correlation_confidence > 1
             or self.cohort_slo_breach_rate > 1
             or self.cohort_fairness > 1
-            or self.trusted_cohort_slo_breach_rate > 1
         ):
             raise ValueError("rates, fairness, and confidence cannot exceed 1")
         if self.observed_requests_per_minute > self.requests_per_minute:
             raise ValueError(
                 "observed_requests_per_minute cannot exceed requests_per_minute"
             )
-        if not isinstance(self.trusted_cohort_graduated, bool):
-            raise ValueError("trusted_cohort_graduated must be a boolean")
         if self.correlated_requests_per_minute > self.requests_per_minute:
             raise ValueError(
                 "correlated_requests_per_minute cannot exceed requests_per_minute"

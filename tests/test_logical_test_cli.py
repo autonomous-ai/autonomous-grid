@@ -281,17 +281,8 @@ def test_real_client_retries_only_transient_capacity_responses(monkeypatch):
     attempts = iter((503, 429, 200))
     clock = iter((10.0, 10.1, 10.3, 10.7))
 
-    def request_once(
-        endpoint,
-        user,
-        *,
-        max_tokens,
-        timeout,
-        request_headers=None,
-        tenant_attestation_secret="",
-    ):
+    def request_once(endpoint, user, *, max_tokens, timeout, request_headers=None):
         assert request_headers == {"X-Test": "evaluation"}
-        assert tenant_attestation_secret == ""
         status = next(attempts)
         return _RealChatResult(
             user_id=user.user_id,

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-
 import pytest
 
 from shared.allocator.auth import (
@@ -9,10 +7,8 @@ from shared.allocator.auth import (
     decode_node_token,
     engine_node_id,
     mint_node_token,
-    mint_tenant_attestation,
     secure_control_transport,
     verify_node_token,
-    verify_tenant_attestation,
 )
 
 
@@ -39,23 +35,6 @@ def test_node_token_rejects_other_hosts_wrong_signer_tampering_and_expiry():
         verify_node_token(f"{token[:-1]}x", "operator", "host-a", now=101)
     with pytest.raises(ValueError, match="expired"):
         verify_node_token(token, "operator", "host-a", now=160)
-
-
-def test_tenant_attestation_is_digest_bound_short_lived_and_secret_free():
-    digest = hashlib.sha256(b"anonymous-principal-a").digest()
-    other = hashlib.sha256(b"anonymous-principal-b").digest()
-    proof = mint_tenant_attestation("operator-secret", digest, ttl_seconds=60, now=100)
-
-    assert "operator-secret" not in proof
-    verify_tenant_attestation(proof, "operator-secret", digest, now=159)
-    with pytest.raises(ValueError, match="signature"):
-        verify_tenant_attestation(proof, "operator-secret", other, now=101)
-    with pytest.raises(ValueError, match="signature"):
-        verify_tenant_attestation(proof, "wrong-secret", digest, now=101)
-    with pytest.raises(ValueError, match="currently valid"):
-        verify_tenant_attestation(proof, "operator-secret", digest, now=160)
-    with pytest.raises(ValueError, match="no greater than"):
-        mint_tenant_attestation("operator-secret", digest, ttl_seconds=301, now=100)
 
 
 @pytest.mark.parametrize(
