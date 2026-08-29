@@ -727,7 +727,40 @@ If no durable state path exists, or the requested path cannot be quarantined or 
 After a valid state restore, fresh membership must re-register before destructive work resumes;
 the restart grace period prevents a temporarily incomplete fleet view from causing unloads.
 
-### Single-machine logical fleet test
+### Single-machine scenario lab and logical fleet test
+
+Use the deterministic scenario lab to explore a large heterogeneous fleet without starting model
+processes or pretending the development Mac owns the modeled GPUs:
+
+```bash
+uv run grid test scenario \
+  --machines 8 \
+  --models 8 \
+  --users 50 \
+  --duration 30m \
+  --seed 42
+uv run grid test scenario --machines 16 --models 9 --users 500 --duration 2h --json
+```
+
+The lab creates logical Apple/Metal, ComfyUI/MPS, and NVIDIA/vLLM/ComfyUI configurations with
+different memory, disk, cached artifacts, concurrency, performance, and cost. User personas produce
+coding, research, marketing, sales, design, image, video, embedding, and general demand through the
+real bounded request classifier; operations traffic also names the baseline model so direct demand
+and autonomous portfolio demand compete in the same run. A seeded workday includes a coding surge,
+creative campaign, thermal throttle, node outage, recovery, and cooldown. Every planning tick uses
+the production workload intelligence and placement planner.
+
+The report explains loads, unloads, node transitions, capacity shortfalls, demand served, workload
+per-user and per-workload fairness/SLO attainment, portfolio suitability, memory use, cache
+locality, persistent modeled disk consumption, cold starts, cost, capacity recommendations, and
+safety invariants. It intentionally reports shortfalls instead of inventing capacity. `--timeline`
+prints every changing tick; `--json` emits the complete stable report;
+reusing `--seed` reproduces the same run. Artifact disk constraints are translated into each
+one-model logical node's admission set, while the allocator's native runtime, backend, lifecycle,
+memory, headroom, and model-slot rules remain authoritative.
+
+The scenario lab is the scale and decision-quality test. The persistent fixture below is the
+separate real-process proof for llama.cpp lifecycle actuation.
 
 For interactive development, start a persistent Grid with any number of logical machines. Each
 machine gets a stable host id, failure domain, state file, credential, capacity share, and real

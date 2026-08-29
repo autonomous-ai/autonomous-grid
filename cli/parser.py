@@ -29,6 +29,13 @@ from .allocator import (
     cmd_allocator_tick,
     cmd_allocator_token_write,
 )
+from .allocator_scenario import (
+    bounded_scenario_machines,
+    bounded_scenario_models,
+    bounded_scenario_users,
+    cmd_test_scenario,
+    simulated_minutes,
+)
 from .auth import cmd_login, cmd_logout, cmd_sync
 from .device import cmd_device_info
 from .engine import (
@@ -242,6 +249,47 @@ def _add_logical_test(sub) -> None:
         help="Seconds allowed for each real placement transition.",
     )
     demo.set_defaults(handler=cmd_test_demo)
+
+    scenario = test_sub.add_parser(
+        "scenario",
+        help="Simulate heterogeneous machines, models, users, demand shifts, and failures",
+    )
+    scenario.add_argument(
+        "--machines",
+        type=bounded_scenario_machines,
+        default=8,
+        metavar="N",
+        help="Modeled heterogeneous logical machines (default 8; maximum 64).",
+    )
+    scenario.add_argument(
+        "--models",
+        type=bounded_scenario_models,
+        default=8,
+        metavar="N",
+        help="Configured model profiles (default 8; maximum 32).",
+    )
+    scenario.add_argument(
+        "--users",
+        type=bounded_scenario_users,
+        default=50,
+        metavar="N",
+        help="Concurrent user personas (default 50; maximum 10000).",
+    )
+    scenario.add_argument(
+        "--duration",
+        type=simulated_minutes,
+        default=30,
+        metavar="TIME",
+        help="Simulated time as minutes or hours, e.g. 30m or 2h (default 30m).",
+    )
+    scenario.add_argument("--seed", type=int, default=42, help="Deterministic random seed.")
+    scenario.add_argument(
+        "--timeline",
+        action="store_true",
+        help="Print every placement-changing tick instead of notable events only.",
+    )
+    scenario.add_argument("--json", action="store_true", help="Emit the complete JSON report.")
+    scenario.set_defaults(handler=cmd_test_scenario)
 
     watch = test_sub.add_parser(
         "watch",

@@ -1908,6 +1908,52 @@ def test_replica_count_scales_for_queue_latency_and_errors():
     assert desired_replica_count(profile, forecast, now=100) >= 6
 
 
+def test_historical_error_rate_does_not_ratchet_one_replica_per_tick():
+    profile = model(
+        min_replicas=1,
+        max_replicas=8,
+        scale_down_cooldown_seconds=0,
+    )
+    forecast = DemandForecast(
+        "qwen",
+        offered_concurrency=0.1,
+        error_rate=0.25,
+        updated_at=100,
+    )
+    machines = tuple(
+        node(
+            f"n-{index}",
+            residencies=(ready("qwen", 8_000, loaded_at=1, last_used_at=1),),
+        )
+        for index in range(4)
+    )
+
+    assert desired_replica_count(profile, forecast, nodes=machines, now=100) == 3
+
+
+def test_historical_queue_pressure_adds_one_safety_replica_without_ratcheting():
+    profile = model(
+        min_replicas=1,
+        max_replicas=8,
+        scale_down_cooldown_seconds=0,
+    )
+    forecast = DemandForecast(
+        "qwen",
+        offered_concurrency=0.1,
+        queue_depth=1,
+        updated_at=100,
+    )
+    machines = tuple(
+        node(
+            f"n-{index}",
+            residencies=(ready("qwen", 8_000, loaded_at=1, last_used_at=1),),
+        )
+        for index in range(4)
+    )
+
+    assert desired_replica_count(profile, forecast, nodes=machines, now=100) == 2
+
+
 def test_replica_count_keeps_recent_ready_replicas_during_scale_down():
     profile = model(min_replicas=1, max_replicas=3, scale_down_cooldown_seconds=100)
     nodes = [
@@ -3187,6 +3233,121 @@ def test_direct_demand_reclaims_same_priority_speculative_canary():
 
     assert plan.preempted_pairs == frozenset({("n", "speculative")})
     assert plan.preemptions[0].for_model_id == "direct"
+
+
+def test_new_speculative_model_rebalances_one_excess_speculative_replica():
+    incumbent = model(
+        "incumbent",
+        8_000,
+        min_replicas=0,
+        max_replicas=2,
+        priority=100,
+        min_residency_seconds=0,
+    )
+    newcomer = replace(incumbent, model_id="newcomer", max_replicas=1)
+    machines = (
+        node("a", 8_000, residencies=(ready("incumbent", 8_000),), max_models=1),
+        node("b", 8_000, residencies=(ready("incumbent", 8_000),), max_models=1),
+    )
+    forecasts = (
+        DemandForecast(
+            "incumbent",
+            requests_per_minute=60,
+            offered_concurrency=2,
+            correlated_requests_per_minute=60,
+            correlation_sources=("workload:general",),
+            updated_at=10,
+        ),
+        DemandForecast(
+            "newcomer",
+            requests_per_minute=30,
+            offered_concurrency=1,
+            correlated_requests_per_minute=30,
+            correlation_sources=("workload:video",),
+            updated_at=10,
+        ),
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        machines,
+        (incumbent, newcomer),
+        forecasts,
+        now=10,
+    )
+
+    assert len(plan.preemptions) == 1
+    assert plan.preemptions[0].model_id == "incumbent"
+    assert plan.preemptions[0].for_model_id == "newcomer"
+
+
+def test_speculative_model_cannot_take_another_models_only_canary():
+    incumbent = model(
+        "incumbent",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+        priority=100,
+        min_residency_seconds=0,
+    )
+    newcomer = replace(incumbent, model_id="newcomer")
+    machine = node(
+        "n",
+        8_000,
+        residencies=(ready("incumbent", 8_000),),
+        max_models=1,
+    )
+    forecasts = tuple(
+        DemandForecast(
+            model_id,
+            requests_per_minute=30,
+            offered_concurrency=1,
+            correlated_requests_per_minute=30,
+            correlation_sources=(f"workload:{model_id}",),
+            updated_at=10,
+        )
+        for model_id in ("incumbent", "newcomer")
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        (incumbent, newcomer),
+        forecasts,
+        now=10,
+    )
+
+    assert plan.preemptions == ()
+    assert plan.nodes_for("incumbent") == ("n",)
+
+
+def test_speculative_model_may_replace_stale_speculation():
+    stale = model(
+        "stale",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+        priority=100,
+        min_residency_seconds=0,
+    )
+    newcomer = replace(stale, model_id="newcomer")
+    machine = node("n", 8_000, residencies=(ready("stale", 8_000),), max_models=1)
+    forecast = DemandForecast(
+        "newcomer",
+        requests_per_minute=30,
+        offered_concurrency=1,
+        correlated_requests_per_minute=30,
+        correlation_sources=("workload:video",),
+        updated_at=10,
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        (stale, newcomer),
+        (forecast,),
+        now=10,
+    )
+
+    assert plan.preempted_pairs == frozenset({("n", "stale")})
+    assert plan.preemptions[0].for_model_id == "newcomer"
 
 
 def test_same_priority_baseline_does_not_preempt_live_direct_service():

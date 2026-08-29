@@ -56,6 +56,10 @@ after baseline and direct traffic, and is evaluated after readiness. Measured su
 optional quality outcomes influence later portfolio scores; failure or no demand returns the model
 through the normal drain/unload safety path.
 
+On a saturated fleet, a new speculative model may replace stale speculation or one excess replica
+to obtain its first canary. It cannot evict baseline/direct work or another hypothesis's only
+canary; further speculative scale-out still waits for spare capacity.
+
 This counterfactual step prevents a loaded-only feedback loop: a Grid containing only a general LLM
 can still notice sustained image demand and prewarm a configured image model.
 

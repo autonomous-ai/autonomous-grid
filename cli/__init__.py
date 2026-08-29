@@ -35,6 +35,7 @@ from .allocator import (
     cmd_allocator_tick,
     cmd_allocator_token_write,
 )
+from .allocator_scenario import cmd_test_scenario
 from .auth import cmd_login, cmd_logout, cmd_sync
 from .device import cmd_device_info
 from .engine import (
@@ -108,6 +109,7 @@ __all__ = [
     "cmd_use",
     "cmd_test_start",
     "cmd_test_demo",
+    "cmd_test_scenario",
     "cmd_test_status",
     "cmd_test_stop",
     "cmd_test_watch",

@@ -613,6 +613,24 @@ relax that rule. Use HTTPS between computers. See
 [Dynamic resource allocator](allocator.md) for placement rules, safety invariants, and the wire
 contract.
 
+For allocator development on one machine, the `test` group separates modeled scale from real
+process actuation:
+
+```
+grid test scenario [--machines N] [--models N] [--users N]
+    [--duration 30m|2h] [--seed N] [--timeline] [--json]
+grid test start [--machines N]
+grid test demo
+grid test status [--json]
+grid test watch
+grid test stop
+```
+
+`test scenario` runs deterministic heterogeneous planning with changing user demand and failures;
+it starts no GPU processes. `test demo` uses real small llama.cpp processes across persistent
+logical hosts to prove load, warm, drain, and unload behavior. See the allocator guide for the
+scenario inventory, scorecard, and limits.
+
 An external vLLM endpoint can declare homogeneous topology without changing lifecycle ownership:
 
 ```bash

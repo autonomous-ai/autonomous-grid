@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from itertools import combinations
@@ -1121,6 +1122,8 @@ class PlacementPlanner:
         # fleet forever: its live slot prevents critical placement while desired assignment keeps
         # reconciliation from draining it. Stage deterministic victims. Administrator priority is
         # primary; within one class, baseline/direct evidence may reclaim speculative canaries.
+        # A newly demanded speculative model may also replace stale speculation or one excess
+        # replica, but it cannot take another model's only canary.
         # The beneficiary remains unsatisfied until a later heartbeat proves capacity is free.
         preempted_nodes: set[str] = set()
         assignments_by_node: dict[str, list[PlacementAssignment]] = {}
@@ -1133,18 +1136,16 @@ class PlacementPlanner:
         for beneficiary in order:
             if len(preemptions) >= self.policy.max_staged_preemptions:
                 break
-            if (
-                _placement_demand_urgency(
-                    beneficiary,
-                    forecast_by_model.get(beneficiary.model_id),
-                )
-                < 2
-            ):
-                # Correlation-only demand is valuable for filling spare capacity, but it is not
-                # strong enough evidence to destroy live service. Wait for direct traffic/pressure
-                # or an explicit configured baseline before staging a preemption.
-                continue
+            beneficiary_urgency = _placement_demand_urgency(
+                beneficiary,
+                forecast_by_model.get(beneficiary.model_id),
+            )
             placed = sum(item.model_id == beneficiary.model_id for item in assignments)
+            if beneficiary_urgency == 0 or (beneficiary_urgency == 1 and placed > 0):
+                # Speculation may acquire one fair canary by replacing only stale speculation or
+                # another speculative model's excess replica. Further speculative scale-out waits
+                # for spare capacity; direct/baseline evidence retains broader preemption rights.
+                continue
             missing = max(0, desired_by_model[beneficiary.model_id] - placed)
             pending_pins = [
                 node_id
@@ -1155,6 +1156,8 @@ class PlacementPlanner:
                 *pending_pins,
                 *(None for _ in range(max(0, missing - len(pending_pins)))),
             ]
+            if beneficiary_urgency == 1:
+                preemption_targets = preemption_targets[:1]
             preemption_cache = (
                 _PreemptionSearchCache()
                 if not pending_pins and beneficiary.min_failure_domains <= 1
@@ -1667,15 +1670,16 @@ def desired_replica_count(
             timestamp,
             policy,
         )
-        # A queue or degraded service level is direct evidence that the current ready set is not
-        # meeting demand, even if one engine advertises a wide theoretical batch. Add one replica
-        # instead of allowing a generous max_concurrency declaration to mask observed pressure.
+        # A queue or degraded service level is direct evidence that computed service capacity needs
+        # one safety replica, even if one engine advertises a wide theoretical batch. Anchor that
+        # increment to the freshly computed target—not the current ready count—so a historical
+        # pressure sample cannot ratchet the fleet by one replica on every planning tick.
         if ready_replicas and (
             forecast.queue_depth
             or (model.latency_slo_ms and forecast.p95_latency_ms > model.latency_slo_ms)
             or forecast.error_rate
         ):
-            target = max(target, min(model.max_replicas, ready_replicas + 1))
+            target = min(model.max_replicas, target + 1)
         target = max(model.min_replicas, target)
 
     # Recently-used ready replicas are retained even after a traffic dip.  This is the global
@@ -1962,6 +1966,36 @@ def _fits(
     return _colocation_allowed(node, model, assignments, profile_by_id)
 
 
+def _evidence_preemption_allowed(
+    victim_model_id: str,
+    beneficiary_model_id: str,
+    victim_priority: int,
+    beneficiary_priority: int,
+    urgency_by_model: Mapping[str, int],
+    assignment_counts: Mapping[str, int],
+) -> bool:
+    """Allow bounded evidence rebalancing without letting speculation harm real service."""
+
+    if victim_priority > beneficiary_priority:
+        return False
+    victim_urgency = urgency_by_model.get(victim_model_id, 0)
+    beneficiary_urgency = urgency_by_model.get(beneficiary_model_id, 0)
+    if beneficiary_urgency >= 2 and (
+        victim_priority < beneficiary_priority or victim_urgency < 2
+    ):
+        return True
+    if beneficiary_urgency != 1 or victim_urgency > 1:
+        return False
+    if victim_urgency == 0:
+        return True
+    # Both are speculative. Guarantee a newly demanded model one canary only by taking an excess
+    # replica; a model's sole canary is never exchanged for another equally weak hypothesis.
+    return (
+        assignment_counts.get(beneficiary_model_id, 0) == 0
+        and assignment_counts.get(victim_model_id, 0) > 1
+    )
+
+
 def _priority_preemption_candidates(
     beneficiary: ModelProfile,
     nodes: list[NodeSnapshot],
@@ -1982,6 +2016,11 @@ def _priority_preemption_candidates(
     """Prove every currently independent node-local victim set in one fleet scan."""
 
     candidates: list[_PreemptionCandidate] = []
+    assignment_counts = Counter(
+        assignment.model_id
+        for node_assignments in assignments_by_node.values()
+        for assignment in node_assignments
+    )
     for node in nodes:
         if required_node_id is not None and node.node_id != required_node_id:
             continue
@@ -2018,11 +2057,13 @@ def _priority_preemption_candidates(
                 and not node.manually_managed
                 and (victim_profile := profile_by_id.get(item.model_id)) is not None
                 and (
-                    victim_profile.priority < beneficiary.priority
-                    or (
-                        victim_profile.priority == beneficiary.priority
-                        and demand_urgency_by_model.get(item.model_id, 0) < 2
-                        and demand_urgency_by_model.get(beneficiary.model_id, 0) >= 2
+                    _evidence_preemption_allowed(
+                        item.model_id,
+                        beneficiary.model_id,
+                        victim_profile.priority,
+                        beneficiary.priority,
+                        demand_urgency_by_model,
+                        assignment_counts,
                     )
                 )
                 and node.node_id not in victim_profile.pinned_nodes
@@ -2057,11 +2098,13 @@ def _priority_preemption_candidates(
             if _adds_model_slot(node.residency(item.model_id))
             and (profile := profile_by_id.get(item.model_id)) is not None
             and (
-                profile.priority < beneficiary.priority
-                or (
-                    profile.priority == beneficiary.priority
-                    and demand_urgency_by_model.get(item.model_id, 0) < 2
-                    and demand_urgency_by_model.get(beneficiary.model_id, 0) >= 2
+                _evidence_preemption_allowed(
+                    item.model_id,
+                    beneficiary.model_id,
+                    profile.priority,
+                    beneficiary.priority,
+                    demand_urgency_by_model,
+                    assignment_counts,
                 )
             )
         )
