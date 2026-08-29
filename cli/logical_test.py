@@ -1221,7 +1221,6 @@ def _wait_for_competition_choice(
                 for row in status.get("portfolio_projections") or []
                 if row.get("workload") == "coding"
                 and row.get("chosen_model") in candidates
-                and row.get("reason") == "portfolio canary"
             ),
             None,
         )
@@ -1230,9 +1229,7 @@ def _wait_for_competition_choice(
             chosen
             and (not expected or chosen == expected)
             and _ready_replicas(status, chosen) >= 1
-            and not status.get(
-            "pending_commands"
-            )
+            and not status.get("pending_commands")
         ):
             return chosen, status
         time.sleep(0.1)

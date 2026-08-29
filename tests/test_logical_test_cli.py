@@ -15,6 +15,7 @@ from cli.logical_test import (
     _print_status,
     _real_chat_request,
     _real_users,
+    _wait_for_competition_choice,
 )
 from shared.allocator.intelligence import anonymous_tenant_cohort
 
@@ -100,6 +101,38 @@ def test_logical_status_explains_price_uncertainty_spend_and_capacity(capsys):
     assert "75% demand confidence · known-cost only" in output
     assert "2 workloads jointly · models generalist" in output
     assert "video missing 1 · >=24.0 GiB · comfyui/cuda" in output
+
+
+def test_competition_wait_uses_typed_choice_not_explanation_prose(monkeypatch):
+    status = {
+        "portfolio_projections": [
+            {
+                "workload": "coding",
+                "chosen_model": "coder",
+                "reason": "confidence-aware canary; 8.0 effective samples",
+            }
+        ],
+        "nodes": [
+            {
+                "residencies": [
+                    {"model_id": "coder", "state": "ready"}
+                ]
+            }
+        ],
+        "pending_commands": [],
+        "history": [],
+    }
+    monkeypatch.setattr("cli.logical_test._status_payload", lambda _record: status)
+
+    chosen, observed = _wait_for_competition_choice(
+        {},
+        candidates=("coder", "general"),
+        timeout=1,
+        initial={"history": []},
+    )
+
+    assert chosen == "coder"
+    assert observed is status
 
 
 def test_demo_fixture_users_occupy_distinct_bounded_cohorts():
