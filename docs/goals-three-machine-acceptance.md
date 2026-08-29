@@ -49,7 +49,9 @@ inference but not actually polling the distributed task queue.
 ## Scenario
 
 1. Import or initialize the game project and start a Goal allowing both harnesses. Attach immutable
-   file evals for `index.html`, `game.js`, `style.css`, and `README.md`.
+   file evals for `index.html`, `game.js`, `style.css`, and `README.md`; require bounded literal
+   evidence for the HTML/JS wiring, click handler, score update, and visible styling rather than
+   accepting filenames alone.
 2. Leave only A serving tasks. Confirm A completes feature 1, receives turn 2, and creates an
    uncommitted marker while working on feature 2.
 3. Close or power off A. Do not stop it gracefully and do not copy its task root.

@@ -19,9 +19,14 @@ import _harness as H
 sys.path.insert(0, str(H.GRID_REPO))
 
 GAME_EVALS = [
-    {"type": "file", "name": "game page", "path": "index.html", "min_bytes": 10},
-    {"type": "file", "name": "game logic", "path": "game.js", "min_bytes": 10},
-    {"type": "file", "name": "game styles", "path": "style.css", "min_bytes": 10},
+    {"type": "file", "name": "interactive game page", "path": "index.html",
+     "min_bytes": 10, "max_bytes": 20_000,
+     "contains": ['id="target"', 'script src="game.js"']},
+    {"type": "file", "name": "click updates score", "path": "game.js",
+     "min_bytes": 10, "max_bytes": 20_000,
+     "contains": ["addEventListener('click'", "textContent"]},
+    {"type": "file", "name": "visible game styles", "path": "style.css",
+     "min_bytes": 10, "max_bytes": 20_000, "contains": ["background:"]},
     {"type": "file", "name": "game instructions", "path": "README.md", "min_bytes": 10},
 ]
 

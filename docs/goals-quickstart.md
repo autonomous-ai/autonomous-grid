@@ -80,8 +80,10 @@ For example, `game-evals.json` can require artifacts without trusting the acting
 {
   "version": 1,
   "evals": [
-    {"type": "file", "name": "page", "path": "index.html", "min_bytes": 10},
-    {"type": "file", "name": "logic", "path": "game.js", "min_bytes": 10},
+    {"type": "file", "name": "interactive page", "path": "index.html",
+     "max_bytes": 20000, "contains": ["id=\"target\"", "script src=\"game.js\""]},
+    {"type": "file", "name": "click updates score", "path": "game.js",
+     "max_bytes": 20000, "contains": ["addEventListener('click'", "textContent"]},
     {"type": "file", "name": "styles", "path": "style.css", "min_bytes": 10},
     {"type": "file", "name": "instructions", "path": "README.md", "min_bytes": 10}
   ]
@@ -101,6 +103,10 @@ A `sha256` file predicate must also declare `max_bytes`. The declared maxima acr
 may total at most 64 MiB. The relay streams those commit-pinned blobs through the hash instead of
 buffering decompressed Git objects; size/existence checks read metadata only. This keeps a tiny,
 highly compressed result push from expanding into unbounded evaluator memory.
+A `contains` predicate requires one to sixteen unique literal UTF-8 strings and a `max_bytes` no
+greater than 16 MiB; declared content-inspection maxima may total at most 64 MiB. Every literal must
+occur in the exact commit-pinned blob. Grid searches the blob as a bounded stream, including matches
+that cross stream chunks; it does not execute regexes or repository code on the relay.
 
 When a different harness takes a later turn, Grid does not try to translate opaque Codex and Claude
 session formats. It supplies the shared Git worktree plus a bounded relay-authored history of recent
@@ -303,9 +309,9 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 
 | Goal | Execution | Harnesses | Injected failure | Independent eval |
 |---|---|---|---|---|
-| Four-feature game | A -> B -> C | Codex -> Codex -> Codex | A dies in feature 2; B dies in 3–4 | Four required files |
-| Mixed game | A -> B -> C | Codex -> Claude -> Codex | A and B die mid-feature | Four required files |
-| Crash-safe game | A -> B | Codex -> Codex | A's native harness crashes after writing partial work | Four required files |
+| Four-feature game | A -> B -> C | Codex -> Codex -> Codex | A dies in feature 2; B dies in 3–4 | HTML wiring, click/score behavior, styling and instructions |
+| Mixed game | A -> B -> C | Codex -> Claude -> Codex | A and B die mid-feature | HTML wiring, click/score behavior, styling and instructions |
+| Crash-safe game | A -> B | Codex -> Codex | A's native harness crashes after writing partial work | HTML wiring, click/score behavior, styling and instructions |
 | Image artifact | B polls; A executes | Claude rejected; Codex selected | Capability mismatch | PNG file and size |
 | Support reply | A polls; B -> C execute | Codex | B dies after API commit; first eval fails | `DONE.md`; one API side effect |
 | Required child | A parent; B child; C parent | Codex -> Claude -> Codex | Parent moves while child runs | Child and parent files |

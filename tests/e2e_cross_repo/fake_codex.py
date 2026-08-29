@@ -58,7 +58,9 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
     if scenario == "graceful_crash":
         if node == "A" and not history:
             (cwd / "index.html").write_text(
-                "<!doctype html><title>Crash-safe Grid Goal</title><button>Play</button>\n")
+                "<!doctype html><title>Crash-safe Grid Goal</title>"
+                "<button id=\"target\">Play</button><output id=\"score\">0</output>"
+                "<script src=\"game.js\"></script>\n")
             (cwd / "PARTIAL.md").write_text(
                 "Node A created the first feature before its native harness crashed.\n")
             history.append({"node": "A", "native_thread": "partial-feature-1"})
@@ -74,8 +76,10 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
         if not (cwd / "PARTIAL.md").is_file() or not (cwd / "index.html").is_file():
             raise RuntimeError("node B received native history without A's partial worktree")
         (cwd / "game.js").write_text(
-            "let score=0;document.querySelector('button').onclick=()=>score+=1;\n")
-        (cwd / "style.css").write_text("body{font:18px system-ui;text-align:center}\n")
+            "let score=0;document.querySelector('#target').addEventListener('click',()=>{"
+            "document.querySelector('#score').textContent=String(++score)});\n")
+        (cwd / "style.css").write_text(
+            "body{font:18px system-ui;text-align:center;background:#eef}\n")
         (cwd / "README.md").write_text(
             "# Crash-safe game\n\nNode B resumed node A's native Goal and completed it.\n")
         history.append({"node": "B", "resumed_native_thread": True})

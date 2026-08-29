@@ -32,6 +32,12 @@ No worker may read another worker's disk. A successor reconstructs only:
 Uncommitted work from an expired lease is deliberately lost. This is the fence that prevents a late
 worker from publishing over its successor.
 
+A disconnect while the provider is still long-polling is earlier than a lease: no harness has
+received an assignment. The relay checks disconnection before and after its guarded claim. If the
+peer vanished after selection but before response delivery, Grid atomically restores the row's
+queue clock and attempt counter and emits no retry event. An orphan HTTP handler therefore cannot
+steal a future Goal turn and make the fleet wait through a fictitious failed attempt.
+
 ### Harness policy and per-turn assignment
 
 A Goal stores an ordered allow-list of harnesses (`codex`, `claude`) and required capabilities.
@@ -130,7 +136,7 @@ against the exact result commit produced by that turn.
 An evaluation definition is versioned and immutable once a Goal starts. The first implemented,
 relay-local deterministic kind is:
 
-- `file`: path exists, regular-file type, size, and SHA-256 predicates.
+- `file`: path exists, regular-file type, size, SHA-256, and bounded literal-content predicates.
 
 SHA-256 predicates require an explicit `max_bytes`; their declared aggregate is capped at 64 MiB
 per completion nomination. The evaluator hashes Git blobs as a bounded stream and verifies the
@@ -139,6 +145,11 @@ can contain an enormous repeated blob. Legacy definitions still face the runtime
 deterministic failed evidence rather than allocating the object in relay memory; malformed stored
 definitions create audit-only evaluator errors and block for operator recovery instead of returning
 an endless result-settlement 500.
+
+Literal-content predicates require an explicit per-file bound, allow at most sixteen short unique
+UTF-8 literals, and cap aggregate inspected content at 64 MiB. Matching streams the exact Git blob
+and carries only enough overlap to recognize a literal split across chunks. Regex and command
+execution are intentionally excluded from the relay-local evaluator.
 
 The evaluator semantics version is part of each canonical definition and therefore its hash.
 Definitions created before this field existed are version 1; a future implementation must add an

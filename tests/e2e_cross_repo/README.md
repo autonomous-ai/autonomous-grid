@@ -50,9 +50,9 @@ real.
 
 | Scenario | Nodes and harnesses | Failure or constraint | Proof |
 |---|---|---|---|
-| Four-feature game | A Codex -> B Codex -> C Codex | A and B are killed mid-turn | Same rows are reclaimed; only accepted Git checkpoints survive |
-| Native crash checkpoint | A Codex -> B Codex | A's app-server fails after partial work | Same turn immediately requeues; B restores partial tree and native thread |
-| Mixed game | A Codex -> B Claude -> C Codex | Two machine losses across unlike harnesses | Shared tree/transcript continuity plus harness-specific native state |
+| Four-feature game | A Codex -> B Codex -> C Codex | A and B are killed mid-turn | Same rows are reclaimed; commit-pinned wiring/click/score/style evals pass |
+| Native crash checkpoint | A Codex -> B Codex | A's app-server fails after partial work | Same turn immediately requeues; B restores partial tree/thread and behavior evals pass |
+| Mixed game | A Codex -> B Claude -> C Codex | Two machine losses across unlike harnesses | Shared continuity plus commit-pinned behavior evals across harnesses |
 | Image artifact | B Claude polls; A Codex executes | Goal requires `image_generation` | Ineligible node spends no attempt; independent PNG eval passes |
 | Support reply | A polls; B Codex -> C Codex | Origin restriction, crash after API commit, failed first eval | One business side effect, stable idempotency key, repair turn passes |
 | Required child | A parent; B Claude child; C parent | Parent waits while child runs | Independently evaluated child commit fans into parent exactly once |
@@ -61,6 +61,10 @@ real.
 The native-crash case starts each provider in one-claim mode so A withdraws after handing off its
 checkpoint and cannot race B for its own immediate retry. This changes only the test process
 lifecycle; production claim, checkpoint, retry, and settlement code remains untouched.
+The full matrix also leaves providers long-polling immediately before fixture teardown. The relay
+checks socket disconnects on both sides of assignment and returns any response that cannot be
+delivered to the queue without consuming an attempt; otherwise an orphan request from one scenario
+can steal the next scenario's first Goal turn.
 
 ## Prerequisites
 
