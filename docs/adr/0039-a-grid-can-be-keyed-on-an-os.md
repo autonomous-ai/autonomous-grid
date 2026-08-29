@@ -331,10 +331,79 @@ The alternatives, and what each would have cost:
   counts, not content — but it trades ten thousand strangers' email addresses for a panel that, on this
   type, answers a question nobody is asking.
 
+⚠️ **D-l is not the last word on this exposure either, and its own review proved it.** The public
+overview publishes `provider_email` with no gate at all; that is a THIRD mechanism, closed separately
+in D-m. A first draft of this route's refusal sent the refused caller *to that overview* for "the
+grid's own totals, naming nobody" — false, and a good illustration of how easily this area is
+reasoned about one surface at a time.
+
 There is **no rollout ordering** and no half in this repo: the refusal changes no response on any other
 type, and the app is unchanged because D-e keeps an OS grid out of its reach entirely. If the app is
 ever brought into scope, this refusal is one more thing to revisit alongside D-e, not a thing that will
 already be right.
+
+## D-m — The public overview names no provider on this type
+
+`GET /relay/v1/grid/overview` is **public and unauthenticated** — its own docstring says so, and it
+takes no `_extract_auth` at all. For every node whose role is `provider` or `both` and whose
+heartbeat is inside the TTL, `overview.build_grid_overview` emits `provider_email`, joined from
+`UserRow.email`, beside the machine's name, chip, VRAM and the models it serves.
+
+On a `private-domain` grid that is a company publishing its own people's machines, which is what the
+web UI was built for. On `os-community` every member is minted `both` and the type's whole premise is
+that strangers share compute — so anyone who knows the grid's signaling URL can read the address of
+everybody serving on it, with no credential at all.
+
+⚠️ **This is the THIRD mechanism onto one exposure, and each of the first two was closed by an
+argument that does not reach it.** D-e empties the roster *by construction* — no OS membership is
+persisted, so `list_grid_members` has no row to return. D-l refuses `/grid/members/usage`, whose
+emails come from observed traffic rather than the allowlist. This one reads `NodeRow` joined to
+`UserRow`: rows a provider writes by the act of serving, on a route with **no gate whatsoever**. So
+the door left open was the *weakest*-gated of the three, which is not a decision anybody made — it is
+the shape of finding the mechanisms one at a time.
+
+**DECIDED 2026-08-29 (issue 14): `provider_email` is sent as `null` on `os-community`, and the key
+stays.** Keyed by equality against the type literal, the same shape as D-l and D-i.
+
+- **The key stays and the value goes.** Omitting it would make the payload's *shape* vary by network
+  type, which is the cost D-l explicitly rejected when it turned down "return the caller's own row
+  only" — a shape that differs per type is the sort of thing a later reader reports as a bug.
+- **Overloading `null` is deliberate.** It already means "the control plane could not resolve the
+  owner", and a client cannot tell that from "withheld". Nothing should: both render as a machine
+  nobody is named for, and a distinguishable "withheld" would advertise that there is a name to ask
+  for.
+- **No app half, measured rather than assumed.** `OverviewNode.providerEmail` is already
+  `String?`, parsed as `j['provider_email'] as String?`, and its own doc comment says "Null on an
+  older relay, or when the control plane couldn't resolve the owner". `nodeHostHandle` returns `''`,
+  and `node_groups` collects every unattributed machine into **one headless block** — a designed-for
+  case, not a degenerate one. So there is no rollout ordering in either direction.
+
+Three alternatives were on the table, and each was rejected for a stated reason:
+
+- **A stable non-identifying handle** (the node name, or a digest of the address). Keeps "which
+  machine is this" while dropping the identity, and costs a second spelling of who a provider is. The
+  deciding objection is that a digest which is stable across polls — and it must be, or the machines
+  regroup on every refresh — is a durable pseudonymous identifier, which is a different privacy
+  claim from the one the word "anonymous" makes.
+- **Authenticate the overview on this type.** The narrowest change to the payload, and it is the gate
+  the sibling route already has. Rejected because on this type **every member is a token holder**: it
+  converts an unauthenticated leak into an authenticated one, which is precisely what D-l refused to
+  accept for `/grid/members/usage`. It would also take the public dashboard away from the one grid
+  type whose whole point is that strangers can find it.
+- **Accept the exposure and say so.** Defensible on its face — somebody serving on a public pool
+  arguably publishes themselves by serving. Rejected because they do not: a person runs `grid join`
+  on a machine, and nothing in that act says their email address becomes readable by anyone on the
+  internet who knows a URL. ⚠️ The app already knew and said so — `node_display.nodeHostHandle`
+  carries the comment "Not a privacy measure and shouldn't be mistaken for one: `/grid/overview` is
+  unauthenticated and carries the whole address." A relay-side decision was the missing half, not a
+  finding nobody had made.
+
+⚠️ **The rule this ADR keeps re-learning, written once here.** Three surfaces have now published a
+member's identity on this type, and in each case the previous decision looked like it covered the
+next. Before adding a route that reads `UserRow.email`, or widening one, the question is not *is this
+like the roster* — it is *what does this surface publish on a grid of strangers, and what is its
+gate*. The predicate is shared for this reason: `member_identity_access` owns both answers, so the
+fourth surface finds one module rather than two conventions.
 
 ## Considered options
 
@@ -353,8 +422,11 @@ already be right.
 - One more hand-duplicated wire literal across three repos (grid-apis `store.py`, grid-src
   `network_runtime.py` and `grid_auth.py`), with a rollout order that is the reverse of its neighbours.
 - A grid type on which billing is permanently off by decision rather than by omission (D-g).
-- One route refused purely because the grid admits strangers (D-l), and a standing question for every
-  future route that reads "this grid has no allowlist": is its gate still the one it was written for?
+- One route refused and one payload field withheld purely because the grid admits strangers (D-l,
+  D-m), and a standing question for every future surface that reads `UserRow.email`: what does it
+  publish on a grid of strangers, and what is its gate? Three surfaces have now had to be answered
+  one at a time; `member_identity_access` exists so the fourth finds one module rather than two
+  conventions.
 - A grid type with no roster and no presence outside the CLI (D-e) — acceptable only while the app
   stays out of scope. Bringing the app in later means revisiting D-e first, not bolting a query on.
 - `grid ls` gains a `os-community` row that most users will never have created, and the type string is
