@@ -323,6 +323,7 @@ class Reconciler:
             )
         preemption_round_by_pair: dict[tuple[str, str], int] = {}
         preemption_group_round: dict[tuple[str, str], int] = {}
+        preemption_group_by_pair: dict[tuple[str, str], tuple[str, str]] = {}
         for preemption in plan.preemptions:
             if not preemption.for_model_id:
                 continue
@@ -335,9 +336,27 @@ class Reconciler:
                 next_preemption_round[preemption.for_model_id] = (
                     preemption_group_round[group] + 1
                 )
-            preemption_round_by_pair[
-                (preemption.node_id, preemption.model_id)
-            ] = preemption_group_round[group]
+            pair = (preemption.node_id, preemption.model_id)
+            preemption_round_by_pair[pair] = preemption_group_round[group]
+            preemption_group_by_pair[pair] = group
+        preemption_release_work_by_group: dict[tuple[str, str], int] = {}
+        preemption_wait_by_group: dict[tuple[str, str], float] = {}
+        for pair, group in preemption_group_by_pair.items():
+            victim = residency_by_pair.get(pair)
+            victim_profile = profile_by_id.get(pair[1])
+            if victim is None or victim_profile is None:
+                continue
+            remaining_transitions = (
+                2 if victim.state == ResidencyState.READY else 1
+            )
+            preemption_release_work_by_group[group] = (
+                preemption_release_work_by_group.get(group, 0)
+                + remaining_transitions
+            )
+            preemption_wait_by_group[group] = max(
+                preemption_wait_by_group.get(group, 0.0),
+                victim.active_requests * victim_profile.expected_service_seconds,
+            )
         preemptions = {
             (item.node_id, item.model_id): item for item in plan.preemptions
         }
@@ -657,17 +676,10 @@ class Reconciler:
             if action.kind in (ActionKind.LOAD, ActionKind.WARM):
                 return profile.load_seconds + warm_seconds
             if preemption is not None:
-                wait_seconds = 0.0
-                if action.kind == ActionKind.DRAIN:
-                    victim = residency_by_pair.get(
-                        (action.node_id, action.model_id)
-                    )
-                    victim_profile = profile_by_id.get(action.model_id)
-                    if victim is not None and victim_profile is not None:
-                        wait_seconds = (
-                            victim.active_requests
-                            * victim_profile.expected_service_seconds
-                        )
+                group = preemption_group_by_pair.get(
+                    (action.node_id, action.model_id)
+                )
+                wait_seconds = preemption_wait_by_group.get(group, 0.0)
                 return profile.load_seconds + warm_seconds + wait_seconds
             return math.inf
 
@@ -680,13 +692,15 @@ class Reconciler:
 
         def proposal_sort_key(
             action: MutationAction,
-        ) -> tuple[int, int, float, int, int, str, str]:
+        ) -> tuple[int, int, float, int, int, int, str, str]:
             admin_priority, demand_urgency = service_priority(action)
             pair = (action.node_id, action.model_id)
+            preemption_group = preemption_group_by_pair.get(pair)
             return (
                 -admin_priority,
                 -demand_urgency,
                 time_to_ready(action),
+                preemption_release_work_by_group.get(preemption_group, 0),
                 action_stage(action),
                 preemption_round_by_pair.get(
                     pair,

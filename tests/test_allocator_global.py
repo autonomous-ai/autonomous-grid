@@ -3375,6 +3375,81 @@ def test_mutation_governor_preserves_replica_round_fairness_during_preemption():
     assert all(item.kind == ActionKind.DRAIN for item in result.executable_actions)
 
 
+def test_mutation_governor_finishes_nearest_capacity_release_group_first():
+    machines = [
+        node(
+            "a-two-victims",
+            capacity_mb=8_000,
+            max_models=2,
+            residencies=(
+                ModelResidency("old-a1", 4_000, ResidencyState.READY, loaded_at=1),
+                ModelResidency("old-a2", 4_000, ResidencyState.READY, loaded_at=1),
+            ),
+        ),
+        node(
+            "z-one-victim",
+            capacity_mb=8_000,
+            max_models=2,
+            residencies=(
+                ModelResidency("old-z", 8_000, ResidencyState.READY, loaded_at=1),
+            ),
+        ),
+    ]
+    profiles = [
+        model(
+            model_id,
+            memory_mb,
+            min_replicas=0,
+            max_replicas=0,
+            priority=1,
+            min_residency_seconds=0,
+        )
+        for model_id, memory_mb in (
+            ("old-a1", 4_000),
+            ("old-a2", 4_000),
+            ("old-z", 8_000),
+        )
+    ]
+    profiles.extend(
+        (
+            model(
+                "alpha",
+                8_000,
+                pinned_nodes=("a-two-victims",),
+                priority=100,
+            ),
+            model(
+                "beta",
+                8_000,
+                pinned_nodes=("z-one-victim",),
+                priority=100,
+            ),
+        )
+    )
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        machines,
+        profiles,
+        now=10,
+    )
+
+    result = Reconciler(
+        ReconcilePolicy(max_concurrent_mutations=1)
+    ).reconcile(
+        plan,
+        machines,
+        profiles,
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+
+    selected = result.executable_actions[0]
+    beneficiary_by_pair = {
+        (item.node_id, item.model_id): item.for_model_id
+        for item in plan.preemptions
+    }
+    assert beneficiary_by_pair[(selected.node_id, selected.model_id)] == "beta"
+
+
 def test_reconciler_indexes_high_cardinality_inputs_once(
     monkeypatch,
 ):
