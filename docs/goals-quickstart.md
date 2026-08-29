@@ -152,6 +152,11 @@ before accepting the turn. Evidence records both the input and output transcript
 provider checks out the verified checkpoint before resuming its native thread; it does not fetch
 another provider's filesystem, process memory or bearer token.
 
+Codex embeds worker-local absolute rollout paths in its state database. Grid does not reuse those
+paths: the checkpoint stores a path relative to `.grid/agent/codex/home`, and each successor rebases
+it beneath its own task root before `thread/resume`. This is what allows nodes with different
+`--tasks-root` values to resume the same native Goal.
+
 If a provider disappears mid-turn, its lease expires and the relay requeues the same task row with
 an incremented attempt number. The replacement starts from the last successful project and Codex
 checkpoint. Work that existed only in the dead provider's uncommitted worktree is intentionally

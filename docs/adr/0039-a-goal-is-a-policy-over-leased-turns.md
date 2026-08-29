@@ -57,10 +57,11 @@ The ordered list is a deterministic preference when one node can run several har
 still allows a later harness when that is what an eligible node advertises. Grid does not claim
 round-robin fairness in this slice.
 
-Capabilities are operator-advertised, fail closed, and scoped to a harness. Installing a binary is
-enough to advertise the harness itself; it is not evidence that image generation, browser control,
-an MCP server, or a privileged API is configured. Unknown required capabilities leave the Goal
-queued rather than spending attempts on unsuitable workers.
+Capabilities are operator-advertised, fail closed, and scoped to a harness. A binary is advertised
+only after its version proves the native distributed-Goal contract Grid uses (`codex-cli 0.150.1`
+or newer for Codex; Claude has its own measured resume floor). Installation is not evidence that
+image generation, browser control, an MCP server, or a privileged API is configured. Unknown
+required capabilities leave the Goal queued rather than spending attempts on unsuitable workers.
 
 ### Native Goal mechanisms remain authoritative progress loops
 
@@ -72,6 +73,13 @@ agent side ref may contain both checkpoint namespaces, and a harness resumes its
 session when it returns to the Goal. A different harness receives the shared Git tree plus a concise
 handoff block describing completed turns and failed evaluations. "Mixed-agent resume" therefore
 means shared Goal continuity, not deserializing Claude history into Codex or vice versa.
+
+Codex's state database records the rollout JSONL by an absolute machine-local path. Copying that
+database and calling `thread/resume` by id fails when the prior worker root is absent. Grid therefore
+stores the rollout's path relative to the checkpointed Codex home, resolves it beneath the successor
+worker's home, and supplies that relocated absolute `path` to `thread/resume`. Paths that escape the
+copied home, are missing, or are ambiguous fail closed. This was measured against real Codex 0.150.1
+with worker A's original home taken offline before worker B resumed.
 
 Grid records the native status, evaluator reason when the harness exposes one, model, harness
 version, token/time usage, and checkpoint commit for every attempt. Native status can request

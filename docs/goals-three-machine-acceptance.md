@@ -85,6 +85,7 @@ screenshots alone.
 | Turn 2 | A attempt 1 lease expiry; B attempt 2, Claude, same turn id, result commit and transcript input/output |
 | Turn 3 | B attempt 1 lease expiry; C attempt 2, Codex, same turn id, result commit and transcript input/output |
 | Isolation | both uncommitted markers absent on replacement machines and final tree |
+| Native path portability | B and C resume Codex using rollout paths beneath their own distinct task roots; A's absolute path is never reused |
 | Evaluation | each definition hash, evaluator node, exact result commit, score and evidence |
 | Terminal state | Goal `complete`; zero queued/running turns for its conversation |
 

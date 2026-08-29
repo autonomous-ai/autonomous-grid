@@ -36,10 +36,11 @@ class _FakeProcess:
         self.returncode = -9
 
 
-def _messages(status="complete"):
+def _messages(rollout_path, status="complete"):
     return [
         {"id": 1, "result": {"userAgent": "codex"}},
-        {"id": 2, "result": {"thread": {"id": "thread-portable"}}},
+        {"id": 2, "result": {"thread": {
+            "id": "thread-portable", "path": str(rollout_path)}}},
         {"method": "turn/started", "params": {"threadId": "thread-portable"}},
         {"id": 3, "result": {"goal": {"status": "active"}}},
         {"method": "thread/tokenUsage/updated", "params": {
@@ -106,7 +107,11 @@ def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch)
     events = []
     monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
     monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
-    process = _FakeProcess(_messages())
+    rollout = (tmp_path / task_codex.AGENT_DIR / task_codex.HOME_DIR
+               / "sessions/fake/rollout-thread-portable.jsonl")
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    process = _FakeProcess(_messages(rollout))
     result = task_codex.run_slice(
         _job(), tmp_path, inference=task_codex.GridInference("https://grid.test", "secret"),
         executable="/fake/codex", timeout=30,
@@ -118,6 +123,8 @@ def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch)
     assert result.turns_completed == 1 and result.tokens_used == 450
     checkpoint = json.loads((tmp_path / ".grid/agent/codex/goal-state.json").read_text())
     assert checkpoint["thread_id"] == "thread-portable"
+    assert checkpoint["version"] == 2
+    assert checkpoint["rollout_relpath"] == "sessions/fake/rollout-thread-portable.jsonl"
     sent = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
     assert sent[0]["method"] == "initialize"
     assert sent[1] == {"method": "initialized"}
@@ -130,6 +137,37 @@ def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch)
                and row["params"].get("status") == "paused" for row in sent)
     assert "secret" not in process.stdin.getvalue()
     assert events[-1][0] == "goal.slice.completed"
+
+
+def test_copied_codex_checkpoint_rebases_rollout_to_the_new_worker(tmp_path):
+    worker_b_home = tmp_path / "worker-b" / "home"
+    rollout = worker_b_home / "sessions/2026/rollout-thread-portable.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+
+    resolved = task_codex._resume_rollout(worker_b_home, {
+        "thread_id": "thread-portable",
+        "rollout_relpath": "sessions/2026/rollout-thread-portable.jsonl",
+    }, "thread-portable")
+
+    assert resolved == rollout.resolve()
+    assert str(resolved).startswith(str(worker_b_home.resolve()))
+
+
+def test_legacy_codex_checkpoint_discovers_copied_rollout_but_refuses_escape(tmp_path):
+    home = tmp_path / "home"
+    rollout = home / "sessions/2026/rollout-thread-portable.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+
+    assert task_codex._resume_rollout(home, {}, "thread-portable") == rollout.resolve()
+    try:
+        task_codex._resume_rollout(
+            home, {"rollout_relpath": "../../outside.jsonl"}, "thread-portable")
+    except task_codex.CodexGoalError as exc:
+        assert "escapes its Codex home" in str(exc)
+    else:
+        raise AssertionError("a checkpoint path escaped the portable Codex home")
 
 
 def _git(directory: Path, *args: str) -> str:

@@ -203,6 +203,54 @@ def _write_state(workspace: Path, value: dict[str, Any]) -> None:
             pass
 
 
+def _relative_rollout(codex_home: Path, path: Any) -> str:
+    """Turn Codex's machine-local rollout path into a checkpoint-safe relative path."""
+    if not isinstance(path, str) or not path:
+        raise CodexGoalError("Codex returned no rollout path for its distributed Goal thread")
+    root = codex_home.resolve()
+    supplied = Path(path)
+    if not supplied.is_absolute():
+        raise CodexGoalError("Codex returned a non-absolute distributed Goal rollout path")
+    candidate = supplied.resolve()
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        raise CodexGoalError("Codex stored its Goal rollout outside the portable Codex home") from None
+    if not candidate.is_file():
+        raise CodexGoalError("Codex's distributed Goal rollout does not exist")
+    return relative.as_posix()
+
+
+def _resume_rollout(codex_home: Path, state: dict[str, Any], thread_id: str) -> Path:
+    """Resolve a copied rollout without trusting A's absolute SQLite path on worker B."""
+    relative = state.get("rollout_relpath")
+    if relative is not None:
+        if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
+            raise CodexGoalError("the distributed Codex checkpoint has an invalid rollout path")
+        root = codex_home.resolve()
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            raise CodexGoalError(
+                "the distributed Codex checkpoint rollout escapes its Codex home") from None
+        if not candidate.is_file():
+            raise CodexGoalError("the distributed Codex checkpoint rollout is missing")
+        return candidate
+
+    # Compatibility for checkpoints written before rollout_relpath existed. The copied transcript
+    # still contains the rollout; recover it by exact thread-id suffix and write the relative path
+    # back after this slice. Never fall back to resume-by-id: Codex's SQLite row contains worker A's
+    # absolute path and can silently work only while A's disk happens to remain mounted.
+    sessions = codex_home / "sessions"
+    matches = [path for path in sessions.rglob("*.jsonl")
+               if path.is_file() and path.name.endswith(f"-{thread_id}.jsonl")]
+    if len(matches) != 1:
+        raise CodexGoalError(
+            "the distributed Codex checkpoint has no unique portable rollout for its thread")
+    return matches[0].resolve()
+
+
 class ToolExecutor:
     """Execute the Goal's explicit observe/act HTTP capabilities and publish an audit event."""
 
@@ -467,12 +515,16 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
         if thread_id:
             resume = dict(thread_params)
             resume.pop("dynamicTools", None)
-            rpc.wait(rpc.send("thread/resume", {"threadId": thread_id, **resume}))
+            resume["path"] = str(_resume_rollout(codex_home, state, thread_id))
+            thread_result = rpc.wait(
+                rpc.send("thread/resume", {"threadId": thread_id, **resume})) or {}
         else:
-            result = rpc.wait(rpc.send("thread/start", thread_params)) or {}
-            thread_id = str((result.get("thread") or {}).get("id") or "")
+            thread_result = rpc.wait(rpc.send("thread/start", thread_params)) or {}
+            thread_id = str((thread_result.get("thread") or {}).get("id") or "")
             if not thread_id:
                 raise CodexGoalError("Codex thread/start returned no thread id")
+        rollout_relpath = _relative_rollout(
+            codex_home, (thread_result.get("thread") or {}).get("path"))
         set_goal: dict[str, Any] = {"threadId": thread_id, "status": "active"}
         if turns_before == 0:
             set_goal.update({
@@ -502,7 +554,8 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
         result = GoalSlice(status, thread_id, turns_before + 1, measured_tokens, measured_time,
                            output=str(turn.get("output") or "") or None)
         _write_state(workspace, {
-            "version": 1, "thread_id": result.thread_id, "status": result.status,
+            "version": 2, "thread_id": result.thread_id,
+            "rollout_relpath": rollout_relpath, "status": result.status,
             "turns_completed": result.turns_completed, "tokens_used": result.tokens_used,
             "time_used_seconds": result.time_used_seconds,
         })

@@ -29,6 +29,12 @@ def history_path() -> Path:
     return home / "fake-history.json"
 
 
+def rollout_path(thread_id: str) -> Path:
+    directory = Path(os.environ["CODEX_HOME"]) / "sessions" / "fake"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"rollout-fake-{thread_id}.jsonl"
+
+
 def load_history() -> list[dict]:
     path = history_path()
     if not path.is_file():
@@ -235,10 +241,19 @@ def main() -> int:
                 "code": -32600, "message": "Not initialized"}})
         elif method == "thread/start":
             dynamic_tools = request.get("params", {}).get("dynamicTools") or []
-            reply(request, {"thread": {"id": thread_id}})
+            rollout = rollout_path(thread_id)
+            rollout.write_text("{}\n")
+            reply(request, {"thread": {"id": thread_id, "path": str(rollout)}})
         elif method == "thread/resume":
             thread_id = request.get("params", {}).get("threadId") or thread_id
-            reply(request, {"thread": {"id": thread_id}})
+            supplied = Path(request.get("params", {}).get("path") or "")
+            home = Path(os.environ["CODEX_HOME"]).resolve()
+            if (not supplied.is_file() or not supplied.resolve().is_relative_to(home)
+                    or not supplied.name.endswith(f"-{thread_id}.jsonl")):
+                emit({"id": request["id"], "error": {
+                    "code": -32600, "message": f"non-portable rollout path: {supplied}"}})
+                continue
+            reply(request, {"thread": {"id": thread_id, "path": str(supplied)}})
         elif method == "thread/goal/set":
             desired = request.get("params", {}).get("status")
             # Completion wins the runner's pause request, as it does in the native Goal state.
