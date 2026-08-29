@@ -1193,25 +1193,30 @@ class AllocatorController:
         active_models = tuple(
             model_id for model_id in self._profiles if model_id not in self._retiring
         )
+        profiles = tuple(self._profiles[model_id] for model_id in active_models)
+        node_list = tuple(nodes)
         with self._demand_lock:
             direct = self.demand.forecasts(active_models, now=now)
-            profiles = tuple(self._profiles[model_id] for model_id in active_models)
-            node_list = tuple(nodes)
-            selection = self._joint_portfolio_selection(
-                profiles,
-                direct,
-                node_list,
-                now=now,
-                placement_hints=placement_hints,
-            )
-            forecasts = self.intelligence.portfolio_forecasts(
-                profiles,
-                direct,
-                now=now,
-                placement_hints=placement_hints,
-                chosen_models=selection,
-            )
-            return forecasts, selection
+            # Planner-backed portfolio search may evaluate dozens of complete fleet plans. Snapshot
+            # bounded telemetry under its own mutex, then release it before any optimization so
+            # inference finalizers can keep recording demand while the controller holds `_lock`.
+            intelligence = WorkloadIntelligence.from_dict(self.intelligence.to_dict())
+        selection = self._joint_portfolio_selection(
+            profiles,
+            direct,
+            node_list,
+            now=now,
+            placement_hints=placement_hints,
+            intelligence=intelligence,
+        )
+        forecasts = intelligence.portfolio_forecasts(
+            profiles,
+            direct,
+            now=now,
+            placement_hints=placement_hints,
+            chosen_models=selection,
+        )
+        return forecasts, selection
 
     def _joint_portfolio_selection(
         self,
@@ -1221,6 +1226,7 @@ class AllocatorController:
         *,
         now: float,
         placement_hints: Mapping[str, Mapping[str, Any]] | None,
+        intelligence: WorkloadIntelligence,
     ) -> dict[str, str] | None:
         """Coordinate workload choices against one real fleet plan.
 
@@ -1233,7 +1239,7 @@ class AllocatorController:
 
         if len(nodes) == 0:
             return None
-        projections = self.intelligence.projections(
+        projections = intelligence.projections(
             profiles,
             now=now,
             placement_hints=placement_hints,
@@ -1241,7 +1247,7 @@ class AllocatorController:
         active_rows = [
             row
             for row in projections
-            if int(row.get("samples") or 0) >= self.intelligence.portfolio_min_samples
+            if int(row.get("samples") or 0) >= intelligence.portfolio_min_samples
             and float(row.get("requests_per_minute") or 0.0) > 0
             and any(candidate.get("selectable") for candidate in row.get("candidates") or ())
         ]
@@ -1297,7 +1303,7 @@ class AllocatorController:
                 result = (float("-inf"),)
                 evaluation_cache[key] = result
                 return result
-            forecasts = self.intelligence.portfolio_forecasts(
+            forecasts = intelligence.portfolio_forecasts(
                 profiles,
                 direct,
                 now=now,

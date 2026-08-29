@@ -90,7 +90,9 @@ per workload and 64 distinct portfolios, so catalog size cannot create an unboun
 Only one distinct model may differ from the exploitation-only portfolio because of uncertainty at a
 time; this is an explicit fleet exploration budget, not one canary allowance per workload. Status
 shows the joint mapping, selected model set, and the model currently consuming that exploration
-slot.
+slot. The controller snapshots bounded demand and outcome state under the telemetry mutex, releases
+it, and performs planner-backed search on that immutable snapshot; request completion telemetry is
+therefore not serialized behind portfolio optimization.
 
 Counterfactual portfolio demand is deliberately weaker than direct evidence: it may fill spare
 capacity but cannot evict a baseline or a directly demanded model. Workload-wide latency, queues,

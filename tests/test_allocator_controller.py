@@ -383,6 +383,86 @@ def test_joint_portfolio_search_has_a_hard_planner_evaluation_bound(monkeypatch)
     assert calls <= 65  # one baseline plus at most 64 distinct portfolio evaluations
 
 
+def test_joint_portfolio_planning_does_not_block_request_telemetry(monkeypatch):
+    controller = AllocatorController()
+    for model_id, workload in (("coder", "coding"), ("researcher", "research")):
+        controller.put_profile(
+            ModelProfile(
+                model_id,
+                1_000,
+                runtimes=("llama.cpp",),
+                backends=("metal",),
+                min_replicas=0,
+                max_replicas=1,
+                min_residency_seconds=0,
+                workload_scores=((workload, 1.0),),
+            )
+        )
+        for timestamp in (98, 99, 100):
+            controller.observe_lifecycle(
+                RequestFeatures("chat/completions", "auto", workload),
+                service_seconds=1,
+                timestamp=timestamp,
+            )
+    machines = (
+        NodeSnapshot(
+            "node",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            last_heartbeat=100,
+        ),
+    )
+    hints = controller.planner.portfolio_placement_hints(
+        machines, controller.profiles, now=100
+    )
+    planner_entered = threading.Event()
+    release_planner = threading.Event()
+    planning_finished = threading.Event()
+    telemetry_finished = threading.Event()
+    failures: list[BaseException] = []
+    original_plan = controller.planner.plan
+
+    def blocking_plan(*args, **kwargs):
+        planner_entered.set()
+        if not release_planner.wait(2):
+            raise TimeoutError("test did not release planner")
+        return original_plan(*args, **kwargs)
+
+    def plan_portfolio():
+        try:
+            controller._forecast_bundle(100, placement_hints=hints, nodes=machines)
+        except BaseException as exc:  # pragma: no cover - asserted through failures
+            failures.append(exc)
+        finally:
+            planning_finished.set()
+
+    def record_request():
+        controller.observe_lifecycle(
+            RequestFeatures("chat/completions", "auto", "coding"),
+            service_seconds=1,
+            timestamp=101,
+        )
+        telemetry_finished.set()
+
+    monkeypatch.setattr(controller.planner, "plan", blocking_plan)
+    planning_thread = threading.Thread(target=plan_portfolio)
+    planning_thread.start()
+    assert planner_entered.wait(1)
+    telemetry_thread = threading.Thread(target=record_request)
+    telemetry_thread.start()
+    try:
+        assert telemetry_finished.wait(0.1)
+    finally:
+        release_planner.set()
+        planning_thread.join(2)
+        telemetry_thread.join(2)
+
+    assert planning_finished.is_set()
+    assert failures == []
+
+
 @pytest.mark.parametrize("attested,expect_preemption", [(False, False), (True, True)])
 def test_controller_only_preempts_speculation_for_trusted_broad_portfolio_pressure(
     attested,
