@@ -1093,6 +1093,9 @@ def _add_goal(sub) -> None:
         "evidence", help="Export turn, machine, model, commit and evaluation evidence")
     evidence.add_argument("goal_id")
     evidence.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    evidence.add_argument(
+        "--verify", action="store_true",
+        help="Fail unless turns, transcript handoffs and final independent evals are complete.")
     evidence.set_defaults(handler=cmd_goal)
 
     for action, help_text in (("pause", "Stop scheduling new turns"),

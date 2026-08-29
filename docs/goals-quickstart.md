@@ -47,7 +47,7 @@ The command prints a Goal id. Use that id to inspect or control the run:
 grid goal list                    # active, paused and blocked
 grid goal list --all              # includes ended Goal history
 grid goal status <goal-id>
-grid goal evidence <goal-id> > goal-evidence.json
+grid goal evidence <goal-id> --verify > goal-evidence.json
 grid goal pause <goal-id>         # current leased turn may finish; no next turn is queued
 grid goal resume <goal-id>
 grid goal cancel <goal-id>        # ends the Goal and cancels queued/running work

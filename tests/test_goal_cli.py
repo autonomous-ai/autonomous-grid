@@ -92,9 +92,63 @@ def test_goal_evidence_prints_machine_readable_audit_record(monkeypatch, capsys)
         "inference": [{"provider_node_id": "gpu-B", "model": "model-1"}],
         "eval_runs": [],
     })
-    args = SimpleNamespace(goal_action="evidence", goal_id="goal-1", grid=None)
+    args = SimpleNamespace(goal_action="evidence", goal_id="goal-1", grid=None, verify=False)
     assert goal.cmd_goal(args) == 0
     assert json.loads(capsys.readouterr().out)["turns"][0]["provider_node_id"] == "node-A"
+
+
+def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, capsys):
+    from cli import goal
+    from remote import relay
+
+    record = {
+        "goal": {"id": "goal-1", "status": "complete", "evals": [{
+            "definition_id": "eval-1", "definition_hash": "hash-1", "name": "artifact",
+        }]},
+        "turns": [
+            {"state": "completed", "agent_kind": "codex", "provider_node_id": "node-A",
+             "input_commit": "1" * 40, "result_commit": "2" * 40,
+             "transcript_commit": None, "transcript_result_commit": "a" * 40},
+            {"state": "completed", "agent_kind": "claude", "provider_node_id": "node-B",
+             "input_commit": "2" * 40, "result_commit": "3" * 40,
+             "transcript_commit": "a" * 40, "transcript_result_commit": "b" * 40},
+        ],
+        "eval_runs": [{"definition_id": "eval-1", "result_commit": "3" * 40,
+                       "accepted": True, "passed": True}],
+    }
+    monkeypatch.setattr(goal, "_resolve", lambda _args: ("http://relay", "token", "grid"))
+    monkeypatch.setattr(relay, "get_goal_evidence", lambda *_args: record)
+
+    args = SimpleNamespace(goal_action="evidence", goal_id="goal-1", grid=None, verify=True)
+    assert goal.cmd_goal(args) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == record
+    assert "Goal evidence verified" in captured.err
+
+
+def test_goal_evidence_verify_refuses_a_broken_handoff(monkeypatch, capsys):
+    from cli import goal
+    from remote import relay
+
+    record = {
+        "goal": {"id": "goal-1", "status": "complete", "evals": []},
+        "turns": [
+            {"state": "completed", "agent_kind": "codex", "provider_node_id": "node-A",
+             "input_commit": "1" * 40, "result_commit": "2" * 40,
+             "transcript_commit": None, "transcript_result_commit": "a" * 40},
+            {"state": "completed", "agent_kind": "codex", "provider_node_id": "node-C",
+             "input_commit": "2" * 40, "result_commit": "3" * 40,
+             "transcript_commit": "wrong", "transcript_result_commit": "b" * 40},
+        ],
+        "eval_runs": [],
+    }
+    monkeypatch.setattr(goal, "_resolve", lambda _args: ("http://relay", "token", "grid"))
+    monkeypatch.setattr(relay, "get_goal_evidence", lambda *_args: record)
+
+    args = SimpleNamespace(goal_action="evidence", goal_id="goal-1", grid=None, verify=True)
+    with pytest.raises(SystemExit, match="turn 2 transcript input"):
+        goal.cmd_goal(args)
+    assert json.loads(capsys.readouterr().out) == record
 
 
 def test_goal_status_shows_budget_blocker_and_distributed_children(capsys):

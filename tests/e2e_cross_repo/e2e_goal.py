@@ -51,6 +51,8 @@ def _assert_transcript_chain(evidence: dict, expected_turns: int) -> None:
     assert all(turn["transcript_result_commit"] for turn in turns), turns
     for previous, current in zip(turns, turns[1:]):
         assert current["transcript_commit"] == previous["transcript_result_commit"], turns
+    from cli.goal import _verify_evidence
+    assert _verify_evidence(evidence) == []
 
 
 def test_three_nodes_reclaim_goal_turns_and_finish_one_game(

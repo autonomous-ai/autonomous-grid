@@ -63,8 +63,10 @@ inference but not actually polling the distributed task queue.
 
 ## Required evidence
 
-Save the relay-authored JSON artifact with `grid goal evidence <goal-id> > goal-evidence.json`.
-A release is not accepted from screenshots alone.
+Save and verify the relay-authored JSON artifact with
+`grid goal evidence <goal-id> --verify > goal-evidence.json`. The command exits nonzero if the Goal
+is not complete, a turn is nonterminal, the transcript chain is broken, or a required final eval has
+no accepted passing run. A release is not accepted from screenshots alone.
 
 | Evidence | Required assertion |
 |---|---|

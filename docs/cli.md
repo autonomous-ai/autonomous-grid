@@ -1546,6 +1546,7 @@ grid goal run --project <project-id> --objective <text> --done-when <text> --mod
               [--grid <grid>] [--json]
 grid goal list [--all] [--grid <grid>] [--json]
 grid goal status <goal-id> [--grid <grid>] [--json]
+grid goal evidence <goal-id> [--verify] [--grid <grid>]
 grid goal pause|resume|cancel <goal-id> [--grid <grid>] [--json]
 ```
 

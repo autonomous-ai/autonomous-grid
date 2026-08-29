@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 
@@ -79,6 +80,61 @@ def _show(goal: dict, as_json: bool) -> None:
                   f"{child.get('objective')}")
 
 
+def _verify_evidence(record: dict) -> list[str]:
+    """Return deterministic release-gate failures in a relay-authored Goal evidence record."""
+    failures: list[str] = []
+    goal = record.get("goal") if isinstance(record.get("goal"), dict) else {}
+    turns = record.get("turns") if isinstance(record.get("turns"), list) else []
+    if goal.get("status") != "complete":
+        failures.append(f"Goal status is {goal.get('status')!r}, not 'complete'")
+    if not turns:
+        failures.append("no Goal turns were recorded")
+        return failures
+
+    for index, turn in enumerate(turns, 1):
+        if not isinstance(turn, dict):
+            failures.append(f"turn {index} is not an object")
+            continue
+        if turn.get("state") != "completed":
+            failures.append(f"turn {index} state is {turn.get('state')!r}, not 'completed'")
+        for field in ("agent_kind", "provider_node_id", "input_commit", "result_commit"):
+            if not turn.get(field):
+                failures.append(f"turn {index} has no {field}")
+        if not turn.get("transcript_result_commit"):
+            failures.append(f"turn {index} has no verified transcript output commit")
+
+    first = turns[0] if isinstance(turns[0], dict) else {}
+    if first.get("transcript_commit") is not None:
+        failures.append("turn 1 unexpectedly resumes a pre-existing transcript")
+    for index, (previous, current) in enumerate(zip(turns, turns[1:]), 2):
+        if not isinstance(previous, dict) or not isinstance(current, dict):
+            continue
+        if current.get("transcript_commit") != previous.get("transcript_result_commit"):
+            failures.append(
+                f"turn {index} transcript input does not equal turn {index - 1} output")
+
+    evals = goal.get("evals") if isinstance(goal.get("evals"), list) else []
+    runs = record.get("eval_runs") if isinstance(record.get("eval_runs"), list) else []
+    final_commit = turns[-1].get("result_commit") if isinstance(turns[-1], dict) else None
+    for spec in evals:
+        if not isinstance(spec, dict):
+            failures.append("Goal contains a malformed evaluation definition")
+            continue
+        definition_id = spec.get("definition_id")
+        definition_hash = spec.get("definition_hash")
+        accepted = [run for run in runs if isinstance(run, dict)
+                    and run.get("accepted") is True and run.get("passed") is True
+                    and run.get("result_commit") == final_commit
+                    and ((definition_id and run.get("definition_id") == definition_id)
+                         or (definition_hash
+                             and run.get("definition_hash") == definition_hash))]
+        if not accepted:
+            failures.append(
+                f"evaluation {spec.get('name') or definition_id or definition_hash or '?'} has no "
+                "accepted passing run for the final result commit")
+    return failures
+
+
 def cmd_goal(args: argparse.Namespace) -> int:
     from remote import relay
 
@@ -113,7 +169,14 @@ def cmd_goal(args: argparse.Namespace) -> int:
     if args.goal_action == "status":
         goal = relay.get_goal(base, token, args.goal_id)
     elif args.goal_action == "evidence":
-        print(json.dumps(relay.get_goal_evidence(base, token, args.goal_id), indent=2))
+        evidence = relay.get_goal_evidence(base, token, args.goal_id)
+        print(json.dumps(evidence, indent=2))
+        if getattr(args, "verify", False):
+            failures = _verify_evidence(evidence)
+            if failures:
+                raise SystemExit("Goal evidence verification failed:\n- " + "\n- ".join(failures))
+            print("Goal evidence verified: terminal turns, transcript chain and evaluations pass.",
+                  file=sys.stderr)
         return 0
     else:
         goal = relay.control_goal(base, token, args.goal_id, args.goal_action)
