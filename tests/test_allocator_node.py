@@ -186,6 +186,31 @@ def test_node_loop_warms_and_advertises_only_ready_model(tmp_path):
         ]
         engine = client.get("/nodes/discover").json()["engines"][0]
         assert engine["endpoint_url"].startswith("https://10.0.0.5:")
+        assert app.state.nodes[agent.node_id].allocator["cost_known"] is False
+        child_id = engine_node_id(managed.host_id, "qwen.gguf")
+        assert app.state.nodes[child_id].allocator["cost_known"] is False
+
+
+def test_node_heartbeat_advertises_explicit_zero_cost_as_known(tmp_path):
+    app = create_app(
+        grid_id="grid",
+        grid_name="test",
+        allocator_control_token="secret",
+        allocator_interval_seconds=3_600,
+    )
+    with TestClient(app) as client:
+        enable_automatic(client)
+        agent, managed, _, _ = make_agent(
+            tmp_path,
+            client,
+            resource_info_collector=lambda: {**resources(), "cost_per_hour": 0},
+        )
+        agent.heartbeat_once()
+
+        assert managed.wait_idle(1)
+        allocator = app.state.nodes[agent.node_id].allocator
+        assert allocator["cost_known"] is True
+        assert allocator["cost_per_hour"] == 0.0
 
 
 def test_ready_engine_put_commit_then_timeout_retains_tombstone_and_fences_route(
@@ -2154,6 +2179,25 @@ def test_resource_collector_can_partition_one_machine_into_failure_domains():
     assert advertised["host_priority"] == 2
     assert advertised["gpu_count"] == 1
     assert advertised["gpu_memory_mb"] == [advertised["capacity_mb"]]
+
+
+def test_resource_collector_preserves_unknown_cost_instead_of_advertising_free():
+    advertised = _allocator_resources(resources())
+
+    assert "cost_per_hour" not in advertised
+
+
+@pytest.mark.parametrize("cost", [None, -1, float("nan"), float("inf"), True, "unknown"])
+def test_resource_collector_rejects_invalid_cost_as_unknown(cost):
+    advertised = _allocator_resources({**resources(), "cost_per_hour": cost})
+
+    assert "cost_per_hour" not in advertised
+
+
+def test_resource_collector_preserves_explicit_zero_cost_as_known():
+    advertised = _allocator_resources({**resources(), "cost_per_hour": 0})
+
+    assert advertised["cost_per_hour"] == 0.0
 
 
 def test_node_rejects_warm_when_local_capacity_drops_after_global_plan(

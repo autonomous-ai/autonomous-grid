@@ -1375,7 +1375,7 @@ def _allocator_resources(
         gpu_count = max(1, gpu_count)
         if not gpu_memory_mb and capacity_mb > 0:
             gpu_memory_mb = (capacity_mb,)
-    return {
+    resources = {
         "capacity_mb": capacity_mb,
         "reserved_mb": min(reserved_mb, capacity_mb),
         # This field is a local admission fence. The controller independently derives capacity from
@@ -1391,13 +1391,16 @@ def _allocator_resources(
             info.get("mem_bandwidth_gbps")
         ),
         "compute_gflops": _nonnegative_number(info.get("compute_gflops")),
-        # Optional operator/accounting metadata. Device discovery cannot infer electricity,
-        # depreciation, or rental price, but a deployment or logical test can provide it and the
-        # global placement scorer already knows how to prefer cheaper eligible nodes.
-        "cost_per_hour": _nonnegative_number(info.get("cost_per_hour")),
         "host_priority": _nonnegative_int(info.get("host_priority")),
         "allowed_data_tiers": ["public", "internal"],
     }
+    # Optional operator/accounting metadata. Device discovery cannot infer electricity,
+    # depreciation, or rental price. Preserve that uncertainty instead of silently advertising an
+    # unpriced host as free; an explicit zero remains a known zero-cost host.
+    cost_per_hour = _optional_nonnegative_number(info.get("cost_per_hour"))
+    if cost_per_hour is not None:
+        resources["cost_per_hour"] = cost_per_hour
+    return resources
 
 
 def _nonnegative_int(value: Any) -> int:
@@ -1413,3 +1416,13 @@ def _nonnegative_number(value: Any) -> float:
     except (TypeError, ValueError, OverflowError):
         return 0.0
     return number if math.isfinite(number) and number >= 0 else 0.0
+
+
+def _optional_nonnegative_number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
