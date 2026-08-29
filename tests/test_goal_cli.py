@@ -109,6 +109,7 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
     from remote import relay
 
     record = {
+        "schema_version": 1,
         "goal": {"id": "goal-1", "status": "complete", "evals": [{
             "definition_id": "eval-1", "definition_hash": "hash-1", "name": "artifact",
         }]},
@@ -146,6 +147,7 @@ def test_goal_evidence_verify_refuses_a_broken_handoff(monkeypatch, capsys):
     from remote import relay
 
     record = {
+        "schema_version": 1,
         "goal": {"id": "goal-1", "status": "complete", "evals": []},
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
                        "worktree_chain": [{
@@ -178,6 +180,7 @@ def test_goal_evidence_verify_refuses_pruned_training_objects():
     from cli.goal import _verify_evidence
 
     record = {
+        "schema_version": 1,
         "goal": {"status": "complete", "evals": []},
         "trajectory": {"transcript_pruned": True, "pruned_turn_branches": ["turn-1"]},
         "turns": [{
@@ -198,6 +201,7 @@ def test_goal_evidence_verify_refuses_an_unrelated_worktree_handoff():
     from cli.goal import _verify_evidence
 
     record = {
+        "schema_version": 1,
         "goal": {"status": "complete", "evals": []},
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
                        "worktree_chain": [{
@@ -225,6 +229,7 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
     from cli.goal import _verify_evidence
 
     record = {
+        "schema_version": 1,
         "goal": {"status": "complete", "evals": []},
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
         "turns": [{
@@ -250,6 +255,7 @@ def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
     from cli.goal import _verify_evidence
 
     record = {
+        "schema_version": 1,
         "goal": {"status": "complete", "evals": []},
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
         "turns": [{

@@ -85,6 +85,9 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                      require_inference: bool = False) -> list[str]:
     """Return deterministic release-gate failures in a relay-authored Goal evidence record."""
     failures: list[str] = []
+    if record.get("schema_version") != 1:
+        failures.append(
+            f"unsupported Goal evidence schema version {record.get('schema_version')!r}")
     goal = record.get("goal") if isinstance(record.get("goal"), dict) else {}
     turns = record.get("turns") if isinstance(record.get("turns"), list) else []
     if goal.get("status") != "complete":
