@@ -217,7 +217,6 @@ class NodeSnapshot:
     compute_gflops: float = 0.0
     gpu_count: int = 0
     gpu_memory_mb: tuple[int, ...] = ()
-    cost_per_hour: float = 0.0
     host_priority: int = 0
     last_heartbeat: float = 0.0
     mutation_cooldown_until: float = 0.0
@@ -249,7 +248,6 @@ class NodeSnapshot:
         _finite_nonnegative(self.latency_ms, "latency_ms")
         _finite_nonnegative(self.memory_bandwidth_gbps, "memory_bandwidth_gbps")
         _finite_nonnegative(self.compute_gflops, "compute_gflops")
-        _finite_nonnegative(self.cost_per_hour, "cost_per_hour")
         _finite_nonnegative(self.last_heartbeat, "last_heartbeat")
         _finite_nonnegative(self.mutation_cooldown_until, "mutation_cooldown_until")
         if (
@@ -367,6 +365,9 @@ class NodeSnapshot:
             raise ValueError("unsupported allocator node schema")
         fields = dict(value)
         fields.pop("schema_version", None)
+        # Older allocator snapshots carried optional accounting metadata. It never affects current
+        # placement; ignore it so durable pre-removal state remains readable during upgrades.
+        fields.pop("cost_per_hour", None)
         fields["residencies"] = tuple(
             ModelResidency.from_dict(item) for item in fields.get("residencies") or ()
         )

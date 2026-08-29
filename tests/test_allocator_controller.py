@@ -223,7 +223,6 @@ def test_controller_portfolio_uses_a_fleet_feasible_fallback():
         runtimes=("llama.cpp",),
         backends=("metal",),
         last_heartbeat=100,
-        cost_per_hour=0.20,
     )
 
     controller.tick((machine,), now=100)
@@ -1953,12 +1952,10 @@ def test_delivered_warm_intent_prevents_duplicate_cold_start_before_heartbeat():
     controller.put_profile(profile(artifact_sha256=digest))
     cheap = replace(
         node(node_id="cheap", artifact_sha256=digest),
-        cost_per_hour=1.0,
         max_models=1,
     )
     expensive = replace(
         node(node_id="expensive"),
-        cost_per_hour=0.1,
         max_models=1,
     )
 

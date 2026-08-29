@@ -364,6 +364,9 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 "requests": 0,
                 "workloads": {},
                 "desired_replicas": dict(bootstrap.desired_replicas),
+                "ready_replicas": {},
+                "served_equivalent": 0.0,
+                "service_rate_pct": 0.0,
                 "loads": sorted(bootstrap_loads),
                 "unloads": [],
                 "node_changes": [],
@@ -502,12 +505,35 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             row["workload"]: row
             for row in allocator_status["portfolio_projections"]
         }
-        capacity_by_model = {
-            model_id: len(plan.nodes_for(model_id))
-            * profile_by_id[model_id].replica_concurrency
-            * profile_by_id[model_id].target_utilization
-            for model_id in profile_by_id
-        }
+        # Requests arrived before this planning tick. Score them against capacity that was READY at
+        # the start of the tick, not desired assignments whose load/warm mutations have only just
+        # been issued. Materialization below makes successful mutations available next minute. This
+        # one-tick actuation lag is deliberately conservative and is what lets the lab distinguish
+        # proactive allocation from reactive scaling.
+        capacity_by_model: defaultdict[str, float] = defaultdict(float)
+        ready_replicas_by_model: Counter[str] = Counter()
+        for node in nodes:
+            if node.state not in (NodeState.ACCEPTING, NodeState.THROTTLED):
+                continue
+            node_capacity_fraction = (
+                planner_policy.throttled_capacity_fraction
+                if node.state == NodeState.THROTTLED
+                else 1.0
+            )
+            for residency in node.residencies:
+                profile = profile_by_id.get(residency.model_id)
+                if (
+                    profile is None
+                    or residency.state != ResidencyState.READY
+                    or not profile.matches_artifact(residency)
+                ):
+                    continue
+                ready_replicas_by_model[residency.model_id] += 1
+                capacity_by_model[residency.model_id] += (
+                    profile.replica_concurrency
+                    * profile.target_utilization
+                    * node_capacity_fraction
+                )
         offered_by_model: defaultdict[str, float] = defaultdict(float)
         chosen_by_workload: dict[str, str] = {}
         for workload, count in request_counts.items():
@@ -530,9 +556,12 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             else 1.0
             for model_id, offered in offered_by_model.items()
         }
+        minute_served = 0.0
         for workload, count in request_counts.items():
             chosen = chosen_by_workload.get(workload, "")
-            served_by_workload[workload] += count * service_ratio_by_model.get(chosen, 0.0)
+            served = count * service_ratio_by_model.get(chosen, 0.0)
+            minute_served += served
+            served_by_workload[workload] += served
             requested_by_workload[workload] += count
             total_requests += count
         for persona in personas:
@@ -567,6 +596,12 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     "requests": sum(request_counts.values()),
                     "workloads": dict(sorted(request_counts.items())),
                     "desired_replicas": desired,
+                    "ready_replicas": dict(sorted(ready_replicas_by_model.items())),
+                    "served_equivalent": round(minute_served, 2),
+                    "service_rate_pct": round(
+                        100.0 * minute_served / max(1, sum(request_counts.values())),
+                        2,
+                    ),
                     "loads": [f"{model}@{node}" for node, model in sorted(added)],
                     "unloads": [f"{model}@{node}" for node, model in sorted(removed)],
                     "node_changes": state_changes,
@@ -757,7 +792,10 @@ def _build_catalog(count: int, machines: int) -> tuple[CatalogModel, ...]:
             priority=100,
             load_seconds=20.0 + int(source["artifact_mb"]) / 2_000.0,
             warm_seconds=3.0 + memory_mb / 8_000.0,
-            min_residency_seconds=0,
+            # One simulated minute of placement stickiness is enough to expose useful repacking
+            # while preventing adjacent-tick reversals. Production profiles default to a longer
+            # hold; the planner honors each model's configured value.
+            min_residency_seconds=60,
             scale_down_cooldown_seconds=120,
             min_failure_domains=1,
             max_colocated_models=1,
@@ -933,13 +971,23 @@ def _materialize(
     now: float,
 ) -> tuple[NodeSnapshot, ...]:
     by_node: defaultdict[str, list[ModelResidency]] = defaultdict(list)
+    prior_by_pair = {
+        (node.node_id, residency.model_id): residency
+        for node in nodes
+        for residency in node.residencies
+    }
     for assignment in assignments:
+        prior = prior_by_pair.get((assignment.node_id, assignment.model_id))
         by_node[assignment.node_id].append(
             ModelResidency(
                 model_id=assignment.model_id,
                 memory_mb=assignment.memory_mb,
                 state=ResidencyState.READY,
-                loaded_at=now,
+                loaded_at=(
+                    prior.loaded_at
+                    if assignment.existing and prior is not None and prior.loaded_at
+                    else now
+                ),
                 last_used_at=now,
             )
         )

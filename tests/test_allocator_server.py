@@ -63,7 +63,6 @@ def _managed_node(
             "allocator": {
                 "managed": True,
                 "cached_models": ["qwen"],
-                "cost_per_hour": 2.5,
                 "max_models": 2,
                 "actuator_capabilities": ["load", "warm", "drain", "unload"],
             },
@@ -870,7 +869,6 @@ def test_engine_and_agent_records_for_one_host_do_not_double_capacity(tmp_path):
             "resources": {"capacity_mb": 16_000, "runtimes": ["llama.cpp"]},
             "allocator": {
                 "managed": True,
-                "cost_per_hour": 2.5,
                 "max_models": 4,
                 "residencies": [
                     {"model_id": "qwen", "memory_mb": 8_000, "state": "ready"}
@@ -884,7 +882,6 @@ def test_engine_and_agent_records_for_one_host_do_not_double_capacity(tmp_path):
     assert len(nodes) == 1
     assert nodes[0]["node_id"] == "host-1"
     assert nodes[0]["capacity_mb"] == 16_000
-    assert nodes[0]["cost_per_hour"] == 2.5
     assert nodes[0]["max_models"] == 2
     assert nodes[0]["max_concurrency"] == 1
     assert [item["model_id"] for item in nodes[0]["residencies"]] == ["qwen"]

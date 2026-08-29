@@ -2821,7 +2821,6 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                         ),
                     ),
                     gpu_memory_mb=gpu_memory_mb,
-                    cost_per_hour=_nonnegative_float(allocator.get("cost_per_hour")),
                     host_priority=_first_nonnegative_int(
                         allocator.get("host_priority")
                     ),
@@ -3035,9 +3034,6 @@ def _merge_allocator_hosts(
                     (member.gpu_memory_mb for member in members),
                     key=lambda values: (len(values), sum(values), values),
                 ),
-                # Capacity-node and child-engine records describe one physical host, so host cost
-                # is metadata rather than an additive per-record charge.
-                cost_per_hour=max(member.cost_per_hour for member in members),
                 host_priority=max(member.host_priority for member in members),
                 last_heartbeat=max(member.last_heartbeat for member in members),
                 mutation_cooldown_until=max(

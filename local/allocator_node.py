@@ -931,7 +931,6 @@ class AllocatorNodeAgent:
 
     def _allocator_envelope(self) -> dict[str, Any]:
         envelope = self.runtime.allocator_envelope()
-        envelope["cost_per_hour"] = self.resources.get("cost_per_hour", 0.0)
         envelope["host_priority"] = self.resources.get("host_priority", 0)
         return envelope
 
@@ -1436,10 +1435,6 @@ def _allocator_resources(
             info.get("mem_bandwidth_gbps")
         ),
         "compute_gflops": _nonnegative_number(info.get("compute_gflops")),
-        # Optional operator/accounting metadata. Device discovery cannot infer electricity,
-        # depreciation, or rental price, but a deployment or logical test can provide it and the
-        # global placement scorer already knows how to prefer cheaper eligible nodes.
-        "cost_per_hour": _nonnegative_number(info.get("cost_per_hour")),
         "host_priority": _nonnegative_int(info.get("host_priority")),
         "allowed_data_tiers": ["public", "internal"],
     }

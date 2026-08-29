@@ -2164,7 +2164,6 @@ def test_resource_collector_can_partition_one_machine_into_failure_domains():
             "failure_domain": "logical-node-3",
             "mem_bandwidth_gbps": 400,
             "compute_gflops": 27_132,
-            "cost_per_hour": 0.25,
             "host_priority": 2,
         }
     )
@@ -2172,7 +2171,6 @@ def test_resource_collector_can_partition_one_machine_into_failure_domains():
     assert advertised["failure_domain"] == "logical-node-3"
     assert advertised["memory_bandwidth_gbps"] == 400
     assert advertised["compute_gflops"] == 27_132
-    assert advertised["cost_per_hour"] == 0.25
     assert advertised["host_priority"] == 2
     assert advertised["gpu_count"] == 1
     assert advertised["gpu_memory_mb"] == [advertised["capacity_mb"]]

@@ -59,6 +59,7 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
     )
     print("Planning simulation only: hardware telemetry is modeled; no GPU processes are started.")
     print("The real `grid test demo` remains the load/warm/drain/unload process test.\n")
+    print("Lifecycle timing: a load requested this minute becomes ready on the following minute.\n")
 
     print("Heterogeneous logical fleet")
     machine_groups = Counter(
@@ -125,7 +126,7 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
         detail = " | ".join(changes) or "placement stable"
         print(
             f"  m{row['minute']:02d} {row['phase']:<19} "
-            f"requests={row['requests']:<3} · {detail}"
+            f"requests={row['requests']:<3} · served={row['service_rate_pct']:>6.2f}% · {detail}"
         )
     if not full_timeline and len(timeline) < len(report.timeline):
         print(

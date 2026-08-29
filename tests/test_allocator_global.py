@@ -2854,7 +2854,6 @@ def test_isolated_ready_bulk_placement_matches_general_scoring_exactly():
             active_requests=index % 4,
             max_concurrency=4,
             queue_depth=index % 3,
-            cost_per_hour=index / 100,
         )
         for index in range(32)
     )
@@ -2885,7 +2884,6 @@ def test_single_contender_cold_bulk_placement_matches_general_scoring_exactly():
             active_requests=index % 4,
             max_concurrency=4,
             queue_depth=index % 3,
-            cost_per_hour=index / 100,
         )
         for index in range(32)
     )
@@ -2915,7 +2913,6 @@ def test_equal_priority_cached_candidate_order_matches_general_scoring_exactly()
             active_requests=index % 4,
             max_concurrency=4,
             queue_depth=index % 3,
-            cost_per_hour=index / 100,
         )
         for index in range(64)
     )
@@ -3695,11 +3692,11 @@ def test_throttled_capacity_fraction_limits_new_placement_memory():
     assert plan.assignments == ()
 
 
-def test_failure_domain_minimum_wins_over_cost_when_feasible():
+def test_failure_domain_minimum_uses_an_additional_domain_when_feasible():
     machines = [
         node("a1", domain="rack-a"),
         node("a2", domain="rack-a"),
-        node("b1", domain="rack-b", cost_per_hour=10_000),
+        node("b1", domain="rack-b"),
     ]
     profile = model(min_replicas=2, max_replicas=2, min_failure_domains=2)
     plan = PlacementPlanner().plan(machines, [profile], now=10)
@@ -3742,7 +3739,7 @@ def test_planner_relocates_a_flexible_model_to_preserve_the_only_large_host():
         256,
         min_replicas=1,
         max_replicas=1,
-        min_residency_seconds=0,
+        min_residency_seconds=100,
         scale_down_cooldown_seconds=0,
     )
     specialist = model(
@@ -3819,20 +3816,22 @@ def test_planner_relocates_a_flexible_model_to_preserve_the_only_large_host():
 
     replacement_ready = replace(
         machines[0],
-        residencies=(ready("baseline", 256, last_used_at=11),),
+        residencies=(ready("baseline", 256, last_used_at=101),),
+        last_heartbeat=101,
     )
+    current_large = replace(machines[1], last_heartbeat=101)
     relocated = planner.plan(
-        (replacement_ready, machines[1]),
+        (replacement_ready, current_large),
         (baseline, specialist),
-        forecasts=(replace(forecasts[0], updated_at=11),),
-        now=11,
+        forecasts=(replace(forecasts[0], updated_at=101),),
+        now=101,
     )
     draining_incumbent = Reconciler().reconcile(
         relocated,
-        (replacement_ready, machines[1]),
+        (replacement_ready, current_large),
         (baseline, specialist),
         mode=AllocatorMode.AUTOMATIC,
-        now=11,
+        now=101,
     )
     assert [
         (item.kind, item.node_id, item.model_id)
@@ -3843,16 +3842,17 @@ def test_planner_relocates_a_flexible_model_to_preserve_the_only_large_host():
         (
             replacement_ready,
             replace(
-                machines[1],
+                current_large,
                 residencies=(
                     ModelResidency("baseline", 256, ResidencyState.CACHED),
                     ModelResidency("specialist", 714, ResidencyState.CACHED),
                 ),
+                last_heartbeat=102,
             ),
         ),
         (baseline, specialist),
-        forecasts=(replace(forecasts[0], updated_at=11),),
-        now=11,
+        forecasts=(replace(forecasts[0], updated_at=102),),
+        now=102,
     )
 
     assert {
@@ -3901,7 +3901,58 @@ def test_planner_does_not_relocate_without_demand_for_the_constrained_model():
     assert plan.preemptions == ()
 
 
-def test_planner_repacks_onto_a_materially_better_host_instead_of_cold_loading():
+def test_equal_scarcity_does_not_ping_pong_a_ready_flexible_model():
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    flexible = model(
+        "flexible",
+        256,
+        min_replicas=1,
+        max_replicas=1,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=0,
+    )
+    specialist_a = model("specialist-a", 700, min_replicas=1, max_replicas=1)
+    specialist_b = model("specialist-b", 700, min_replicas=1, max_replicas=1)
+    machines = (
+        node(
+            "a",
+            1_000,
+            max_models=1,
+            allowed_models=("flexible", "specialist-a"),
+            residencies=(ready("flexible", 256, last_used_at=10),),
+        ),
+        node(
+            "b",
+            1_000,
+            max_models=1,
+            allowed_models=("flexible", "specialist-b"),
+            cached=("flexible",),
+        ),
+        node(
+            "c",
+            1_000,
+            max_models=1,
+            allowed_models=("flexible", "specialist-a"),
+            residencies=(ready("specialist-a", 700, last_used_at=10),),
+        ),
+        node(
+            "d",
+            1_000,
+            max_models=1,
+            allowed_models=("flexible", "specialist-b"),
+            residencies=(ready("specialist-b", 700, last_used_at=10),),
+        ),
+    )
+
+    plan = planner.plan(machines, (flexible, specialist_a, specialist_b), now=10)
+
+    assert plan.nodes_for("flexible") == ("a",)
+    assert plan.nodes_for("specialist-a") == ("c",)
+    assert plan.nodes_for("specialist-b") == ("d",)
+    assert plan.preemptions == ()
+
+
+def test_planner_repacks_when_a_materially_better_host_has_a_beneficiary():
     planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
     baseline = model(
         "baseline",
@@ -3968,58 +4019,6 @@ def test_planner_repacks_onto_a_materially_better_host_instead_of_cold_loading()
         PlacementPreemption("medium", "baseline", "specialist"),
     )
 
-    draining = planner.plan(
-        (
-            replace(
-                machines[0],
-                residencies=(ready("baseline", 256, last_used_at=10.5),),
-            ),
-            replace(
-                machines[1],
-                residencies=(
-                    replace(
-                        machines[1].residencies[0],
-                        state=ResidencyState.DRAINING,
-                    ),
-                    machines[1].residencies[1],
-                ),
-            ),
-            machines[2],
-        ),
-        (baseline, specialist),
-        forecasts=(replace(forecast, updated_at=10.5),),
-        now=10.5,
-    )
-
-    assert draining.nodes_for("specialist") == ()
-    assert draining.preemptions == (
-        PlacementPreemption("medium", "baseline", "specialist"),
-    )
-
-    converged = planner.plan(
-        (
-            replace(
-                machines[0],
-                residencies=(ready("baseline", 256, last_used_at=11),),
-            ),
-            replace(
-                machines[1],
-                residencies=(
-                    ModelResidency("baseline", 256, ResidencyState.CACHED),
-                    ModelResidency("specialist", 714, ResidencyState.CACHED),
-                ),
-            ),
-            machines[2],
-        ),
-        (baseline, specialist),
-        forecasts=(replace(forecast, updated_at=11),),
-        now=11,
-    )
-
-    assert {
-        (item.model_id, item.node_id) for item in converged.assignments
-    } == {("baseline", "small"), ("specialist", "medium")}
-
 
 def test_planner_uses_immediate_capacity_when_repack_gain_is_only_marginal():
     planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
@@ -4028,7 +4027,7 @@ def test_planner_uses_immediate_capacity_when_repack_gain_is_only_marginal():
         256,
         min_replicas=1,
         max_replicas=1,
-        min_residency_seconds=0,
+        min_residency_seconds=100,
         scale_down_cooldown_seconds=0,
     )
     specialist = model(
@@ -4081,8 +4080,9 @@ def test_planner_uses_immediate_capacity_when_repack_gain_is_only_marginal():
         now=10,
     )
 
-    assert plan.nodes_for("baseline") == ("small",)
+    assert plan.nodes_for("baseline") == ("medium",)
     assert plan.nodes_for("specialist") == ("large",)
+    assert plan.preemptions == ()
 
 
 def test_planner_repacking_finds_capacity_path_independent_of_ineligible_nodes():

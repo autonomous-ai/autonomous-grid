@@ -49,7 +49,7 @@ The controller keeps direct named-model pressure separate from workload demand. 
 scales that model normally. Unbound or automatic traffic contributes to a workload forecast such as
 coding, research, design, image, video, embedding, or general language work. At planning time, the
 allocator projects sustained workload demand onto configured models using each profile's workload
-scores, compatibility and resource cost, cold-start time, and measured outcomes. This lets an
+scores, compatibility and resource footprint, cold-start time, and measured outcomes. This lets an
 inactive specialist receive a bounded canary without creating a loaded-only feedback loop.
 The model that happened to serve an automatic request contributes outcome evidence, but the router's
 fallback choice never becomes direct demand for that model.
@@ -67,7 +67,7 @@ capacity but cannot manufacture eviction authority. Status reports service and q
 age/freshness, effective sample count, confidence, quality confidence, and the remaining exploration
 bonus for every candidate.
 
-Request latency is compacted into a bounded logarithmic histogram per time bucket. Cohort SLO
+Request latency is compacted into a bounded logarithmic histogram per time bucket. Aggregate SLO
 graduation therefore uses an approximate request-level p95: one slow outlier among ninety-nine fast
 requests remains tail evidence, but it no longer makes the entire minute appear slow.
 
@@ -180,7 +180,11 @@ throughput exists, bounded memory-bandwidth and compute estimates break otherwis
 and cached bonuses remain much larger, so hardware estimates do not cause gratuitous migration.
 Placement also computes each desired model's future-compatible host set without pretending that
 live memory is already free. A flexible small model is penalized on a host needed by a more
-constrained model when it has another valid destination. If an immediately free host is materially
+constrained model when it has another valid destination. A newly loaded incumbent remains sticky
+for its configured minimum residency under this soft scarcity pressure, preventing adjacent control
+ticks from reversing the same migration. A demanded model's sole feasible host is a hard override:
+Grid may warm the incumbent's replacement immediately, while reconciliation still delays the drain
+until minimum residency has elapsed. If an immediately free host is materially
 worse after accounting for startup time, current work, hardware, and fit, Grid may
 stage a proactive repack instead: it assigns the incumbent to its replacement host, proves that
 replacement ready, drains and unloads the old copy, and only then warms the demanded model on the
@@ -194,9 +198,9 @@ converging. The same optimization applies to empty one-model hosts only when one
 its priority class, preserving equal-priority sharing. Both cases preserve the general scorer's
 exact result while avoiding a fleet-wide rescan for every replica on large networks.
 When several equal-priority models share an otherwise uniform empty fleet, Grid caches each static
-candidate order but still consumes it one replica per model per fairness round; any shared-host or
+candidate order but still consumes it one replica per model per allocation round; any shared-host or
 domain interaction falls back to complete rescoring and bounded repacking.
-Cost, latency, host priority, cold-start time, and throttling lower a candidate's score. Managed
+Load, latency, host priority, cold-start time, and throttling lower a candidate's score. Managed
 nodes report monotonic action duration in their authenticated acknowledgements. Successful warm
 times are retained in bounded controller history and blended with the configured model estimate as
 a cold-start prior; a bounded eight-sample EWMA becomes authoritative after four samples for that
@@ -243,7 +247,7 @@ precedence over this load balance. Equivalent engines prefer the freshest lease,
 inside the allowed future-skew window is clamped to zero age and cannot gain extra priority.
 When private proxy measurements exist for the requested model, routing minimizes estimated
 completion time: the incoming request's service wave is multiplied by a confidence- and
-freshness-weighted latency EWMA. Weak or missing measurements blend toward the current cohort
+freshness-weighted latency EWMA. Weak or missing measurements blend toward comparable nodes'
 median, measurements for other models are ignored, and expired evidence falls back completely.
 For text generation, a bounded `max_completion_tokens` or `max_tokens` hint adds a model-throughput
 lower bound to that estimate, allowing short requests to favor low latency and long generations to

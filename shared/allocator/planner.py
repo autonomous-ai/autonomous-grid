@@ -716,6 +716,7 @@ class PlacementPlanner:
                 and candidate_node.max_models != 0
             )
         scarce_host_claims: dict[tuple[str, str], tuple[str, ...]] = {}
+        scarce_host_excess_claims: dict[tuple[str, str], int] = {}
         scarce_host_preservations: dict[tuple[str, str], tuple[str, ...]] = {}
         for candidate_model in model_list:
             candidate_nodes = future_eligible_nodes.get(candidate_model.model_id, frozenset())
@@ -737,6 +738,24 @@ class PlacementPlanner:
                 )
                 if constrained:
                     scarce_host_claims[(candidate_model.model_id, node_id)] = constrained
+        # Scarcity is relative. If every feasible host for a flexible model protects one equally
+        # constrained peer, moving a healthy incumbent preserves nothing and merely changes which
+        # peer names the penalty. Normalize by the least-scarce feasible alternative so only a real
+        # reduction in opportunity cost can overcome ready-residency stickiness.
+        for candidate_model_id, candidate_nodes in future_eligible_nodes.items():
+            if not candidate_nodes:
+                continue
+            minimum_claims = min(
+                len(scarce_host_claims.get((candidate_model_id, node_id), ()))
+                for node_id in candidate_nodes
+            )
+            for node_id in candidate_nodes:
+                excess = (
+                    len(scarce_host_claims.get((candidate_model_id, node_id), ()))
+                    - minimum_claims
+                )
+                if excess > 0:
+                    scarce_host_excess_claims[(candidate_model_id, node_id)] = excess
         for (candidate_model_id, scarce_node_id), constrained in scarce_host_claims.items():
             for alternative_node_id in future_eligible_nodes[candidate_model_id]:
                 if alternative_node_id == scarce_node_id:
@@ -848,11 +867,14 @@ class PlacementPlanner:
                     startup_seconds=startup_by_pair,
                 )
                 constrained = scarce_host_claims.get((model.model_id, node.node_id), ())
-                if constrained:
+                excess_scarcity = scarce_host_excess_claims.get(
+                    (model.model_id, node.node_id), 0
+                )
+                if constrained and excess_scarcity:
                     score, reasons = cached
                     cached = (
                         score
-                        - _SCARCE_HOST_OPPORTUNITY_PENALTY * len(constrained),
+                        - _SCARCE_HOST_OPPORTUNITY_PENALTY * excess_scarcity,
                         (
                             *reasons,
                             "scarce host also required by " + ", ".join(constrained[:3]),
@@ -1418,15 +1440,32 @@ class PlacementPlanner:
                     continue
                 if (model.model_id, node.node_id) in assigned_pairs:
                     continue
-                if live_incumbents and scarce_host_claims.get(
-                    (model.model_id, node.node_id)
-                ):
-                    # The resident fast path intentionally preserves live work, but it must not
-                    # cement a flexible small model onto the only host that can satisfy another
-                    # demanded model. Let ordinary scored placement select a replacement host;
-                    # reconciliation will make it ready before this incumbent is drained.
-                    continue
                 residency = node.residency(model.model_id)
+                residency_age = (
+                    timestamp - residency.loaded_at
+                    if residency is not None and residency.loaded_at
+                    else math.inf
+                )
+                hard_scarcity_blocker = any(
+                    len(future_eligible_nodes.get(constrained_model_id, ())) == 1
+                    for constrained_model_id in scarce_host_claims.get(
+                        (model.model_id, node.node_id), ()
+                    )
+                )
+                recently_loaded = bool(
+                    residency is not None
+                    and -self.policy.max_future_clock_skew_seconds <= residency_age
+                    < model.min_residency_seconds
+                )
+                if (
+                    live_incumbents
+                    and scarce_host_excess_claims.get((model.model_id, node.node_id))
+                    and (not recently_loaded or hard_scarcity_blocker)
+                ):
+                    # Repacking may reserve a relatively scarce host, but a fresh placement is
+                    # sticky against soft score improvements. A demanded model's sole feasible host
+                    # remains a hard override; reconciliation still enforces make-before-break.
+                    continue
                 if live_incumbents:
                     candidate_shape_matches = bool(
                         residency is not None

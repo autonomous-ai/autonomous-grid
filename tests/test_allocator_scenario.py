@@ -46,6 +46,18 @@ def test_scenario_exercises_heterogeneous_fleet_catalog_users_and_events(
     assert report.metrics["joint_portfolio_ticks"] > 0
     assert report.metrics["portfolio_changes"] > 0
     assert any(row.get("portfolio_selection") for row in report.timeline)
+    assert all("ready_replicas" in row for row in report.timeline)
+    assert all(0 <= row["service_rate_pct"] <= 100 for row in report.timeline)
+    assert any(
+        row["minute"] >= 0
+        and row["loads"]
+        and any(
+            row["ready_replicas"].get(load.split("@", 1)[0], 0)
+            < row["desired_replicas"].get(load.split("@", 1)[0], 0)
+            for load in row["loads"]
+        )
+        for row in report.timeline
+    )
 
 
 def test_scenario_is_deterministic_and_json_serializable(representative_report):
@@ -216,6 +228,7 @@ def test_scenario_cli_prints_human_scorecard(capsys):
     assert args.handler(args) == 0
     output = capsys.readouterr().out
     assert "Planning simulation only" in output
+    assert "becomes ready on the following minute" in output
     assert "Heterogeneous logical fleet" in output
     assert "Model portfolio" in output
     assert "User population" in output
@@ -223,6 +236,7 @@ def test_scenario_cli_prints_human_scorecard(capsys):
     assert "Scorecard" in output
     assert "least-served user" in output
     assert "joint portfolio optimizer" in output
+    assert "served=" in output
     assert "portfolio " in output
     assert "fairness" not in output
     assert "compute cost" not in output
