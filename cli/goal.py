@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -298,6 +299,21 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"evaluation {spec.get('name') or '?'} has no immutable definition id and hash")
             continue
+        definition_body = {
+            key: value for key, value in spec.items()
+            if key not in {"definition_id", "definition_hash"}
+        }
+        encoded_definition = json.dumps(
+            definition_body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        actual_hash = hashlib.sha256(encoded_definition.encode("utf-8")).hexdigest()
+        if actual_hash != definition_hash:
+            failures.append(
+                f"evaluation {spec.get('name') or definition_id} body does not match its "
+                "immutable definition hash")
+            continue
+        # File v1 is executed by deterministic relay code, never by the acting harness. A random
+        # nonempty node name is not proof of independent evaluation in a release artifact.
+        expected_evaluator = "relay" if spec.get("type") == "file" else None
         accepted = [run for run in runs if isinstance(run, dict)
                     and run.get("accepted") is True and run.get("passed") is True
                     and run.get("state") == "passed"
@@ -306,6 +322,8 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                     and run.get("definition_id") == definition_id
                     and run.get("definition_hash") == definition_hash
                     and run.get("evaluator_node_id")
+                    and (expected_evaluator is None
+                         or run.get("evaluator_node_id") == expected_evaluator)
                     and run.get("accepted_at")
                     and isinstance(run.get("score"), (int, float))
                     and not isinstance(run.get("score"), bool)

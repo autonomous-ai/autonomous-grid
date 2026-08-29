@@ -143,6 +143,11 @@ an endless result-settlement 500.
 The evaluator semantics version is part of each canonical definition and therefore its hash.
 Definitions created before this field existed are version 1; a future implementation must add an
 explicit version branch rather than silently changing what an existing metric means.
+Before each run, Grid reparses the stored definition through the create-time validator and
+recomputes its canonical hash. Valid-looking database corruption therefore cannot execute a changed
+metric under the original label; it produces an audit-only evaluator error and blocks completion.
+The offline evidence verifier independently recomputes the exported definition hash and, for the
+relay-local file evaluator, requires the evaluator identity to be exactly `relay`.
 
 Planned evaluator-node kinds, which are not part of the first release gate, are:
 

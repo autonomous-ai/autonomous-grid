@@ -138,6 +138,20 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
             "passed": True,
         }],
     }
+    # Use the real canonical definition identity exported by the relay.
+    definition = record["goal"]["evals"][0]
+    definition.update({
+        "type": "file", "version": 1, "path": "artifact.txt", "exists": True,
+    })
+    definition_body = {
+        key: value for key, value in definition.items()
+        if key not in {"definition_id", "definition_hash"}
+    }
+    definition_hash = __import__("hashlib").sha256(json.dumps(
+        definition_body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest()
+    definition["definition_hash"] = definition_hash
+    record["eval_runs"][0]["definition_hash"] = definition_hash
     monkeypatch.setattr(goal, "_resolve", lambda _args: ("http://relay", "token", "grid"))
     monkeypatch.setattr(relay, "get_goal_evidence", lambda *_args: record)
 
@@ -152,6 +166,47 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
     record["eval_runs"][0]["turn_id"] = "turn-1"
     failures = goal._verify_evidence(record)
     assert any("from the final turn" in failure for failure in failures)
+
+
+def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_evaluator():
+    from cli import goal
+
+    spec = {
+        "type": "file", "version": 1, "name": "artifact",
+        "path": "artifact.txt", "exists": True,
+    }
+    definition_hash = __import__("hashlib").sha256(json.dumps(
+        spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest()
+    record = {
+        "schema_version": 1,
+        "goal": {"id": "goal-1", "status": "complete", "evals": [{
+            **spec, "definition_id": "eval-1", "definition_hash": definition_hash,
+        }]},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
+                       "worktree_chain": []},
+        "turns": [{
+            "id": "turn-1", "state": "completed", "agent_kind": "codex",
+            "provider_node_id": "node-A", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [], "inference": [],
+        "eval_runs": [{
+            "turn_id": "turn-1", "definition_id": "eval-1",
+            "definition_hash": definition_hash, "result_commit": "2" * 40,
+            "evaluator_node_id": "relay", "state": "passed", "score": 1.0,
+            "accepted": True, "accepted_at": "2026-08-29T12:00:00+00:00",
+            "passed": True,
+        }],
+    }
+    assert goal._verify_evidence(record) == []
+
+    record["goal"]["evals"][0]["path"] = "silently-changed.txt"
+    assert any("does not match" in failure for failure in goal._verify_evidence(record))
+    record["goal"]["evals"][0]["path"] = "artifact.txt"
+    record["eval_runs"][0]["evaluator_node_id"] = "node-A"
+    assert any("no accepted passing run" in failure for failure in goal._verify_evidence(record))
 
 
 def test_goal_evidence_verify_refuses_a_broken_handoff(monkeypatch, capsys):

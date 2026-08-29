@@ -128,6 +128,8 @@ match both the immutable definition id and hash, name its evaluator, and have `a
 an acceptance timestamp. A row with
 `accepted: false` proves only that a stale provider evaluated something after losing its lease; it
 must remain in the audit record and must not be counted toward completion or future training data.
+`grid goal evidence --verify` also recomputes each exported definition hash. The release fails if a
+file evaluator names anything other than the relay evaluator, even when its score says it passed.
 
 ## Failure criteria
 
