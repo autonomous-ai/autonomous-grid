@@ -514,7 +514,7 @@ class AllocatorNodeAgent:
             raise shutdown_error
 
     def _register_control(self, *, deadline: float | None = None) -> None:
-        envelope = self.runtime.allocator_envelope()
+        envelope = self._allocator_envelope()
         envelope["max_concurrency"] = 0
         self._note_routable_registry_attempt()
         try:
@@ -545,7 +545,7 @@ class AllocatorNodeAgent:
         deadline: float | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, str]]]:
         acknowledgements = self.runtime.acknowledgements()
-        envelope = self.runtime.allocator_envelope()
+        envelope = self._allocator_envelope()
         envelope["max_concurrency"] = 0
         self._note_routable_registry_attempt()
         try:
@@ -883,8 +883,14 @@ class AllocatorNodeAgent:
             return None
         return count
 
-    def _engine_envelope(self, residency: ManagedResidency) -> dict[str, Any]:
+    def _allocator_envelope(self) -> dict[str, Any]:
         envelope = self.runtime.allocator_envelope()
+        envelope["cost_per_hour"] = self.resources.get("cost_per_hour", 0.0)
+        envelope["host_priority"] = self.resources.get("host_priority", 0)
+        return envelope
+
+    def _engine_envelope(self, residency: ManagedResidency) -> dict[str, Any]:
+        envelope = self._allocator_envelope()
         envelope["residencies"] = [
             row
             for row in envelope["residencies"]
@@ -922,7 +928,7 @@ class AllocatorNodeAgent:
             else:
                 self._register_control(deadline=deadline)
             return
-        envelope = self.runtime.allocator_envelope()
+        envelope = self._allocator_envelope()
         if self._registry_cleanup_fenced:
             envelope["state"] = NodeState.DRAINING.value
             envelope["decision"] = None
@@ -967,7 +973,7 @@ class AllocatorNodeAgent:
 
         if deadline is not None and self._monotonic() >= deadline:
             return False, False
-        envelope = self.runtime.allocator_envelope()
+        envelope = self._allocator_envelope()
         envelope["state"] = NodeState.DRAINING.value
         envelope["decision"] = None
         envelope["max_concurrency"] = 0
@@ -994,7 +1000,7 @@ class AllocatorNodeAgent:
         return True, False
 
     def _heartbeat_shutdown_control(self, *, deadline: float | None = None) -> None:
-        envelope = self.runtime.allocator_envelope()
+        envelope = self._allocator_envelope()
         envelope["state"] = NodeState.DRAINING.value
         envelope["decision"] = None
         envelope["max_concurrency"] = 0
@@ -1384,6 +1390,11 @@ def _allocator_resources(
             info.get("mem_bandwidth_gbps")
         ),
         "compute_gflops": _nonnegative_number(info.get("compute_gflops")),
+        # Optional operator/accounting metadata. Device discovery cannot infer electricity,
+        # depreciation, or rental price, but a deployment or logical test can provide it and the
+        # global placement scorer already knows how to prefer cheaper eligible nodes.
+        "cost_per_hour": _nonnegative_number(info.get("cost_per_hour")),
+        "host_priority": _nonnegative_int(info.get("host_priority")),
         "allowed_data_tiers": ["public", "internal"],
     }
 

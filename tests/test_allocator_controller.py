@@ -1431,6 +1431,56 @@ def test_controller_tick_with_ready_replica_proposes_no_mutation():
     assert controller.commands_for("n", now=10) == ()
 
 
+def test_delivered_warm_intent_prevents_duplicate_cold_start_before_heartbeat():
+    digest = "a" * 64
+    controller = AllocatorController(mode=AllocatorMode.AUTOMATIC)
+    controller.put_profile(profile(artifact_sha256=digest))
+    cheap = replace(
+        node(node_id="cheap", artifact_sha256=digest),
+        cost_per_hour=1.0,
+        max_models=1,
+    )
+    expensive = replace(
+        node(node_id="expensive"),
+        cost_per_hour=0.1,
+        max_models=1,
+    )
+
+    first = controller.tick((cheap, expensive), now=10)
+    assert [(item.node_id, item.kind) for item in first.executable_actions] == [
+        ("cheap", ActionKind.WARM)
+    ]
+    command = controller.commands_for("cheap", now=10)[0]
+
+    # The next registry snapshot has not caught up with the delivered WARM. Meanwhile the other
+    # node reports cached weights and would otherwise look cheaper to start.
+    lagging_cheap = replace(cheap, residencies=(), last_heartbeat=11)
+    newly_cached_expensive = replace(
+        expensive,
+        residencies=(
+            ModelResidency(
+                "qwen",
+                8_000,
+                ResidencyState.CACHED,
+                artifact_sha256=digest,
+            ),
+        ),
+        last_heartbeat=11,
+    )
+    controller.tick((lagging_cheap, newly_cached_expensive), now=11)
+
+    assert controller.last_plan is not None
+    assert [(item.node_id, item.model_id) for item in controller.last_plan.assignments] == [
+        ("cheap", "qwen")
+    ]
+    assert command.action_id in {
+        item["action_id"]
+        for item in controller.status((lagging_cheap, newly_cached_expensive), now=11)[
+            "pending_commands"
+        ]
+    }
+
+
 def test_controller_plan_generation_is_logical_stable_and_persisted(tmp_path):
     path = tmp_path / "allocator.json"
     controller = AllocatorController(state_path=path)

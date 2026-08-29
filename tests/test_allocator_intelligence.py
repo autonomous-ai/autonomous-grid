@@ -139,3 +139,61 @@ def test_model_outcomes_are_bounded_and_persisted_without_content():
     assert restored.outcomes[0].requests == 1
     assert restored.outcomes[0].quality == 0.8
     assert "prompt" not in str(restored.to_dict()).lower()
+
+
+def test_model_evaluation_updates_quality_without_creating_demand():
+    intelligence = WorkloadIntelligence()
+
+    outcome = intelligence.observe_model_evaluation(
+        "coder",
+        "coding",
+        quality=0.75,
+        latency_ms=125,
+        output_units=32,
+        timestamp=10,
+    )
+
+    assert outcome.model_id == "coder"
+    assert outcome.quality == 0.75
+    assert outcome.quality_samples == 1
+    assert outcome.latency_ms == 125
+    assert intelligence.demand.to_dict()["models"] == {}
+    assert intelligence.unbound_demand.to_dict()["models"] == {}
+
+
+def test_measured_quality_and_latency_choose_between_equal_portfolio_candidates():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    candidates = (
+        ModelProfile(
+            model_id="fast-correct",
+            memory_mb=1_000,
+            min_replicas=0,
+            max_replicas=1,
+            latency_slo_ms=1_000,
+            workload_scores=(("coding", 1.0),),
+        ),
+        ModelProfile(
+            model_id="slow-wrong",
+            memory_mb=1_000,
+            min_replicas=0,
+            max_replicas=1,
+            latency_slo_ms=1_000,
+            workload_scores=(("coding", 1.0),),
+        ),
+    )
+    for index in range(20):
+        intelligence.observe_model_evaluation(
+            "fast-correct", "coding", quality=1.0, latency_ms=100, timestamp=index
+        )
+        intelligence.observe_model_evaluation(
+            "slow-wrong", "coding", quality=0.0, latency_ms=2_000, timestamp=index
+        )
+    intelligence.observe(
+        RequestFeatures("chat/completions", "auto", "coding"),
+        portfolio_unbound=True,
+        timestamp=100,
+    )
+
+    projection = intelligence.portfolio_forecasts(candidates, (), now=100)
+
+    assert projection[0].model_id == "fast-correct"

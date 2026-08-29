@@ -686,6 +686,48 @@ def create_app(
         result = await _run_allocator_tick(app)
         return {"deleted": model_id, "reconciliation": _reconcile_summary(result)}
 
+    @app.post("/allocator/evaluations")
+    async def allocator_record_evaluation(request: Request):
+        """Accept bounded, authenticated canary quality evidence without creating demand."""
+
+        _require_allocator_control(app, request)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400, detail="Request body is not valid JSON"
+            ) from exc
+        if not isinstance(body, dict):
+            raise HTTPException(
+                status_code=400, detail="Request body must be a JSON object"
+            )
+        try:
+            model_id = str(body["model_id"])
+            workload = str(body["workload"])
+            quality = float(body["quality"])
+            error = body.get("error", False)
+            if not isinstance(error, bool):
+                raise ValueError("error must be a boolean")
+            latency_ms = float(body.get("latency_ms") or 0.0)
+            output_units = int(body.get("output_units") or 0)
+            outcome = _allocator(app).observe_evaluation(
+                model_id,
+                workload,
+                quality=quality,
+                error=error,
+                latency_ms=latency_ms,
+                output_units=output_units,
+            )
+        except KeyError as exc:
+            detail = str(exc).strip("'")
+            status_code = 404 if detail == "allocator model profile not found" else 400
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _mark_allocator_dirty(app, safety_changed=False)
+        await _run_allocator_tick(app)
+        return {"evaluation": asdict(outcome)}
+
     @app.put("/allocator/mode")
     async def allocator_set_mode(request: Request):
         _require_allocator_control(app, request)
@@ -805,6 +847,13 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     if not isinstance(model, str) or not model:
         return _openai_error(400, "model is required", "invalid_request")
     features = classify_request(endpoint_path, body)
+    if request.headers.get("x-grid-allocator-evaluation") == "1":
+        # Canary traffic is real inference, so it should still update engine performance.
+        # It is not user demand, however, and its bounded quality evidence is submitted through
+        # /allocator/evaluations. Requiring the control token prevents arbitrary callers from
+        # suppressing their own demand signal with this header.
+        _require_allocator_control(app, request)
+        features = replace(features, tenant_class="allocator-evaluation")
 
     engine = _choose_engine(
         app,
@@ -2912,6 +2961,8 @@ def _observe_allocator_request(
     queue_depth: int = 0,
     output_units: int = 0,
 ) -> None:
+    if features is not None and features.tenant_class == "allocator-evaluation":
+        return
     elapsed = max(0.0, time.monotonic() - started_at)
     try:
         recorded = _allocator(app).observe_lifecycle(

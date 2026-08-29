@@ -124,10 +124,12 @@ Candidates otherwise prefer an existing ready residency, local cached weights, a
 domain, measured throughput, and best-fit memory. Before measured
 throughput exists, bounded memory-bandwidth and compute estimates break otherwise-cold ties; ready
 and cached bonuses remain much larger, so hardware estimates do not cause gratuitous migration.
-Ready incumbents on full one-model hosts are indexed and ranked in one pass when their failure
-domains are independent. The same optimization applies to empty one-model hosts only when one model
-remains in its priority class, preserving equal-priority sharing. Both cases preserve the general
-scorer's exact result while avoiding a fleet-wide rescan for every replica on large networks.
+Ready, loading, and warming incumbents on full one-model hosts are indexed and ranked in one pass
+when their failure domains are independent. Treating an in-progress incumbent as occupied prevents
+the empty-host fast path from starting a duplicate cold load while its heartbeat is still
+converging. The same optimization applies to empty one-model hosts only when one model remains in
+its priority class, preserving equal-priority sharing. Both cases preserve the general scorer's
+exact result while avoiding a fleet-wide rescan for every replica on large networks.
 When several equal-priority models share an otherwise uniform empty fleet, Grid caches each static
 candidate order but still consumes it one replica per model per fairness round; any shared-host or
 domain interaction falls back to complete rescoring and bounded repacking.
@@ -807,6 +809,32 @@ URL (`--local` makes that explicit even when remote mode is active), including `
 `grid models`, and `grid allocator status --grid http://127.0.0.1:22100`. The start output names the
 owner-only token file for allocator mutations. The fixture stays isolated from the active local or
 remote Grid configuration.
+
+To compare genuinely different models and heterogeneous node economics, add repeatable portfolio
+candidates plus one capacity and hourly cost per text node, then run the real competition:
+
+```bash
+uv run grid test start --machines 4 --include-comfyui --media-bundle z_image \
+  --candidate-model qwen2.5-coder-0.5b-instruct-q4_k_m.gguf \
+  --candidate-model qwen2.5-0.5b-instruct-q4_k_m.gguf \
+  --text-capacities-gib 3.5,5,25.5 \
+  --text-costs-per-hour 0.05,0.20,0.80
+uv run grid test compete
+```
+
+`grid test compete` loads one candidate at a time through the production lifecycle, runs eight
+deterministic coding questions through real llama.cpp/Metal inference, and submits authenticated
+correctness and latency evidence without manufacturing user demand. It then offloads every
+candidate and sends unresolved coding traffic through the ordinary Grid request boundary. The
+allocator—not the router—chooses the measured portfolio winner, reloads it, verifies a real answer,
+and fails the test if it did not use the cheapest currently capable logical node. Evaluation-marked
+inference still updates per-engine performance, but only the owner capability may mark it and its
+quality is recorded separately at `POST /allocator/evaluations`; ordinary callers cannot suppress
+their demand signal. The command leaves the selected winner ready for interactive `grid chat` use.
+
+Configured logical capacities must fit within this machine's real usable memory. The list lengths
+must equal the number of text nodes (`--machines` minus the optional ComfyUI node), so a too-small
+cheap node, a medium economical node, and a large expensive fallback can be tested explicitly.
 
 `grid test demo` performs no synthetic inference or demand injection. It first converges the
 baseline to one real replica and verifies a genuine OpenAI-compatible response. Three genuine

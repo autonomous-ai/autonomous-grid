@@ -203,6 +203,44 @@ class WorkloadIntelligence:
         self.unbound_demand.clear()
         self._outcomes.clear()
 
+    def observe_model_evaluation(
+        self,
+        model_id: str,
+        workload: str,
+        *,
+        quality: float,
+        error: bool = False,
+        latency_ms: float = 0.0,
+        output_units: int = 0,
+        timestamp: float | None = None,
+    ) -> ModelWorkloadOutcome:
+        """Record a bounded canary/evaluation outcome without manufacturing live demand.
+
+        Offline or shadow evaluations answer a different question from production lifecycle
+        telemetry: how well did a candidate solve a known task?  Feeding them through ``observe``
+        would also increment demand and could cause the benchmark itself to scale the model it is
+        judging.  Keep quality evidence separate while reusing the same EWMA outcome record used by
+        portfolio selection.
+        """
+
+        if not model_id or len(model_id) > 1_024:
+            raise ValueError("model_id is required and must be bounded")
+        if workload not in KNOWN_WORKLOADS:
+            raise ValueError(f"unknown workload {workload!r}")
+        observed_at = time.time() if timestamp is None else float(timestamp)
+        if not math.isfinite(observed_at) or observed_at < 0:
+            raise ValueError("timestamp must be finite and non-negative")
+        self._observe_outcome(
+            model_id,
+            workload,
+            error=bool(error),
+            latency_ms=float(latency_ms),
+            output_units=output_units,
+            quality=float(quality),
+            timestamp=observed_at,
+        )
+        return self._outcomes[(model_id, workload)]
+
     def portfolio_forecasts(
         self,
         profiles: Iterable[ModelProfile],
@@ -392,6 +430,11 @@ class WorkloadIntelligence:
             success = 1.0 - outcome.errors / outcome.requests
             quality = outcome.quality if outcome.quality_samples else 0.5
             score += confidence * (0.15 * (success - 0.5) + 0.20 * (quality - 0.5))
+            if profile.latency_slo_ms > 0 and outcome.latency_ms > 0:
+                # Quality remains dominant, but two similarly capable candidates should not tie
+                # when one consistently consumes much more of the workload's latency budget.
+                latency_ratio = outcome.latency_ms / profile.latency_slo_ms
+                score -= confidence * min(0.05, latency_ratio * 0.02)
         # Small deterministic pressure toward efficient canaries. Configured suitability remains
         # dominant; this does not turn memory size into a semantic request router.
         score -= min(0.10, math.log2(max(1, profile.maximum_memory_mb)) / 200.0)

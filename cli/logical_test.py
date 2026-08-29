@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 import json
 import os
+import re
 import secrets
 import socket
 import statistics
@@ -84,6 +85,34 @@ def positive_tokens(raw: str) -> int:
     return tokens
 
 
+def positive_gib_csv(raw: str) -> tuple[float, ...]:
+    try:
+        values = tuple(float(item.strip()) for item in raw.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{raw!r} must be a comma-separated list of GiB values"
+        ) from None
+    if not values or any(not 0 < value <= 1_048_576 for value in values):
+        raise argparse.ArgumentTypeError(
+            f"{raw!r} must contain positive finite GiB values"
+        )
+    return values
+
+
+def nonnegative_cost_csv(raw: str) -> tuple[float, ...]:
+    try:
+        values = tuple(float(item.strip()) for item in raw.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{raw!r} must be a comma-separated list of hourly costs"
+        ) from None
+    if not values or any(not 0 <= value <= 1_000_000 for value in values):
+        raise argparse.ArgumentTypeError(
+            f"{raw!r} must contain finite non-negative hourly costs"
+        )
+    return values
+
+
 def _root() -> Path:
     return paths.run_dir() / "logical-test"
 
@@ -137,9 +166,12 @@ def _status_payload(record: dict[str, Any] | None = None) -> dict[str, Any]:
         "machines": int(record.get("machines") or 0) if record else 0,
         "model": str(record.get("model") or "") if record else "",
         "portfolio_model": str(record.get("portfolio_model") or "") if record else "",
+        "portfolio_models": list(record.get("portfolio_models") or []) if record else [],
         "text_machines": int(record.get("text_machines") or 0) if record else 0,
         "include_comfyui": bool(record.get("include_comfyui", False)) if record else False,
         "media_bundle": str(record.get("media_bundle") or "") if record else "",
+        "text_capacities_gib": list(record.get("text_capacities_gib") or []) if record else [],
+        "text_costs_per_hour": list(record.get("text_costs_per_hour") or []) if record else [],
         "endpoint": str(record.get("endpoint") or "") if record else "",
         "run_dir": str(record.get("run_dir") or "") if record else "",
         "log": str(record.get("log") or "") if record else "",
@@ -191,8 +223,11 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
     )
     print(f"  endpoint  {payload['endpoint']}/v1")
     print(f"  model     {payload['model']}")
-    if payload.get("portfolio_model"):
-        print(f"  portfolio {payload['portfolio_model']}")
+    portfolio_models = payload.get("portfolio_models") or (
+        [payload["portfolio_model"]] if payload.get("portfolio_model") else []
+    )
+    if portfolio_models:
+        print(f"  portfolio {', '.join(portfolio_models)}")
     frameworks = ["llama.cpp"]
     if payload.get("include_comfyui"):
         frameworks.append(f"comfyui/{payload.get('media_bundle') or 'media'}")
@@ -213,9 +248,11 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
         backends = ",".join(node.get("backends") or []) or "unknown-backend"
         capacity_gib = float(node.get("capacity_mb") or 0) / 1024.0
         ownership = "managed" if node.get("actuator_capabilities") else "inventory"
+        hourly_cost = float(node.get("cost_per_hour") or 0.0)
+        cost = f" · ${hourly_cost:g}/h" if hourly_cost else ""
         print(
             f"  {node.get('node_id')}  {node.get('state')}  "
-            f"{runtimes}/{backends} · {capacity_gib:.1f} GiB · {ownership}  {placement}"
+            f"{runtimes}/{backends} · {capacity_gib:.1f} GiB{cost} · {ownership}  {placement}"
         )
     pending = payload.get("pending_commands") or []
     if pending:
@@ -243,15 +280,27 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
 
 
 def cmd_test_start(args: argparse.Namespace) -> int:
+    portfolio_models = tuple(
+        dict.fromkeys(
+            model
+            for model in (args.portfolio_model, *(args.candidate_models or ()))
+            if model and model != args.model
+        )
+    )
     existing = _running_record()
     if existing:
         if (
             int(existing.get("machines") or 0) != args.machines
             or str(existing.get("model") or "") != args.model
             or str(existing.get("portfolio_model") or "") != args.portfolio_model
+            or tuple(existing.get("portfolio_models") or ()) != portfolio_models
             or bool(existing.get("include_comfyui", False)) != args.include_comfyui
             or str(existing.get("media_bundle") or "")
             != (args.media_bundle if args.include_comfyui else "")
+            or tuple(existing.get("text_capacities_gib") or ())
+            != tuple(args.text_capacities_gib or ())
+            or tuple(existing.get("text_costs_per_hour") or ())
+            != tuple(args.text_costs_per_hour or ())
         ):
             raise SystemExit(
                 "A logical test Grid is already running with different settings; "
@@ -262,8 +311,8 @@ def cmd_test_start(args: argparse.Namespace) -> int:
 
     try:
         artifact_sha256 = LlamaCppBackend().artifact_sha256(args.model)
-        if args.portfolio_model:
-            LlamaCppBackend().artifact_sha256(args.portfolio_model)
+        for candidate in portfolio_models:
+            LlamaCppBackend().artifact_sha256(candidate)
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from exc
     if args.include_comfyui:
@@ -286,6 +335,14 @@ def cmd_test_start(args: argparse.Namespace) -> int:
                 f"`grid engine pull {args.media_bundle}` first."
             )
     text_machines = args.machines - int(args.include_comfyui)
+    if args.text_capacities_gib and len(args.text_capacities_gib) != text_machines:
+        raise SystemExit(
+            f"--text-capacities-gib needs {text_machines} values, one per text node."
+        )
+    if args.text_costs_per_hour and len(args.text_costs_per_hour) != text_machines:
+        raise SystemExit(
+            f"--text-costs-per-hour needs {text_machines} values, one per text node."
+        )
     extra_ports = (
         (args.comfyui_port, args.media_port) if args.include_comfyui else ()
     )
@@ -314,10 +371,13 @@ def cmd_test_start(args: argparse.Namespace) -> int:
             "text_machines": text_machines,
             "model": args.model,
             "portfolio_model": args.portfolio_model,
+            "portfolio_models": list(portfolio_models),
             "include_comfyui": args.include_comfyui,
             "media_bundle": args.media_bundle if args.include_comfyui else "",
             "comfyui_port": args.comfyui_port,
             "media_port": args.media_port,
+            "text_capacities_gib": list(args.text_capacities_gib or ()),
+            "text_costs_per_hour": list(args.text_costs_per_hour or ()),
             "artifact_sha256": artifact_sha256,
             "port": args.port,
             "engine_port_base": args.engine_port_base,
@@ -345,8 +405,11 @@ def cmd_test_start(args: argparse.Namespace) -> int:
         "text_machines": text_machines,
         "model": args.model,
         "portfolio_model": args.portfolio_model,
+        "portfolio_models": list(portfolio_models),
         "include_comfyui": args.include_comfyui,
         "media_bundle": args.media_bundle if args.include_comfyui else "",
+        "text_capacities_gib": list(args.text_capacities_gib or ()),
+        "text_costs_per_hour": list(args.text_costs_per_hour or ()),
         "endpoint": endpoint,
         "run_dir": os.fspath(run_dir),
         "log": os.fspath(log_path),
@@ -579,6 +642,82 @@ class _RealChatResult:
     attempts: int = 1
 
 
+@dataclass(frozen=True, slots=True)
+class _CodingBenchmarkTask:
+    name: str
+    prompt: str
+    expected: str
+
+
+_CODING_BENCHMARK = (
+    _CodingBenchmarkTask(
+        "python-list-comprehension",
+        """What does this Python print?
+x = [1, 2, 3, 4]
+print([n * 2 for n in x if n % 2])
+A. [2, 4]  B. [2, 6]  C. [4, 8]  D. [1, 3]
+Reply with only A, B, C, or D.""",
+        "B",
+    ),
+    _CodingBenchmarkTask(
+        "python-mutable-default",
+        """Which signature safely fixes a Python function that currently mutates items=[]?
+A. def add(x, items=[])
+B. def add(x, items={})
+C. def add(x, items=None), then create [] when items is None
+D. def add(x, items=list())
+Reply with only A, B, C, or D.""",
+        "C",
+    ),
+    _CodingBenchmarkTask(
+        "binary-search-complexity",
+        "Binary search on a sorted array has which worst-case time complexity? "
+        "A. O(1)  B. O(log n)  C. O(n)  D. O(n log n). Reply with only A, B, C, or D.",
+        "B",
+    ),
+    _CodingBenchmarkTask(
+        "sql-parameterization",
+        """Which Python database call best avoids SQL injection for an integer id?
+A. execute(f'SELECT * FROM t WHERE id={id}')
+B. execute('SELECT * FROM t WHERE id=' + str(id))
+C. execute('SELECT * FROM t WHERE id=%s' % id)
+D. execute('SELECT * FROM t WHERE id=?', (id,))
+Reply with only A, B, C, or D.""",
+        "D",
+    ),
+    _CodingBenchmarkTask(
+        "python-finally-return",
+        """What does this Python print?
+def f():
+    try: return 1
+    finally: return 2
+print(f())
+A. 1  B. 2  C. None  D. It raises. Reply with only A, B, C, or D.""",
+        "B",
+    ),
+    _CodingBenchmarkTask(
+        "javascript-map-filter",
+        "What is [1,2,3].map(x => x * 2).filter(x => x > 2)? "
+        "A. [2,4]  B. [2,4,6]  C. [4,6]  D. [6]. Reply with only A, B, C, or D.",
+        "C",
+    ),
+    _CodingBenchmarkTask(
+        "async-gather",
+        "Three independent one-second async operations run with gather. Ignoring overhead, "
+        "how long do they take? A. about 1 second  B. about 2 seconds  C. about 3 seconds "
+        "D. they cannot run concurrently. Reply with only A, B, C, or D.",
+        "A",
+    ),
+    _CodingBenchmarkTask(
+        "git-soft-reset",
+        "Which command removes the latest local Git commit while keeping its changes staged? "
+        "A. git reset --hard HEAD~1  B. git revert HEAD  C. git reset --soft HEAD~1 "
+        "D. git clean -fd. Reply with only A, B, C, or D.",
+        "C",
+    ),
+)
+
+
 _REAL_USER_BLUEPRINTS = (
     (
         "software-engineer",
@@ -635,6 +774,7 @@ def _real_chat_request(
     max_tokens: int,
     timeout: float,
     retries: int = 0,
+    request_headers: dict[str, str] | None = None,
 ) -> _RealChatResult:
     request_started = time.monotonic()
     result: _RealChatResult | None = None
@@ -644,6 +784,7 @@ def _real_chat_request(
             user,
             max_tokens=max_tokens,
             timeout=timeout,
+            request_headers=request_headers,
         )
         result = replace(
             result,
@@ -667,13 +808,17 @@ def _real_chat_request_once(
     *,
     max_tokens: int,
     timeout: float,
+    request_headers: dict[str, str] | None = None,
 ) -> _RealChatResult:
     started = time.monotonic()
     try:
         with httpx.Client(base_url=endpoint, timeout=timeout, trust_env=False) as client:
             response = client.post(
                 "/v1/chat/completions",
-                headers={"X-Grid-Affinity-Key": user.user_id},
+                headers={
+                    "X-Grid-Affinity-Key": user.user_id,
+                    **(request_headers or {}),
+                },
                 json={
                     "model": user.model,
                     "messages": [{"role": "user", "content": user.prompt}],
@@ -867,6 +1012,369 @@ def _run_real_image(
         "bytes": len(image_bytes),
         "elapsed_seconds": time.monotonic() - started,
     }
+
+
+def _benchmark_choice(text: str) -> str:
+    match = re.search(r"(?<![A-Z])([ABCD])(?![A-Z])", text.upper()[:160])
+    return match.group(1) if match else ""
+
+
+def _profile_body(row: dict[str, Any], **updates: Any) -> dict[str, Any]:
+    return {**{key: value for key, value in row.items() if key != "retiring"}, **updates}
+
+
+def _cheapest_competition_cost(
+    status: dict[str, Any], profile: dict[str, Any]
+) -> float:
+    """Return the cheapest node that can host this logical-test profile right now."""
+
+    model_id = str(profile["model_id"])
+    memory_mb = int(profile.get("memory_mb") or 0)
+    required_runtimes = set(profile.get("runtimes") or [])
+    required_backends = set(profile.get("backends") or [])
+    required_tags = set(profile.get("required_tags") or [])
+    capable: list[float] = []
+    for node in status.get("nodes") or []:
+        if node.get("state") not in {"accepting", "throttled"}:
+            continue
+        if required_runtimes and not required_runtimes.intersection(node.get("runtimes") or []):
+            continue
+        if required_backends and not required_backends.intersection(node.get("backends") or []):
+            continue
+        if not required_tags.issubset(node.get("tags") or []):
+            continue
+        if int(node.get("capacity_mb") or 0) - int(node.get("reserved_mb") or 0) < memory_mb:
+            continue
+        occupied = sum(
+            item.get("model_id") != model_id
+            and item.get("state") in {"loading", "warming", "ready", "draining"}
+            for item in node.get("residencies") or []
+        )
+        max_models = node.get("max_models")
+        if max_models is not None and occupied >= int(max_models):
+            continue
+        capable.append(float(node.get("cost_per_hour") or 0.0))
+    if not capable:
+        raise SystemExit(f"No capable logical node remains for {model_id!r}.")
+    return min(capable)
+
+
+def _put_test_profile(
+    client: httpx.Client,
+    headers: dict[str, str],
+    row: dict[str, Any],
+    **updates: Any,
+) -> None:
+    model_id = str(row["model_id"])
+    response = client.put(
+        f"/allocator/models/{quote(model_id, safe='')}",
+        headers=headers,
+        json=_profile_body(row, **updates),
+    )
+    response.raise_for_status()
+
+
+def _wait_for_competition_choice(
+    record: dict[str, Any],
+    *,
+    candidates: tuple[str, ...],
+    timeout: float,
+    initial: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    deadline = time.monotonic() + timeout
+    prior = _residency_states(initial)
+    seen_history = {_history_key(row) for row in initial.get("history") or []}
+    while time.monotonic() < deadline:
+        status = _status_payload(record)
+        if status.get("status_error"):
+            time.sleep(0.1)
+            continue
+        prior = _print_new_events(prior, seen_history, status)
+        projection = next(
+            (
+                row
+                for row in status.get("portfolio_projections") or []
+                if row.get("workload") == "coding"
+                and row.get("chosen_model") in candidates
+                and row.get("reason") == "portfolio canary"
+            ),
+            None,
+        )
+        chosen = str((projection or {}).get("chosen_model") or "")
+        if chosen and _ready_replicas(status, chosen) >= 1 and not status.get(
+            "pending_commands"
+        ):
+            return chosen, status
+        time.sleep(0.1)
+    raise SystemExit("Timed out waiting for measured coding evidence to select and warm a model.")
+
+
+def cmd_test_compete(args: argparse.Namespace) -> int:
+    """Benchmark distinct real models, record quality, then prove autonomous selection."""
+
+    record = _running_record()
+    if not record:
+        raise SystemExit("Logical test Grid is not running. Start it with `grid test start`.")
+    status = _status_payload(record)
+    if status.get("status_error"):
+        raise SystemExit(f"Cannot read logical Grid status: {status['status_error']}")
+    candidates = tuple(
+        dict.fromkeys(
+            str(item)
+            for item in (
+                record.get("portfolio_models")
+                or ([record.get("portfolio_model")] if record.get("portfolio_model") else [])
+            )
+            if str(item)
+        )
+    )
+    if len(candidates) < 2:
+        raise SystemExit(
+            "Real competition needs at least two portfolio candidates. Restart with repeated "
+            "`--candidate-model <cached-gguf>` arguments."
+        )
+    by_model = {
+        str(row.get("model_id")): row for row in status.get("models") or []
+    }
+    missing = [model for model in candidates if model not in by_model]
+    if missing:
+        raise SystemExit(f"Allocator profiles are missing competition models: {missing}")
+    baseline = str(record["model"])
+    if baseline not in by_model:
+        raise SystemExit(f"Allocator profile is missing baseline model {baseline!r}.")
+    token = Path(str(record["token_file"])).read_text(encoding="utf-8").strip()
+    headers = {"X-Grid-Allocator-Token": token}
+    endpoint = str(record["endpoint"])
+    benchmark_rows: list[dict[str, Any]] = []
+
+    print("Real model competition · router-independent allocator evidence")
+    print(f"Candidates: {', '.join(candidates)}")
+    print(f"Benchmark:  {len(_CODING_BENCHMARK)} deterministic coding tasks per model")
+    print("Every answer is generated by a real llama.cpp/Metal process; correctness is exact and local.\n")
+
+    with httpx.Client(base_url=endpoint, timeout=10.0, trust_env=False) as client:
+        _put_test_profile(
+            client,
+            headers,
+            by_model[baseline],
+            min_replicas=1,
+            max_replicas=1,
+            min_failure_domains=1,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=1,
+        )
+        for row in by_model.values():
+            if row.get("model_id") in candidates:
+                _put_test_profile(
+                    client,
+                    headers,
+                    row,
+                    min_replicas=0,
+                    max_replicas=1,
+                    min_failure_domains=1,
+                    min_residency_seconds=0,
+                    scale_down_cooldown_seconds=1,
+                    workload_scores=[["coding", 1.0]],
+                )
+        time.sleep(1.1)
+
+        for candidate_index, candidate in enumerate(candidates, 1):
+            print(f"[{candidate_index}/{len(candidates)}] Evaluating {candidate}")
+            _put_test_profile(
+                client,
+                headers,
+                by_model[candidate],
+                min_replicas=1,
+                max_replicas=1,
+                min_failure_domains=1,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=1,
+                workload_scores=[["coding", 1.0]],
+            )
+            ready = _wait_for_demand_ready(
+                record,
+                model=candidate,
+                timeout=args.timeout,
+                initial=_status_payload(record),
+            )
+            node = next(
+                node
+                for node in ready.get("nodes") or []
+                if any(
+                    item.get("model_id") == candidate and item.get("state") == "ready"
+                    for item in node.get("residencies") or []
+                )
+            )
+            correct = 0
+            latencies: list[float] = []
+            for task_index, task in enumerate(_CODING_BENCHMARK, 1):
+                result = _real_chat_request(
+                    endpoint,
+                    _RealUser(
+                        user_id=f"benchmark-{candidate_index}-{task_index}",
+                        role="software-engineer",
+                        model=candidate,
+                        prompt=task.prompt,
+                    ),
+                    max_tokens=args.max_tokens,
+                    timeout=args.timeout,
+                    retries=3,
+                    request_headers={
+                        "X-Grid-Allocator-Evaluation": "1",
+                        **headers,
+                    },
+                )
+                answer = _benchmark_choice(result.text)
+                passed = result.status_code == 200 and answer == task.expected
+                correct += int(passed)
+                latencies.append(result.elapsed_seconds)
+                evidence = client.post(
+                    "/allocator/evaluations",
+                    headers=headers,
+                    json={
+                        "model_id": candidate,
+                        "workload": "coding",
+                        "quality": float(passed),
+                        "error": result.status_code != 200,
+                        "latency_ms": result.elapsed_seconds * 1_000.0,
+                        "output_units": result.completion_tokens,
+                    },
+                )
+                evidence.raise_for_status()
+                print(
+                    f"    {task.name:<28} expected {task.expected} · "
+                    f"got {answer or '?'} · {'pass' if passed else 'fail'}"
+                )
+            quality = correct / len(_CODING_BENCHMARK)
+            benchmark_rows.append(
+                {
+                    "model": candidate,
+                    "quality": quality,
+                    "median_latency": statistics.median(latencies),
+                    "memory_mb": int(by_model[candidate].get("memory_mb") or 0),
+                    "node": str(node.get("node_id") or ""),
+                    "node_capacity_mb": int(node.get("capacity_mb") or 0),
+                    "node_cost": float(node.get("cost_per_hour") or 0.0),
+                }
+            )
+            print(
+                f"  score {correct}/{len(_CODING_BENCHMARK)} ({quality:.0%}) · median "
+                f"{statistics.median(latencies):.3f}s · {node.get('node_id')} "
+                f"({float(node.get('capacity_mb') or 0) / 1024:.1f} GiB, "
+                f"${float(node.get('cost_per_hour') or 0):g}/h)\n"
+            )
+            _put_test_profile(
+                client,
+                headers,
+                by_model[candidate],
+                min_replicas=0,
+                max_replicas=1,
+                min_failure_domains=1,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=1,
+                workload_scores=[["coding", 1.0]],
+            )
+            # Fully release the one model-at-a-time benchmark slot before admitting the next
+            # candidate. Otherwise an intentionally tiny test node can still be draining while
+            # the next candidate arrives, briefly forcing a cold start on a larger expensive node
+            # and obscuring the placement decision this command is meant to explain.
+            _wait_for_placement(
+                record,
+                replicas={candidate: 0},
+                timeout=args.timeout,
+                initial=ready,
+            )
+
+        settled = _wait_for_placement(
+            record,
+            replicas={baseline: 1, **{candidate: 0 for candidate in candidates}},
+            timeout=args.timeout,
+            initial=_status_payload(record),
+        )
+        for candidate in candidates:
+            _put_test_profile(
+                client,
+                headers,
+                by_model[candidate],
+                min_replicas=0,
+                max_replicas=1,
+                min_failure_domains=1,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=300,
+                workload_scores=[["coding", 1.0]],
+            )
+
+    print("[selection] Sending unresolved coding demand after all candidates are offloaded")
+    unresolved = tuple(
+        _real_chat_request(
+            endpoint,
+            _RealUser(
+                user_id=f"competition-unresolved-{index}",
+                role="software-engineer",
+                model="auto",
+                prompt="Debug this Python function and add a regression unit test.",
+            ),
+            max_tokens=args.max_tokens,
+            timeout=args.timeout,
+        )
+        for index in range(1, 4)
+    )
+    if any(item.status_code != 503 for item in unresolved):
+        raise SystemExit("Expected unresolved router-free requests to return HTTP 503.")
+    chosen, selected = _wait_for_competition_choice(
+        record,
+        candidates=candidates,
+        timeout=args.timeout,
+        initial=settled,
+    )
+    projection = next(
+        row
+        for row in selected.get("portfolio_projections") or []
+        if row.get("workload") == "coding" and row.get("chosen_model") == chosen
+    )
+    chosen_node = next(
+        node
+        for node in selected.get("nodes") or []
+        if any(
+            item.get("model_id") == chosen and item.get("state") == "ready"
+            for item in node.get("residencies") or []
+        )
+    )
+    cheapest_cost = _cheapest_competition_cost(selected, by_model[chosen])
+    chosen_cost = float(chosen_node.get("cost_per_hour") or 0.0)
+    if chosen_cost > cheapest_cost + 1e-9:
+        raise SystemExit(
+            f"Allocator selected {chosen_node.get('node_id')} at ${chosen_cost:g}/h for "
+            f"{chosen!r}, but a capable ${cheapest_cost:g}/h node was available."
+        )
+    proof = _real_chat_request(
+        endpoint,
+        _RealUser(
+            user_id="competition-proof",
+            role="software-engineer",
+            model=chosen,
+            prompt="What is the time complexity of binary search? Reply concisely.",
+        ),
+        max_tokens=args.max_tokens,
+        timeout=args.timeout,
+    )
+    _require_real_chat((proof,), label="winning model")
+
+    print("\nResult")
+    for row in sorted(benchmark_rows, key=lambda item: (-item["quality"], item["median_latency"])):
+        print(
+            f"  {row['model']}: quality {row['quality']:.0%} · median "
+            f"{row['median_latency']:.3f}s · profile {row['memory_mb']} MiB"
+        )
+    print(f"  allocator chose {chosen} · portfolio score {float(projection.get('score') or 0):.4f}")
+    print(
+        f"  placed on {chosen_node.get('node_id')} · "
+        f"{float(chosen_node.get('capacity_mb') or 0) / 1024:.1f} GiB · "
+        f"${float(chosen_node.get('cost_per_hour') or 0):g}/h · cheapest capable node"
+    )
+    print(f"  real winning response: {proof.text[:160]!r}")
+    print("The router supplied no provisioning requirement; measured evidence drove selection.")
+    return 0
 
 
 def cmd_test_demo(args: argparse.Namespace) -> int:

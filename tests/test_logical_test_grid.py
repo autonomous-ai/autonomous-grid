@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from local.logical_test_grid import _profile, logical_resources
+from local.logical_test_grid import _estimated_model_memory_mb, _profile, logical_resources
 
 
 def test_logical_resources_partition_real_physical_capacity_without_multiplying_it():
@@ -19,6 +19,7 @@ def test_logical_resources_partition_real_physical_capacity_without_multiplying_
         machine_index=0,
         machine_count=4,
         capacity_bytes=8 * gib,
+        cost_per_hour=0.25,
     )()
     large = logical_resources(
         physical,
@@ -34,6 +35,7 @@ def test_logical_resources_partition_real_physical_capacity_without_multiplying_
     assert small["memory"]["available_gb"] == 6
     assert large["memory"]["available_gb"] == 15
     assert small["failure_domain"] == "logical-machine-1"
+    assert small["cost_per_hour"] == 0.25
     assert large["failure_domain"] == "logical-machine-2"
 
 
@@ -51,3 +53,11 @@ def test_real_test_profile_is_owned_llama_lifecycle_with_bounded_replicas():
     assert profile.max_replicas == 3
     assert profile.artifact_sha256 == "a" * 64
     assert profile.workload_scores == (("coding", 1.0),)
+
+
+def test_model_memory_estimate_uses_real_cached_weight_size(monkeypatch, tmp_path):
+    model = tmp_path / "candidate.gguf"
+    model.write_bytes(b"x" * 1024 * 1024)
+    monkeypatch.setattr("local.logical_test_grid.paths.models_dir", lambda: tmp_path)
+
+    assert _estimated_model_memory_mb(model.name) == 256

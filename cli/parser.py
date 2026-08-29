@@ -58,6 +58,7 @@ from .grid import (
 from .credential import cmd_credential
 from .launch import cmd_launch
 from .logical_test import (
+    cmd_test_compete,
     cmd_test_start,
     cmd_test_demo,
     cmd_test_status,
@@ -66,6 +67,8 @@ from .logical_test import (
     logical_machine_count,
     positive_seconds,
     positive_tokens,
+    positive_gib_csv,
+    nonnegative_cost_csv,
     real_request_count,
     real_user_count,
 )
@@ -202,6 +205,14 @@ def _add_logical_test(sub) -> None:
         default="SmolLM2-135M-Instruct-Q3_K_S.gguf",
         help="Cached GGUF the autonomous workload demo may proactively load.",
     )
+    start.add_argument(
+        "--candidate-model",
+        dest="candidate_models",
+        action="append",
+        default=[],
+        metavar="GGUF",
+        help="Additional cached GGUF candidate for real portfolio competition; repeatable.",
+    )
     start.add_argument("--port", type=int, default=22_100, help="Grid control/API port.")
     start.add_argument(
         "--engine-port-base",
@@ -240,6 +251,23 @@ def _add_logical_test(sub) -> None:
         type=int,
         default=22_201,
         help="Loopback Grid media-adapter port for the mixed-framework test Grid.",
+    )
+    start.add_argument(
+        "--text-capacities-gib",
+        type=positive_gib_csv,
+        default=(),
+        metavar="GIB,...",
+        help=(
+            "Logical usable-memory totals for text nodes; count must equal the number of text "
+            "nodes and the physical total remains enforced."
+        ),
+    )
+    start.add_argument(
+        "--text-costs-per-hour",
+        type=nonnegative_cost_csv,
+        default=(),
+        metavar="USD,...",
+        help="Logical hourly costs for text nodes, used by placement scoring.",
     )
     start.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     start.set_defaults(handler=cmd_test_start)
@@ -280,6 +308,25 @@ def _add_logical_test(sub) -> None:
         help="Seconds allowed for each real placement or ComfyUI generation transition.",
     )
     demo.set_defaults(handler=cmd_test_demo)
+
+    compete = test_sub.add_parser(
+        "compete",
+        help="Benchmark real candidate models and prove quality/cost-aware selection",
+    )
+    compete.add_argument(
+        "--max-tokens",
+        type=positive_tokens,
+        default=16,
+        metavar="N",
+        help="Maximum generated tokens per deterministic benchmark task (default 16).",
+    )
+    compete.add_argument(
+        "--timeout",
+        type=positive_seconds,
+        default=600.0,
+        help="Seconds allowed for each real model lifecycle transition.",
+    )
+    compete.set_defaults(handler=cmd_test_compete)
 
     scenario = test_sub.add_parser(
         "scenario",

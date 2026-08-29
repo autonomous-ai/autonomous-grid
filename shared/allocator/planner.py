@@ -908,14 +908,17 @@ class PlacementPlanner:
         def place_isolated_replicas(
             model: ModelProfile,
             *,
-            ready_incumbents: bool,
+            live_incumbents: bool,
         ) -> None:
             """Bulk-place replicas on independent one-model hosts with static scores.
 
-            Ready incumbents are non-fungible because their full host cannot accept another model.
-            Empty hosts are handled only when the caller proves there is one remaining contender in
-            its priority class. A unique, unused domain per candidate keeps score ordering static;
-            selected assignments still receive their exact current-domain score.
+            Ready and in-progress incumbents are non-fungible because their full host cannot accept
+            another model. Including LOADING/WARMING here is also essential for placement stability:
+            otherwise the empty-host fast path can skip an executing warm and start the same replica
+            on a second node. Empty hosts are handled only when the caller proves there is one
+            remaining contender in its priority class. A unique, unused domain per candidate keeps
+            score ordering static; selected assignments still receive their exact current-domain
+            score.
             """
 
             goal = placement_goal(model)
@@ -932,10 +935,15 @@ class PlacementPlanner:
                 if (model.model_id, node.node_id) in assigned_pairs:
                     continue
                 residency = node.residency(model.model_id)
-                if ready_incumbents:
+                if live_incumbents:
                     candidate_shape_matches = bool(
                         residency is not None
-                        and residency.state == ResidencyState.READY
+                        and residency.state
+                        in (
+                            ResidencyState.LOADING,
+                            ResidencyState.WARMING,
+                            ResidencyState.READY,
+                        )
                         and model.matches_artifact(residency)
                         and sum(not _adds_model_slot(item) for item in node.residencies)
                         == 1
@@ -1048,7 +1056,7 @@ class PlacementPlanner:
             )
 
         for model in order:
-            place_isolated_replicas(model, ready_incumbents=True)
+            place_isolated_replicas(model, live_incumbents=True)
 
         priorities = sorted({model.priority for model in order}, reverse=True)
         for priority in priorities:
@@ -1079,7 +1087,7 @@ class PlacementPlanner:
                 if len(remaining_contenders) == 1:
                     place_isolated_replicas(
                         remaining_contenders[0],
-                        ready_incumbents=False,
+                        live_incumbents=False,
                     )
                 else:
                     for model in remaining_contenders:

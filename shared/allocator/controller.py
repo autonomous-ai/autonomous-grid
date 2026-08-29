@@ -26,6 +26,7 @@ from shared.allocator.models import (
     AllocatorMode,
     DemandForecast,
     ModelProfile,
+    ModelResidency,
     MutationAction,
     NodeSnapshot,
     PlacementPlan,
@@ -248,6 +249,38 @@ class AllocatorController:
             )
         return True
 
+    def observe_evaluation(
+        self,
+        model_id: str,
+        workload: str,
+        *,
+        quality: float,
+        error: bool = False,
+        latency_ms: float = 0.0,
+        output_units: int = 0,
+        timestamp: float | None = None,
+    ):
+        """Record authenticated quality evidence for one configured model.
+
+        Evaluations deliberately do not touch the direct or unbound demand trackers. They improve
+        future portfolio choice without allowing a benchmark run to provision itself.
+        """
+
+        if model_id not in self._observable_models:
+            raise KeyError("allocator model profile not found")
+        with self._demand_lock:
+            if model_id not in self._observable_models:
+                raise KeyError("allocator model profile not found")
+            return self.intelligence.observe_model_evaluation(
+                model_id,
+                workload,
+                quality=quality,
+                error=error,
+                latency_ms=latency_ms,
+                output_units=output_units,
+                timestamp=timestamp,
+            )
+
     def tick(
         self,
         nodes: Iterable[NodeSnapshot],
@@ -332,8 +365,12 @@ class AllocatorController:
             for profile in profiles
         )
         self._resolve_withdrawn_destructive(node_list)
-        raw_plan = self.planner.plan(
+        planning_nodes = self._overlay_delivered_constructive_intent(
             node_list,
+            effective_profiles,
+        )
+        raw_plan = self.planner.plan(
+            planning_nodes,
             effective_profiles,
             forecasts,
             now=timestamp,
@@ -370,7 +407,7 @@ class AllocatorController:
         )
         result = self.reconciler.reconcile(
             plan,
-            node_list,
+            planning_nodes,
             profiles,
             self._history,
             mode=self.mode,
@@ -408,6 +445,86 @@ class AllocatorController:
                 )
         self._save_or_rollback(checkpoint)
         return result
+
+    def _overlay_delivered_constructive_intent(
+        self,
+        nodes: tuple[NodeSnapshot, ...],
+        profiles: tuple[ModelProfile, ...],
+    ) -> tuple[NodeSnapshot, ...]:
+        """Keep an executing load/warm stable until its next factual heartbeat arrives.
+
+        Command delivery and node telemetry are separate authenticated heartbeats. During that
+        small gap, planning from the older snapshot can move the same desired replica elsewhere,
+        cancel work that is already running, and pay for two cold starts. A delivered constructive
+        command is bounded, durable evidence of an in-progress residency; destructive safety still
+        uses the unmodified factual snapshots elsewhere in the tick.
+        """
+
+        if not self._delivered_command_ids:
+            return nodes
+        profile_by_id = {profile.model_id: profile for profile in profiles}
+        intents: dict[str, list[MutationAction]] = {}
+        for action in self._commands.values():
+            if (
+                action.action_id in self._delivered_command_ids
+                and action.kind in (ActionKind.LOAD, ActionKind.WARM)
+                and action.model_id in profile_by_id
+            ):
+                intents.setdefault(action.node_id, []).append(action)
+        if not intents:
+            return nodes
+
+        overlaid: list[NodeSnapshot] = []
+        for node in nodes:
+            actions = intents.get(node.node_id)
+            if not actions:
+                overlaid.append(node)
+                continue
+            residencies = {item.model_id: item for item in node.residencies}
+            for action in sorted(actions, key=lambda item: (item.created_at, item.action_id)):
+                profile = profile_by_id[action.model_id]
+                if (
+                    action.memory_mb != profile.memory_for(node.runtimes)
+                    or action.artifact_sha256 != profile.artifact_sha256
+                ):
+                    # Profile changes invalidate the old command; let normal stale-command
+                    # cancellation replace it instead of preserving an obsolete intent.
+                    continue
+                current = residencies.get(action.model_id)
+                if current is not None and not profile.matches_artifact(current):
+                    # A different live revision needs the ordinary make-before-break path; one
+                    # model-id slot cannot safely represent both artifacts synthetically.
+                    continue
+                if (
+                    current is not None
+                    and current.state == ResidencyState.READY
+                    and profile.matches_artifact(current)
+                ):
+                    continue
+                intended_state = (
+                    ResidencyState.WARMING
+                    if action.kind == ActionKind.WARM
+                    else ResidencyState.LOADING
+                )
+                if current is None:
+                    residencies[action.model_id] = ModelResidency(
+                        action.model_id,
+                        action.memory_mb,
+                        intended_state,
+                        loaded_at=action.created_at,
+                        managed=True,
+                        artifact_sha256=action.artifact_sha256,
+                    )
+                else:
+                    residencies[action.model_id] = replace(
+                        current,
+                        memory_mb=action.memory_mb,
+                        state=intended_state,
+                        managed=True,
+                        artifact_sha256=action.artifact_sha256,
+                    )
+            overlaid.append(replace(node, residencies=tuple(residencies.values())))
+        return tuple(overlaid)
 
     def commands_for(
         self,
@@ -1030,6 +1147,25 @@ class AllocatorController:
                     action.kind in (ActionKind.DRAIN, ActionKind.UNLOAD) and pair in desired
                 )
                 message = "desired placement changed before execution"
+                if stale and action.kind in (ActionKind.LOAD, ActionKind.WARM):
+                    desired_nodes = sorted(
+                        assignment.node_id
+                        for assignment in plan.assignments
+                        if assignment.model_id == action.model_id
+                    )
+                    residency = next(
+                        (
+                            node.residency(action.model_id)
+                            for node in nodes
+                            if node.node_id == action.node_id
+                        ),
+                        None,
+                    )
+                    message += (
+                        f" (desired nodes: {desired_nodes or ['none']}; "
+                        f"observed state: {residency.state.value if residency else 'absent'}; "
+                        f"delivered: {action_id in self._delivered_command_ids})"
+                    )
                 if (
                     not stale
                     and action.kind in (ActionKind.LOAD, ActionKind.WARM)

@@ -56,6 +56,7 @@ from .grid import (
 )
 from .launch import cmd_launch
 from .logical_test import (
+    cmd_test_compete,
     cmd_test_demo,
     cmd_test_start,
     cmd_test_status,
@@ -102,6 +103,7 @@ __all__ = [
     "cmd_models",
     "cmd_engines",
     "cmd_catalog",
+    "cmd_test_compete",
     "cmd_device_info",
     "cmd_pull",
     "cmd_rm",

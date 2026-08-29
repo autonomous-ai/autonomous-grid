@@ -278,6 +278,70 @@ def test_unconfigured_model_names_create_only_bounded_workload_demand(tmp_path):
     assert set(workload_models) == {"general"}
 
 
+def test_authenticated_evaluation_records_quality_without_creating_demand(tmp_path):
+    app, client, _ = _app(tmp_path)
+    assert client.put(
+        "/allocator/models/qwen",
+        json=_profile(),
+        headers=AUTH,
+    ).status_code == 200
+
+    anonymous = client.post(
+        "/allocator/evaluations",
+        json={"model_id": "qwen", "workload": "coding", "quality": 1.0},
+    )
+    assert anonymous.status_code == 403
+
+    response = client.post(
+        "/allocator/evaluations",
+        headers=AUTH,
+        json={
+            "model_id": "qwen",
+            "workload": "coding",
+            "quality": 0.75,
+            "latency_ms": 125,
+            "output_units": 32,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    evaluation = response.json()["evaluation"]
+    assert evaluation["model_id"] == "qwen"
+    assert evaluation["quality"] == 0.75
+    assert evaluation["quality_samples"] == 1
+    assert app.state.allocator.demand.to_dict()["models"] == {}
+    assert app.state.allocator.intelligence.unbound_demand.to_dict()["models"] == {}
+
+
+def test_authenticated_evaluation_inference_does_not_create_demand(tmp_path):
+    app, client, _ = _app(tmp_path)
+    assert client.put(
+        "/allocator/models/qwen",
+        json=_profile(),
+        headers=AUTH,
+    ).status_code == 200
+    body = {"model": "qwen", "messages": [{"role": "user", "content": "hi"}]}
+
+    anonymous = client.post(
+        "/v1/chat/completions",
+        headers={"X-Grid-Allocator-Evaluation": "1"},
+        json=body,
+    )
+    assert anonymous.status_code == 403
+
+    before = app.state.allocator_dirty_revision
+    response = client.post(
+        "/v1/chat/completions",
+        headers={**AUTH, "X-Grid-Allocator-Evaluation": "1"},
+        json=body,
+    )
+
+    assert response.status_code == 503
+    assert app.state.allocator_dirty_revision == before
+    assert app.state.allocator.demand.to_dict()["models"] == {}
+    assert app.state.allocator.intelligence.unbound_demand.to_dict()["models"] == {}
+
+
 def test_automatic_commands_are_visible_only_to_authenticated_host(tmp_path):
     _, client, _ = _app(tmp_path)
     _managed_node(client)

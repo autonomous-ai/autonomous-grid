@@ -8,6 +8,7 @@ identity, idle signals, failure domains, and the physical-capacity share are sim
 from __future__ import annotations
 
 import argparse
+import math
 import signal
 import threading
 import time
@@ -20,7 +21,7 @@ import uvicorn
 
 from local.allocator_node import AllocatorNodeAgent
 from local.server import create_app
-from shared import jsonio
+from shared import jsonio, paths
 from shared.allocator.auth import mint_node_token
 from shared.allocator.local import HostPolicy, LocalHostProtectionLoop
 from shared.allocator.models import ModelProfile, ResidencyState
@@ -54,6 +55,7 @@ def logical_resources(
     machine_index: int,
     machine_count: int,
     capacity_bytes: int | None = None,
+    cost_per_hour: float = 0.0,
 ) -> Callable[[], dict[str, Any]]:
     """Partition one machine's capacity instead of multiplying it by the logical host count."""
 
@@ -94,6 +96,7 @@ def logical_resources(
                 float(physical.get("compute_gflops") or 0) / machine_count,
             ),
             "failure_domain": f"logical-machine-{machine_index + 1}",
+            "cost_per_hour": cost_per_hour,
         }
 
     return collect
@@ -106,12 +109,13 @@ def _profile(
     *,
     min_replicas: int | None = None,
     workload_scores: tuple[tuple[str, float], ...] = (),
+    memory_mb: int = 256,
 ) -> ModelProfile:
     minimum = machines if min_replicas is None else min_replicas
     return ModelProfile(
         model_id=model,
         # Includes runtime/KV overhead above the default tiny model's ~94 MB weights.
-        memory_mb=256,
+        memory_mb=memory_mb,
         runtimes=("llama.cpp",),
         min_replicas=minimum,
         max_replicas=machines,
@@ -127,6 +131,17 @@ def _profile(
         artifact_sha256=artifact_sha256,
         workload_scores=workload_scores,
     )
+
+
+def _estimated_model_memory_mb(model_id: str) -> int:
+    """Conservative real-weight footprint for logical admission and competition tests."""
+
+    model_path = paths.models_dir() / Path(model_id).name
+    try:
+        weight_mb = model_path.stat().st_size / (1024 * 1024)
+    except OSError as exc:
+        raise RuntimeError(f"cannot size cached model {model_id!r}: {exc}") from exc
+    return max(256, math.ceil(weight_mb * 1.25 + 128))
 
 
 def _ready_count(runtimes: list[ManagedModelRuntime], model: str) -> int:
@@ -162,10 +177,22 @@ def run_worker(config_path: Path) -> int:
     comfyui_port = int(cfg.get("comfyui_port") or 22_200)
     media_port = int(cfg.get("media_port") or 22_201)
     text_machines = machines - int(include_comfyui)
+    text_capacities_gib = tuple(float(item) for item in cfg.get("text_capacities_gib") or ())
+    text_costs_per_hour = tuple(float(item) for item in cfg.get("text_costs_per_hour") or ())
     if text_machines < 1:
         raise RuntimeError("a real logical Grid needs at least one text machine")
     model = str(cfg["model"])
     portfolio_model = str(cfg.get("portfolio_model") or "")
+    portfolio_models = tuple(
+        dict.fromkeys(
+            str(item)
+            for item in (
+                cfg.get("portfolio_models")
+                or ([portfolio_model] if portfolio_model else [])
+            )
+            if str(item)
+        )
+    )
     control_token = Path(str(cfg["control_token_path"])).read_text(encoding="utf-8").strip()
     if not control_token:
         raise RuntimeError("logical Grid control token is empty")
@@ -230,15 +257,27 @@ def run_worker(config_path: Path) -> int:
             raise RuntimeError(
                 f"physical usable memory cannot fit {media_bundle} plus {text_machines} text slots"
             )
-        text_capacity_bytes = (
-            (physical_usable_bytes - media_capacity_bytes) // text_machines
-            if include_comfyui
-            else physical_usable_bytes // text_machines
+        configured_text_capacity = tuple(
+            int(value * 1024**3) for value in text_capacities_gib
         )
+        if configured_text_capacity:
+            if len(configured_text_capacity) != text_machines:
+                raise RuntimeError("configured text capacity count does not match text nodes")
+            if sum(configured_text_capacity) + media_capacity_bytes > physical_usable_bytes:
+                raise RuntimeError("configured logical capacities exceed physical usable memory")
+            text_capacity_bytes = configured_text_capacity
+        else:
+            balanced = (
+                (physical_usable_bytes - media_capacity_bytes) // text_machines
+                if include_comfyui
+                else physical_usable_bytes // text_machines
+            )
+            text_capacity_bytes = (balanced,) * text_machines
         artifact_sha256 = LlamaCppBackend().artifact_sha256(model)
-        portfolio_sha256 = (
-            LlamaCppBackend().artifact_sha256(portfolio_model) if portfolio_model else ""
-        )
+        portfolio_sha256 = {
+            candidate: LlamaCppBackend().artifact_sha256(candidate)
+            for candidate in portfolio_models
+        }
         for index in range(text_machines):
             host_id = f"logical-host-{index + 1}"
             node_port_start = port_base + index * 10
@@ -275,7 +314,10 @@ def run_worker(config_path: Path) -> int:
                     physical,
                     machine_index=index,
                     machine_count=machines,
-                    capacity_bytes=text_capacity_bytes,
+                    capacity_bytes=text_capacity_bytes[index],
+                    cost_per_hour=(
+                        text_costs_per_hour[index] if text_costs_per_hour else 0.0
+                    ),
                 ),
                 heartbeat_interval=0.25,
                 shutdown_drain_timeout=5.0,
@@ -343,16 +385,17 @@ def run_worker(config_path: Path) -> int:
                 json=_profile(model, text_machines, artifact_sha256).to_dict(),
             )
             response.raise_for_status()
-            if portfolio_model:
+            for candidate in portfolio_models:
                 response = client.put(
-                    f"/allocator/models/{portfolio_model}",
+                    f"/allocator/models/{quote(candidate, safe='')}",
                     headers=headers,
                     json=_profile(
-                        portfolio_model,
+                        candidate,
                         text_machines,
-                        portfolio_sha256,
+                        portfolio_sha256[candidate],
                         min_replicas=0,
-                        workload_scores=(("coding", 1.0), ("research", 0.8)),
+                        workload_scores=(("coding", 1.0),),
+                        memory_mb=_estimated_model_memory_mb(candidate),
                     ).to_dict(),
                 )
                 response.raise_for_status()

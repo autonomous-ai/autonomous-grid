@@ -20,12 +20,15 @@ def test_logical_test_parser_defaults_to_four_machines():
     assert args.machines == 4
     assert args.model == "SmolLM2-135M-Instruct-Q3_K_M.gguf"
     assert args.portfolio_model == "SmolLM2-135M-Instruct-Q3_K_S.gguf"
+    assert args.candidate_models == []
     assert args.port == 22_100
     assert args.engine_port_base == 22_110
     assert args.include_comfyui is False
     assert args.media_bundle == "z_image"
     assert args.comfyui_port == 22_200
     assert args.media_port == 22_201
+    assert args.text_capacities_gib == ()
+    assert args.text_costs_per_hour == ()
     assert args.timeout == 600.0
     assert args.handler is cli.cmd_test_start
 
@@ -34,6 +37,7 @@ def test_logical_test_parser_accepts_machine_count_and_lifecycle_commands():
     start = cli.build_parser().parse_args(["test", "start", "--machines", "7"])
     status = cli.build_parser().parse_args(["test", "status", "--json"])
     demo = cli.build_parser().parse_args(["test", "demo"])
+    compete = cli.build_parser().parse_args(["test", "compete"])
     watch = cli.build_parser().parse_args(["test", "watch", "--interval", "0.1"])
     stop = cli.build_parser().parse_args(["test", "stop"])
 
@@ -45,6 +49,9 @@ def test_logical_test_parser_accepts_machine_count_and_lifecycle_commands():
     assert demo.users == 6
     assert demo.max_tokens == 32
     assert demo.timeout == 600.0
+    assert compete.handler is cli.cmd_test_compete
+    assert compete.max_tokens == 16
+    assert compete.timeout == 600.0
     assert watch.handler is cli.cmd_test_watch
     assert watch.interval == 0.1
     assert stop.handler is cli.cmd_test_stop
@@ -92,6 +99,14 @@ def test_mixed_framework_parser_exposes_real_media_and_user_controls():
             "23000",
             "--media-port",
             "23001",
+            "--candidate-model",
+            "coder.gguf",
+            "--candidate-model",
+            "general.gguf",
+            "--text-capacities-gib",
+            "3.4,5,17",
+            "--text-costs-per-hour",
+            "0.05,0.20,0.80",
         ]
     )
     demo = cli.build_parser().parse_args(
@@ -111,6 +126,9 @@ def test_mixed_framework_parser_exposes_real_media_and_user_controls():
     assert start.media_bundle == "z_image"
     assert start.comfyui_port == 23000
     assert start.media_port == 23001
+    assert start.candidate_models == ["coder.gguf", "general.gguf"]
+    assert start.text_capacities_gib == (3.4, 5.0, 17.0)
+    assert start.text_costs_per_hour == (0.05, 0.2, 0.8)
     assert demo.users == 9
     assert demo.requests == 18
     assert demo.max_tokens == 48
@@ -151,7 +169,8 @@ def test_real_client_retries_only_transient_capacity_responses(monkeypatch):
     attempts = iter((503, 429, 200))
     clock = iter((10.0, 10.1, 10.3, 10.7))
 
-    def request_once(endpoint, user, *, max_tokens, timeout):
+    def request_once(endpoint, user, *, max_tokens, timeout, request_headers=None):
+        assert request_headers == {"X-Test": "evaluation"}
         status = next(attempts)
         return _RealChatResult(
             user_id=user.user_id,
@@ -175,6 +194,7 @@ def test_real_client_retries_only_transient_capacity_responses(monkeypatch):
         max_tokens=1,
         timeout=1,
         retries=3,
+        request_headers={"X-Test": "evaluation"},
     )
 
     assert result.status_code == 200
