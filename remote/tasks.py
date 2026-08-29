@@ -1271,7 +1271,18 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
             run_kwargs["inference"] = task_codex.GridInference(
                 state.signaling_url, state.token())
         outcome = run_task(job, publisher.publish, **run_kwargs)
-        outcome, landed = _push_result(job, outcome, spawned["yes"], remote, publisher)
+        if (isinstance(job.get("goal"), dict) and outcome.state == "failed"
+                and not spawned["yes"]):
+            # A native Goal is durable and has a bounded attempt budget. Failure before the child
+            # process exists is evidence about THIS NODE (binary vanished after advertisement,
+            # local permissions, socket setup), not about the Goal. Report nothing terminal: the
+            # lease reaper hands the same turn to another capable machine and eventually ends it at
+            # retries_exhausted if the fault is fleet-wide. Ordinary one-shot tasks retain their
+            # established terminal-failure behavior.
+            landed = False
+            abandoned_because = "'s native Goal harness could not start"
+        else:
+            outcome, landed = _push_result(job, outcome, spawned["yes"], remote, publisher)
     except task_repo.InputFetchError:
         # The input never arrived, so this attempt has produced no evidence about the task at all —
         # not even a failed one. Routed to the same silence a failed push takes: report nothing,

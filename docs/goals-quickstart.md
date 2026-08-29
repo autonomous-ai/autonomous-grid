@@ -148,6 +148,11 @@ an incremented attempt number. The replacement starts from the last successful p
 checkpoint. Work that existed only in the dead provider's uncommitted worktree is intentionally
 discarded; external actions should therefore be idempotent.
 
+A node-local failure before the native harness process starts (for example a binary removed after
+capability advertisement or a local permission fault) follows the same bounded reclaim path instead
+of terminally failing the Goal on one computer. If every capable node fails, the existing attempt
+cap ends the Goal as `retries_exhausted` rather than retrying forever.
+
 When Codex marks the Goal complete, the last task becomes terminal and no next task is queued. The
 Goal disappears from the default `grid goal list`, while its Goal row, task attempts, events,
 trajectory and counters remain available for audit and future `grid train` datasets. Unlike

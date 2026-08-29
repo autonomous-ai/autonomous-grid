@@ -3635,6 +3635,34 @@ def test_a_workspace_that_could_not_be_prepared_pushes_nothing(agent, tmp_path, 
     assert _git(remote.url, "rev-parse", "refs/heads/task/T1").stdout.strip() == commit
 
 
+def test_a_goal_whose_harness_never_started_is_left_for_another_machine(
+        agent, tmp_path, monkeypatch):
+    """A node-local pre-spawn fault must not terminally fail a durable distributed Goal."""
+    from remote import task_repo, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    real_run = task_repo._run
+
+    def fail_on_clean(workspace, *args, **kwargs):
+        if args and args[0] == "clean":
+            raise task_repo.CheckoutError("git clean failed (1): node-local permission denied")
+        return real_run(workspace, *args, **kwargs)
+
+    monkeypatch.setattr(task_repo, "_run", fail_on_clean)
+    reports = []
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reports.append(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+    job = _job_with_input(commit)
+    job["goal"] = {"status": "active", "objective": "finish", "done_when": "checks pass"}
+
+    tasks._run_and_report(_FakeState(), job)
+
+    assert reports == [], "one broken node terminally failed a Goal another node could run"
+    assert _git(remote.url, "rev-parse", "refs/heads/task/T1").stdout.strip() == commit
+
+
 def test_a_fetch_that_fails_is_a_different_error_from_a_task_that_cannot_be_checked_out(
         tmp_path):
     """The input FETCH is retryable; a claim that never named an input is not (ADR 0033 issue 16a).
