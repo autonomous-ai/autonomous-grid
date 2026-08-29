@@ -105,6 +105,7 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
         "goal": {"id": "goal-1", "status": "complete", "evals": [{
             "definition_id": "eval-1", "definition_hash": "hash-1", "name": "artifact",
         }]},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
         "turns": [
             {"state": "completed", "agent_kind": "codex", "provider_node_id": "node-A",
              "input_commit": "1" * 40, "result_commit": "2" * 40,
@@ -132,6 +133,7 @@ def test_goal_evidence_verify_refuses_a_broken_handoff(monkeypatch, capsys):
 
     record = {
         "goal": {"id": "goal-1", "status": "complete", "evals": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
         "turns": [
             {"state": "completed", "agent_kind": "codex", "provider_node_id": "node-A",
              "input_commit": "1" * 40, "result_commit": "2" * 40,
@@ -149,6 +151,26 @@ def test_goal_evidence_verify_refuses_a_broken_handoff(monkeypatch, capsys):
     with pytest.raises(SystemExit, match="turn 2 transcript input"):
         goal.cmd_goal(args)
     assert json.loads(capsys.readouterr().out) == record
+
+
+def test_goal_evidence_verify_refuses_pruned_training_objects():
+    from cli.goal import _verify_evidence
+
+    record = {
+        "goal": {"status": "complete", "evals": []},
+        "trajectory": {"transcript_pruned": True, "pruned_turn_branches": ["turn-1"]},
+        "turns": [{
+            "id": "turn-1", "state": "completed", "agent_kind": "codex",
+            "provider_node_id": "node-A", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40, "branch_pruned": True,
+        }],
+        "eval_runs": [],
+    }
+
+    failures = _verify_evidence(record)
+    assert "the Goal transcript ref has been pruned" in failures
+    assert any("turn branches have been pruned" in item for item in failures)
 
 
 def test_goal_status_shows_budget_blocker_and_distributed_children(capsys):

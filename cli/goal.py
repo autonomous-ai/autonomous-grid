@@ -91,12 +91,23 @@ def _verify_evidence(record: dict) -> list[str]:
         failures.append("no Goal turns were recorded")
         return failures
 
+    trajectory = (record.get("trajectory")
+                  if isinstance(record.get("trajectory"), dict) else {})
+    if trajectory.get("transcript_pruned") is True:
+        failures.append("the Goal transcript ref has been pruned")
+    pruned_branches = trajectory.get("pruned_turn_branches")
+    if isinstance(pruned_branches, list) and pruned_branches:
+        failures.append(
+            "turn branches have been pruned: " + ", ".join(map(str, pruned_branches)))
+
     for index, turn in enumerate(turns, 1):
         if not isinstance(turn, dict):
             failures.append(f"turn {index} is not an object")
             continue
         if turn.get("state") != "completed":
             failures.append(f"turn {index} state is {turn.get('state')!r}, not 'completed'")
+        if turn.get("branch_pruned") is True:
+            failures.append(f"turn {index} result branch has been pruned")
         for field in ("agent_kind", "provider_node_id", "input_commit", "result_commit"):
             if not turn.get(field):
                 failures.append(f"turn {index} has no {field}")
