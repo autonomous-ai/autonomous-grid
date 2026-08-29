@@ -95,3 +95,23 @@ def test_goal_evidence_prints_machine_readable_audit_record(monkeypatch, capsys)
     args = SimpleNamespace(goal_action="evidence", goal_id="goal-1", grid=None)
     assert goal.cmd_goal(args) == 0
     assert json.loads(capsys.readouterr().out)["turns"][0]["provider_node_id"] == "node-A"
+
+
+def test_goal_status_shows_budget_blocker_and_distributed_children(capsys):
+    from cli.goal import _show
+
+    _show({
+        "id": "parent", "status": "blocked", "objective": "Ship it",
+        "done_when": "checks pass", "turns_completed": 2, "tokens_used": 1_250,
+        "token_budget": 10_000, "child_tokens_reserved": 4_000,
+        "agents": ["codex", "claude"], "blocked_reason": "child conflict in app.py",
+        "children": [{
+            "id": "child-1", "status": "complete", "required": True,
+            "objective": "Build the API",
+        }],
+    }, False)
+    output = capsys.readouterr().out
+    assert "1,250 / 10,000 tokens · 4,000 reserved for children" in output
+    assert "agents     codex, claude" in output
+    assert "blocked    child conflict in app.py" in output
+    assert "child-1 [complete] (required) Build the API" in output

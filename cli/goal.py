@@ -51,6 +51,17 @@ def _show(goal: dict, as_json: bool) -> None:
     print(f"  done when  {goal.get('done_when')}")
     print(f"  progress   {goal.get('turns_completed', 0)} turns · "
           f"{goal.get('tokens_used', 0)} tokens")
+    if goal.get("token_budget") is not None:
+        reserved = int(goal.get("child_tokens_reserved") or 0)
+        suffix = f" · {reserved:,} reserved for children" if reserved else ""
+        print(f"  budget     {int(goal.get('tokens_used') or 0):,} / "
+              f"{int(goal['token_budget']):,} tokens{suffix}")
+    if goal.get("agents"):
+        print(f"  agents     {', '.join(goal['agents'])}")
+    if goal.get("parent_goal_id"):
+        print(f"  parent     {goal['parent_goal_id']}")
+    if goal.get("blocked_reason"):
+        print(f"  blocked    {goal['blocked_reason']}")
     if goal.get("evals"):
         last = goal.get("last_eval") or {}
         results = last.get("results") or []
@@ -59,6 +70,13 @@ def _show(goal: dict, as_json: bool) -> None:
         print(f"  evals      {len(goal['evals'])} checks{suffix}")
     if goal.get("turn_id"):
         print(f"  first turn {goal['turn_id']}")
+    children = goal.get("children") or []
+    if children:
+        print(f"  children   {len(children)}")
+        for child in children:
+            required = "required" if child.get("required", True) else "optional"
+            print(f"    {child.get('id')} [{child.get('status')}] ({required}) "
+                  f"{child.get('objective')}")
 
 
 def cmd_goal(args: argparse.Namespace) -> int:
