@@ -758,13 +758,17 @@ class PlacementPlanner:
             )
             return True
 
-        def place_isolated_ready_replicas(model: ModelProfile) -> None:
-            """Bulk-place ready residencies whose occupied one-model hosts are non-fungible.
+        def place_isolated_replicas(
+            model: ModelProfile,
+            *,
+            ready_incumbents: bool,
+        ) -> None:
+            """Bulk-place replicas on independent one-model hosts with static scores.
 
-            These hosts cannot accept another model until their incumbent is explicitly evicted,
-            so repeatedly rediscovering the same ready set cannot affect fairness or repacking. A
-            unique, previously unused failure domain per candidate also keeps the score ordering
-            static; the selected assignment still receives its exact current-domain score.
+            Ready incumbents are non-fungible because their full host cannot accept another model.
+            Empty hosts are handled only when the caller proves there is one remaining contender in
+            its priority class. A unique, unused domain per candidate keeps score ordering static;
+            selected assignments still receive their exact current-domain score.
             """
 
             goal = placement_goal(model)
@@ -783,17 +787,28 @@ class PlacementPlanner:
                 if (model.model_id, node.node_id) in assigned_pairs:
                     continue
                 residency = node.residency(model.model_id)
+                if ready_incumbents:
+                    candidate_shape_matches = bool(
+                        residency is not None
+                        and residency.state == ResidencyState.READY
+                        and model.matches_artifact(residency)
+                        and sum(
+                            not _adds_model_slot(item) for item in node.residencies
+                        )
+                        == 1
+                    )
+                    for_new = False
+                else:
+                    candidate_shape_matches = (
+                        occupied_models[node.node_id] == 0
+                        and desired_model_slots[node.node_id] == 0
+                    )
+                    for_new = _requires_new_runtime(residency, model)
+                if not candidate_shape_matches:
+                    continue
                 if (
-                    residency is None
-                    or residency.state != ResidencyState.READY
-                    or not model.matches_artifact(residency)
-                    or sum(not _adds_model_slot(item) for item in node.residencies) != 1
-                    or _ineligible_reason(
-                        node,
-                        model,
-                        timestamp,
-                        self.policy,
-                        for_new=False,
+                    _ineligible_reason(
+                        node, model, timestamp, self.policy, for_new=for_new
                     )
                     is not None
                     or not _fits(
@@ -862,11 +877,24 @@ class PlacementPlanner:
                 placed += 1
 
         for model in order:
-            place_isolated_ready_replicas(model)
+            place_isolated_replicas(model, ready_incumbents=True)
 
         priorities = sorted({model.priority for model in order}, reverse=True)
         for priority in priorities:
             priority_models = [model for model in order if model.priority == priority]
+            remaining_contenders = [
+                model
+                for model in priority_models
+                if sum(
+                    item.model_id == model.model_id for item in assignments
+                )
+                < placement_goal(model)
+            ]
+            if len(remaining_contenders) == 1:
+                place_isolated_replicas(
+                    remaining_contenders[0],
+                    ready_incumbents=False,
+                )
             blocked: set[str] = set()
             while True:
                 placed_by_model = {

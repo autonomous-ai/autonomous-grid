@@ -96,8 +96,9 @@ domain, measured throughput, and best-fit memory. Before measured
 throughput exists, bounded memory-bandwidth and compute estimates break otherwise-cold ties; ready
 and cached bonuses remain much larger, so hardware estimates do not cause gratuitous migration.
 Ready incumbents on full one-model hosts are indexed and ranked in one pass when their failure
-domains are independent; this preserves the general scorer's exact result while avoiding a
-fleet-wide rescan for every retained replica on large saturated networks.
+domains are independent. The same optimization applies to empty one-model hosts only when one model
+remains in its priority class, preserving equal-priority sharing. Both cases preserve the general
+scorer's exact result while avoiding a fleet-wide rescan for every replica on large networks.
 Cost, latency, host priority, cold-start time, and throttling lower a candidate's score. Managed
 nodes report monotonic action duration in their authenticated acknowledgements. Successful warm
 times are retained in bounded controller history and blended with the configured model estimate as
