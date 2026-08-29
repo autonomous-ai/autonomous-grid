@@ -71,17 +71,19 @@ A release is not accepted from screenshots alone.
 | Goal | id, objective, done condition, allowed harnesses, eval definition hashes |
 | Machine inventory | physical hostname, Grid node id, OS, harness and harness version for A/B/C |
 | Model assignment | requested model and every Grid inference provider node used per turn |
-| Turn 1 | A node id, Codex, attempt 1, input commit, result commit |
-| Turn 2 | A attempt 1 lease expiry; B attempt 2, Claude, same turn id, result commit |
-| Turn 3 | B attempt 1 lease expiry; C attempt 2, Codex, same turn id, result commit |
+| Turn 1 | A node id, Codex, attempt 1, input/result commits, null transcript input, non-null transcript output |
+| Turn 2 | A attempt 1 lease expiry; B attempt 2, Claude, same turn id, result commit and transcript input/output |
+| Turn 3 | B attempt 1 lease expiry; C attempt 2, Codex, same turn id, result commit and transcript input/output |
 | Isolation | both uncommitted markers absent on replacement machines and final tree |
 | Evaluation | each definition hash, evaluator node, exact result commit, score and evidence |
 | Terminal state | Goal `complete`; zero queued/running turns for its conversation |
 
-The commit chain must be ancestral and every replacement must fetch through the relay's Git URL.
-Opaque Codex and Claude histories may remain harness-specific; cross-harness continuity comes from
-the shared committed tree, Goal metadata, events, and relay-authored eval evidence. A same-harness
-worker should additionally restore that harness's private transcript side-ref.
+The worktree commit chain must be ancestral and every replacement must fetch through the relay's
+Git URL. The evidence must also form an exact transcript chain: turn 2's `transcript_commit` equals
+turn 1's `transcript_result_commit`, and turn 3's input equals turn 2's output. The relay resolves
+each output from `refs/grid/agent/<goal-id>` rather than trusting the worker's report. Opaque Codex
+and Claude records inside that checkpoint remain harness-specific; a returning harness restores its
+own native state while every harness receives the shared tree, Goal metadata and event history.
 
 Every terminal evaluation row used as proof must have `accepted: true`. A row with
 `accepted: false` proves only that a stale provider evaluated something after losing its lease; it

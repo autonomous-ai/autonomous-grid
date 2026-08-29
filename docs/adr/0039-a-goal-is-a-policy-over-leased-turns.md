@@ -140,8 +140,9 @@ The feature is not production-proven by processes sharing one host. Release requ
 1. deterministic cross-repository tests with separate roots, real relay/task/Git planes, forced
    lease loss, adversarial races, and fake harnesses; and
 2. a three-physical-node run using real Codex/Claude binaries and Grid inference, with node ids,
-   harness/model assignments, task attempts, commits, native checkpoints, evaluations, and final
-   artifacts recorded in the test report.
+   harness/model assignments, task attempts, worktree commits, relay-verified transcript input and
+   output commits, native checkpoints, evaluations, and final artifacts recorded in the test
+   report.
 
 Required scenarios include Codex A -> Claude B -> Codex C, a capability-constrained image Goal that
 Claude cannot claim, evaluator retry and stale-commit rejection, cancellation during evaluation,

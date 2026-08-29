@@ -212,7 +212,8 @@ handle their own network-local authentication.
 The cross-repository integration test starts the real private relay and three isolated provider
 processes with three separate task roots. It kills A during feature 2 and B during features 3–4,
 then proves B and C reclaimed the same relay rows and reconstructed only the last published Git
-state:
+state. It also verifies the relay-authored transcript chain, so each turn's input checkpoint must
+exactly equal the previous worker's published output checkpoint:
 
 ```bash
 GRID_SRC_REPO=/path/to/autonomous-grid-cli uv run pytest \
