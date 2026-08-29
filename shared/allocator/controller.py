@@ -380,9 +380,24 @@ class AllocatorController:
             for model_id in sorted(self._profiles)
             if model_id not in self._retiring
         )
-        current = self.planner.plan(current_nodes, profiles, (), now=timestamp)
+        placement_hints = self.planner.portfolio_placement_hints(
+            current_nodes,
+            profiles,
+            now=timestamp,
+        )
+        forecasts = self._forecasts(
+            timestamp,
+            placement_hints=placement_hints,
+            nodes=current_nodes,
+        )
+        current = self.planner.plan(
+            current_nodes,
+            profiles,
+            forecasts,
+            now=timestamp,
+        )
         proposed = (proposed_planner or self.planner).plan(
-            proposed_nodes, profiles, (), now=timestamp
+            proposed_nodes, profiles, forecasts, now=timestamp
         )
 
         def minimum_coverage(plan: PlacementPlan, model_id: str) -> int:
@@ -390,21 +405,22 @@ class AllocatorController:
                 assignment.model_id == model_id for assignment in plan.assignments
             )
 
+        desired = dict(current.desired_replicas)
         regressions = {
             profile.model_id: (
                 minimum_coverage(current, profile.model_id),
                 minimum_coverage(proposed, profile.model_id),
-                profile.min_replicas,
+                desired.get(profile.model_id, profile.min_replicas),
             )
             for profile in profiles
-            if profile.min_replicas > 0
+            if desired.get(profile.model_id, profile.min_replicas) > 0
             and minimum_coverage(proposed, profile.model_id)
-            < min(profile.min_replicas, minimum_coverage(current, profile.model_id))
+            < minimum_coverage(current, profile.model_id)
         }
         if regressions:
             detail = ", ".join(
-                f"{model_id} {after}/{minimum} minimum replicas (currently {before})"
-                for model_id, (before, after, minimum) in sorted(regressions.items())
+                f"{model_id} {after}/{target} desired replicas (currently {before})"
+                for model_id, (before, after, target) in sorted(regressions.items())
             )
             raise ValueError(
                 f"{change} would reduce minimum service coverage: {detail}; "

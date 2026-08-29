@@ -1751,6 +1751,33 @@ def test_budget_update_requires_explicit_acknowledgement_for_new_minimum_shortfa
     assert policy.max_hourly_cost == 0.5
 
 
+def test_budget_update_protects_demand_driven_service_with_zero_minimum():
+    controller = AllocatorController()
+    controller.put_profile(replace(profile(), min_replicas=0, max_replicas=1))
+    for timestamp in (8, 9, 10):
+        assert controller.observe(
+            "qwen",
+            service_seconds=10,
+            latency_ms=20_000,
+            queue_depth=3,
+            timestamp=timestamp,
+        )
+    machine = NodeSnapshot(
+        "priced",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        cost_per_hour=1.0,
+        cost_known=True,
+        last_heartbeat=10,
+    )
+
+    with pytest.raises(ValueError, match="reduce minimum service coverage"):
+        controller.set_hourly_cost_budget(0.5, nodes=(machine,), now=10)
+
+    assert controller.planner.policy.max_hourly_cost == 0.0
+
+
 def test_status_projects_spend_windows_and_recommends_budget_for_missing_capacity():
     controller = AllocatorController(
         planner_policy=PlannerPolicy(memory_headroom_fraction=0, max_hourly_cost=0.5)

@@ -586,7 +586,8 @@ eligible computer; allocation never invents a download source.
 `grid allocator host price set host-1 0.60` registers a durable, operator-authoritative physical
 host price. Node heartbeats cannot create or override accounting values. An explicit zero is known
 free; `grid allocator host price remove host-1` returns the host to unknown price. A price update
-that reduces achievable minimum service needs `--allow-service-shortfall`. Status prints effective
+that reduces achievable desired service, including demand-driven replicas above the minimum, needs
+`--allow-service-shortfall`. Status prints effective
 price provenance for every host.
 
 `grid allocator budget --max-hourly-cost 2.50` sets a durable hard ceiling on the sum of the
@@ -594,7 +595,7 @@ selected hosts' operator prices. A host is charged once even when it serves seve
 While a positive ceiling is active, a node without an operator price is ineligible by default;
 `--allow-unknown-cost` is an explicit fail-open override, and status continues to name every
 unknown-cost host. Setting the value to `0` disables the ceiling. If a tighter ceiling would reduce
-currently achievable minimum-replica coverage, Grid rejects the update without changing policy;
+currently achievable desired-replica coverage, Grid rejects the update without changing policy;
 `--allow-service-shortfall` explicitly acknowledges that service tradeoff for this update. After an
 acknowledged update, the allocator stages normal drain/unload transitions until the desired fleet
 fits. It never stops a pinned, manually managed, or external process merely to meet a budget; that

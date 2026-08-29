@@ -252,7 +252,8 @@ are merged into one physical host. Worker heartbeats cannot create or override a
 their discovery metadata is not trusted for budget enforcement. An explicit operator price of zero
 means known-free, while removing or never setting a price means unknown. `grid allocator status`
 shows each effective value and its `operator` or `unknown` provenance. A price increase or removal
-that would reduce currently achievable minimum service is rejected unless the operator supplies
+that would reduce currently achievable desired service—including demand/SLO-driven replicas above
+the configured minimum—is rejected unless the operator supplies
 `--allow-service-shortfall`, using the same one-time acknowledgement as a budget reduction. The
 single-machine logical Grid registers its configured test prices through this production control
 surface rather than granting its simulated workers accounting authority.
@@ -262,8 +263,9 @@ An operator may also set a durable hard fleet ceiling with
 not once per colocated model. Zero disables the ceiling. Under a positive ceiling, missing price
 metadata fails closed unless the operator explicitly supplies `--allow-unknown-cost`; both desired
 and currently active unknown-cost hosts remain visible in status. Before committing an update, Grid
-compares achievable minimum-replica coverage under the current and proposed policies. A newly
-created minimum-service shortfall is rejected transactionally unless the operator explicitly
+compares achievable desired-replica coverage under the current and proposed policies using one
+demand forecast. This includes active on-demand profiles whose configured minimum is zero. A newly
+created service shortfall is rejected transactionally unless the operator explicitly
 supplies `--allow-service-shortfall`; this one-time acknowledgement is not a persistent relaxation
 of placement policy. Once acknowledged, tightening the ceiling stages drain/unload for unselected
 managed, unpinned residencies so current state can converge to the affordable desired set. Manual,
