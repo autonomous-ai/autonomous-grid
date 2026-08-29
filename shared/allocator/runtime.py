@@ -891,7 +891,10 @@ class ManagedModelRuntime:
             return decision
 
     def begin(
-        self, raw_action: MutationAction | Mapping[str, Any]
+        self,
+        raw_action: MutationAction | Mapping[str, Any],
+        *,
+        authority_ttl_seconds: float | None = None,
     ) -> ActionReceipt | None:
         action = (
             raw_action
@@ -929,7 +932,11 @@ class ManagedModelRuntime:
                     "recommendation is not an executable command",
                     now,
                 )
-            authority_error = self._authority_rejection_locked(action, now=now)
+            authority_error = self._authority_rejection_locked(
+                action,
+                now=now,
+                lease_ttl_seconds=authority_ttl_seconds,
+            )
             if authority_error:
                 existing = self._receipts.get(action.action_id)
                 if existing is not None:
@@ -1072,6 +1079,8 @@ class ManagedModelRuntime:
         self,
         raw_action: MutationAction | Mapping[str, Any],
         message: str,
+        *,
+        authority_ttl_seconds: float | None = None,
     ) -> ActionReceipt:
         """Persist a valid delivered command as terminally failed without a side effect.
 
@@ -1094,7 +1103,11 @@ class ManagedModelRuntime:
                 raise ValueError("command target does not match this host")
             if not action.executable:
                 raise ValueError("recommendation is not an executable command")
-            authority_error = self._authority_rejection_locked(action, now=now)
+            authority_error = self._authority_rejection_locked(
+                action,
+                now=now,
+                lease_ttl_seconds=authority_ttl_seconds,
+            )
             if authority_error:
                 raise ValueError(authority_error)
             self._accept_authority_locked(action)
@@ -2337,6 +2350,7 @@ class ManagedModelRuntime:
         action: MutationAction,
         *,
         now: float,
+        lease_ttl_seconds: float | None = None,
     ) -> str:
         if action.controller_term < self._highest_controller_term:
             return "stale allocator controller term"
@@ -2347,7 +2361,14 @@ class ManagedModelRuntime:
             and action.controller_id != self._controller_id_for_term
         ):
             return "conflicting allocator controller for current term"
-        if (
+        if lease_ttl_seconds is not None:
+            try:
+                remaining = float(lease_ttl_seconds)
+            except (TypeError, ValueError, OverflowError):
+                return "allocator controller lease TTL is invalid"
+            if not math.isfinite(remaining) or remaining <= 0:
+                return "allocator controller lease expired"
+        elif (
             action.controller_lease_expires_at
             and now >= action.controller_lease_expires_at
         ):

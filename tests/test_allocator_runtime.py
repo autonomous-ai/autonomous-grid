@@ -1192,6 +1192,47 @@ def test_expired_controller_lease_is_cancelled_before_side_effect(tmp_path):
     assert backend.starts == []
 
 
+def test_relative_controller_lease_ttl_ignores_node_wall_clock_skew(tmp_path):
+    backend = FakeBackend()
+    managed = runtime(tmp_path, backend=backend, clock=Clock(1_000_000_000))
+    command = action(
+        ActionKind.LOAD,
+        action_id="clock-skew-safe",
+        controller_term=2,
+        controller_id="leader-a",
+        controller_lease_expires_at=200,
+    )
+
+    receipt = managed.begin(command, authority_ttl_seconds=5)
+
+    assert receipt and receipt.status == MutationStatus.RUNNING
+    wait(managed)
+    assert managed.residencies[0].state == ResidencyState.CACHED
+    assert next(
+        item
+        for item in managed.acknowledgements()
+        if item["action_id"] == command.action_id
+    )["status"] == "succeeded"
+
+
+def test_expired_relative_controller_lease_ttl_fails_despite_slow_node_clock(tmp_path):
+    backend = FakeBackend()
+    managed = runtime(tmp_path, backend=backend, clock=Clock(0))
+    command = action(
+        ActionKind.LOAD,
+        action_id="expired-relative",
+        controller_term=2,
+        controller_id="leader-a",
+        controller_lease_expires_at=1_000_000_000,
+    )
+
+    receipt = managed.begin(command, authority_ttl_seconds=0)
+
+    assert receipt and receipt.status == MutationStatus.CANCELLED
+    assert receipt.message == "allocator controller lease expired"
+    assert backend.starts == []
+
+
 def test_delayed_old_term_cannot_overwrite_refenced_command_receipt(tmp_path):
     managed = runtime(tmp_path)
     original = action(

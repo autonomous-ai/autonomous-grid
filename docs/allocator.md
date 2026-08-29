@@ -615,6 +615,7 @@ An authenticated heartbeat response carries commands for that `host_id`:
   "model_last_used_at": {"qwen3-coder": 1785300100},
   "allocator": {
     "mode": "automatic",
+    "controller_lease_ttl_seconds": 14.8,
     "commands": [
       {
         "action_id": "8ccf...",
@@ -638,10 +639,15 @@ The plan generation is a persistent epoch plus a monotonically increasing sequen
 digest, so plans remain ordered across wall-clock changes. Mutation authority is a separate durable
 fence: automatic mode acquires a renewable single-writer lease beside the controller state file,
 increments its term on every takeover, and stamps every command with `(controller_term,
-controller_id, controller_lease_expires_at)`. A managed node durably remembers the highest term,
-accepts at most one controller identity in that term, rejects expired leases, and rejects every
-lower-term command even after restart. This makes command safety independent of network delivery
-order; plan generations continue to order plans within the accepted authority.
+controller_id, controller_lease_expires_at)`. At each authenticated command response, the server
+also converts that absolute authority deadline into a remaining TTL in its own clock domain. The
+node subtracts the complete request duration and admits the command using only its local monotonic
+clock; a fast or slow node wall clock therefore cannot extend authority or reject a valid leader.
+A managed node durably remembers the highest term, accepts at most one controller identity in that
+term, rejects expired TTLs, and rejects every lower-term command even after restart. The absolute
+field remains for controller persistence and backward-compatible peers. This makes command safety
+independent of network delivery order and cross-host wall-clock skew; plan generations continue to
+order plans within the accepted authority.
 
 The complete action also includes its reason, creation time, and `not_before` time. Wire objects use
 `schema_version: 1`; the new authority fields are additive so older persisted actions still decode,

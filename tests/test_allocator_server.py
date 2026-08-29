@@ -534,6 +534,7 @@ def test_automatic_commands_are_visible_only_to_authenticated_host(tmp_path):
     assert commands[0]["controller_term"] == 1
     assert commands[0]["controller_id"]
     assert commands[0]["controller_lease_expires_at"] > time.time()
+    assert authorized.json()["allocator"]["controller_lease_ttl_seconds"] > 0
 
     unauthenticated_ack = client.post(
         "/nodes/heartbeat",

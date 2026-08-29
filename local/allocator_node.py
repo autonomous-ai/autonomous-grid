@@ -217,7 +217,20 @@ class AllocatorNodeAgent:
 
         response, sent = self._post_control(deadline=cycle_deadline)
         self.runtime.mark_acknowledged(sent)
-        commands = ((response.get("allocator") or {}).get("commands") or ())
+        allocator_response = response.get("allocator") or {}
+        commands = allocator_response.get("commands") or ()
+        authority_ttl = allocator_response.get("controller_lease_ttl_seconds")
+        commands_received_at = self._monotonic()
+
+        def remaining_authority_ttl() -> float | None:
+            if authority_ttl is None:
+                return None
+            return max(
+                0.0,
+                float(authority_ttl)
+                - max(0.0, self._monotonic() - commands_received_at),
+            )
+
         began = False
         for raw in commands:
             if not isinstance(raw, Mapping):
@@ -238,10 +251,18 @@ class AllocatorNodeAgent:
                             command,
                             "local capacity changed before warm: "
                             f"requires {required_mb} MB, available {available_text} MB",
+                            authority_ttl_seconds=remaining_authority_ttl(),
                         )
                         began = True
                         continue
-                began = self.runtime.begin(command) is not None or began
+                began = (
+                    self.runtime.begin(
+                        command,
+                        authority_ttl_seconds=remaining_authority_ttl(),
+                    )
+                    is not None
+                    or began
+                )
             except (KeyError, TypeError, ValueError) as exc:
                 cycle_error = f"invalid allocator command: {exc}"
             except OSError as exc:
@@ -544,6 +565,7 @@ class AllocatorNodeAgent:
         *,
         deadline: float | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, str]]]:
+        request_started_at = self._monotonic()
         acknowledgements = self.runtime.acknowledgements()
         envelope = self._allocator_envelope()
         envelope["max_concurrency"] = 0
@@ -584,6 +606,30 @@ class AllocatorNodeAgent:
         payload = response.json()
         if not isinstance(payload, dict):
             raise TypeError("allocator heartbeat returned a non-object response")
+        allocator = payload.get("allocator")
+        if isinstance(allocator, Mapping):
+            raw_ttl = allocator.get("controller_lease_ttl_seconds")
+            if raw_ttl is not None:
+                try:
+                    ttl = float(raw_ttl)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError("allocator controller lease TTL is invalid") from exc
+                if not math.isfinite(ttl) or ttl < 0:
+                    raise ValueError("allocator controller lease TTL is invalid")
+                payload = {
+                    **payload,
+                    "allocator": {
+                        **allocator,
+                        # The server computes remaining authority in its own clock domain. Subtract
+                        # the complete local request duration, then use only local monotonic elapsed
+                        # time when admitting commands; wall-clock skew can no longer extend or
+                        # prematurely expire controller authority.
+                        "controller_lease_ttl_seconds": max(
+                            0.0,
+                            ttl - max(0.0, self._monotonic() - request_started_at),
+                        ),
+                    },
+                }
         self._observe_registry_ttl(payload)
         return payload, acknowledgements
 

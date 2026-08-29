@@ -626,6 +626,7 @@ def create_app(
             "allocator": {
                 "mode": _allocator(app).mode.value,
                 "commands": [_allocator_action_dict(item) for item in commands],
+                "controller_lease_ttl_seconds": _command_lease_ttl(commands),
             },
         }
 
@@ -3126,6 +3127,17 @@ def _merge_allocator_hosts(
 
 def _allocator_action_dict(action: MutationAction) -> dict[str, Any]:
     return action.to_dict()
+
+
+def _command_lease_ttl(commands: tuple[MutationAction, ...]) -> float | None:
+    expiries = tuple(
+        action.controller_lease_expires_at
+        for action in commands
+        if action.controller_lease_expires_at > 0
+    )
+    if not expiries:
+        return None
+    return max(0.0, min(expiries) - time.time())
 
 
 def _reconcile_summary(result) -> dict[str, Any] | None:

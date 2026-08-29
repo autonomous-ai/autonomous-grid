@@ -111,6 +111,7 @@ def make_agent(
     collector=None,
     resource_info_collector=resources,
     advertise_host="10.0.0.5",
+    runtime_clock=None,
     **agent_kwargs,
 ):
     backend = FakeBackend()
@@ -119,6 +120,7 @@ def make_agent(
         tmp_path / "node.json",
         host_id="host-a",
         backend=backend,
+        clock=runtime_clock or time.time,
         signal_collector=collector,
         protection_loop=LocalHostProtectionLoop(
             HostPolicy(
@@ -189,6 +191,28 @@ def test_node_loop_warms_and_advertises_only_ready_model(tmp_path):
         assert app.state.nodes[agent.node_id].allocator["cost_known"] is False
         child_id = engine_node_id(managed.host_id, "qwen.gguf")
         assert app.state.nodes[child_id].allocator["cost_known"] is False
+
+
+def test_node_command_authority_uses_relative_ttl_despite_wall_clock_skew(tmp_path):
+    app = create_app(
+        grid_id="grid",
+        grid_name="test",
+        allocator_control_token="secret",
+        allocator_interval_seconds=3_600,
+    )
+    with TestClient(app) as client:
+        enable_automatic(client)
+        agent, managed, backend, _ = make_agent(
+            tmp_path,
+            client,
+            runtime_clock=lambda: 1_000_000_000_000.0,
+        )
+
+        agent.heartbeat_once()
+
+        assert managed.wait_idle(1)
+        assert backend.starts == 1
+        assert managed.residencies[0].state == ResidencyState.READY
 
 
 def test_node_heartbeat_advertises_explicit_zero_cost_as_known(tmp_path):
