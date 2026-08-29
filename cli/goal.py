@@ -105,6 +105,9 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         failures.append(
             "turn branches have been pruned: " + ", ".join(map(str, pruned_branches)))
 
+    attempt_events = (record.get("attempt_events")
+                      if isinstance(record.get("attempt_events"), list) else [])
+
     for index, turn in enumerate(turns, 1):
         if not isinstance(turn, dict):
             failures.append(f"turn {index} is not an object")
@@ -123,6 +126,16 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         turn.get("provider_node_id") for turn in turns
         if isinstance(turn, dict) and turn.get("provider_node_id")
     }
+    # A killed provider cannot appear as the terminal provider on the reclaimed row. The relay's
+    # `task.retry` event is the authority that it executed the prior attempt, so include it in the
+    # physical-node inventory; provider-authored attempt-start events are deliberately insufficient.
+    execution_nodes.update(
+        item["event"].get("previous_provider_id")
+        for item in attempt_events
+        if isinstance(item, dict) and isinstance(item.get("event"), dict)
+        and item["event"].get("type") == "task.retry"
+        and item["event"].get("previous_provider_id")
+    )
     if len(execution_nodes) < min_execution_nodes:
         failures.append(
             f"Goal used {len(execution_nodes)} distinct execution node(s), fewer than required "
@@ -159,8 +172,6 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
 
     evals = goal.get("evals") if isinstance(goal.get("evals"), list) else []
     runs = record.get("eval_runs") if isinstance(record.get("eval_runs"), list) else []
-    attempt_events = (record.get("attempt_events")
-                      if isinstance(record.get("attempt_events"), list) else [])
     inference = record.get("inference") if isinstance(record.get("inference"), list) else []
     if require_inference:
         for index, turn in enumerate(turns, 1):

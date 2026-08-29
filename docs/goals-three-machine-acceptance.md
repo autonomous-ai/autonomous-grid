@@ -100,7 +100,9 @@ For each reclaimed turn, use the relay-authored `task.retry.previous_provider_id
 for the machine that disappeared, and the settled turn's `provider_node_id` as the authority for its
 replacement. A provider-authored `task.attempt_started` event is useful corroboration but is not
 required for the killed attempt: an abrupt power loss can happen before that best-effort event is
-flushed. The replacement's attempt number must still be 2 and the retry reason must be
+flushed. `--min-execution-nodes` counts both the settled providers and these relay-authored retry
+predecessors; it never counts a provider-authored start marker. The replacement's attempt number
+must still be 2 and the retry reason must be
 `lease_expired`.
 
 Every terminal evaluation row used as proof must belong to the final turn and final result commit,

@@ -45,7 +45,7 @@ def _completed_goal(relay: str, token: str, conversation_id: str) -> dict | None
     return value if value.get("status") == "complete" else None
 
 
-def _assert_transcript_chain(evidence: dict, expected_turns: int) -> None:
+def _assert_transcript_chain(evidence: dict, expected_turns: int, *, min_nodes: int = 1) -> None:
     """Every new relay turn must consume the exact checkpoint its predecessor published."""
     turns = evidence["turns"]
     assert len(turns) == expected_turns, turns
@@ -54,7 +54,7 @@ def _assert_transcript_chain(evidence: dict, expected_turns: int) -> None:
     for previous, current in pairwise(turns):
         assert current["transcript_commit"] == previous["transcript_result_commit"], turns
     from cli.goal import _verify_evidence
-    assert _verify_evidence(evidence) == []
+    assert _verify_evidence(evidence, min_execution_nodes=min_nodes) == []
 
 
 def test_three_nodes_reclaim_goal_turns_and_finish_one_game(
@@ -142,7 +142,7 @@ def test_three_nodes_reclaim_goal_turns_and_finish_one_game(
         {"node": "C", "features": [3, 4]},
     ]
     evidence = relay_client.get_goal_evidence(relay, owner_token, conversation_id)
-    _assert_transcript_chain(evidence, 3)
+    _assert_transcript_chain(evidence, 3, min_nodes=3)
     retries = {
         item["turn_id"]: item["event"] for item in evidence["attempt_events"]
         if item["event"].get("type") == "task.retry"
@@ -237,7 +237,7 @@ def test_three_nodes_reclaim_one_goal_codex_then_claude_then_codex(
     claude_transcripts = list((goal_workspace_root / "mixed-C").rglob("*.jsonl"))
     assert claude_transcripts, "C did not fetch Claude B's opaque transcript side-ref"
     _assert_transcript_chain(
-        relay_client.get_goal_evidence(relay, owner_token, conversation_id), 3)
+        relay_client.get_goal_evidence(relay, owner_token, conversation_id), 3, min_nodes=3)
 
 
 def test_image_goal_waits_for_a_node_with_the_required_capability(

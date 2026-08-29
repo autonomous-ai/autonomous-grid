@@ -259,6 +259,13 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
                   "previous_provider_id": "node-A", "reason": "lease_expired"},
     })
     assert _verify_evidence(record) == []
+    assert _verify_evidence(record, min_execution_nodes=2) == []
+
+    # A provider-authored start marker or a retry naming the eventual winner cannot fabricate a
+    # second physical worker for the strict gate.
+    record["attempt_events"][0]["event"]["previous_provider_id"] = "node-B"
+    assert any("fewer than required 2" in item
+               for item in _verify_evidence(record, min_execution_nodes=2))
 
 
 def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
