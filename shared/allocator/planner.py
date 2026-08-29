@@ -667,9 +667,75 @@ class PlacementPlanner:
             regular_slots = max(0, target - len(model.pinned_nodes))
             return pinned_successes_by_model[model.model_id] + regular_slots
 
+        isolated_empty_orders: dict[str, tuple[NodeSnapshot, ...]] = {}
+        isolated_empty_cursors: dict[str, int] = {}
+
         def place_next_replica(model: ModelProfile) -> bool:
             target = desired_by_model[model.model_id]
             domains = assigned_domains.setdefault(model.model_id, set())
+            cached_order = isolated_empty_orders.get(model.model_id)
+            if cached_order is not None:
+                cursor = isolated_empty_cursors.get(model.model_id, 0)
+                while cursor < len(cached_order):
+                    node = cached_order[cursor]
+                    cursor += 1
+                    isolated_empty_cursors[model.model_id] = cursor
+                    if (model.model_id, node.node_id) in assigned_pairs:
+                        continue
+                    residency = node.residency(model.model_id)
+                    if (
+                        _ineligible_reason(
+                            node,
+                            model,
+                            timestamp,
+                            self.policy,
+                            for_new=_requires_new_runtime(residency, model),
+                        )
+                        is not None
+                        or not _fits(
+                            node,
+                            model,
+                            capacity,
+                            occupied_models,
+                            desired_model_slots,
+                            assignments,
+                            profile_by_id,
+                        )
+                    ):
+                        continue
+                    score, reasons = _candidate_score(
+                        node,
+                        model,
+                        capacity[node.node_id],
+                        domains,
+                        self.policy,
+                        now=timestamp,
+                        need_new_domain=(
+                            len(domains)
+                            < min(model.min_failure_domains, target)
+                        ),
+                        startup_seconds=startup_by_pair,
+                    )
+                    index = sum(
+                        item.model_id == model.model_id for item in assignments
+                    )
+                    _place(
+                        _assignment(
+                            model,
+                            node,
+                            index=index,
+                            score=score,
+                            reasons=reasons,
+                        ),
+                        node,
+                        assignments,
+                        assigned_pairs,
+                        domains,
+                        capacity,
+                        occupied_models,
+                        desired_model_slots,
+                    )
+                    return True
             candidates: list[tuple[float, str, NodeSnapshot, tuple[str, ...]]] = []
             compatible_new_domain_exists = False
             for node in node_list:
@@ -876,6 +942,68 @@ class PlacementPlanner:
                 )
                 placed += 1
 
+        def cache_isolated_empty_order(model: ModelProfile) -> None:
+            """Cache a static candidate order without changing fair round progression."""
+
+            domains = assigned_domains.setdefault(model.model_id, set())
+            candidates: list[tuple[float, str, NodeSnapshot]] = []
+            candidate_domains: list[str] = []
+            for node in node_list:
+                if (model.model_id, node.node_id) in assigned_pairs:
+                    continue
+                residency = node.residency(model.model_id)
+                if (
+                    _ineligible_reason(
+                        node,
+                        model,
+                        timestamp,
+                        self.policy,
+                        for_new=_requires_new_runtime(residency, model),
+                    )
+                    is not None
+                    or not _fits(
+                        node,
+                        model,
+                        capacity,
+                        occupied_models,
+                        desired_model_slots,
+                        assignments,
+                        profile_by_id,
+                    )
+                ):
+                    continue
+                if (
+                    node.max_models != 1
+                    or occupied_models[node.node_id] != 0
+                    or desired_model_slots[node.node_id] != 0
+                ):
+                    # A feasible fungible or already-shared host can change relative score as peers
+                    # place. Use the complete scorer instead of caching a partial candidate set.
+                    return
+                domain = node.failure_domain or node.node_id
+                candidate_domains.append(domain)
+                score, _ = _candidate_score(
+                    node,
+                    model,
+                    capacity[node.node_id],
+                    domains,
+                    self.policy,
+                    now=timestamp,
+                    need_new_domain=False,
+                    startup_seconds=startup_by_pair,
+                )
+                candidates.append((score, node.node_id, node))
+            if (
+                len(candidate_domains) != len(set(candidate_domains))
+                or set(candidate_domains).intersection(domains)
+            ):
+                return
+            isolated_empty_orders[model.model_id] = tuple(
+                item[2]
+                for item in sorted(candidates, key=lambda item: (-item[0], item[1]))
+            )
+            isolated_empty_cursors[model.model_id] = 0
+
         for model in order:
             place_isolated_replicas(model, ready_incumbents=True)
 
@@ -895,6 +1023,9 @@ class PlacementPlanner:
                     remaining_contenders[0],
                     ready_incumbents=False,
                 )
+            else:
+                for model in remaining_contenders:
+                    cache_isolated_empty_order(model)
             blocked: set[str] = set()
             while True:
                 placed_by_model = {

@@ -99,6 +99,9 @@ Ready incumbents on full one-model hosts are indexed and ranked in one pass when
 domains are independent. The same optimization applies to empty one-model hosts only when one model
 remains in its priority class, preserving equal-priority sharing. Both cases preserve the general
 scorer's exact result while avoiding a fleet-wide rescan for every replica on large networks.
+When several equal-priority models share an otherwise uniform empty fleet, Grid caches each static
+candidate order but still consumes it one replica per model per fairness round; any shared-host or
+domain interaction falls back to complete rescoring and bounded repacking.
 Cost, latency, host priority, cold-start time, and throttling lower a candidate's score. Managed
 nodes report monotonic action duration in their authenticated acknowledgements. Successful warm
 times are retained in bounded controller history and blended with the configured model estimate as
