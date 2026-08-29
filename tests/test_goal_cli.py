@@ -129,8 +129,12 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
              "input_commit": "2" * 40, "result_commit": "3" * 40,
              "transcript_commit": "a" * 40, "transcript_result_commit": "b" * 40},
         ],
-        "eval_runs": [{"definition_id": "eval-1", "result_commit": "3" * 40,
-                       "accepted": True, "passed": True}],
+        "eval_runs": [{
+            "turn_id": "turn-2", "definition_id": "eval-1", "definition_hash": "hash-1",
+            "result_commit": "3" * 40, "evaluator_node_id": "relay", "state": "passed",
+            "score": 1.0, "accepted": True, "accepted_at": "2026-08-29T12:00:00+00:00",
+            "passed": True,
+        }],
     }
     monkeypatch.setattr(goal, "_resolve", lambda _args: ("http://relay", "token", "grid"))
     monkeypatch.setattr(relay, "get_goal_evidence", lambda *_args: record)
@@ -140,6 +144,12 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
     captured = capsys.readouterr()
     assert json.loads(captured.out) == record
     assert "Goal evidence verified" in captured.err
+
+    # The same commit can legitimately recur on a later no-op turn. An older turn's accepted score
+    # is not evidence that the final completion nomination was independently evaluated.
+    record["eval_runs"][0]["turn_id"] = "turn-1"
+    failures = goal._verify_evidence(record)
+    assert any("from the final turn" in failure for failure in failures)
 
 
 def test_goal_evidence_verify_refuses_a_broken_handoff(monkeypatch, capsys):

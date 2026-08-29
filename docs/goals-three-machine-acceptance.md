@@ -103,7 +103,9 @@ required for the killed attempt: an abrupt power loss can happen before that bes
 flushed. The replacement's attempt number must still be 2 and the retry reason must be
 `lease_expired`.
 
-Every terminal evaluation row used as proof must have `accepted: true`. A row with
+Every terminal evaluation row used as proof must belong to the final turn and final result commit,
+match both the immutable definition id and hash, name its evaluator, and have `accepted: true` with
+an acceptance timestamp. A row with
 `accepted: false` proves only that a stale provider evaluated something after losing its lease; it
 must remain in the audit record and must not be counted toward completion or future training data.
 

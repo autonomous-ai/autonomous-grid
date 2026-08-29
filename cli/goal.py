@@ -191,23 +191,35 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"turn {index} attempt {attempt} has no authoritative retry event naming the "
                 "previous provider")
-    final_commit = turns[-1].get("result_commit") if isinstance(turns[-1], dict) else None
+    final_turn = turns[-1] if isinstance(turns[-1], dict) else {}
+    final_turn_id = final_turn.get("id")
+    final_commit = final_turn.get("result_commit")
     for spec in evals:
         if not isinstance(spec, dict):
             failures.append("Goal contains a malformed evaluation definition")
             continue
         definition_id = spec.get("definition_id")
         definition_hash = spec.get("definition_hash")
+        if not definition_id or not definition_hash:
+            failures.append(
+                f"evaluation {spec.get('name') or '?'} has no immutable definition id and hash")
+            continue
         accepted = [run for run in runs if isinstance(run, dict)
                     and run.get("accepted") is True and run.get("passed") is True
+                    and run.get("state") == "passed"
+                    and run.get("turn_id") == final_turn_id
                     and run.get("result_commit") == final_commit
-                    and ((definition_id and run.get("definition_id") == definition_id)
-                         or (definition_hash
-                             and run.get("definition_hash") == definition_hash))]
+                    and run.get("definition_id") == definition_id
+                    and run.get("definition_hash") == definition_hash
+                    and run.get("evaluator_node_id")
+                    and run.get("accepted_at")
+                    and isinstance(run.get("score"), (int, float))
+                    and not isinstance(run.get("score"), bool)
+                    and 0 <= run["score"] <= 1]
         if not accepted:
             failures.append(
                 f"evaluation {spec.get('name') or definition_id or definition_hash or '?'} has no "
-                "accepted passing run for the final result commit")
+                "accepted passing run from the final turn for the final result commit")
     return failures
 
 
