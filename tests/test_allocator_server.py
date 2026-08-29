@@ -632,6 +632,50 @@ def test_automatic_mode_has_one_leader_and_takeover_advances_term(tmp_path):
     assert second_client.get("/allocator/status").json()["authority"]["term"] == 2
 
 
+def test_economics_writes_are_single_leader_even_before_automatic_mode(tmp_path):
+    state_path = tmp_path / "allocator.json"
+    first = create_app(
+        grid_id="ag-test",
+        grid_name="first",
+        allocator_state_path=state_path,
+        allocator_control_token=TOKEN,
+        allocator_interval_seconds=60,
+    )
+    second = create_app(
+        grid_id="ag-test",
+        grid_name="second",
+        allocator_state_path=state_path,
+        allocator_control_token=TOKEN,
+        allocator_interval_seconds=60,
+    )
+    first_client = TestClient(first)
+    second_client = TestClient(second)
+
+    acquired = first_client.put(
+        "/allocator/hosts/host-1/price",
+        json={"cost_per_hour": 0.1},
+        headers=AUTH,
+    )
+    assert acquired.status_code == 200, acquired.text
+    refused = second_client.put(
+        "/allocator/budget",
+        json={"max_hourly_cost": 1.0},
+        headers=AUTH,
+    )
+    assert refused.status_code == 409
+    assert "another live controller" in refused.json()["detail"]
+    assert second.state.allocator.planner.policy.max_hourly_cost == 0.0
+
+    first.state.allocator_authority.release()
+    takeover = second_client.put(
+        "/allocator/budget",
+        json={"max_hourly_cost": 1.0},
+        headers=AUTH,
+    )
+    assert takeover.status_code == 200, takeover.text
+    assert second_client.get("/allocator/status").json()["authority"]["term"] == 2
+
+
 def test_stale_ack_is_ignored_without_poisoning_later_receipts(tmp_path):
     _, client, _ = _app(tmp_path)
     _managed_node(client)

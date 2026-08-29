@@ -824,6 +824,10 @@ def create_app(
     async def allocator_set_budget(request: Request):
         _require_allocator_control(app, request)
         try:
+            await asyncio.to_thread(_ensure_allocator_authority, app)
+        except Exception as exc:  # noqa: BLE001 - conflicting writer is an operator error
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
             body = await request.json()
             maximum = float(body.get("max_hourly_cost", 0.0))
             allow_unknown = body.get("allow_unknown_cost", False)
@@ -852,6 +856,10 @@ def create_app(
     @app.put("/allocator/hosts/{host_id}/price")
     async def allocator_set_host_price(host_id: str, request: Request):
         _require_allocator_control(app, request)
+        try:
+            await asyncio.to_thread(_ensure_allocator_authority, app)
+        except Exception as exc:  # noqa: BLE001 - conflicting writer is an operator error
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         try:
             body = await request.json()
             if not isinstance(body, dict):
@@ -884,6 +892,10 @@ def create_app(
     @app.delete("/allocator/hosts/{host_id}/price")
     async def allocator_delete_host_price(host_id: str, request: Request):
         _require_allocator_control(app, request)
+        try:
+            await asyncio.to_thread(_ensure_allocator_authority, app)
+        except Exception as exc:  # noqa: BLE001 - conflicting writer is an operator error
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if host_id not in _allocator(app).host_prices:
             raise HTTPException(status_code=404, detail="allocator host price not found")
         try:

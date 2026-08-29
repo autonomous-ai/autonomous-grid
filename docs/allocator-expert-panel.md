@@ -100,7 +100,12 @@ Revisions `83f3dde` and `77a8646` accepted and tested the immediate findings:
    converged to `$0.55/h`. The test Grid was then restored to no ceiling and its original
    `$0.05/$0.20/$0.80` operator prices.
 
-Open findings from this follow-up are versioned/leader-fenced economics writes for active-active
-controllers, durable acknowledgement audit records, and name-independent cohort/SLO loss ordering
-under a budget that cannot serve every workload. Those are the next acceptance gates; they are not
-claimed as solved by the authoritative-price milestone.
+Two subsequent changes closed more of the follow-up. Equal-share scarcity ties now use trusted
+cohort/SLO harm and measured load rather than model-name order (`39a27ba`), with a name-swap
+metamorphic test. Budget and price writes also acquire the durable controller authority lease before
+mutation, so a live standby receives HTTP 409 and takeover advances the term even if both processes
+have not yet entered automatic mode.
+
+Open findings are CAS-versioned economics transactions across stale post-takeover controller state,
+durable acknowledgement audit records, and richer per-cohort loss previews. Those are the next
+acceptance gates; they are not claimed as solved by the authoritative-price milestone.
