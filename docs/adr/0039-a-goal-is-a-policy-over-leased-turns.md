@@ -258,6 +258,12 @@ terminal Goal is a parent, resume cancels and lease-fences all still-live descen
 restoring workers whose output has no nonterminal parent to receive it. Independently completed
 descendants remain immutable history.
 
+This is a general terminal-parent invariant. Result settlement and the deadline/retry reaper invoke
+the same recursive dependency cleanup whenever a parent reaches a terminal state. Live descendant
+Goal rows become `cancelled`, and their queued/running turns end through the ordinary cancellation
+writer so task events, provider fencing and attached-reader wakeups are preserved. A terminal
+parent never leaves an orphan agent consuming fleet capacity.
+
 ### Evidence required for release
 
 The feature is not production-proven by processes sharing one host. Release requires both:

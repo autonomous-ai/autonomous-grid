@@ -83,6 +83,11 @@ failed, or budget-limited work back into an active Goal. If a paused parent reve
 outcome, Grid cancels its still-live descendant turns rather than waking workers whose results can
 no longer be reconciled into that parent.
 
+The same dependency fence applies to every terminal parent path, not only pause/resume: an explicit
+failed result, deadline, or exhausted retry cap cancels queued/running descendants through the
+ordinary task cancellation protocol. Providers are notified by the lease fence, and completed
+children remain available as trajectory history.
+
 `objective` says what to achieve. `done-when` is one clear, verifiable finish line. The native Goal
 mechanism decides when to nominate completion. If independent evals are configured, Grid checks the
 exact result commit and is the only component allowed to accept that nomination.
