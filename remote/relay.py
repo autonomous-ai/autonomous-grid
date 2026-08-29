@@ -375,6 +375,7 @@ def report_task_result(
     error: str | None,
     session_id: str | None = None,
     result_commit: str | None = None,
+    transcript_result_commit: str | None = None,
     session_reset_reason: str | None = None,
     goal_status: str | None = None,
     goal_turns_completed: int | None = None,
@@ -408,6 +409,8 @@ def report_task_result(
         body["session_id"] = session_id
     if result_commit:
         body["result_commit"] = result_commit
+    if transcript_result_commit:
+        body["transcript_result_commit"] = transcript_result_commit
     if session_reset_reason:
         body["session_reset_reason"] = session_reset_reason
     if goal_status is not None:

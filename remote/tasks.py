@@ -159,6 +159,9 @@ class TaskOutcome:
     #: The commit the pushed task branch ended on. Set for EVERY terminal outcome, success and
     #: failure alike (ADR 0032 D-e) — only the relay decides whether `main` follows it.
     result_commit: str | None = None
+    #: The exact tip published to this conversation's transcript side ref. Unlike
+    #: ``result_commit``, this preserves the agent's resumable history rather than its files.
+    transcript_result_commit: str | None = None
     #: Why this run started a FRESH conversation instead of continuing the project's (issue 07).
     #: Reported to the relay so it lands on the task row and in the durable log: the matching
     #: `task.session_reset` progress event travels through a publisher that latches off permanently
@@ -211,6 +214,7 @@ def claim_once(state: Any) -> dict[str, Any] | None:
 def report_once(serve_state: Any, task_id: str, *, state: str, output: str | None,
                 error: str | None, session_id: str | None = None,
                 result_commit: str | None = None,
+                transcript_result_commit: str | None = None,
                 session_reset_reason: str | None = None,
                 goal_status: str | None = None,
                 goal_turns_completed: int | None = None,
@@ -227,6 +231,7 @@ def report_once(serve_state: Any, task_id: str, *, state: str, output: str | Non
             serve_state.signaling_url, token, task_id,
             state=state, output=output, error=error, session_id=session_id,
             result_commit=result_commit, session_reset_reason=session_reset_reason,
+            transcript_result_commit=transcript_result_commit,
             goal_status=goal_status, goal_turns_completed=goal_turns_completed,
             goal_tokens_used=goal_tokens_used,
             goal_time_used_seconds=goal_time_used_seconds)
@@ -237,6 +242,7 @@ def report_once(serve_state: Any, task_id: str, *, state: str, output: str | Non
             serve_state.signaling_url, serve_state.token(), task_id,
             state=state, output=output, error=error, session_id=session_id,
             result_commit=result_commit, session_reset_reason=session_reset_reason,
+            transcript_result_commit=transcript_result_commit,
             goal_status=goal_status, goal_turns_completed=goal_turns_completed,
             goal_tokens_used=goal_tokens_used,
             goal_time_used_seconds=goal_time_used_seconds)
@@ -1349,6 +1355,7 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
             report_kwargs: dict[str, Any] = {
                 "state": outcome.state, "output": outcome.output, "error": outcome.error,
                 "session_id": outcome.session_id, "result_commit": outcome.result_commit,
+                "transcript_result_commit": outcome.transcript_result_commit,
                 "session_reset_reason": outcome.session_reset_reason,
             }
             # Preserve the established Claude report shape. Besides compatibility with older
@@ -1545,7 +1552,7 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         # codebase's word for that is "do not report success and let it be retried", exactly as a
         # failed result push already behaves. A terminal failure would spend the whole turn on a
         # transient network fault.
-        task_repo.push_transcript(
+        transcript_result_commit = task_repo.push_transcript(
             workspace, url=remote.url, token=remote.token,
             ref=task_repo.transcript_ref(conversation_id))
         pushed = task_repo.commit_and_push(
@@ -1628,9 +1635,11 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         # out what the agent was doing when it stopped, and the session id is what the next attempt
         # resumes. Only the verdict changes.
         return replace(outcome, state="failed", error=reason,
-                       result_commit=pushed.commit), True
+                       result_commit=pushed.commit,
+                       transcript_result_commit=transcript_result_commit), True
 
-    return replace(outcome, result_commit=pushed.commit), True
+    return replace(outcome, result_commit=pushed.commit,
+                   transcript_result_commit=transcript_result_commit), True
 
 
 def _publisher_for(state: Any, task_id: str, job: dict[str, Any]) -> Any:

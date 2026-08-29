@@ -13780,6 +13780,23 @@ def test_report_task_result_carries_the_session_id_when_there_is_one(monkeypatch
     assert seen["body"]["session_id"] == "012c9e09-abcd"
 
 
+def test_report_task_result_carries_the_published_transcript_commit(monkeypatch):
+    """The relay can prove which resumable agent history this worker actually published."""
+    from remote import relay
+
+    seen = {}
+    _mock_serve_engine(monkeypatch, lambda request: (
+        seen.update(body=json.loads(request.content)),
+        httpx.Response(200, json={}))[-1])
+
+    commit = "a" * 40
+    relay.report_task_result(
+        "https://relay.example", "AT", "T1", state="completed", output="hi", error=None,
+        transcript_result_commit=commit)
+
+    assert seen["body"]["transcript_result_commit"] == commit
+
+
 def test_report_task_result_omits_the_session_id_rather_than_sending_null(monkeypatch):
     """Absent must mean "do not change it", not "clear it".
 

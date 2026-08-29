@@ -2936,6 +2936,8 @@ def test_the_projects_own_gitignore_cannot_suppress_the_conversation(
     tasks._run_and_report(_FakeState(), _job_with_input(commit))
 
     assert reported["state"] == "completed"
+    assert reported["transcript_result_commit"] == _git(
+        remote.url, "rev-parse", task_repo.transcript_ref(_CONVERSATION)).stdout.strip()
     ref = task_repo.transcript_ref(_CONVERSATION)
     listing = _git(remote.url, "ls-tree", "-r", "--name-only", ref).stdout.split()
     assert f".grid/agent/{_MEMBER}/sess-1.jsonl" in listing, listing
