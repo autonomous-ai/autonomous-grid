@@ -183,8 +183,12 @@ bypassing the missing ancestry is never an option.
 The relay enforces maximum depth, children per Goal, cumulative token budget, and unique idempotency
 keys. The child identity, immutable spec, edge and budget reservation commit before its first turn
 is exposed; an idempotent retry can finish publication after a crash but cannot alter or duplicate
-the child. Required children must independently pass their evaluations. Their pinned result commits
-and summaries are included in the parent's next handoff. Optional children may omit evaluations;
+the child. A status-less reserved child is treated as live until provisioning recovers it. The
+periodic reconciler scans both active Goals missing a continuation and every waiting parent missing
+its fan-in callback; it addresses the parent directly so nested Goal hierarchies cannot confuse a
+waiting child-parent with its own parent. Required children must independently pass their
+evaluations. Their pinned result commits and summaries are included in the parent's next handoff.
+Optional children may omit evaluations;
 their failure is preserved as trajectory evidence but cannot block the parent, and their branch is
 merged only when they complete. The parent waits until every child is terminal so it receives one
 deterministic snapshot of all child outcomes. Child turns advance only their own branch and never

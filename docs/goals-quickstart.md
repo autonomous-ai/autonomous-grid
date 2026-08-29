@@ -153,7 +153,11 @@ the child id and conflicting paths; Grid never resumes the parent from a tree th
 child's accepted work. Child turns never publish directly to global `main`: they advance only their
 child branch, parent fan-in accepts them, and the root Goal alone enters the ordinary trunk-apply
 pipeline. Spawn identity, immutable spec, dependency edge and budget reservation commit before the
-child turn is exposed, so a retried tool call cannot publish an orphan or duplicate child.
+child turn is exposed, so a retried tool call cannot publish an orphan or duplicate child. A
+reserved child whose first turn was interrupted remains live—not failed—and the periodic
+reconciler provisions it. The same sweep retries every `waiting_children` parent, including a Goal
+that is itself a child, so a relay stop after child completion but before the fan-in callback cannot
+strand the hierarchy.
 
 ## What moves between computers
 
