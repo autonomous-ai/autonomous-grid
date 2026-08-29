@@ -28273,6 +28273,70 @@ def test_post_spawn_goal_harness_failure_is_left_for_another_machine(monkeypatch
     assert "queued immediately" in capsys.readouterr().err
 
 
+def test_old_relay_without_checkpoint_route_falls_back_to_lease_recovery(
+        monkeypatch, capsys):
+    """Provider-first rollout must not terminally fail a Goal when `/retry` is still 404."""
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([{
+        "task_id": "T1", "project_id": "P1", "member_key": "M1",
+        "conversation_id": "G1", "agent_kind": "codex", "prompt": "continue",
+        "goal": {"objective": "build", "done_when": "tests pass", "model": "grid-model"},
+    }])
+    reports = []
+    flushes = []
+
+    class Publisher:
+        def publish(self, *_args, **_kwargs):
+            return True
+
+        def flush(self):
+            flushes.append("before-handoff")
+
+        def close(self):
+            flushes.append("close")
+
+    class Renewer:
+        lost = False
+        cancelled = False
+
+        def start(self):
+            pass
+
+        def attach(self, _proc):
+            pass
+
+        def close(self):
+            pass
+
+    def run(_job, *_args, on_spawn=None, **_kwargs):
+        on_spawn(SimpleNamespace(pid=1234))
+        return tasks.TaskOutcome(
+            "failed", None, "native process disconnected", retryable=True,
+            result_commit="a" * 40, transcript_result_commit="b" * 40)
+
+    def old_relay(*_args, **_kwargs):
+        raise relay.RelayError("checkpoint_task_retry failed (404)", status=404)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", run)
+    monkeypatch.setattr(
+        tasks, "_push_result", lambda _job, outcome, *_args: (outcome, True))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *_args: Publisher())
+    monkeypatch.setattr(tasks, "_lease_renewer", lambda *_args, **_kwargs: Renewer())
+    monkeypatch.setattr(tasks, "_tree_beat", lambda *_args: None)
+    monkeypatch.setattr(tasks.relay, "checkpoint_task_retry", old_relay)
+    monkeypatch.setattr(tasks, "report_once", lambda *_args, **kwargs: reports.append(kwargs))
+
+    tasks.task_loop(state)
+
+    assert reports == []
+    assert flushes == ["before-handoff", "close"]
+    stderr = capsys.readouterr().err
+    assert "falling back to lease-expiry recovery" in stderr
+    assert "left `running` so its lease can lapse" in stderr
+
+
 def test_goal_checkpoint_handoff_refreshes_an_expired_token_exactly_once(monkeypatch):
     """A long native Goal slice must not lose its accepted partial state at token rollover."""
     from remote import relay, tasks
