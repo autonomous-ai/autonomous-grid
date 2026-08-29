@@ -132,6 +132,14 @@ relay-local deterministic kind is:
 
 - `file`: path exists, regular-file type, size, and SHA-256 predicates.
 
+SHA-256 predicates require an explicit `max_bytes`; their declared aggregate is capped at 64 MiB
+per completion nomination. The evaluator hashes Git blobs as a bounded stream and verifies the
+stream length against Git metadata. This is separate from the compressed push limit: a small pack
+can contain an enormous repeated blob. Legacy definitions still face the runtime budget and become
+deterministic failed evidence rather than allocating the object in relay memory; malformed stored
+definitions create audit-only evaluator errors and block for operator recovery instead of returning
+an endless result-settlement 500.
+
 The evaluator semantics version is part of each canonical definition and therefore its hash.
 Definitions created before this field existed are version 1; a future implementation must add an
 explicit version branch rather than silently changing what an existing metric means.

@@ -94,6 +94,11 @@ relay-authored guidance for the next worker. Evaluator infrastructure errors blo
 remain `accepted: false`; after recovery, `grid goal resume` schedules a fresh nomination/eval.
 With no eval manifest, native Goal completion remains the stopping decision.
 
+A `sha256` file predicate must also declare `max_bytes`. The declared maxima across all SHA checks
+may total at most 64 MiB. The relay streams those commit-pinned blobs through the hash instead of
+buffering decompressed Git objects; size/existence checks read metadata only. This keeps a tiny,
+highly compressed result push from expanding into unbounded evaluator memory.
+
 When a different harness takes a later turn, Grid does not try to translate opaque Codex and Claude
 session formats. It supplies the shared Git worktree plus a bounded relay-authored history of recent
 turn outcomes, failed evals and child results. A first-time Claude worker includes that handoff in
