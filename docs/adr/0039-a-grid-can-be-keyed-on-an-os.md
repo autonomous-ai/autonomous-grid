@@ -193,6 +193,34 @@ and the only remaining remedy would be taking the whole grid down. ⚠️ The pr
 bites a token whose roles are exactly `{"consumer"}`; on this type members are `both`, so the role
 condition has to be re-derived rather than copied.
 
+**As built (issue 06).** The role condition moved out of both predicates into a named per-type
+answer, so the two questions — *which types does the denylist reach* and *whom does it bite there* —
+are asked separately rather than one being inferred from the other. Each side carries a
+`DENYLIST_NETWORK_TYPES` collection naming the two types, and a function that answers the second
+question per type: grid-apis `store.denylist_governs` (which `_is_denied_consumer` now calls before
+its `is_denied` query), grid-src `grid_auth._is_open_consumer` (unrenamed, so this decision still
+names it). The rule that keeps the control plane's two ladders honest is that **every arm of
+`member_for_access` that synthesizes a member must ask**, because the cohort is per type and the
+question needs the member the arm just built — it cannot be hoisted below the ladder. On `permissioned-providers` the answer is unchanged — roles exactly `{"consumer"}`; on
+`os-community` it is every member. Both were verified by mutation: carrying the providers condition
+across kills 11 grid-apis tests and 14 grid-src tests.
+
+Two consequences of the widening are worth recording because neither is obvious from the decision
+above. The **owner** of an OS grid is deniable, since `create_network` writes every creator an
+allowlist row and on this type the denylist governs every role — deliberately not exempted, because
+`is_admin` reads ownership rather than that row, so the account that denied itself can always lift
+it. ⚠️ That cost `member_for_access` a fourth denial check, on its **owner-by-`google_sub`** arm,
+found in review: `create_network` keys the owner's row on their EMAIL while every ownership test
+compares `google_sub`, so a change of address falls both ladders through to their owner arm. The
+visibility drop already applied to the member `_map_visible_row` synthesizes there; the mint did not,
+and on `permissioned-providers` that asymmetry was invisible because `_owner_member`'s `["admin"]` is
+governed by the allowlist. On this type it meant the grid vanished from `GET /tokens` while
+`POST /tokens/{id}` renewed it forever. And the FE's `/managed-networks/{id}/denylist` routes keep their `permissioned-providers`
+guard: its stated reason ("the only type where a denylist has any effect") is what D-h makes false,
+but those routes moderate a grid a *person* created by shelling out to that person's own CLI, and an
+OS grid is owned by a configured platform account (D-d). The admin `/networks/{id}/denylist` trio
+carries no type guard and is the door onto an OS grid.
+
 ## D-i — The task plane is refused at the door on this type
 
 **Project creation** is refused on an `os-community` grid, and that single refusal is the whole

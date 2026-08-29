@@ -299,6 +299,48 @@ def test_the_control_plane_admits_the_type_as_a_valid_one():
         f"raises on every OS grid row the store reads")
 
 
+# --- the denylist's reach, a rule with a half in each repository (ADR 0039 D-h) --------------------
+# The one enforcement mechanism this type widens, and the only lever that can stop ONE abusive
+# account on a grid that admits strangers automatically. Its two halves answer different questions —
+# the control plane decides what a caller SEES and is issued, the master decides what a credential
+# already in flight is SERVED — so a widening applied to one side alone leaves an account that has
+# vanished from its own grid list and is still being served at the relay, or the reverse.
+
+#: The predicate that decides WHO a denylist row refuses is not the same on every type, and this
+#: check cannot read that half: it is a role condition inside a function body, spelled differently
+#: in the two repositories on purpose (grid-apis has no allowlist predicate to be the inverse of).
+#: Each repository pins its own role condition against a `both` member — the role an OS grid's gate
+#: actually mints — and a mutation run proved both matrices fail when the providers type's
+#: `== {"consumer"}` is carried across. What travels between repositories, and what this reads, is
+#: the SET of types the denylist reaches at all.
+_DENYLIST_TYPES = "DENYLIST_NETWORK_TYPES"
+_DENYLIST_CONTROL_VALUE = "permissioned-providers"
+
+
+@pytest.mark.parametrize(
+    "side,relative_path,parse",
+    [
+        ("grid-src's master", "grid_cli/private_server/grid_auth.py", _module),
+        ("grid-apis' control plane", "grid_networks/store.py", _apis_module),
+    ])
+def test_the_denylist_reaches_an_os_grid_on_both_sides_of_the_call(side, relative_path, parse):
+    """Neither repository's own suite can see this: each is right about its own half.
+
+    ⚠️ The failure is **silent in both directions**. Widened here and not there, an operator bans an
+    account, watches the grid disappear from its `grid ls`, and the credential in that machine's
+    `~/.grid` keeps being served until it expires — a year. Widened there and not here, the ban bites
+    at the relay while `GET /tokens` keeps handing the same account a fresh credential every sign-in,
+    which reads as a broken grid rather than as a ban.
+    """
+    members = _collection(parse(relative_path), _DENYLIST_TYPES, relative_path)
+    assert _DENYLIST_CONTROL_VALUE in members, (
+        f"positive control: {_DENYLIST_CONTROL_VALUE} is missing from {side} {_DENYLIST_TYPES} too, "
+        f"so this check is reading the wrong thing — fix the harness before believing its verdict")
+    assert OS_COMMUNITY in members, (
+        f"{side} {_DENYLIST_TYPES} does not name {OS_COMMUNITY}, so the denylist reaches an OS grid "
+        f"on one side of the call and not the other (ADR 0039 D-h) — edit BOTH sides")
+
+
 # --- the `os=` query parameter's NAME, this slice's SECOND cross-repo value -----------------------
 # The type literal above is not the only value the OS gate hand-duplicates across a repository
 # boundary. The claim itself rides as a query parameter on `GET /v1/grid/tokens`, and its name is
