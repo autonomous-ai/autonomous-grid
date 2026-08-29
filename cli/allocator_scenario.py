@@ -101,6 +101,12 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
         changes: list[str] = []
         if row["node_changes"]:
             changes.append("nodes " + ", ".join(row["node_changes"]))
+        if row.get("portfolio_changed") and row.get("portfolio_selection"):
+            portfolio = ", ".join(
+                f"{workload}->{model_id}"
+                for workload, model_id in sorted(row["portfolio_selection"].items())
+            )
+            changes.append("portfolio " + portfolio)
         if row["loads"]:
             changes.append("load " + ", ".join(row["loads"][:3]))
             if len(row["loads"]) > 3:
@@ -131,8 +137,7 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
     print("\nScorecard")
     print(f"  overall allocator score       {metrics['overall_score']:>7.2f}/100")
     print(f"  demand served                 {metrics['service_rate_pct']:>7.2f}%")
-    print(f"  user fairness                 {metrics['user_fairness_pct']:>7.2f}%")
-    print(f"  workload fairness             {metrics['workload_fairness_pct']:>7.2f}%")
+    print(f"  least-served user             {metrics['minimum_user_service_pct']:>7.2f}%")
     print(f"  users meeting 90% SLO         {metrics['user_slo_attainment_pct']:>7.2f}%")
     print(f"  workloads meeting 90% SLO     {metrics['workload_slo_attainment_pct']:>7.2f}%")
     print(f"  portfolio suitability         {metrics['portfolio_suitability_pct']:>7.2f}%")
@@ -169,7 +174,10 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
         )
     print(f"  catalog gaps                  {metrics['catalog_gap_requests']} requests")
     print(f"  direct named-model traffic    {metrics['direct_named_requests']} requests")
-    print(f"  modeled compute cost          {metrics['modeled_compute_cost']:.4f}")
+    print(
+        f"  joint portfolio optimizer     {metrics['joint_portfolio_ticks']} ticks · "
+        f"{metrics['portfolio_changes']} selection changes"
+    )
 
     weakest = sorted(
         metrics["per_workload"].items(),

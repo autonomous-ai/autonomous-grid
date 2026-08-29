@@ -43,6 +43,9 @@ def test_scenario_exercises_heterogeneous_fleet_catalog_users_and_events(
     assert report.metrics["loads"] > 0
     assert report.metrics["total_requests"] > 0
     assert report.metrics["direct_named_requests"] > 0
+    assert report.metrics["joint_portfolio_ticks"] > 0
+    assert report.metrics["portfolio_changes"] > 0
+    assert any(row.get("portfolio_selection") for row in report.timeline)
 
 
 def test_scenario_is_deterministic_and_json_serializable(representative_report):
@@ -78,6 +81,27 @@ def test_capacity_sweep_keeps_the_same_seeded_users_and_requests():
         workload: row["requests"]
         for workload, row in roomy.metrics["per_workload"].items()
     }
+    assert roomy.metrics["service_rate_pct"] > scarce.metrics["service_rate_pct"]
+    assert (
+        roomy.metrics["minimum_workload_service_pct"]
+        > scarce.metrics["minimum_workload_service_pct"]
+    )
+    assert (
+        roomy.metrics["unsatisfied_replica_minutes"]
+        < scarce.metrics["unsatisfied_replica_minutes"]
+    )
+
+
+def test_production_controller_admits_persistent_new_media_workload():
+    report = run_scenario(
+        ScenarioConfig(machines=8, models=8, users=50, minutes=30, seed=42)
+    )
+
+    video = report.metrics["per_workload"]["video"]
+    assert video["requests"] > 0
+    assert video["service_rate_pct"] > 50
+    assert report.metrics["service_rate_pct"] > 95
+    assert report.metrics["unsatisfied_replica_minutes"] < 10
 
 
 def test_scenario_checks_real_planner_safety_and_persistent_disk(representative_report):
@@ -88,14 +112,14 @@ def test_scenario_checks_real_planner_safety_and_persistent_disk(representative_
     assert report.metrics["minimum_remaining_disk_mb"] >= 0
     assert report.metrics["artifact_download_mb"] >= 0
     assert 0 <= report.metrics["service_rate_pct"] <= 100
-    assert report.metrics["fairness_pct"] == report.metrics["user_fairness_pct"]
-    assert 0 <= report.metrics["user_fairness_pct"] <= 100
-    assert 0 <= report.metrics["workload_fairness_pct"] <= 100
+    assert 0 <= report.metrics["minimum_user_service_pct"] <= 100
     assert 0 <= report.metrics["user_slo_attainment_pct"] <= 100
     assert 0 <= report.metrics["workload_slo_attainment_pct"] <= 100
     assert 0 <= report.metrics["minimum_workload_service_pct"] <= 100
     assert 0 <= report.metrics["portfolio_suitability_pct"] <= 100
     assert all(0 <= row["service_rate_pct"] <= 100 for row in report.users)
+    assert "modeled_compute_cost" not in report.metrics
+    assert not any("fairness" in key for key in report.metrics)
 
 
 def test_scarce_fleet_reports_capacity_shortfall_instead_of_overcommit():
@@ -197,6 +221,11 @@ def test_scenario_cli_prints_human_scorecard(capsys):
     assert "User population" in output
     assert "Allocation timeline" in output
     assert "Scorecard" in output
+    assert "least-served user" in output
+    assert "joint portfolio optimizer" in output
+    assert "portfolio " in output
+    assert "fairness" not in output
+    assert "compute cost" not in output
     assert "Safety: PASS" in output
 
 

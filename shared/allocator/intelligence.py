@@ -166,6 +166,12 @@ class ModelWorkloadOutcome:
     output_units: float = 0.0
     quality: float = 0.0
     quality_samples: int = 0
+    # Exponentially decayed sample mass is kept separately from lifetime counters.  Lifetime
+    # counters are useful diagnostics, but they must not regain decision confidence when one fresh
+    # request arrives after a long idle period.
+    service_evidence: float = 0.0
+    error_evidence: float = 0.0
+    quality_evidence: float = 0.0
     service_updated_at: float = 0.0
     quality_updated_at: float = 0.0
 
@@ -183,6 +189,9 @@ class ModelWorkloadOutcome:
             "latency_ms",
             "output_units",
             "quality",
+            "service_evidence",
+            "error_evidence",
+            "quality_evidence",
             "service_updated_at",
             "quality_updated_at",
         ):
@@ -191,6 +200,14 @@ class ModelWorkloadOutcome:
                 raise ValueError(f"{name} must be finite and non-negative")
         if self.quality > 1:
             raise ValueError("quality cannot exceed 1")
+        if self.service_evidence > MAX_COUNTER:
+            raise ValueError("service evidence is outside the supported range")
+        if not 0 <= self.error_evidence <= self.service_evidence:
+            raise ValueError("error evidence cannot exceed service evidence")
+        # Quality has its own timestamp because latency-only traffic must not refresh benchmark
+        # evidence. Its stored mass can therefore exceed service mass while being much older.
+        if not 0 <= self.quality_evidence <= MAX_COUNTER:
+            raise ValueError("quality evidence is outside the supported range")
 
 
 class WorkloadIntelligence:
@@ -565,6 +582,14 @@ class WorkloadIntelligence:
                 fields.setdefault("quality_updated_at", 0.0)
                 fields["quality"] = 0.0
                 fields["quality_samples"] = 0
+            # Records written before decayed sufficient statistics used the lifetime counters as
+            # their effective evidence.  Seed the new fields from those counters at the record's
+            # existing timestamp; ordinary time decay then migrates them conservatively.
+            fields.setdefault("service_evidence", float(fields.get("requests") or 0))
+            fields.setdefault("error_evidence", float(fields.get("errors") or 0))
+            fields.setdefault(
+                "quality_evidence", float(fields.get("quality_samples") or 0)
+            )
             outcome = ModelWorkloadOutcome(**fields)
             result._outcomes[
                 (outcome.model_id, outcome.workload, outcome.artifact_sha256)
@@ -593,18 +618,64 @@ class WorkloadIntelligence:
         key = (model_id, workload, artifact)
         prior = self._outcomes.get(key)
         requests = min(MAX_COUNTER, (prior.requests if prior else 0) + 1)
-        alpha = 1.0 if prior is None else 0.20
+        if prior is None:
+            service_evidence = 1.0
+            error_evidence = float(error)
+            service_updated_at = timestamp
+            service_alpha = 1.0
+        elif timestamp >= prior.service_updated_at:
+            service_decay = _evidence_decay(timestamp - prior.service_updated_at)
+            prior_service_evidence = prior.service_evidence * service_decay
+            service_evidence = min(MAX_COUNTER, prior_service_evidence + 1.0)
+            error_evidence = min(
+                service_evidence,
+                prior.error_evidence * service_decay + float(error),
+            )
+            service_updated_at = timestamp
+            # A first observation after an idle period should dominate decayed history. Under a
+            # steady stream retain the responsive EWMA used for live regressions.
+            service_alpha = max(0.20, 1.0 / service_evidence)
+        else:
+            # Completion callbacks may arrive out of order. Add their appropriately aged mass at
+            # the current evidence watermark and never move that watermark backwards.
+            observation_weight = _evidence_decay(prior.service_updated_at - timestamp)
+            service_evidence = min(
+                MAX_COUNTER, prior.service_evidence + observation_weight
+            )
+            error_evidence = min(
+                service_evidence,
+                prior.error_evidence + float(error) * observation_weight,
+            )
+            service_updated_at = prior.service_updated_at
+            service_alpha = min(0.20, observation_weight / service_evidence)
         quality_samples = min(
             MAX_COUNTER,
             (prior.quality_samples if prior else 0) + int(quality is not None),
         )
+        quality_evidence = prior.quality_evidence if prior else 0.0
+        quality_updated_at = prior.quality_updated_at if prior else 0.0
         quality_ewma = prior.quality if prior else 0.0
         if quality is not None:
-            quality_ewma = (
-                float(quality)
-                if not prior or not prior.quality_samples
-                else (alpha * float(quality) + (1.0 - alpha) * prior.quality)
-            )
+            if not prior or not prior.quality_samples:
+                quality_evidence = 1.0
+                quality_updated_at = timestamp
+                quality_alpha = 1.0
+            elif timestamp >= prior.quality_updated_at:
+                quality_decay = _evidence_decay(timestamp - prior.quality_updated_at)
+                prior_quality_evidence = prior.quality_evidence * quality_decay
+                quality_evidence = min(MAX_COUNTER, prior_quality_evidence + 1.0)
+                quality_updated_at = timestamp
+                quality_alpha = max(0.20, 1.0 / quality_evidence)
+            else:
+                quality_weight = _evidence_decay(prior.quality_updated_at - timestamp)
+                quality_evidence = min(
+                    MAX_COUNTER, prior.quality_evidence + quality_weight
+                )
+                quality_updated_at = prior.quality_updated_at
+                quality_alpha = min(0.20, quality_weight / quality_evidence)
+            quality_ewma = quality_alpha * float(quality) + (
+                1.0 - quality_alpha
+            ) * quality_ewma
         self._outcomes[key] = ModelWorkloadOutcome(
             model_id=model_id,
             workload=workload,
@@ -614,21 +685,22 @@ class WorkloadIntelligence:
             latency_ms=(
                 latency_ms
                 if prior is None
-                else alpha * latency_ms + (1.0 - alpha) * prior.latency_ms
+                else service_alpha * latency_ms
+                + (1.0 - service_alpha) * prior.latency_ms
             ),
             output_units=(
                 float(output_units)
                 if prior is None
-                else alpha * output_units + (1.0 - alpha) * prior.output_units
+                else service_alpha * output_units
+                + (1.0 - service_alpha) * prior.output_units
             ),
             quality=quality_ewma,
             quality_samples=quality_samples,
-            service_updated_at=timestamp,
-            quality_updated_at=(
-                timestamp
-                if quality is not None
-                else (prior.quality_updated_at if prior else 0.0)
-            ),
+            service_evidence=service_evidence,
+            error_evidence=error_evidence,
+            quality_evidence=quality_evidence,
+            service_updated_at=service_updated_at,
+            quality_updated_at=quality_updated_at,
         )
 
     def _outcome_evidence(
@@ -647,35 +719,39 @@ class WorkloadIntelligence:
                 "age_seconds": 0.0,
                 "freshness": 0.0,
                 "effective_requests": 0.0,
+                "effective_errors": 0.0,
                 "confidence": 0.0,
                 "quality_age_seconds": 0.0,
                 "quality_freshness": 0.0,
+                "effective_quality_samples": 0.0,
                 "quality_confidence": 0.0,
                 "exploration_bonus": _MAX_EXPLORATION_BONUS,
             }
         age = max(0.0, now - outcome.service_updated_at)
-        freshness = math.pow(0.5, age / _OUTCOME_HALF_LIFE_SECONDS)
-        effective_requests = outcome.requests * freshness
+        freshness = _evidence_decay(age)
+        effective_requests = outcome.service_evidence * freshness
+        effective_errors = outcome.error_evidence * freshness
         confidence = min(1.0, effective_requests / _OUTCOME_FULL_CONFIDENCE_REQUESTS)
         quality_age = max(0.0, now - outcome.quality_updated_at)
         quality_freshness = (
-            math.pow(0.5, quality_age / _OUTCOME_HALF_LIFE_SECONDS)
+            _evidence_decay(quality_age)
             if outcome.quality_samples
             else 0.0
         )
+        effective_quality_samples = outcome.quality_evidence * quality_freshness
         quality_confidence = min(
             1.0,
-            outcome.quality_samples
-            * quality_freshness
-            / _QUALITY_FULL_CONFIDENCE_SAMPLES,
+            effective_quality_samples / _QUALITY_FULL_CONFIDENCE_SAMPLES,
         )
         return {
             "age_seconds": age,
             "freshness": freshness,
             "effective_requests": effective_requests,
+            "effective_errors": effective_errors,
             "confidence": confidence,
             "quality_age_seconds": quality_age,
             "quality_freshness": quality_freshness,
+            "effective_quality_samples": effective_quality_samples,
             "quality_confidence": quality_confidence,
             "exploration_bonus": _MAX_EXPLORATION_BONUS * (1.0 - confidence),
         }
@@ -699,8 +775,12 @@ class WorkloadIntelligence:
         )
         if outcome and outcome.requests:
             confidence = evidence["confidence"]
-            success = (outcome.requests - outcome.errors + 1.0) / (
-                outcome.requests + 2.0
+            success = (
+                evidence["effective_requests"]
+                - evidence["effective_errors"]
+                + 1.0
+            ) / (
+                evidence["effective_requests"] + 2.0
             )
             quality = outcome.quality if outcome.quality_samples else 0.5
             score += confidence * 0.15 * (success - 0.5)
@@ -740,6 +820,10 @@ class WorkloadIntelligence:
             # earn a material evidence advantage before replacing a currently feasible model.
             score -= 0.08
         return score
+
+
+def _evidence_decay(age_seconds: float) -> float:
+    return math.pow(0.5, max(0.0, age_seconds) / _OUTCOME_HALF_LIFE_SECONDS)
 
 
 def _placement_feasible(

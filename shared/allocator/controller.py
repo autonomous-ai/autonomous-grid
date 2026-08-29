@@ -318,13 +318,18 @@ class AllocatorController:
         """
 
         served_artifact = canonical_sha256(served_artifact_sha256)
-        direct_model = served_model or features.requested_model
+        # Direct demand follows the model the caller named, never the router's fallback choice.
+        # Treating an ``auto`` request as direct demand for whichever ready model happened to serve
+        # it lets routing accidents pin the wrong supply and can starve a missing specialist. The
+        # served model still receives outcome evidence below; the workload forecast owns future
+        # model selection.
+        direct_model = features.requested_model
         directly_observable = direct_model in self._observable_models
         # Model binding belongs to the incoming request, not to the router's eventual fallback.
         # An ``auto`` coding request that a ready generalist happens to serve is still unbound
         # coding demand: retaining that signal is what lets the allocator provision a better
-        # specialist for later requests. At the same time, the served model receives ordinary
-        # direct capacity demand so a useful fallback can scale while the specialist warms.
+        # specialist for later requests. The served fallback contributes measured outcome evidence,
+        # but it does not become caller-requested capacity merely because the router selected it.
         portfolio_unbound = features.requested_model not in self._observable_models
         with self._demand_lock:
             # Close a profile-retirement race after acquiring the telemetry lock.

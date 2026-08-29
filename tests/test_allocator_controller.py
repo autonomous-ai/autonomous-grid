@@ -124,7 +124,7 @@ def test_late_response_from_old_artifact_cannot_update_new_revision_evidence():
     assert evidence["quality_confidence"] == 0.0
 
 
-def test_router_fallback_preserves_unbound_workload_demand_for_specialist_selection():
+def test_router_fallback_preserves_workload_demand_without_pinning_router_choice():
     controller = AllocatorController()
     controller.put_profile(profile(model_id="general"))
     controller.put_profile(
@@ -146,10 +146,11 @@ def test_router_fallback_preserves_unbound_workload_demand_for_specialist_select
         timestamp=10,
     )
 
-    assert set(controller.demand.to_dict()["models"]) == {"general"}
+    assert controller.demand.to_dict()["models"] == {}
     assert set(controller.intelligence.unbound_demand.to_dict()["models"]) == {
         "coding"
     }
+    assert controller.intelligence.outcomes[0].model_id == "general"
 
 
 def test_explicit_named_request_does_not_become_portfolio_demand():

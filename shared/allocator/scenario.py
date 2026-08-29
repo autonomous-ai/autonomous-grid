@@ -14,8 +14,8 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Iterable
 
-from shared.allocator.demand import DemandTracker
-from shared.allocator.intelligence import WorkloadIntelligence, classify_request
+from shared.allocator.controller import AllocatorController
+from shared.allocator.intelligence import classify_request
 from shared.allocator.models import (
     ModelProfile,
     ModelResidency,
@@ -23,7 +23,7 @@ from shared.allocator.models import (
     NodeState,
     ResidencyState,
 )
-from shared.allocator.planner import PlacementPlanner, PlannerPolicy
+from shared.allocator.planner import PlannerPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +218,6 @@ _MACHINE_BLUEPRINTS = (
         "disk_total": 2_000_000,
         "disk_free": 1_100_000,
         "concurrency": 8,
-        "cost": 0.22,
     },
     {
         "hardware": "Mac Studio M2 Max 64 GB",
@@ -231,7 +230,6 @@ _MACHINE_BLUEPRINTS = (
         "disk_total": 1_000_000,
         "disk_free": 180_000,
         "concurrency": 4,
-        "cost": 0.12,
     },
     {
         "hardware": "2x RTX Pro 6000 Blackwell",
@@ -244,7 +242,6 @@ _MACHINE_BLUEPRINTS = (
         "disk_total": 4_000_000,
         "disk_free": 2_400_000,
         "concurrency": 32,
-        "cost": 2.80,
     },
     {
         "hardware": "RTX 4090 workstation",
@@ -257,7 +254,6 @@ _MACHINE_BLUEPRINTS = (
         "disk_total": 1_000_000,
         "disk_free": 48_000,
         "concurrency": 8,
-        "cost": 0.75,
     },
     {
         "hardware": "Mac Studio media node 192 GB",
@@ -270,7 +266,6 @@ _MACHINE_BLUEPRINTS = (
         "disk_total": 2_000_000,
         "disk_free": 620_000,
         "concurrency": 2,
-        "cost": 0.24,
     },
     {
         "hardware": "Mac mini M2 Pro 32 GB",
@@ -283,7 +278,6 @@ _MACHINE_BLUEPRINTS = (
         "disk_total": 500_000,
         "disk_free": 36_000,
         "concurrency": 2,
-        "cost": 0.07,
     },
 )
 
@@ -297,11 +291,12 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     catalog = _build_catalog(config.models, config.machines)
     machines = _build_machines(config.machines, catalog, topology_rng)
     personas = _build_personas(config.users, persona_rng)
-    intelligence = WorkloadIntelligence(portfolio_min_samples=3)
-    direct_demand = DemandTracker()
     planner_policy = PlannerPolicy(memory_headroom_fraction=0.05, node_ttl_seconds=180)
-    planner = PlacementPlanner(planner_policy)
+    controller = AllocatorController(planner_policy=planner_policy)
     profiles = tuple(item.profile for item in catalog)
+    for profile in profiles:
+        controller.put_profile(profile)
+    planner = controller.planner
     profile_by_id = {item.profile.model_id: item.profile for item in catalog}
     artifact_by_id = {item.profile.model_id: item.artifact_size_mb for item in catalog}
     nodes = tuple(item.snapshot for item in machines)
@@ -322,9 +317,10 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     peak_shortfall_by_model: Counter[str] = Counter()
     catalog_gap_requests = 0
     direct_named_requests = 0
+    joint_portfolio_ticks = 0
+    portfolio_changes = 0
     suitability_weight = 0.0
     memory_utilization: list[float] = []
-    cost = 0.0
     safety_violations: list[str] = []
     timeline: list[dict[str, Any]] = []
     prior_phase = ""
@@ -335,7 +331,9 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
 
     base_time = 1_000_000.0
     nodes = _refresh_disk_admission(nodes, catalog, disk_available)
-    bootstrap = planner.plan(nodes, profiles, (), now=base_time - 30.0)
+    controller.tick(nodes, now=base_time - 30.0)
+    bootstrap = controller.last_plan
+    assert bootstrap is not None
     bootstrap_violations = _validate_plan(
         bootstrap.assignments,
         nodes,
@@ -369,11 +367,14 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 "loads": sorted(bootstrap_loads),
                 "unloads": [],
                 "node_changes": [],
+                "portfolio_selection": {},
+                "portfolio_changed": False,
                 "unsatisfied": [],
             }
         )
     prior_phase = "bootstrap"
     prior_states = {node.node_id: node.state for node in nodes}
+    prior_portfolio_selection: dict[str, str] = {}
 
     for minute in range(config.minutes):
         now = base_time + minute * 60.0
@@ -422,10 +423,9 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 else 0.0
             )
             for _ in range(count):
-                intelligence.observe(
+                controller.observe_lifecycle(
                     features,
                     served_model=served_model,
-                    portfolio_unbound=not explicit_model,
                     service_seconds=persona.service_seconds,
                     latency_ms=persona.service_seconds * 1_000.0,
                     queue_depth=0 if served_model else 1,
@@ -434,30 +434,14 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     quality=(max(0.0, min(1.0, capability * 0.95)) if served_model else None),
                     timestamp=now + rng.random() * 30.0,
                 )
-                if explicit_model:
-                    direct_demand.observe(
-                        explicit_model,
-                        service_seconds=persona.service_seconds,
-                        latency_ms=persona.service_seconds * 1_000.0,
-                        queue_depth=0 if served_model else 1,
-                        errors=int(not served_model),
-                        timestamp=now + rng.random() * 30.0,
-                    )
             request_counts[features.workload] += count
             request_counts_by_user[persona.user_id] += count
             service_totals[features.workload] += count * persona.service_seconds
             direct_named_requests += count if explicit_model else 0
 
-        direct_forecasts = direct_demand.forecasts(
-            tuple(profile_by_id),
-            now=now + 30.0,
-        )
-        forecasts = intelligence.portfolio_forecasts(
-            profiles,
-            direct_forecasts,
-            now=now + 30.0,
-        )
-        plan = planner.plan(nodes, profiles, forecasts, now=now + 30.0)
+        controller.tick(nodes, now=now + 30.0)
+        plan = controller.last_plan
+        assert plan is not None
         violations = _validate_plan(
             plan.assignments,
             nodes,
@@ -506,9 +490,17 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 item.missing_replicas,
             )
 
+        allocator_status = controller.status(nodes, now=now + 30.0)
+        portfolio_selection = {
+            str(workload): str(model_id)
+            for workload, model_id in allocator_status["portfolio_selection"].items()
+        }
+        joint_portfolio_ticks += int(allocator_status["portfolio_policy"]["joint"])
+        portfolio_changed = portfolio_selection != prior_portfolio_selection
+        portfolio_changes += int(portfolio_changed)
         projection_by_workload = {
             row["workload"]: row
-            for row in intelligence.projections(profiles, now=now + 30.0)
+            for row in allocator_status["portfolio_projections"]
         }
         capacity_by_model = {
             model_id: len(plan.nodes_for(model_id))
@@ -553,8 +545,6 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
 
         utilization = _memory_utilization(plan.assignments, nodes)
         memory_utilization.append(utilization)
-        active_node_ids = {item.node_id for item in plan.assignments}
-        cost += sum(node.cost_per_hour for node in nodes if node.node_id in active_node_ids) / 60.0
 
         state_changes = [
             f"{node.node_id}:{prior_states.get(node.node_id, node.state).value}->{node.state.value}"
@@ -562,7 +552,14 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             if prior_states.get(node.node_id) != node.state
         ]
         desired = dict(plan.desired_replicas)
-        if phase != prior_phase or added or removed or plan.unsatisfied or state_changes:
+        if (
+            phase != prior_phase
+            or added
+            or removed
+            or plan.unsatisfied
+            or state_changes
+            or portfolio_changed
+        ):
             timeline.append(
                 {
                     "minute": minute,
@@ -573,6 +570,8 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     "loads": [f"{model}@{node}" for node, model in sorted(added)],
                     "unloads": [f"{model}@{node}" for node, model in sorted(removed)],
                     "node_changes": state_changes,
+                    "portfolio_selection": dict(sorted(portfolio_selection.items())),
+                    "portfolio_changed": portfolio_changed,
                     "unsatisfied": [
                         {
                             "model": item.model_id,
@@ -585,6 +584,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             )
         prior_phase = phase
         prior_states = {node.node_id: node.state for node in nodes}
+        prior_portfolio_selection = portfolio_selection
         nodes = _materialize(plan.assignments, nodes, now + 45.0)
 
     total_served = sum(served_by_workload.values())
@@ -593,13 +593,12 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         for workload, requested in requested_by_workload.items()
         if requested > 0
     ]
-    workload_fairness = _jain(service_rates)
     user_service_rates = [
         served_by_user[user_id] / requested
         for user_id, requested in requested_by_user.items()
         if requested > 0
     ]
-    user_fairness = _jain(user_service_rates)
+    minimum_user_service = min(user_service_rates, default=1.0)
     workload_slo_attainment = (
         sum(rate >= 0.90 for rate in service_rates) / len(service_rates)
         if service_rates
@@ -617,11 +616,11 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     safety_rate = 1.0 if not safety_violations else 0.0
     overall = 100.0 * (
         0.35 * service_rate
-        + 0.10 * user_fairness
-        + 0.05 * workload_fairness
+        + 0.10 * minimum_user_service
         + 0.10 * suitability
         + 0.10 * workload_slo_attainment
-        + 0.10 * churn_efficiency
+        + 0.10 * user_slo_attainment
+        + 0.05 * churn_efficiency
         + 0.20 * safety_rate
     )
 
@@ -698,9 +697,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             "total_requests": total_requests,
             "served_equivalent": round(total_served, 2),
             "service_rate_pct": round(100.0 * service_rate, 2),
-            "fairness_pct": round(100.0 * user_fairness, 2),
-            "user_fairness_pct": round(100.0 * user_fairness, 2),
-            "workload_fairness_pct": round(100.0 * workload_fairness, 2),
+            "minimum_user_service_pct": round(100.0 * minimum_user_service, 2),
             "user_slo_attainment_pct": round(100.0 * user_slo_attainment, 2),
             "workload_slo_attainment_pct": round(100.0 * workload_slo_attainment, 2),
             "minimum_workload_service_pct": round(100.0 * min(service_rates, default=1.0), 2),
@@ -714,12 +711,13 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             "modeled_cold_start_seconds": round(cold_start_seconds, 2),
             "artifact_download_mb": artifact_download_mb,
             "minimum_remaining_disk_mb": min(disk_available.values(), default=0),
-            "modeled_compute_cost": round(cost, 4),
             "unsatisfied_replica_minutes": unsatisfied_replica_minutes,
             "shortfall_by_model": dict(sorted(shortfall_by_model.items())),
             "peak_shortfall_by_model": dict(sorted(peak_shortfall_by_model.items())),
             "catalog_gap_requests": catalog_gap_requests,
             "direct_named_requests": direct_named_requests,
+            "joint_portfolio_ticks": joint_portfolio_ticks,
+            "portfolio_changes": portfolio_changes,
             "per_workload": per_workload,
         },
         safety={
@@ -825,7 +823,6 @@ def _build_machines(
             compute_gflops=6_000.0 + index * 2_000.0,
             gpu_count=int(source["gpu_count"]),
             gpu_memory_mb=tuple(source["gpu_memory"]),
-            cost_per_hour=float(source["cost"]),
             last_heartbeat=1_000_000.0,
         )
         result.append(
@@ -1036,11 +1033,3 @@ def _validate_plan(
             if assignment.model_id not in node.cached_models and artifact_sizes[assignment.model_id] > disk_available[node_id]:
                 violations.append(f"artifact disk overcommit for {assignment.model_id} on {node_id}")
     return tuple(violations)
-
-
-def _jain(values: Iterable[float]) -> float:
-    rows = tuple(values)
-    if not rows:
-        return 1.0
-    denominator = len(rows) * sum(value * value for value in rows)
-    return (sum(rows) ** 2 / denominator) if denominator else 1.0

@@ -307,6 +307,66 @@ def test_stale_outcomes_decay_and_candidate_status_explains_effective_evidence()
     )
 
 
+def test_one_fresh_result_does_not_revive_an_entire_stale_history():
+    intelligence = WorkloadIntelligence()
+    half_life = 7 * 24 * 60 * 60
+    now = 8 * half_life
+    for _ in range(20):
+        intelligence.observe(
+            RequestFeatures("chat/completions", "coder", "coding"),
+            served_model="coder",
+            error=True,
+            quality=0.0,
+            timestamp=0,
+        )
+
+    intelligence.observe(
+        RequestFeatures("chat/completions", "coder", "coding"),
+        served_model="coder",
+        error=False,
+        timestamp=now,
+    )
+
+    outcome = intelligence.outcomes[0]
+    evidence = intelligence._outcome_evidence("coder", "coding", now=now)
+    # Lifetime counters remain available for diagnostics, while decision evidence contains one
+    # current result plus 1/256th of the old mass. The old implementation treated all 21 results as
+    # current merely because the newest timestamp was fresh.
+    assert outcome.requests == 21
+    assert outcome.errors == 20
+    assert evidence["effective_requests"] == pytest.approx(1 + 20 / 256)
+    assert evidence["effective_errors"] == pytest.approx(20 / 256)
+    assert evidence["confidence"] == pytest.approx((1 + 20 / 256) / 20)
+    assert evidence["effective_quality_samples"] == pytest.approx(20 / 256)
+
+
+def test_late_completion_is_discounted_without_rewinding_evidence_time():
+    intelligence = WorkloadIntelligence()
+    half_life = 7 * 24 * 60 * 60
+    now = 8 * half_life
+    intelligence.observe(
+        RequestFeatures("chat/completions", "coder", "coding"),
+        served_model="coder",
+        latency_ms=100,
+        timestamp=now,
+    )
+
+    intelligence.observe(
+        RequestFeatures("chat/completions", "coder", "coding"),
+        served_model="coder",
+        latency_ms=10_000,
+        error=True,
+        timestamp=0,
+    )
+
+    outcome = intelligence.outcomes[0]
+    evidence = intelligence._outcome_evidence("coder", "coding", now=now)
+    assert outcome.service_updated_at == now
+    assert evidence["effective_requests"] == pytest.approx(1 + 1 / 256)
+    assert evidence["effective_errors"] == pytest.approx(1 / 256)
+    assert outcome.latency_ms < 150
+
+
 def test_fresh_service_request_does_not_revive_stale_quality_evidence():
     intelligence = WorkloadIntelligence(portfolio_min_samples=1)
     candidate = profile("coder", 8_000, ("coding", 1.0))

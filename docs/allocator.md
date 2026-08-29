@@ -51,6 +51,8 @@ coding, research, design, image, video, embedding, or general language work. At 
 allocator projects sustained workload demand onto configured models using each profile's workload
 scores, compatibility and resource cost, cold-start time, and measured outcomes. This lets an
 inactive specialist receive a bounded canary without creating a loaded-only feedback loop.
+The model that happened to serve an automatic request contributes outcome evidence, but the router's
+fallback choice never becomes direct demand for that model.
 
 Measured model/workload outcomes use confidence that reaches full weight after twenty fresh
 requests; separately labeled quality reaches full weight after eight fresh evaluations. Both decay
@@ -827,16 +829,16 @@ uv run grid test scenario --machines 16 --models 9 --users 500 --duration 2h --j
 ```
 
 The lab creates logical Apple/Metal, ComfyUI/MPS, and NVIDIA/vLLM/ComfyUI configurations with
-different memory, disk, cached artifacts, concurrency, performance, and cost. User personas produce
+different memory, disk, cached artifacts, concurrency, and performance. User personas produce
 coding, research, marketing, sales, design, image, video, embedding, and general demand through the
 real bounded request classifier; operations traffic also names the baseline model so direct demand
 and autonomous portfolio demand compete in the same run. A seeded workday includes a coding surge,
 creative campaign, thermal throttle, node outage, recovery, and cooldown. Every planning tick uses
 the production workload intelligence and placement planner.
 
-The report explains loads, unloads, node transitions, capacity shortfalls, demand served, workload
-per-user and per-workload fairness/SLO attainment, portfolio suitability, memory use, cache
-locality, persistent modeled disk consumption, cold starts, cost, capacity recommendations, and
+The report explains joint portfolio changes, loads, unloads, node transitions, capacity shortfalls,
+demand served, least-user service and user/workload SLO attainment, portfolio suitability, memory use, cache locality,
+persistent modeled disk consumption, cold starts, capacity recommendations, and
 safety invariants. It intentionally reports shortfalls instead of inventing capacity. `--timeline`
 prints every changing tick; `--json` emits the complete stable report;
 reusing `--seed` reproduces the same run. Artifact disk constraints are translated into each
@@ -991,12 +993,8 @@ The design follows several primary systems results while preserving Grid's alloc
 
 - [Scalable Joint Resource Allocation for SLO-Constrained LLM Inference in Heterogeneous GPU
   Clouds](https://arxiv.org/abs/2604.07472) motivates joint feasibility, model choice, provisioning,
-  routing, quality, latency, memory, and budget constraints. Grid applies its fleet-feasibility and
-  bounded cost insight in the allocator while leaving per-request routing independent.
-- [Fairness in Serving Large Language Models](https://www.usenix.org/conference/osdi24/presentation/sheng)
-  motivates work-conserving, token-aware user fairness. Grid currently measures fairness in the
-  scenario lab; enforceable token fairness belongs primarily in the serving scheduler/router and
-  remains future work for the production plane.
+  routing, quality, latency, and memory constraints. Grid applies its fleet-feasibility and model
+  portfolio insight in the allocator while leaving per-request routing independent.
 - [Llumnix](https://www.usenix.org/conference/osdi24/presentation/sun-biao) and
   [Libra](https://www.usenix.org/conference/nsdi26/presentation/ruan-libra) motivate dynamic
   rescheduling, isolation, and SLO-aware adaptation under changing load. Grid's load/warm and
