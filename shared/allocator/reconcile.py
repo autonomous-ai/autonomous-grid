@@ -538,7 +538,24 @@ class Reconciler:
             ActionKind.DRAIN: 2,
             ActionKind.UNLOAD: 3,
         }
-        proposals.sort(key=lambda item: (priority[item.kind], item.node_id, item.model_id))
+
+        def service_priority(action: MutationAction) -> int:
+            preemption = preemptions.get((action.node_id, action.model_id))
+            if preemption is not None and preemption.for_model_id:
+                beneficiary = profile_by_id.get(preemption.for_model_id)
+                if beneficiary is not None:
+                    return beneficiary.priority
+            profile = profile_by_id.get(action.model_id)
+            return profile.priority if profile is not None else 0
+
+        proposals.sort(
+            key=lambda item: (
+                priority[item.kind],
+                -service_priority(item),
+                item.node_id,
+                item.model_id,
+            )
+        )
         selected: list[MutationAction] = []
         scheduled_by_node = dict(active_by_node)
         for proposal in proposals:

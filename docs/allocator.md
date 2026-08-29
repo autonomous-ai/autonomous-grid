@@ -260,7 +260,9 @@ The planner and reconciler keep these rules even when demand, membership, or clo
    draining the last managed baseline replica; only authenticated managed inventory can do that.
 8. **Bound change.** Automatic mode has global and per-host concurrent-mutation limits. Minimum
    residency, mutation cooldown, observation timeout, and exponential failure backoff suppress
-   churn and retry storms.
+   churn and retry storms. Within one lifecycle phase, scarce execution slots go to higher-priority
+   models; an explicit preemption drain inherits the beneficiary's priority so routine cleanup
+   cannot delay it.
 9. **Make retries idempotent.** Actions have stable IDs, pending equivalents are suppressed, and
    duplicate acknowledgements are harmless. Command delivery is durably marked before the response
    is returned to a node. A late success or failure may complete an action that the controller had
