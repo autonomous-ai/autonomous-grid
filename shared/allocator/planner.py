@@ -111,7 +111,7 @@ _SCARCE_HOST_OPPORTUNITY_PENALTY = 200_000.0
 # Repacking delays placement by at least one controller wave, so require a material improvement
 # over an immediately usable host. Candidate scores already price load/warm time, live traffic,
 # hardware, and hourly cost; this guard prevents marginal score noise from causing churn.
-_PROACTIVE_REPACK_SCORE_MARGIN = 5_000.0
+_PROACTIVE_REPACK_SCORE_MARGIN = 500.0
 
 
 @dataclass(slots=True)

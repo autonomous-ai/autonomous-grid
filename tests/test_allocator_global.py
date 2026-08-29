@@ -4235,6 +4235,7 @@ def test_planner_repacks_onto_a_materially_better_host_instead_of_cold_loading()
             max_models=1,
             cost_per_hour=0.80,
             cost_known=True,
+            cached=("specialist",),
         ),
     )
 
@@ -4275,6 +4276,70 @@ def test_planner_repacks_onto_a_materially_better_host_instead_of_cold_loading()
         (item.model_id, item.node_id) for item in converged.assignments
     } == {("baseline", "small"), ("specialist", "medium")}
     assert converged.hourly_cost == pytest.approx(0.25)
+
+
+def test_planner_uses_immediate_capacity_when_repack_gain_is_only_marginal():
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    baseline = model(
+        "baseline",
+        256,
+        min_replicas=1,
+        max_replicas=1,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=0,
+    )
+    specialist = model(
+        "specialist",
+        714,
+        min_replicas=0,
+        max_replicas=1,
+        scale_down_cooldown_seconds=0,
+    )
+    forecast = DemandForecast(
+        "specialist",
+        requests_per_minute=10,
+        offered_concurrency=0.5,
+        observed_requests_per_minute=10,
+        updated_at=10,
+    )
+    machines = (
+        node(
+            "small",
+            512,
+            max_models=1,
+            cost_per_hour=0.05,
+            residencies=(
+                ModelResidency("baseline", 256, ResidencyState.CACHED),
+            ),
+        ),
+        node(
+            "medium",
+            4_096,
+            max_models=1,
+            cost_per_hour=0.20,
+            residencies=(
+                ready("baseline", 256, last_used_at=10),
+                ModelResidency("specialist", 714, ResidencyState.CACHED),
+            ),
+        ),
+        node(
+            "large",
+            4_096,
+            max_models=1,
+            cost_per_hour=0.30,
+            cached=("specialist",),
+        ),
+    )
+
+    plan = planner.plan(
+        machines,
+        (baseline, specialist),
+        forecasts=(forecast,),
+        now=10,
+    )
+
+    assert plan.nodes_for("baseline") == ("small",)
+    assert plan.nodes_for("specialist") == ("large",)
 
 
 def test_planner_repacking_finds_capacity_path_independent_of_ineligible_nodes():
