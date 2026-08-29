@@ -123,18 +123,25 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
     planner = PlacementPlanner(policy)
     for scenario in range(150):
         model_count = rng.randint(1, 5)
+        model_ids = tuple(f"model-{index}" for index in range(model_count))
         profiles = tuple(
             ModelProfile(
-                model_id=f"model-{index}",
+                model_id=model_id,
                 memory_mb=rng.choice((1_000, 2_000, 4_000, 8_000, 12_000)),
                 runtimes=("llama.cpp",),
                 backends=("metal", "cuda"),
                 min_replicas=(minimum := rng.randint(0, 1)),
                 max_replicas=rng.randint(max(1, minimum), 4),
+                max_colocated_models=rng.choice((0, 0, 0, 1, 2)),
+                colocation_excludes=tuple(
+                    peer
+                    for peer in model_ids
+                    if peer != model_id and rng.random() < 0.15
+                ),
                 min_residency_seconds=0,
                 scale_down_cooldown_seconds=0,
             )
-            for index in range(model_count)
+            for model_id in model_ids
         )
         nodes: list[NodeSnapshot] = []
         for index in range(rng.randint(1, 7)):
