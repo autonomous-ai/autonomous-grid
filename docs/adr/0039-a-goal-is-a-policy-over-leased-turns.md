@@ -258,6 +258,11 @@ terminal Goal is a parent, resume cancels and lease-fences all still-live descen
 restoring workers whose output has no nonterminal parent to receive it. Independently completed
 descendants remain immutable history.
 
+Pausing an already-paused Goal never replaces `goal_paused_status` with `paused`; the operation is
+idempotent across retries and UI double-submits. A direct pause of a descendant carrying
+`goal_paused_by=<ancestor>` clears only that ownership marker. This intentionally converts a
+cascade pause into an independent pause without losing the descendant's underlying status.
+
 This is a general terminal-parent invariant. Result settlement and the deadline/retry reaper invoke
 the same recursive dependency cleanup whenever a parent reaches a terminal state. Live descendant
 Goal rows become `cancelled`, and their queued/running turns end through the ordinary cancellation

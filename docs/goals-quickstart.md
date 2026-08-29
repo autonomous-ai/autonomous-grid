@@ -83,6 +83,11 @@ failed, or budget-limited work back into an active Goal. If a paused parent reve
 outcome, Grid cancels its still-live descendant turns rather than waking workers whose results can
 no longer be reconciled into that parent.
 
+Repeated pause is idempotent and never overwrites that saved outcome. One deliberate hierarchical
+case remains useful: directly pausing a child already paused by its parent detaches it from the
+parent's cascade while preserving the child's saved state, so resuming the parent leaves that child
+paused until it is resumed explicitly.
+
 The same dependency fence applies to every terminal parent path, not only pause/resume: an explicit
 failed result, deadline, or exhausted retry cap cancels queued/running descendants through the
 ordinary task cancellation protocol. Providers are notified by the lease fence, and completed
