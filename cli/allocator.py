@@ -74,6 +74,12 @@ def cmd_allocator_status(args: argparse.Namespace) -> int:
     print(f"Allocator {payload.get('mode', 'unknown')} · {len(nodes)} hosts · {len(models)} models")
     print(f"  pending mutations  {len(pending)}")
     print(f"  unmet constraints  {len(unsatisfied)}")
+    authority = payload.get("authority") or {}
+    if authority:
+        print(
+            f"  controller authority term {authority.get('term', 0)} · "
+            f"{'held' if authority.get('held') else 'not held'}"
+        )
     if payload.get("last_tick_at"):
         print(f"  last tick          {payload['last_tick_at']:.3f}")
     if payload.get("last_error"):

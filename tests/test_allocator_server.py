@@ -460,6 +460,9 @@ def test_automatic_commands_are_visible_only_to_authenticated_host(tmp_path):
     assert commands[0]["model_id"] == "qwen"
     assert commands[0]["kind"] == "warm"
     assert commands[0]["schema_version"] == 1
+    assert commands[0]["controller_term"] == 1
+    assert commands[0]["controller_id"]
+    assert commands[0]["controller_lease_expires_at"] > time.time()
 
     unauthenticated_ack = client.post(
         "/nodes/heartbeat",
@@ -502,6 +505,13 @@ def test_automatic_commands_are_visible_only_to_authenticated_host(tmp_path):
     )
     assert completed.status_code == 200, completed.text
     status = client.get("/allocator/status").json()
+    assert status["node_authorities"] == [
+        {
+            "node_id": "host-1",
+            "highest_controller_term": 0,
+            "controller_id_for_term": "",
+        }
+    ]
     assert status["history"][-1]["duration_seconds"] == 12.5
     assert status["learned_warm_seconds"] == [
         {
@@ -511,6 +521,43 @@ def test_automatic_commands_are_visible_only_to_authenticated_host(tmp_path):
             "samples": 1,
         }
     ]
+
+
+def test_automatic_mode_has_one_leader_and_takeover_advances_term(tmp_path):
+    state_path = tmp_path / "allocator.json"
+    first = create_app(
+        grid_id="ag-test",
+        grid_name="first",
+        allocator_state_path=state_path,
+        allocator_control_token=TOKEN,
+        allocator_interval_seconds=60,
+    )
+    second = create_app(
+        grid_id="ag-test",
+        grid_name="second",
+        allocator_state_path=state_path,
+        allocator_control_token=TOKEN,
+        allocator_interval_seconds=60,
+    )
+    first_client = TestClient(first)
+    second_client = TestClient(second)
+
+    acquired = first_client.put(
+        "/allocator/mode", json={"mode": "automatic"}, headers=AUTH
+    )
+    assert acquired.status_code == 200, acquired.text
+    refused = second_client.put(
+        "/allocator/mode", json={"mode": "automatic"}, headers=AUTH
+    )
+    assert refused.status_code == 409
+    assert "another live controller" in refused.json()["detail"]
+
+    first.state.allocator_authority.release()
+    takeover = second_client.put(
+        "/allocator/mode", json={"mode": "automatic"}, headers=AUTH
+    )
+    assert takeover.status_code == 200, takeover.text
+    assert second_client.get("/allocator/status").json()["authority"]["term"] == 2
 
 
 def test_stale_ack_is_ignored_without_poisoning_later_receipts(tmp_path):

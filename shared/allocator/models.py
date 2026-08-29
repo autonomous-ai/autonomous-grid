@@ -793,6 +793,9 @@ class MutationAction:
     dependencies: tuple[str, ...] = ()
     executable: bool = False
     artifact_sha256: str = ""
+    controller_term: int = 0
+    controller_id: str = ""
+    controller_lease_expires_at: float = 0.0
 
     def __post_init__(self) -> None:
         if (
@@ -806,6 +809,26 @@ class MutationAction:
             raise ValueError("memory_mb must be positive")
         _finite_nonnegative(self.created_at, "created_at")
         _finite_nonnegative(self.not_before, "not_before")
+        if (
+            isinstance(self.controller_term, bool)
+            or not isinstance(self.controller_term, int)
+            or not 0 <= self.controller_term <= MAX_COUNTER
+        ):
+            raise ValueError("controller_term must be an integer in the supported range")
+        if self.controller_term and (
+            not self.controller_id
+            or not isinstance(self.controller_id, str)
+            or len(self.controller_id) > MAX_ID_LENGTH
+        ):
+            raise ValueError("fenced allocator commands require a controller_id")
+        if not self.controller_term and self.controller_id:
+            raise ValueError("legacy allocator commands cannot declare a controller_id")
+        _finite_nonnegative(
+            self.controller_lease_expires_at,
+            "controller_lease_expires_at",
+        )
+        if self.controller_lease_expires_at and not self.controller_term:
+            raise ValueError("a controller lease requires a positive controller_term")
         if not isinstance(self.kind, ActionKind):
             object.__setattr__(self, "kind", ActionKind(self.kind))
         object.__setattr__(self, "dependencies", _unique(self.dependencies))

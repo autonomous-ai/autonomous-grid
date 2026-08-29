@@ -202,6 +202,13 @@ controller recovers in `recommend`; `automatic` is refused if a durable state pa
 Fresh node heartbeats are still required after restart—durable allocator intent does not turn the
 in-memory registry into durable membership.
 
+Automatic mode also owns a renewable single-writer lease in a sibling authority file. Each
+takeover increments a durable term; mutation commands carry that term, the leader identity, and the
+lease deadline. Managed nodes persist the highest accepted term and reject conflicting, expired,
+or older authority before launching or stopping a model. The file-backed lease coordinates local
+server processes on one filesystem; a future multi-control-plane deployment needs a
+consensus-backed implementation of the same term contract.
+
 `cli/allocator.py` owns the operator surface and starts one detached `__allocator-node` process per
 participating computer. `local/allocator_node.py` samples local resource/safety state, reports
 actual residencies, receives host-specific commands, and acknowledges outcomes. Its local

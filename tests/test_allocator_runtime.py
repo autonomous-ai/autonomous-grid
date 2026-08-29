@@ -130,6 +130,9 @@ def action(
     generation: str = "0000000000100-plan",
     dependencies: tuple[str, ...] = (),
     artifact_sha256: str = "",
+    controller_term: int = 0,
+    controller_id: str = "",
+    controller_lease_expires_at: float = 0.0,
 ) -> MutationAction:
     return MutationAction(
         action_id=action_id or f"{kind.value}-{generation}",
@@ -143,6 +146,9 @@ def action(
         dependencies=dependencies,
         executable=True,
         artifact_sha256=artifact_sha256,
+        controller_term=controller_term,
+        controller_id=controller_id,
+        controller_lease_expires_at=controller_lease_expires_at,
     )
 
 
@@ -1113,6 +1119,98 @@ def test_controller_epoch_fences_lower_sequences_and_superseded_epochs(tmp_path)
     )
     assert delayed_old_epoch and delayed_old_epoch.status == MutationStatus.CANCELLED
     assert backend.starts == []
+
+
+def test_controller_terms_fence_conflicts_takeover_and_reordered_delivery(tmp_path):
+    backend = FakeBackend()
+    managed = runtime(tmp_path, backend=backend)
+    leader_a = action(
+        ActionKind.LOAD,
+        action_id="leader-a",
+        controller_term=7,
+        controller_id="leader-a",
+    )
+    managed.begin(leader_a)
+    wait(managed)
+
+    conflict = managed.begin(
+        action(
+            ActionKind.WARM,
+            action_id="conflict",
+            controller_term=7,
+            controller_id="leader-b",
+        )
+    )
+    assert conflict and conflict.status == MutationStatus.CANCELLED
+
+    takeover = managed.begin(
+        action(
+            ActionKind.LOAD,
+            action_id="takeover",
+            generation=f"{'b' * 32}:00000000000000000001:{'1' * 12}",
+            controller_term=8,
+            controller_id="leader-b",
+        )
+    )
+    assert takeover and takeover.status == MutationStatus.RUNNING
+    wait(managed)
+
+    restored = ManagedModelRuntime(
+        tmp_path / "runtime.json",
+        host_id="host-a",
+        backend=backend,
+        clock=Clock(200),
+        port_available=lambda _port: True,
+    )
+    delayed = restored.begin(
+        action(
+            ActionKind.WARM,
+            action_id="delayed-a",
+            controller_term=7,
+            controller_id="leader-a",
+        )
+    )
+    assert delayed and delayed.status == MutationStatus.CANCELLED
+    assert delayed.message == "stale allocator controller term"
+
+
+def test_expired_controller_lease_is_cancelled_before_side_effect(tmp_path):
+    backend = FakeBackend()
+    managed = runtime(tmp_path, backend=backend, clock=Clock(100))
+    receipt = managed.begin(
+        action(
+            ActionKind.LOAD,
+            action_id="expired",
+            controller_term=2,
+            controller_id="leader-a",
+            controller_lease_expires_at=100,
+        )
+    )
+    assert receipt and receipt.status == MutationStatus.CANCELLED
+    assert receipt.message == "allocator controller lease expired"
+    assert managed.residencies == ()
+    assert backend.starts == []
+
+
+def test_delayed_old_term_cannot_overwrite_refenced_command_receipt(tmp_path):
+    managed = runtime(tmp_path)
+    original = action(
+        ActionKind.LOAD,
+        action_id="stable-command",
+        controller_term=3,
+        controller_id="leader-a",
+    )
+    managed.begin(original)
+    wait(managed)
+    succeeded = next(
+        item for item in managed.acknowledgements() if item["action_id"] == original.action_id
+    )
+    assert succeeded["status"] == "succeeded"
+
+    refenced = replace(original, controller_term=4, controller_id="leader-b")
+    assert managed.begin(refenced).status == MutationStatus.SUCCEEDED
+    delayed = managed.begin(original)
+    assert delayed.status == MutationStatus.SUCCEEDED
 
 
 def test_wrong_host_and_non_executable_recommendation_are_cancelled(tmp_path):

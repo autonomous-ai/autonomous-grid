@@ -38,17 +38,23 @@ budgets matter, but correctness boundaries must come first.
    target host, and proposed speculative victims. Status-wide cohort SLOs use the selected model's
    configured latency objective rather than error-only accounting when a portfolio projection
    exists.
+4. **Controller epochs were arrival-ordered, not authority-ordered.** Automatic mode now uses a
+   durable renewable single-writer lease with a monotonic takeover term. Commands carry the term,
+   leader identity, and lease deadline. Every managed runtime persists its highest term, binds one
+   leader per term, rejects expired or lower-term work before a side effect, and preserves that
+   fence across restart. Tests cover lease contention, renewal, expiry, takeover, conflicting
+   leaders, reordered delivery, restart, and same-action receipt replay.
 
 ### Open panel priorities
 
-1. Add a durable monotonic controller term and renewable single-writer lease before claiming
-   active-active control-plane safety on physical fleets.
-2. Add confidence-aware, freshness-decayed portfolio exploration and optimize a joint model set,
+1. Add confidence-aware, freshness-decayed portfolio exploration and optimize a joint model set,
    rather than independently choosing one greedy winner per workload.
-3. Add explicit fleet cost budgets, unknown-cost handling, spend forecasts, and budget-constrained
+2. Add explicit fleet cost budgets, unknown-cost handling, spend forecasts, and budget-constrained
    capacity recommendations.
-4. Expand model utility evaluation beyond tiny exact-answer coding probes and exercise real vLLM,
+3. Expand model utility evaluation beyond tiny exact-answer coding probes and exercise real vLLM,
    ComfyUI, artifact transfer, long-context, and multi-physical-node failure conditions.
+4. Replace the local lease-file authority with a consensus-backed term allocator before running
+   multiple active control-plane replicas on separate physical machines.
 
 Every later panel should record the exact revision, workload, hardware, real-versus-modeled boundary,
 scores, disagreements, reproduced failures, and whether each accepted finding gained an integration

@@ -21,6 +21,8 @@ from shared import jsonio
 from shared.allocator.demand import DemandTracker
 from shared.allocator.intelligence import RequestFeatures, WorkloadIntelligence
 from shared.allocator.models import (
+    MAX_COUNTER,
+    MAX_ID_LENGTH,
     SCHEMA_VERSION,
     ActionKind,
     AllocatorMode,
@@ -59,6 +61,9 @@ class AllocatorController:
         state_path: Path | None = None,
         max_history: int = 1_000,
         membership_recovery_grace_seconds: float = 90.0,
+        controller_term: int = 1,
+        controller_id: str | None = None,
+        controller_lease_expires_at: float = 0.0,
     ) -> None:
         if max_history < 1:
             raise ValueError("max_history must be positive")
@@ -67,6 +72,21 @@ class AllocatorController:
             or membership_recovery_grace_seconds < 0
         ):
             raise ValueError("membership_recovery_grace_seconds must be finite and non-negative")
+        if (
+            isinstance(controller_term, bool)
+            or not isinstance(controller_term, int)
+            or not 0 < controller_term <= MAX_COUNTER
+        ):
+            raise ValueError("controller_term must be a positive supported integer")
+        if controller_id is not None and (
+            not controller_id or len(controller_id) > MAX_ID_LENGTH
+        ):
+            raise ValueError("controller_id must be non-empty and bounded")
+        if (
+            not math.isfinite(controller_lease_expires_at)
+            or controller_lease_expires_at < 0
+        ):
+            raise ValueError("controller_lease_expires_at must be finite and non-negative")
         self.mode = AllocatorMode(mode)
         self.planner = PlacementPlanner(planner_policy)
         self.reconciler = Reconciler(reconcile_policy)
@@ -88,6 +108,9 @@ class AllocatorController:
             tuple[ActionKind, str, str], MutationStatus
         ] = {}
         self._controller_epoch = uuid.uuid4().hex
+        self._controller_term = controller_term
+        self._controller_id = controller_id or self._controller_epoch
+        self._controller_lease_expires_at = controller_lease_expires_at
         self._plan_sequence = 0
         self._action_sequence = 0
         self._last_plan_input_digest = ""
@@ -132,6 +155,69 @@ class AllocatorController:
             self.mode = AllocatorMode(mode)
             if self.mode != AllocatorMode.AUTOMATIC:
                 self._cancel_all_pending("automatic allocation was disabled")
+            self._save_or_rollback(checkpoint)
+
+    def update_authority(
+        self,
+        term: int,
+        controller_id: str,
+        lease_expires_at: float,
+    ) -> None:
+        """Adopt a live lease and re-fence every durable pending command atomically."""
+
+        if (
+            isinstance(term, bool)
+            or not isinstance(term, int)
+            or not 0 < term <= MAX_COUNTER
+        ):
+            raise ValueError("controller authority term is invalid")
+        controller_id = str(controller_id)
+        if not controller_id or len(controller_id) > MAX_ID_LENGTH:
+            raise ValueError("controller authority id is invalid")
+        lease_expires_at = float(lease_expires_at)
+        if not math.isfinite(lease_expires_at) or lease_expires_at <= 0:
+            raise ValueError("controller authority lease expiry is invalid")
+        with self._lock:
+            if term < self._controller_term:
+                raise ValueError("cannot move allocator controller authority backward")
+            if (
+                term == self._controller_term
+                and controller_id != self._controller_id
+                and self._controller_lease_expires_at > 0
+            ):
+                raise ValueError("cannot replace allocator leader within one term")
+            if (
+                term == self._controller_term
+                and controller_id == self._controller_id
+                and lease_expires_at == self._controller_lease_expires_at
+            ):
+                return
+            checkpoint = self._checkpoint()
+            self._controller_term = term
+            self._controller_id = controller_id
+            self._controller_lease_expires_at = lease_expires_at
+
+            def refence(action: MutationAction) -> MutationAction:
+                return replace(
+                    action,
+                    controller_term=term,
+                    controller_id=controller_id,
+                    controller_lease_expires_at=lease_expires_at,
+                )
+
+            self._commands = {
+                action_id: refence(action)
+                for action_id, action in self._commands.items()
+            }
+            self._withdrawn_destructive = {
+                action_id: refence(action)
+                for action_id, action in self._withdrawn_destructive.items()
+            }
+            if self._last_result is not None:
+                self._last_result = replace(
+                    self._last_result,
+                    actions=tuple(refence(action) for action in self._last_result.actions),
+                )
             self._save_or_rollback(checkpoint)
 
     def put_profile(self, profile: ModelProfile) -> None:
@@ -802,6 +888,9 @@ class AllocatorController:
                 "schema_version": SCHEMA_VERSION,
                 "mode": self.mode.value,
                 "controller_epoch": self._controller_epoch,
+                "controller_term": self._controller_term,
+                "controller_id": self._controller_id,
+                "controller_lease_expires_at": self._controller_lease_expires_at,
                 "plan_sequence": self._plan_sequence,
                 "last_tick_at": self._last_tick_at,
                 "last_tick_duration_seconds": self._last_tick_duration_seconds,
@@ -1019,7 +1108,15 @@ class AllocatorController:
                 ),
             )
             id_map[action.action_id] = action_id
-            sequenced.append(replace(action, action_id=action_id))
+            sequenced.append(
+                replace(
+                    action,
+                    action_id=action_id,
+                    controller_term=self._controller_term,
+                    controller_id=self._controller_id,
+                    controller_lease_expires_at=self._controller_lease_expires_at,
+                )
+            )
         sequenced = [
             replace(
                 action,
@@ -1517,6 +1614,9 @@ class AllocatorController:
             "schema_version": SCHEMA_VERSION,
             "mode": self.mode.value,
             "controller_epoch": self._controller_epoch,
+            "controller_term": self._controller_term,
+            "controller_id": self._controller_id,
+            "controller_lease_expires_at": self._controller_lease_expires_at,
             "plan_sequence": self._plan_sequence,
             "action_sequence": self._action_sequence,
             "last_plan_input_digest": self._last_plan_input_digest,
@@ -1591,6 +1691,9 @@ class AllocatorController:
             "mutation_blocks": dict(self._mutation_blocks),
             "mutation_block_delays": dict(self._mutation_block_delays),
             "mutation_block_causes": dict(self._mutation_block_causes),
+            "controller_term": self._controller_term,
+            "controller_id": self._controller_id,
+            "controller_lease_expires_at": self._controller_lease_expires_at,
             "plan_sequence": self._plan_sequence,
             "action_sequence": self._action_sequence,
             "last_plan_input_digest": self._last_plan_input_digest,
@@ -1630,6 +1733,11 @@ class AllocatorController:
         self._mutation_blocks = checkpoint["mutation_blocks"]
         self._mutation_block_delays = checkpoint["mutation_block_delays"]
         self._mutation_block_causes = checkpoint["mutation_block_causes"]
+        self._controller_term = checkpoint["controller_term"]
+        self._controller_id = checkpoint["controller_id"]
+        self._controller_lease_expires_at = checkpoint[
+            "controller_lease_expires_at"
+        ]
         self._plan_sequence = checkpoint["plan_sequence"]
         self._action_sequence = checkpoint["action_sequence"]
         self._last_plan_input_digest = checkpoint["last_plan_input_digest"]
@@ -1656,6 +1764,21 @@ class AllocatorController:
             if len(epoch) != 32 or any(character not in "0123456789abcdef" for character in epoch):
                 raise ValueError("invalid persisted allocator controller epoch")
             self._controller_epoch = epoch
+        if "controller_term" in value:
+            term = int(value["controller_term"])
+            controller_id = str(value.get("controller_id") or "")
+            lease_expires_at = float(value.get("controller_lease_expires_at") or 0.0)
+            if (
+                not 0 < term <= MAX_COUNTER
+                or not controller_id
+                or len(controller_id) > MAX_ID_LENGTH
+                or not math.isfinite(lease_expires_at)
+                or lease_expires_at < 0
+            ):
+                raise ValueError("invalid persisted allocator controller authority")
+            self._controller_term = term
+            self._controller_id = controller_id
+            self._controller_lease_expires_at = lease_expires_at
         sequence = int(value.get("plan_sequence") or 0)
         if sequence < 0:
             raise ValueError("invalid persisted allocator plan sequence")
@@ -1896,6 +2019,11 @@ def _action_from_dict(value: dict[str, Any]) -> MutationAction:
         dependencies=tuple(value.get("dependencies") or ()),
         executable=bool(value.get("executable", False)),
         artifact_sha256=value.get("artifact_sha256") or "",
+        controller_term=int(value.get("controller_term") or 0),
+        controller_id=str(value.get("controller_id") or ""),
+        controller_lease_expires_at=float(
+            value.get("controller_lease_expires_at") or 0.0
+        ),
     )
 
 

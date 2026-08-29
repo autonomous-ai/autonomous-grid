@@ -191,6 +191,8 @@ def _status_payload(record: dict[str, Any] | None = None) -> dict[str, Any]:
         status = allocator.json()
         payload.update(
             mode=status.get("mode"),
+            authority=status.get("authority"),
+            node_authorities=status.get("node_authorities") or [],
             nodes=status.get("nodes") or [],
             models=status.get("models") or [],
             forecasts=status.get("forecasts") or [],
@@ -243,6 +245,17 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
     if payload.get("status_error"):
         print(f"  status    starting ({payload['status_error']})")
         return
+    authority = payload.get("authority") or {}
+    if authority.get("held"):
+        accepted_terms = {
+            int(item.get("highest_controller_term") or 0)
+            for item in payload.get("node_authorities") or []
+        }
+        converged = accepted_terms == {int(authority.get("term") or 0)}
+        print(
+            f"  authority term {authority.get('term')} · lease active · "
+            f"nodes {'converged' if converged else 'converging'}"
+        )
     for node in nodes:
         residencies = node.get("residencies") or []
         placement = ", ".join(

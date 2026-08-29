@@ -31,6 +31,7 @@ from shared.allocator.auth import (
     verify_node_token,
     verify_tenant_attestation,
 )
+from shared.allocator.authority import ControllerAuthorityLease
 from shared.allocator.controller import AllocatorController
 from shared.allocator.intelligence import (
     RequestFeatures,
@@ -287,6 +288,9 @@ def create_app(
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+            authority = lifespan_app.state.allocator_authority
+            if authority is not None:
+                await asyncio.to_thread(authority.release)
 
     app = FastAPI(
         title="Grid Local Signaling Server",
@@ -304,6 +308,18 @@ def create_app(
         allocator_state_path
     )
     app.state.allocator = allocator
+    app.state.allocator_authority_ttl_seconds = max(
+        45.0,
+        3.0 * allocator_interval_seconds,
+    )
+    app.state.allocator_authority = (
+        ControllerAuthorityLease(
+            allocator_state_path,
+            ttl_seconds=app.state.allocator_authority_ttl_seconds,
+        )
+        if allocator_state_path is not None
+        else None
+    )
     app.state.allocator_control_token = allocator_control_token
     app.state.allocator_interval_seconds = float(allocator_interval_seconds)
     app.state.allocator_coalesce_seconds = float(allocator_coalesce_seconds)
@@ -574,6 +590,22 @@ def create_app(
             and successful_revision
             and not error_blocks_revision
         ):
+            if _allocator(app).mode == AllocatorMode.AUTOMATIC:
+                try:
+                    await asyncio.to_thread(_ensure_allocator_authority, app)
+                except Exception as exc:  # noqa: BLE001 - fail closed on lost authority
+                    app.state.allocator_last_error = str(exc)
+                    commands = ()
+                    return {
+                        "ttl_seconds": NODE_TTL_SECONDS,
+                        "load": dict(node.load),
+                        "model_last_used_at": dict(node.model_last_used_at),
+                        "acknowledgements": acknowledgement_results,
+                        "allocator": {
+                            "mode": _allocator(app).mode.value,
+                            "commands": [],
+                        },
+                    }
             destructive_safety_current = int(
                 app.state.allocator_last_success_safety_revision
             ) == int(app.state.allocator_safety_revision)
@@ -642,6 +674,19 @@ def create_app(
     async def allocator_status():
         return {
             **_allocator(app).status(_allocator_snapshots(app)),
+            "node_authorities": [
+                {
+                    "node_id": _node_host_id(node) or node.node_id,
+                    "highest_controller_term": int(
+                        node.allocator.get("highest_controller_term") or 0
+                    ),
+                    "controller_id_for_term": str(
+                        node.allocator.get("controller_id_for_term") or ""
+                    ),
+                }
+                for node in sorted(_nodes(app).values(), key=lambda item: item.node_id)
+                if node.role == "allocator" and isinstance(node.allocator, dict)
+            ],
             "last_error": app.state.allocator_last_error,
             "last_error_revision": app.state.allocator_last_error_revision,
             "dirty_revision": app.state.allocator_dirty_revision,
@@ -656,6 +701,11 @@ def create_app(
             ),
             "warning": app.state.allocator_warning,
             "state_quarantine": app.state.allocator_state_quarantine,
+            "authority": (
+                app.state.allocator_authority.status()
+                if app.state.allocator_authority is not None
+                else None
+            ),
         }
 
     @app.put("/allocator/models/{model_id:path}")
@@ -756,7 +806,14 @@ def create_app(
                     "restart the signaling server"
                 ),
             )
+        if mode == AllocatorMode.AUTOMATIC:
+            try:
+                await asyncio.to_thread(_ensure_allocator_authority, app)
+            except Exception as exc:  # noqa: BLE001 - authority errors are operator-visible
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
         _allocator(app).set_mode(mode)
+        if mode != AllocatorMode.AUTOMATIC and app.state.allocator_authority is not None:
+            await asyncio.to_thread(app.state.allocator_authority.release)
         _mark_allocator_dirty(app)
         result = await _run_allocator_tick(app)
         return {"mode": mode.value, "reconciliation": _reconcile_summary(result)}
@@ -2097,6 +2154,26 @@ def _validate_allocator_envelope(value: dict[str, Any]) -> None:
             status_code=400,
             detail=f"unsupported allocator schema_version {schema_version}",
         )
+    controller_term = value.get("highest_controller_term", 0)
+    controller_id = value.get("controller_id_for_term", "")
+    if (
+        isinstance(controller_term, bool)
+        or not isinstance(controller_term, int)
+        or not 0 <= controller_term <= MAX_COUNTER
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="highest_controller_term must be a supported non-negative integer",
+        )
+    if (
+        not isinstance(controller_id, str)
+        or len(controller_id) > MAX_ID_LENGTH
+        or bool(controller_term) != bool(controller_id)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="controller_id_for_term must identify every positive controller term",
+        )
     rows = value.get("residencies")
     if rows is None:
         return
@@ -2422,11 +2499,32 @@ def _allocator_tick_sync(
         return None, str(exc)
 
 
+def _ensure_allocator_authority(app: FastAPI) -> None:
+    authority = app.state.allocator_authority
+    if authority is None:
+        state_path = _allocator(app).state_path
+        if state_path is None:
+            raise RuntimeError("automatic allocation requires durable controller authority")
+        authority = ControllerAuthorityLease(
+            state_path,
+            ttl_seconds=float(app.state.allocator_authority_ttl_seconds),
+        )
+        app.state.allocator_authority = authority
+    grant = authority.ensure()
+    _allocator(app).update_authority(
+        grant.term,
+        grant.leader_id,
+        grant.expires_at,
+    )
+
+
 async def _run_allocator_tick(app: FastAPI):
     async with app.state.allocator_tick_lock:
         target_revision = int(app.state.allocator_dirty_revision)
         target_safety_revision = int(app.state.allocator_safety_revision)
         try:
+            if _allocator(app).mode == AllocatorMode.AUTOMATIC:
+                await asyncio.to_thread(_ensure_allocator_authority, app)
             snapshots = _allocator_snapshots(app)
             result, error = await asyncio.to_thread(
                 _allocator_tick_sync,

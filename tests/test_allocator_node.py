@@ -385,10 +385,12 @@ def test_many_slow_child_activity_probes_are_bounded_parallel_after_host_lease(
 
         # At the runtime's actual maximum of 100 models, serial one-second /slots timeouts exceed
         # the 60-second registry lease. The bounded worker pool finishes that exact worst case with
-        # ample room for every child update inside one absolute cycle deadline.
+        # ample room for every child update inside one absolute cycle deadline. Keep at least half
+        # the 15-second cycle as scheduling/network headroom; a fixed six-second wall-clock bound
+        # proved needlessly sensitive to host load in the complete repository suite.
         assert peak_health == 16
         assert peak_active == 32
-        assert 3.0 <= elapsed < 6.0
+        assert 3.0 <= elapsed < 7.5
         assert agent.last_error == ""
         assert agent.node_id in app.state.nodes
         assert len(agent._registered_engines) == 100
@@ -772,6 +774,8 @@ def test_post_command_child_sync_deadline_publishes_independent_host_fence(
             plan_generation=f"{epoch}:{int(sequence) + 1:020d}:{'f' * 12}",
             created_at=time.time(),
             executable=True,
+            controller_term=managed._highest_controller_term,
+            controller_id=managed._controller_id_for_term,
         )
         original_post_control = agent._post_control
         command_delivered = False

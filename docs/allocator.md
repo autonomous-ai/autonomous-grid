@@ -565,6 +565,9 @@ An authenticated heartbeat response carries commands for that `host_id`:
         "model_id": "qwen3-coder",
         "memory_mb": 24576,
         "plan_generation": "c91d...:00000000000000000042:4fc1...",
+        "controller_term": 7,
+        "controller_id": "c57a...",
+        "controller_lease_expires_at": 1788020000.0,
         "dependencies": [],
         "executable": true
       }
@@ -573,10 +576,19 @@ An authenticated heartbeat response carries commands for that `host_id`:
 }
 ```
 
-The generation is a persistent controller epoch plus a monotonically increasing sequence and an
-input digest. It remains ordered across wall-clock changes, while a new controller epoch fences
-commands from a superseded process. The complete action also includes its reason, creation time,
-and `not_before` time. Wire objects use `schema_version: 1`. Unknown or malformed residency rows are
+The plan generation is a persistent epoch plus a monotonically increasing sequence and an input
+digest, so plans remain ordered across wall-clock changes. Mutation authority is a separate durable
+fence: automatic mode acquires a renewable single-writer lease beside the controller state file,
+increments its term on every takeover, and stamps every command with `(controller_term,
+controller_id, controller_lease_expires_at)`. A managed node durably remembers the highest term,
+accepts at most one controller identity in that term, rejects expired leases, and rejects every
+lower-term command even after restart. This makes command safety independent of network delivery
+order; plan generations continue to order plans within the accepted authority.
+
+The complete action also includes its reason, creation time, and `not_before` time. Wire objects use
+`schema_version: 1`; the new authority fields are additive so older persisted actions still decode,
+but once a node has observed a fenced command it will not return to the legacy term-zero namespace.
+Unknown or malformed residency rows are
 excluded and make the host snapshot `unhealthy`; an invalid host lifecycle likewise fails closed
 rather than becoming eligible. Managed registry IDs are derived from the authenticated host and
 model identities, so a host-scoped credential cannot squat another host's control or engine record.

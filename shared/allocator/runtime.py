@@ -42,6 +42,8 @@ from shared.allocator.local import (
     LocalOverride,
 )
 from shared.allocator.models import (
+    MAX_COUNTER,
+    MAX_ID_LENGTH,
     SCHEMA_VERSION,
     ActionKind,
     ModelResidency,
@@ -827,6 +829,8 @@ class ManagedModelRuntime:
         self._shutting_down = False
         self._latest_plan_generation = ""
         self._superseded_plan_epochs: set[str] = set()
+        self._highest_controller_term = 0
+        self._controller_id_for_term = ""
         self._decision: AdmissionDecision | None = None
         self._persisted_backend_config: dict[str, str] = {}
         self.host_id = host_id or f"host-{uuid.uuid4().hex[:16]}"
@@ -901,26 +905,9 @@ class ManagedModelRuntime:
             prior_active_action_started_at = self._active_action_started_at
             prior_latest_generation = self._latest_plan_generation
             prior_superseded_epochs = set(self._superseded_plan_epochs)
+            prior_controller_term = self._highest_controller_term
+            prior_controller_id = self._controller_id_for_term
             prior_next_receipt_sequence = self._next_receipt_sequence
-            existing = self._receipts.get(action.action_id)
-            if existing is not None:
-                # The controller may have acknowledged this receipt and then restarted from a
-                # durable snapshot that still contains the command. Redelivery is idempotent, but
-                # it must re-arm the cached receipt or the controller can wait forever for an ACK
-                # that this node believes it already sent.
-                if existing.reported_status == existing.status:
-                    existing = ActionReceipt(
-                        existing.action_id,
-                        existing.status,
-                        existing.message,
-                        existing.plan_generation,
-                        existing.updated_at,
-                        sequence=existing.sequence,
-                        duration_seconds=existing.duration_seconds,
-                    )
-                    self._receipts[action.action_id] = existing
-                    self._save_locked()
-                return existing
             if action.node_id != self.host_id:
                 return self._terminal_locked(
                     action,
@@ -942,6 +929,37 @@ class ManagedModelRuntime:
                     "recommendation is not an executable command",
                     now,
                 )
+            authority_error = self._authority_rejection_locked(action, now=now)
+            if authority_error:
+                existing = self._receipts.get(action.action_id)
+                if existing is not None:
+                    # A delayed old leader must never overwrite the receipt for the same command
+                    # after a successor has re-fenced it under a higher term.
+                    return existing
+                return self._terminal_locked(
+                    action,
+                    MutationStatus.CANCELLED,
+                    authority_error,
+                    now,
+                )
+            self._accept_authority_locked(action)
+            existing = self._receipts.get(action.action_id)
+            if existing is not None:
+                # Authority is checked before idempotency: a restarted controller may deliberately
+                # re-fence a pending command with the same action id and a higher term.
+                if existing.reported_status == existing.status:
+                    existing = ActionReceipt(
+                        existing.action_id,
+                        existing.status,
+                        existing.message,
+                        existing.plan_generation,
+                        existing.updated_at,
+                        sequence=existing.sequence,
+                        duration_seconds=existing.duration_seconds,
+                    )
+                    self._receipts[action.action_id] = existing
+                self._save_locked()
+                return existing
             if self._generation_is_stale_locked(action.plan_generation):
                 return self._terminal_locked(
                     action,
@@ -1012,6 +1030,8 @@ class ManagedModelRuntime:
                 self._active_action_started_at = prior_active_action_started_at
                 self._latest_plan_generation = prior_latest_generation
                 self._superseded_plan_epochs = prior_superseded_epochs
+                self._highest_controller_term = prior_controller_term
+                self._controller_id_for_term = prior_controller_id
                 self._next_receipt_sequence = prior_next_receipt_sequence
                 raise
         thread = threading.Thread(
@@ -1070,6 +1090,14 @@ class ManagedModelRuntime:
             raise ValueError("rejected allocator action requires a message")
         now = max(0.0, float(self.clock()))
         with self._lock:
+            if action.node_id != self.host_id:
+                raise ValueError("command target does not match this host")
+            if not action.executable:
+                raise ValueError("recommendation is not an executable command")
+            authority_error = self._authority_rejection_locked(action, now=now)
+            if authority_error:
+                raise ValueError(authority_error)
+            self._accept_authority_locked(action)
             existing = self._receipts.get(action.action_id)
             if existing is not None:
                 if existing.reported_status == existing.status:
@@ -1083,12 +1111,8 @@ class ManagedModelRuntime:
                         duration_seconds=existing.duration_seconds,
                     )
                     self._receipts[action.action_id] = existing
-                    self._save_locked()
+                self._save_locked()
                 return existing
-            if action.node_id != self.host_id:
-                raise ValueError("command target does not match this host")
-            if not action.executable:
-                raise ValueError("recommendation is not an executable command")
             if self._generation_is_stale_locked(action.plan_generation):
                 raise ValueError("stale allocator plan generation")
             if any(
@@ -1187,6 +1211,8 @@ class ManagedModelRuntime:
                 "actuator_capabilities": [item.value for item in ActionKind],
                 "max_models": self.port_end - self.port_start + 1,
                 "latest_plan_generation": self._latest_plan_generation,
+                "highest_controller_term": self._highest_controller_term,
+                "controller_id_for_term": self._controller_id_for_term,
                 "manually_managed": False,
             }
             ca_pem = str(getattr(self.backend, "tls_ca_pem", "") or "")
@@ -2306,6 +2332,37 @@ class ManagedModelRuntime:
         self.override_error = ""
         return override
 
+    def _authority_rejection_locked(
+        self,
+        action: MutationAction,
+        *,
+        now: float,
+    ) -> str:
+        if action.controller_term < self._highest_controller_term:
+            return "stale allocator controller term"
+        if (
+            action.controller_term == self._highest_controller_term
+            and action.controller_term > 0
+            and self._controller_id_for_term
+            and action.controller_id != self._controller_id_for_term
+        ):
+            return "conflicting allocator controller for current term"
+        if (
+            action.controller_lease_expires_at
+            and now >= action.controller_lease_expires_at
+        ):
+            return "allocator controller lease expired"
+        return ""
+
+    def _accept_authority_locked(self, action: MutationAction) -> None:
+        if action.controller_term <= self._highest_controller_term:
+            return
+        self._highest_controller_term = action.controller_term
+        self._controller_id_for_term = action.controller_id
+        # A higher fencing term owns a fresh, independently ordered plan namespace.
+        self._latest_plan_generation = ""
+        self._superseded_plan_epochs.clear()
+
     def _generation_is_stale_locked(self, candidate: str) -> bool:
         candidate_epoch = _epoch_generation(candidate)
         latest_epoch = _epoch_generation(self._latest_plan_generation)
@@ -2376,6 +2433,15 @@ class ManagedModelRuntime:
             for item in value.get("superseded_plan_epochs") or ()
             if isinstance(item, str) and item
         }
+        self._highest_controller_term = int(value.get("highest_controller_term") or 0)
+        self._controller_id_for_term = str(value.get("controller_id_for_term") or "")
+        if (
+            not 0 <= self._highest_controller_term <= MAX_COUNTER
+            or len(self._controller_id_for_term) > MAX_ID_LENGTH
+            or bool(self._highest_controller_term)
+            != bool(self._controller_id_for_term)
+        ):
+            raise ValueError("invalid persisted allocator controller fence")
         self._residencies = {
             item.model_id: item
             for row in value.get("residencies") or ()
@@ -2428,6 +2494,8 @@ class ManagedModelRuntime:
             "next_receipt_sequence": self._next_receipt_sequence,
             "latest_plan_generation": self._latest_plan_generation,
             "superseded_plan_epochs": sorted(self._superseded_plan_epochs),
+            "highest_controller_term": self._highest_controller_term,
+            "controller_id_for_term": self._controller_id_for_term,
             "local_state": self.protection_loop.state.to_dict(),
             "residencies": [item.to_dict() for item in self.residencies],
             "receipts": [

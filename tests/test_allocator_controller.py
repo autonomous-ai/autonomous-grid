@@ -1640,6 +1640,29 @@ def test_controller_plan_generation_is_logical_stable_and_persisted(tmp_path):
     assert restored.status(now=102)["plan_sequence"] == 3
 
 
+def test_controller_refences_pending_commands_when_authority_changes(tmp_path):
+    path = tmp_path / "allocator.json"
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        state_path=path,
+    )
+    controller.put_profile(profile())
+    controller.tick([node(cached=True)], now=10)
+    original = controller.commands_for("n", now=10)[0]
+
+    controller.update_authority(2, "successor", 200)
+    refenced = controller.commands_for("n", now=10)[0]
+    assert refenced.action_id == original.action_id
+    assert refenced.controller_term == 2
+    assert refenced.controller_id == "successor"
+    assert refenced.controller_lease_expires_at == 200
+
+    restored = AllocatorController(state_path=path)
+    persisted = restored.commands_for("n", now=10)[0]
+    assert persisted.controller_term == 2
+    assert persisted.controller_id == "successor"
+
+
 def test_controller_rejects_inconsistent_persisted_plan_generation(tmp_path):
     path = tmp_path / "allocator.json"
     controller = AllocatorController(state_path=path)
