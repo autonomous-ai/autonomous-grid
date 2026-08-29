@@ -1530,6 +1530,7 @@ def desired_replica_count(
 ) -> int:
     policy = policy or PlannerPolicy()
     timestamp = time.time() if now is None else float(now)
+    node_list = tuple(nodes)
     if startup_horizon_seconds is not None:
         if isinstance(startup_horizon_seconds, bool):
             raise ValueError("startup horizon must be finite and non-negative")
@@ -1612,7 +1613,7 @@ def desired_replica_count(
         target, ready_replicas = _replicas_for_service_capacity(
             model,
             required_capacity,
-            nodes,
+            node_list,
             timestamp,
             policy,
         )
@@ -1631,7 +1632,7 @@ def desired_replica_count(
     # hysteresis that makes placement migration-frugal; the reconciler independently gates mutation.
     if policy.preserve_recent_residencies:
         recent = 0
-        for node in nodes:
+        for node in node_list:
             residency = node.residency(model.model_id)
             if (
                 residency is None

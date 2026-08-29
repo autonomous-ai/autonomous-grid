@@ -1741,6 +1741,42 @@ def test_recent_demand_watermark_preserves_one_replica_across_registry_restart()
     assert desired_replica_count(profile, future, now=100) == 0
 
 
+def test_replica_count_preserves_recent_residencies_from_single_pass_iterable():
+    profile = model(
+        min_replicas=0,
+        max_replicas=3,
+        target_utilization=1,
+        scale_down_cooldown_seconds=60,
+    )
+    machines = tuple(
+        node(
+            f"n{index}",
+            residencies=(
+                ModelResidency(
+                    "qwen",
+                    8_000,
+                    ResidencyState.READY,
+                    loaded_at=90,
+                ),
+            ),
+        )
+        for index in range(3)
+    )
+    forecast = DemandForecast("qwen", offered_concurrency=0.5)
+
+    assert desired_replica_count(
+        profile,
+        forecast,
+        nodes=(machine for machine in machines),
+        now=100,
+    ) == desired_replica_count(
+        profile,
+        forecast,
+        nodes=machines,
+        now=100,
+    ) == 3
+
+
 def test_replica_count_falls_back_to_profile_service_time_for_rate_only_demand():
     profile = model(
         min_replicas=0,
