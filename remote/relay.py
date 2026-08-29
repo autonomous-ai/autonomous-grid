@@ -432,6 +432,48 @@ def report_task_result(
     _guard(resp, "report_task_result")
 
 
+def checkpoint_task_retry(
+    signaling_url: str,
+    access_token: str,
+    task_id: str,
+    *,
+    reason: str,
+    result_commit: str | None = None,
+    transcript_result_commit: str | None = None,
+    session_id: str | None = None,
+    session_reset_reason: str | None = None,
+) -> dict[str, Any]:
+    """Relinquish a failed native Goal attempt after publishing a coherent checkpoint.
+
+    Unlike silence + lease expiry, this explicitly authorizes the relay to hand the SAME turn's
+    partial worktree and native history to another machine immediately. The relay independently
+    resolves both Git refs and accepts the call only from the current lease holder.
+    """
+    body: dict[str, Any] = {"reason": reason}
+    if result_commit:
+        body["result_commit"] = result_commit
+    if transcript_result_commit:
+        body["transcript_result_commit"] = transcript_result_commit
+    if session_id:
+        body["session_id"] = session_id
+    if session_reset_reason:
+        body["session_reset_reason"] = session_reset_reason
+    try:
+        with _client(signaling_url, access_token, timeout=_TASK_RESULT_TIMEOUT) as client:
+            resp = client.post(
+                f"/relay/v1/tasks/{quote(task_id, safe='')}/retry",
+                json=body,
+            )
+    except httpx.HTTPError as exc:
+        raise RelayError(f"checkpoint_task_retry transport error: {exc}") from None
+    _guard(resp, "checkpoint_task_retry")
+    try:
+        value = resp.json() if resp.content else {}
+    except ValueError as exc:
+        raise RelayError(f"checkpoint_task_retry returned a malformed body: {exc}") from None
+    return value if isinstance(value, dict) else {}
+
+
 def git_remote_url(signaling_url: str, project_id: str) -> str:
     """The project's repository on the relay's smart-HTTP front (ADR 0032 issue 05).
 

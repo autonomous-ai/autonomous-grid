@@ -666,6 +666,17 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
                 raise CodexGoalError("Codex thread/start returned no thread id")
         rollout_relpath = _relative_rollout(
             codex_home, (thread_result.get("thread") or {}).get("path"))
+        # Persist the portable thread pointer BEFORE activating/running this slice. If the native
+        # app-server dies halfway through the turn, `_push_result` can now publish a checkpoint that
+        # another Codex machine resumes from the copied rollout instead of starting a new thread.
+        # Counters deliberately remain at the last completed checkpoint: replay is the same logical
+        # turn, which also keeps external-action idempotency keys stable.
+        _write_state(workspace, {
+            "version": 2, "thread_id": thread_id,
+            "rollout_relpath": rollout_relpath, "status": "active",
+            "turns_completed": turns_before, "tokens_used": tokens_before,
+            "time_used_seconds": time_before,
+        })
         set_goal: dict[str, Any] = {"threadId": thread_id, "status": "active"}
         if turns_before == 0:
             set_goal.update({

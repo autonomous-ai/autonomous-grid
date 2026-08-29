@@ -13865,6 +13865,30 @@ def test_report_task_result_percent_encodes_the_task_id(monkeypatch):
     assert seen["raw"] == b"/relay/v1/tasks/..%2F..%2Fnodes%2Fevil/result"
 
 
+def test_checkpoint_task_retry_posts_both_distributed_pins(monkeypatch):
+    from remote import relay
+
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"state": "queued", "attempt": 1})
+
+    _mock_serve_engine(monkeypatch, handler)
+    answer = relay.checkpoint_task_retry(
+        "https://relay.example", "AT", "T1", reason="app-server disconnected",
+        result_commit="a" * 40, transcript_result_commit="b" * 40,
+        session_id="session-1")
+
+    assert seen["path"] == "/relay/v1/tasks/T1/retry"
+    assert seen["body"] == {
+        "reason": "app-server disconnected", "result_commit": "a" * 40,
+        "transcript_result_commit": "b" * 40, "session_id": "session-1",
+    }
+    assert answer["state"] == "queued"
+
+
 def test_report_task_result_raises_on_failure(monkeypatch):
     from remote import relay
 
@@ -28194,6 +28218,7 @@ def test_post_spawn_goal_harness_failure_is_left_for_another_machine(monkeypatch
     }])
     events = []
     reports = []
+    handoffs = []
     attached = []
     closed = []
 
@@ -28204,6 +28229,9 @@ def test_post_spawn_goal_harness_failure_is_left_for_another_machine(monkeypatch
 
         def close(self):
             closed.append("publisher")
+
+        def flush(self):
+            return True
 
     class Renewer:
         lost = False
@@ -28228,14 +28256,21 @@ def test_post_spawn_goal_harness_failure_is_left_for_another_machine(monkeypatch
     monkeypatch.setattr(tasks, "_publisher_for", lambda *_args: Publisher())
     monkeypatch.setattr(tasks, "_lease_renewer", lambda *_args, **_kwargs: Renewer())
     monkeypatch.setattr(tasks, "_tree_beat", lambda *_args: None)
+    monkeypatch.setattr(tasks.relay, "checkpoint_task_retry", lambda *_args, **kwargs: (
+        handoffs.append(kwargs), {"state": "queued"})[-1])
     monkeypatch.setattr(tasks, "report_once", lambda *_args, **kwargs: reports.append(kwargs))
 
     tasks.task_loop(state)
 
     assert attached and reports == []
+    assert handoffs == [{
+        "reason": "app-server protocol disconnected", "result_commit": None,
+        "transcript_result_commit": None, "session_id": None,
+        "session_reset_reason": None,
+    }]
     assert events == [("task.retrying", {"reason": "app-server protocol disconnected"})]
     assert closed == ["renewer", "publisher"]
-    assert "another provider" in capsys.readouterr().err
+    assert "queued immediately" in capsys.readouterr().err
 
 
 def test_native_goal_impossible_checkpoint_is_reported_not_retried(monkeypatch):

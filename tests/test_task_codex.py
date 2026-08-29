@@ -154,6 +154,42 @@ def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch)
     assert events[-1][0] == "goal.slice.completed"
 
 
+def test_mid_slice_crash_still_publishes_a_portable_codex_thread_pointer(tmp_path, monkeypatch):
+    """The retry must resume the native Goal thread, not merely inherit its partially edited files."""
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    rollout = (tmp_path / task_codex.AGENT_DIR / task_codex.HOME_DIR
+               / "sessions/fake/rollout-crashed-thread.jsonl")
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    # EOF immediately after thread/start: activation never answers and the slice fails, but the
+    # relay-published transcript now has enough information for another node's thread/resume.
+    process = _FakeProcess([
+        {"id": 1, "result": {"userAgent": "codex"}},
+        {"id": 2, "result": {"thread": {
+            "id": "crashed-thread", "path": str(rollout)}}},
+    ])
+    try:
+        task_codex.run_slice(
+            _job(), tmp_path,
+            inference=task_codex.GridInference("https://grid.test", "secret"),
+            executable="/fake/codex", timeout=30,
+            publish=lambda *_args, **_kwargs: None,
+            process_factory=lambda _argv, _env, _cwd: process)
+    except task_codex.CodexGoalError:
+        pass
+    else:
+        raise AssertionError("the deliberately truncated app-server exchange did not fail")
+
+    checkpoint = json.loads((tmp_path / ".grid/agent/codex/goal-state.json").read_text())
+    assert checkpoint == {
+        "version": 2, "thread_id": "crashed-thread",
+        "rollout_relpath": "sessions/fake/rollout-crashed-thread.jsonl",
+        "status": "active", "turns_completed": 0, "tokens_used": 0,
+        "time_used_seconds": 0,
+    }
+
+
 def test_copied_codex_checkpoint_rebases_rollout_to_the_new_worker(tmp_path):
     worker_b_home = tmp_path / "worker-b" / "home"
     rollout = worker_b_home / "sessions/2026/rollout-thread-portable.jsonl"

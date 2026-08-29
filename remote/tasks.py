@@ -1275,6 +1275,8 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
     publisher = _publisher_for(state, task_id, job)
     remote = _git_remote(state, job)
     landed = True
+    retry_handed_off = False
+    retry_state: str | None = None
     # Which half of the git round trip gave up, for the operator's log. Two things can now leave a
     # task unreported, and they call for opposite reading: a push that did not land means this
     # provider ran the agent and lost the result, while an input that never arrived means it never
@@ -1328,6 +1330,28 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
                 reason = task_stream.redact(outcome.error or "native Goal harness failed")[
                     :_MAX_SESSION_RESET_REASON_CHARS]
                 publisher.publish("task.retrying", reason=reason)
+                # Flush the entire trajectory tail while this provider still holds the lease.
+                # The retry endpoint below revokes event authority immediately; leaving the normal
+                # close in `finally` as the first flush would make the handoff reliably discard the
+                # last output/tool events—the exact training evidence this path exists to retain.
+                publisher.flush()
+                try:
+                    retry_answer = relay.checkpoint_task_retry(
+                        state.signaling_url, state.token(), task_id,
+                        reason=reason,
+                        result_commit=outcome.result_commit,
+                        transcript_result_commit=outcome.transcript_result_commit,
+                        session_id=outcome.session_id,
+                        session_reset_reason=outcome.session_reset_reason,
+                    )
+                    retry_handed_off = True
+                    retry_state = str(retry_answer.get("state") or "queued")
+                except (Exception, SystemExit) as exc:
+                    # Additive rollout and ambiguous acknowledgements both land here. Do not turn
+                    # a retry-path transport/version fault into a terminal Goal failure: leaving
+                    # the row running preserves the established bounded lease-reaper fallback.
+                    _warn(f"task {task_id}: could not explicitly hand off its native Goal "
+                          f"checkpoint ({exc!r}); falling back to lease-expiry recovery")
                 landed = False
                 abandoned_because = "'s native Goal harness failed retryably"
     except task_repo.InputFetchError:
@@ -1395,6 +1419,16 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
         return
 
     if not landed:
+        if retry_handed_off:
+            if retry_state == "failed":
+                _warn(f"task {task_id}'s native Goal harness failed on its final allowed attempt; "
+                      "the relay preserved the partial checkpoint for audit and ended the Goal "
+                      "with retries_exhausted.")
+            else:
+                _warn(f"task {task_id}'s native Goal checkpoint was accepted by the relay and the "
+                      "same turn is queued immediately for another capable provider; no terminal "
+                      "state was reported by this worker.")
+            return
         # DELIBERATELY no terminal report. Nothing this attempt produced is in the repository, so
         # reporting one would mark the task terminal with nothing to fetch — and terminal is
         # precisely the state nothing retries. Left `running`, its lease lapses and the relay's
