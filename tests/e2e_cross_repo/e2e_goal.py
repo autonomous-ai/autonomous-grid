@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from itertools import pairwise
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -50,7 +51,7 @@ def _assert_transcript_chain(evidence: dict, expected_turns: int) -> None:
     assert len(turns) == expected_turns, turns
     assert turns[0]["transcript_commit"] is None, turns
     assert all(turn["transcript_result_commit"] for turn in turns), turns
-    for previous, current in zip(turns, turns[1:]):
+    for previous, current in pairwise(turns):
         assert current["transcript_commit"] == previous["transcript_result_commit"], turns
     from cli.goal import _verify_evidence
     assert _verify_evidence(evidence) == []

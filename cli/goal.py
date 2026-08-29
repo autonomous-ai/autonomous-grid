@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 
@@ -127,7 +128,7 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     first = turns[0] if isinstance(turns[0], dict) else {}
     if first.get("transcript_commit") is not None:
         failures.append("turn 1 unexpectedly resumes a pre-existing transcript")
-    for index, (previous, current) in enumerate(zip(turns, turns[1:]), 2):
+    for index, (previous, current) in enumerate(pairwise(turns), 2):
         if not isinstance(previous, dict) or not isinstance(current, dict):
             continue
         if current.get("transcript_commit") != previous.get("transcript_result_commit"):
