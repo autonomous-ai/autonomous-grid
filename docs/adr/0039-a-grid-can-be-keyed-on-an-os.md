@@ -90,6 +90,10 @@ Two consequences are deliberate, not oversights:
   _deliberate` asserts `== ["platform@autonomous.ai"]`, one row, not zero. The claim worth making is
   the one the test actually proves, and it is the load-bearing one; "empty" was a shorter sentence
   that would eventually be read as an invariant and relied on. Corrected 2026-08-28 after review.
+
+  ⚠️ **The roster is not the only surface that would publish those addresses.** The member-usage
+  panel reaches the same emails by a different mechanism — observed traffic, not the allowlist — so
+  this bullet's reasoning does not close it. It is closed separately, in D-l.
 - **The grid exists only in the CLI.** `grid ls` reads the locally-stored list that `GET /tokens`
   filled (`cli/remote_grid.cmd_remote_ls`, `remote/control_plane.fetch_tokens`); a browser session has
   no CLI OS to report, so `/me` and `/networks` show nothing. The app is out of scope for this feature
@@ -278,6 +282,60 @@ for the other two.
 control plane — the key is absent and the CLI prints nothing, which is exactly the previous behaviour,
 so the degrade is clean.
 
+## D-l — The member-usage panel is refused on this type
+
+`GET /relay/v1/grid/members/usage` (grid-src `relay.py`) returns one row per consumer: the person's
+email alongside their `requests` / `tokens_in` / `tokens_cached` / `tokens_out`. Its gate is
+`_extract_auth(request, "inference:models")` — the scope every consumer needs to use the grid at all —
+so on a grid that keeps no allowlist it reduces to *"do you hold a token for this grid"*. That is the
+right gate on the types it was written for, and its docstring says why: requiring a snapshot row
+unconditionally would lock every caller out of a grid that keeps no roster. On `os-community` the same
+sentence means **every stranger in the world running this operating system**, so the panel would hand
+each of them every other one's email address and spend.
+
+⚠️ **D-e does not already cover this: same concern, second mechanism.** D-e's roster answer holds *by
+construction* — nothing about a person's OS is persisted, so `list_grid_members` has no rows admitted
+by the OS gate to return. This route's emails do not come from the allowlist. They come from
+`node_answered_query.member_snapshot()`, traffic the relay actually observed, which no membership
+model can empty. Widening `_requires_allowlist` to this type (issue 01) is what makes the route
+reachable here, and a reader who stops at D-e will conclude the surface is closed when it is not.
+
+⚠️ **The app being out of scope is not the containment it looks like.** D-e says an OS grid exists
+only in the CLI, and `member_usage_provider.dart` is this route's only reader — but the exposure is the
+*route*, not the panel. Any token holder can call it directly, and on this type every member is a token
+holder. A UI that never renders it is not a gate.
+
+**DECIDED 2026-08-29 (issue 08): the route is refused on `os-community`, at the door.** The same shape
+as D-i and for the reason that worked there — one predicate keyed on the type, rather than a per-caller
+filter that has to stay correct forever. Nobody on a grid of strangers has a reason to audit another
+stranger's spend, so the refusal takes nothing away from anybody. Three costs, stated rather than
+hidden:
+
+- One more network-type predicate to keep in step with the others in this ADR.
+- It must be keyed by **equality** against the `os-community` literal, never on the truthiness of a
+  missing key — the standing rule of the lockstep register, which has five entries that exist because
+  of that one mistake.
+- The pin needs a **positive control**: a test proving the route still serves a `private-domain` grid
+  unchanged. Without it the refusal is equally satisfied by a route that has been switched off for
+  everybody.
+
+The alternatives, and what each would have cost:
+
+- **Return the caller's own row only.** Keeps the endpoint uniform and the app's parsing untouched, and
+  costs a response *shape* that varies by network type — the sort of thing a later reader reports as a
+  bug, on a path no test in the app exercises.
+- **Drop the email and report totals only.** Preserves *how busy is this grid* without naming anybody,
+  and costs an absent email every client must render, plus the docstring's promise that the panel
+  reading this "has the roster keyed by email already".
+- **Decide the exposure is acceptable and say so.** Legitimate on its face — the figures are token
+  counts, not content — but it trades ten thousand strangers' email addresses for a panel that, on this
+  type, answers a question nobody is asking.
+
+There is **no rollout ordering** and no half in this repo: the refusal changes no response on any other
+type, and the app is unchanged because D-e keeps an OS grid out of its reach entirely. If the app is
+ever brought into scope, this refusal is one more thing to revisit alongside D-e, not a thing that will
+already be right.
+
 ## Considered options
 
 - **An onboarding default (auto-join, private-domain shape, for everyone).** Rejected: it reintroduces
@@ -295,6 +353,8 @@ so the degrade is clean.
 - One more hand-duplicated wire literal across three repos (grid-apis `store.py`, grid-src
   `network_runtime.py` and `grid_auth.py`), with a rollout order that is the reverse of its neighbours.
 - A grid type on which billing is permanently off by decision rather than by omission (D-g).
+- One route refused purely because the grid admits strangers (D-l), and a standing question for every
+  future route that reads "this grid has no allowlist": is its gate still the one it was written for?
 - A grid type with no roster and no presence outside the CLI (D-e) — acceptable only while the app
   stays out of scope. Bringing the app in later means revisiting D-e first, not bolting a query on.
 - `grid ls` gains a `os-community` row that most users will never have created, and the type string is
