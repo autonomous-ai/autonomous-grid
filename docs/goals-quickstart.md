@@ -152,6 +152,9 @@ Goal disappears from the default `grid goal list`, while its Goal row, task atte
 trajectory and counters remain available for audit and future `grid train` datasets. Unlike
 ordinary task history, Goal branches and transcript refs do not expire by default. A relay that has
 already exported them may set `GOAL_TRAJECTORY_RETENTION_SECONDS` to a positive retention window.
+The evidence export is schema-versioned and includes each turn's prompt, output/error, harness,
+execution node, inference usage, worktree commits, transcript input/output commits, recorded tool
+events, and accepted or rejected independent eval runs.
 
 ## Give Codex business read/write tools
 
