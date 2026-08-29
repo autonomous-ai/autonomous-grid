@@ -108,6 +108,24 @@ have not yet entered automatic mode. A higher-term successor reloads the last du
 state before persisting its term, preventing stale standby memory from erasing the former leader's
 host prices or budget.
 
-Open findings are CAS-versioned economics transactions across stale post-takeover controller state,
-durable acknowledgement audit records, and richer per-cohort loss previews. Those are the next
-acceptance gates; they are not claimed as solved by the authoritative-price milestone.
+Revisions `6cdb91c` and `894cb55` then closed the stale-writer and acknowledgement-audit gates.
+Every price or budget mutation now requires an expected economics revision. The CLI reads that
+revision immediately before a write unless the operator supplies one explicitly; the API rejects a
+missing precondition with HTTP 428 and a stale precondition with HTTP 409. Material changes advance
+one monotonic revision, no-ops do not, and controller takeover reloads the durable revision before
+accepting a write. The bounded durable audit records controller term and identity, acknowledgement,
+before/after policy or price, and the exact before/after/desired replica impact. Tests cover stale
+concurrent writers, rollback, restart, takeover, missing preconditions, and audit persistence.
+
+A fresh four-logical-node run at revision 4 reproduced the complete real lifecycle. A client using
+stale revision 3 was rejected without mutation. An acknowledged `$1/h` ceiling committed revision 5,
+recorded the baseline's exact `3 -> 2` replica impact against desired 3, chose the two cheapest hosts
+at `$0.25/h`, and completed real drain and unload actions on the `$20/h` llama.cpp host. Disabling the
+ceiling committed revision 6 and loaded/warmed that host back to ready. Restoring its operator price
+to `$0.80/h` committed revision 7; all three text replicas and the immutable ComfyUI/MPS inventory
+were healthy afterward.
+
+Open findings are an atomic multi-change transaction for changing several prices and a budget with
+one revision (avoiding intermediate policies), richer per-cohort loss previews, and consensus-backed
+authority for multiple active physical control-plane replicas. Those are the next acceptance gates;
+they are not claimed as solved by the CAS milestone.
