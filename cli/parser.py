@@ -35,6 +35,7 @@ from .allocator_scenario import (
     bounded_scenario_users,
     cmd_test_scenario,
     simulated_minutes,
+    workload_trace_binding,
 )
 from .auth import cmd_login, cmd_logout, cmd_sync
 from .device import cmd_device_info
@@ -366,6 +367,17 @@ def _add_logical_test(sub) -> None:
         help="Simulated time as minutes or hours, e.g. 30m or 2h (default 30m).",
     )
     scenario.add_argument("--seed", type=int, default=42, help="Deterministic random seed.")
+    scenario.add_argument(
+        "--workload-trace",
+        action="append",
+        default=[],
+        type=workload_trace_binding,
+        metavar="WORKLOAD=CSV",
+        help=(
+            "Replay a headerless timestamp,request-rate CSV for one workload; repeat for "
+            "multiple workloads."
+        ),
+    )
     scenario.add_argument(
         "--timeline",
         action="store_true",

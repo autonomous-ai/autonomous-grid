@@ -620,7 +620,8 @@ process actuation:
 
 ```
 grid test scenario [--machines N] [--models N] [--users N]
-    [--duration 30m|2h] [--seed N] [--timeline] [--json]
+    [--duration 30m|2h] [--seed N]
+    [--workload-trace WORKLOAD=CSV]... [--timeline] [--json]
 grid test start [--machines N] [--candidate-model GGUF]...
     [--workload-model WORKLOAD=GGUF]...
     [--include-comfyui --media-bundle z_image]
@@ -634,7 +635,11 @@ grid test stop
 ```
 
 `test scenario` runs deterministic heterogeneous planning with changing user demand and failures;
-it starts no engine processes and is not an inference test. `--workload-model` gives the real test
+it starts no engine processes and is not an inference test. Repeat `--workload-trace` to replace a
+workload's synthetic demand timing with a headerless CSV whose first columns are timestamp seconds
+and request rate. Extra columns are ignored. The lab normalizes the imported curve to that
+workload's original mean demand, so it compares burst shapes without silently changing scale.
+`--workload-model` gives the real test
 Grid explicit model capabilities such as `coding=qwen-coder.gguf` or
 `research=qwen-instruct.gguf`; several workloads may share one model. With those bindings,
 `test demo` runs a five-phase adaptive workday: idle, mixed specialist demand, a general-demand

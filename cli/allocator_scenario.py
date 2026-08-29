@@ -8,7 +8,12 @@ import re
 from collections import Counter
 from typing import Any
 
-from shared.allocator.scenario import ScenarioConfig, ScenarioReport, run_scenario
+from shared.allocator.scenario import (
+    SCENARIO_WORKLOADS,
+    ScenarioConfig,
+    ScenarioReport,
+    run_scenario,
+)
 
 
 def bounded_scenario_machines(value: str) -> int:
@@ -34,6 +39,21 @@ def simulated_minutes(value: str) -> int:
     return minutes
 
 
+def workload_trace_binding(value: str) -> tuple[str, str]:
+    workload, separator, path = value.partition("=")
+    workload = workload.strip()
+    path = path.strip()
+    if not separator or not workload or not path:
+        raise argparse.ArgumentTypeError(
+            "workload trace must be WORKLOAD=CSV_PATH, for example coding=trace.csv"
+        )
+    if workload not in SCENARIO_WORKLOADS:
+        raise argparse.ArgumentTypeError(
+            f"unknown workload {workload!r}; choose from " + ", ".join(SCENARIO_WORKLOADS)
+        )
+    return workload, path
+
+
 def cmd_test_scenario(args: argparse.Namespace) -> int:
     config = ScenarioConfig(
         machines=args.machines,
@@ -41,6 +61,7 @@ def cmd_test_scenario(args: argparse.Namespace) -> int:
         users=args.users,
         minutes=args.duration,
         seed=args.seed,
+        workload_traces=tuple(args.workload_trace),
     )
     report = run_scenario(config)
     if args.json:
@@ -59,6 +80,12 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
     )
     print("Planning simulation only: hardware telemetry is modeled; no GPU processes are started.")
     print("The real `grid test demo` remains the load/warm/drain/unload process test.\n")
+    if cfg["workload_traces"]:
+        bindings = ", ".join(
+            f"{item['workload']}={item['path']}" for item in cfg["workload_traces"]
+        )
+        print(f"Demand replay: external request-rate traces for {bindings}.")
+        print("Trace values change demand timing, while normalization preserves workload scale.\n")
     print("Lifecycle timing: a load requested this minute becomes ready on the following minute.\n")
 
     print("Heterogeneous logical fleet")
@@ -128,6 +155,16 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
             f"  m{row['minute']:02d} {row['phase']:<19} "
             f"requests={row['requests']:<3} · served={row['service_rate_pct']:>6.2f}% · {detail}"
         )
+        if full_timeline or row.get("portfolio_changed"):
+            for admission in row.get("portfolio_admissions") or ():
+                if admission.get("state") == "ready":
+                    continue
+                print(
+                    f"      {admission.get('workload') or 'unknown'}: "
+                    f"{admission.get('state') or 'unknown'} via "
+                    f"{admission.get('model_id') or 'no-model'} · "
+                    f"{admission.get('reason') or 'no admission reason'}"
+                )
     if not full_timeline and len(timeline) < len(report.timeline):
         print(
             f"  … {len(report.timeline) - len(timeline)} intermediate changes hidden; "

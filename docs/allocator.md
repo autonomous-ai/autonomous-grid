@@ -847,6 +847,9 @@ uv run grid test scenario \
   --duration 30m \
   --seed 42
 uv run grid test scenario --machines 16 --models 9 --users 500 --duration 2h --json
+uv run grid test scenario --machines 8 --models 8 --users 50 --duration 2h \
+  --workload-trace coding=/path/to/trace.csv \
+  --workload-trace image=/path/to/image-trace.csv
 ```
 
 The lab creates logical Apple/Metal, ComfyUI/MPS, and NVIDIA/vLLM/ComfyUI configurations with
@@ -865,6 +868,14 @@ prints every changing tick; `--json` emits the complete stable report;
 reusing `--seed` reproduces the same run. Artifact disk constraints are translated into each
 one-model logical node's admission set, while the allocator's native runtime, backend, lifecycle,
 memory, headroom, and model-slot rules remain authoritative.
+
+For production-shaped replay, `--workload-trace WORKLOAD=CSV` accepts a headerless time series with
+timestamp seconds and request rate in its first two columns; additional distribution columns are
+ignored. Repeat the option for independent coding, research, image, video, or other supported
+workloads. Grid maps the whole trace onto the requested scenario duration and normalizes its mean
+to the built-in workload curve. This changes burst timing while keeping capacity comparisons on the
+same offered-demand scale. Trace input is bounded to 5 MiB and 100,000 rows per workload and is
+validated for finite, nonnegative rates and strictly increasing timestamps.
 
 The scenario lab is a planning-scale and decision-quality test only. It is not an inference test.
 The persistent fixture below is the real-process proof: every successful text or image result comes

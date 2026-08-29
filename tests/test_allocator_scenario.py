@@ -5,6 +5,7 @@ import json
 import pytest
 
 import cli
+from shared.allocator import scenario as scenario_module
 from shared.allocator.scenario import ScenarioConfig, run_scenario
 
 
@@ -46,6 +47,7 @@ def test_scenario_exercises_heterogeneous_fleet_catalog_users_and_events(
     assert report.metrics["joint_portfolio_ticks"] > 0
     assert report.metrics["portfolio_changes"] > 0
     assert any(row.get("portfolio_selection") for row in report.timeline)
+    assert any(row.get("portfolio_admissions") for row in report.timeline)
     assert all("ready_replicas" in row for row in report.timeline)
     assert all(0 <= row["service_rate_pct"] <= 100 for row in report.timeline)
     assert any(
@@ -162,6 +164,62 @@ def test_scenario_configuration_is_bounded(kwargs):
         ScenarioConfig(**kwargs)
 
 
+def test_workload_trace_changes_timing_without_changing_synthetic_demand_scale(tmp_path):
+    trace = tmp_path / "coding.csv"
+    trace.write_text("0,0\n30,0\n60,10\n90,10\n", encoding="utf-8")
+    config = ScenarioConfig(
+        machines=4,
+        models=4,
+        users=18,
+        minutes=6,
+        workload_traces=(("coding", str(trace)),),
+    )
+
+    curve = scenario_module._load_trace_curves(config)["coding"]
+    synthetic = tuple(
+        scenario_module._demand_multiplier(
+            scenario_module._phase(minute, config.minutes), "coding"
+        )
+        for minute in range(config.minutes)
+    )
+
+    assert curve[:4] == (0.0, 0.0, 0.0, 0.0)
+    assert curve[-1] > 0
+    assert sum(curve) == pytest.approx(sum(synthetic))
+
+    report = run_scenario(config)
+    assert report.configuration["demand_source"].startswith("external workload traces")
+    assert report.configuration["workload_traces"] == (
+        {"workload": "coding", "path": str(trace)},
+    )
+    assert report.safety["passed"] is True
+
+
+@pytest.mark.parametrize(
+    "contents,error",
+    [
+        ("timestamp,rate\n0,1\n", "must not have a header"),
+        ("0,1\n0,2\n", "strictly increasing"),
+        ("0,-1\n", "invalid request rate"),
+        ("0,0\n60,0\n", "no positive request rate"),
+    ],
+)
+def test_workload_trace_rejects_malformed_or_useless_input(tmp_path, contents, error):
+    trace = tmp_path / "bad.csv"
+    trace.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=error):
+        run_scenario(
+            ScenarioConfig(
+                machines=4,
+                models=4,
+                users=9,
+                minutes=6,
+                workload_traces=(("coding", str(trace)),),
+            )
+        )
+
+
 def test_cli_parser_exposes_scenario_scale_duration_and_seed():
     args = cli.build_parser().parse_args(
         [
@@ -177,6 +235,8 @@ def test_cli_parser_exposes_scenario_scale_duration_and_seed():
             "2h",
             "--seed",
             "123",
+            "--workload-trace",
+            "coding=/tmp/coding.csv",
             "--timeline",
             "--json",
         ]
@@ -188,6 +248,7 @@ def test_cli_parser_exposes_scenario_scale_duration_and_seed():
     assert args.users == 500
     assert args.duration == 120
     assert args.seed == 123
+    assert args.workload_trace == [("coding", "/tmp/coding.csv")]
     assert args.timeline is True
     assert args.json is True
 
@@ -238,9 +299,37 @@ def test_scenario_cli_prints_human_scorecard(capsys):
     assert "joint portfolio optimizer" in output
     assert "served=" in output
     assert "portfolio " in output
+    assert " via " in output
     assert "fairness" not in output
     assert "compute cost" not in output
     assert "Safety: PASS" in output
+
+
+def test_scenario_cli_explains_external_trace_replay(tmp_path, capsys):
+    trace = tmp_path / "image.csv"
+    trace.write_text("0,0.1\n600,0.8\n", encoding="utf-8")
+    args = cli.build_parser().parse_args(
+        [
+            "test",
+            "scenario",
+            "--machines",
+            "4",
+            "--models",
+            "4",
+            "--users",
+            "9",
+            "--duration",
+            "6m",
+            "--workload-trace",
+            f"image={trace}",
+        ]
+    )
+
+    assert args.handler(args) == 0
+    output = capsys.readouterr().out
+    assert "Demand replay: external request-rate traces" in output
+    assert "normalization preserves workload scale" in output
+    assert "Planning simulation only" in output
 
 
 def test_scenario_cli_json_is_machine_readable(capsys):

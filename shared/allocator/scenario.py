@@ -8,10 +8,13 @@ claiming that modeled CUDA, MPS, disk, or VRAM telemetry is physically present.
 
 from __future__ import annotations
 
+import csv
 import math
 import random
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 from typing import Any, Iterable
 
 from shared.allocator.controller import AllocatorController
@@ -33,6 +36,7 @@ class ScenarioConfig:
     users: int = 50
     minutes: int = 30
     seed: int = 42
+    workload_traces: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         bounds = {
@@ -46,6 +50,21 @@ class ScenarioConfig:
                 raise ValueError(f"{name} must be in [{minimum}, {maximum}]")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise ValueError("seed must be an integer")
+        seen: set[str] = set()
+        for binding in self.workload_traces:
+            if not isinstance(binding, tuple) or len(binding) != 2:
+                raise ValueError("workload_traces entries must be (workload, path) pairs")
+            workload, path = binding
+            if workload not in SCENARIO_WORKLOADS:
+                raise ValueError(
+                    f"unknown trace workload {workload!r}; choose from "
+                    + ", ".join(SCENARIO_WORKLOADS)
+                )
+            if workload in seen:
+                raise ValueError(f"workload trace supplied more than once: {workload}")
+            if not isinstance(path, str) or not path.strip():
+                raise ValueError(f"trace path for {workload} must be a non-empty string")
+            seen.add(workload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +128,10 @@ _REQUESTS: dict[str, tuple[str, str]] = {
     "general": ("chat/completions", "Summarize the meeting and identify the next actions."),
     "embedding": ("embeddings", "Index these internal documents."),
 }
+
+SCENARIO_WORKLOADS = tuple(_REQUESTS)
+_MAX_TRACE_BYTES = 5 * 1024 * 1024
+_MAX_TRACE_ROWS = 100_000
 
 _DIRECT_MODEL_BY_WORKLOAD = {"general": "general-assistant"}
 
@@ -291,12 +314,12 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     catalog = _build_catalog(config.models, config.machines)
     machines = _build_machines(config.machines, catalog, topology_rng)
     personas = _build_personas(config.users, persona_rng)
+    trace_curves = _load_trace_curves(config)
     planner_policy = PlannerPolicy(memory_headroom_fraction=0.05, node_ttl_seconds=180)
     controller = AllocatorController(planner_policy=planner_policy)
     profiles = tuple(item.profile for item in catalog)
     for profile in profiles:
         controller.put_profile(profile)
-    planner = controller.planner
     profile_by_id = {item.profile.model_id: item.profile for item in catalog}
     artifact_by_id = {item.profile.model_id: item.artifact_size_mb for item in catalog}
     nodes = tuple(item.snapshot for item in machines)
@@ -371,6 +394,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 "unloads": [],
                 "node_changes": [],
                 "portfolio_selection": {},
+                "portfolio_admissions": (),
                 "portfolio_changed": False,
                 "unsatisfied": [],
             }
@@ -390,7 +414,12 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         current_ready = _ready_models(nodes)
 
         for persona in personas:
-            expected = persona.requests_per_minute * _demand_multiplier(phase, persona.workload)
+            multiplier = (
+                trace_curves[persona.workload][minute]
+                if persona.workload in trace_curves
+                else _demand_multiplier(phase, persona.workload)
+            )
+            expected = persona.requests_per_minute * multiplier
             count = math.floor(expected)
             if rng.random() < expected - count:
                 count += 1
@@ -498,6 +527,9 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             str(workload): str(model_id)
             for workload, model_id in allocator_status["portfolio_selection"].items()
         }
+        portfolio_admissions = tuple(
+            dict(row) for row in allocator_status["portfolio_admissions"]
+        )
         joint_portfolio_ticks += int(allocator_status["portfolio_policy"]["joint"])
         portfolio_changed = portfolio_selection != prior_portfolio_selection
         portfolio_changes += int(portfolio_changed)
@@ -606,6 +638,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     "unloads": [f"{model}@{node}" for node, model in sorted(removed)],
                     "node_changes": state_changes,
                     "portfolio_selection": dict(sorted(portfolio_selection.items())),
+                    "portfolio_admissions": portfolio_admissions,
                     "portfolio_changed": portfolio_changed,
                     "unsatisfied": [
                         {
@@ -721,8 +754,19 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         }
         for workload, requested in sorted(requested_by_workload.items())
     }
+    configuration = asdict(config)
+    configuration["workload_traces"] = tuple(
+        {"workload": workload, "path": path}
+        for workload, path in config.workload_traces
+    )
+    configuration["demand_source"] = (
+        "external workload traces plus synthetic unbound workloads"
+        if config.workload_traces
+        else "synthetic phase schedule"
+    )
+    configuration["mode"] = "deterministic planning simulation"
     return ScenarioReport(
-        configuration={**asdict(config), "mode": "deterministic planning simulation"},
+        configuration=configuration,
         machines=machine_rows,
         models=model_rows,
         users=user_rows,
@@ -922,6 +966,106 @@ def _demand_multiplier(phase: str, workload: str) -> float:
         "research-recovery": {"research": 4.0, "embedding": 2.5, "coding": 1.3},
     }
     return base * boosts.get(phase, {}).get(workload, 1.0)
+
+
+def _load_trace_curves(config: ScenarioConfig) -> dict[str, tuple[float, ...]]:
+    """Map external timestamp/rate traces onto scenario minutes without changing demand scale.
+
+    Trace files use a deliberately small interchange format: CSV with no header, timestamp in
+    seconds in column one and request rate in column two. Additional columns are ignored, which
+    makes production trace sets such as ServeGen directly usable. Each trace replaces only the
+    *shape* of its workload's synthetic curve; normalizing to the original curve's mean keeps
+    fleet comparisons honest instead of letting an arbitrary trace unit change offered load.
+    """
+
+    curves: dict[str, tuple[float, ...]] = {}
+    for workload, raw_path in config.workload_traces:
+        samples = _read_trace(Path(raw_path), workload=workload)
+        raw_curve = _resample_trace(samples, config.minutes)
+        raw_mean = sum(raw_curve) / len(raw_curve)
+        if raw_mean <= 0:
+            raise ValueError(f"trace for {workload} has no positive demand after resampling")
+        synthetic_curve = tuple(
+            _demand_multiplier(_phase(minute, config.minutes), workload)
+            for minute in range(config.minutes)
+        )
+        target_mean = sum(synthetic_curve) / len(synthetic_curve)
+        scale = target_mean / raw_mean
+        curves[workload] = tuple(value * scale for value in raw_curve)
+    return curves
+
+
+def _read_trace(path: Path, *, workload: str) -> tuple[tuple[float, float], ...]:
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"cannot read trace for {workload}: {path}: {exc}") from exc
+    if size > _MAX_TRACE_BYTES:
+        raise ValueError(
+            f"trace for {workload} is {size} bytes; maximum is {_MAX_TRACE_BYTES}"
+        )
+
+    samples: list[tuple[float, float]] = []
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            for line_number, row in enumerate(csv.reader(handle), start=1):
+                if not row or all(not field.strip() for field in row):
+                    continue
+                if len(samples) >= _MAX_TRACE_ROWS:
+                    raise ValueError(
+                        f"trace for {workload} exceeds {_MAX_TRACE_ROWS} non-empty rows"
+                    )
+                if len(row) < 2:
+                    raise ValueError(
+                        f"trace for {workload} line {line_number} needs timestamp,request_rate"
+                    )
+                try:
+                    timestamp = float(row[0])
+                    rate = float(row[1])
+                except ValueError as exc:
+                    raise ValueError(
+                        f"trace for {workload} line {line_number} has non-numeric "
+                        "timestamp or request rate (files must not have a header)"
+                    ) from exc
+                if not math.isfinite(timestamp) or timestamp < 0:
+                    raise ValueError(
+                        f"trace for {workload} line {line_number} has invalid timestamp"
+                    )
+                if not math.isfinite(rate) or rate < 0:
+                    raise ValueError(
+                        f"trace for {workload} line {line_number} has invalid request rate"
+                    )
+                if samples and timestamp <= samples[-1][0]:
+                    raise ValueError(
+                        f"trace for {workload} timestamps must be strictly increasing"
+                    )
+                samples.append((timestamp, rate))
+    except UnicodeError as exc:
+        raise ValueError(f"trace for {workload} must be UTF-8 CSV: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"cannot read trace for {workload}: {path}: {exc}") from exc
+    if not samples:
+        raise ValueError(f"trace for {workload} is empty")
+    if not any(rate > 0 for _, rate in samples):
+        raise ValueError(f"trace for {workload} has no positive request rate")
+    return tuple(samples)
+
+
+def _resample_trace(
+    samples: tuple[tuple[float, float], ...],
+    minutes: int,
+) -> tuple[float, ...]:
+    if len(samples) == 1:
+        return (samples[0][1],) * minutes
+    timestamps = tuple(timestamp for timestamp, _ in samples)
+    start = timestamps[0]
+    span = timestamps[-1] - start
+    result: list[float] = []
+    for minute in range(minutes):
+        source_time = start + span * minute / (minutes - 1)
+        index = max(0, bisect_right(timestamps, source_time) - 1)
+        result.append(samples[index][1])
+    return tuple(result)
 
 
 def _evolve_nodes(
