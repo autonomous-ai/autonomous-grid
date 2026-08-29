@@ -123,7 +123,13 @@ when it is the only feasible target. Explicit pins, per-host model limits, compa
 and a feasible minimum failure-
 domain count are hard constraints. A failure-domain shortfall or capacity shortage is reported
 rather than hidden by overcommit. A throttled host exposes only its configured fraction of capacity
-for new placement. When greedy placement fragments capacity, a deterministic bounded backtracking
+for new placement. Placement keeps two memory ledgers: current live processes consume incremental
+make-before-break capacity including admission headroom, while the complete desired footprint must
+fit the host's raw allocatable memory after reserve and thermal derating. An existing process may
+therefore be re-admitted without requiring phantom free headroom, but reserve growth cannot leave an
+unsafe collection of zero-incremental incumbents selected. The lowest-priority movable incumbent is
+migrated first when a safe peer exists; without one, Grid reports the shortfall and preserves the
+last replica instead of hiding either constraint. When greedy placement fragments capacity, a deterministic bounded backtracking
 repair can evacuate and re-place several equal-priority replicas; unrelated or ineligible inventory
 does not change that search budget or its result. On homogeneous empty-residency fleets—where moves
 provably preserve resource use—aggregate free memory and model slots provide an admissible lower
@@ -233,8 +239,10 @@ accepting one.
 
 The planner and reconciler keep these rules even when demand, membership, or clocks change:
 
-1. **Never overcommit declared memory.** Reserved memory and policy headroom are removed before
-   placement. Unmanaged resident workloads consume capacity first.
+1. **Never overcommit declared memory.** Reserved memory and thermal derating bound the complete
+   desired footprint. Policy headroom additionally fences new or resized allocations, while a
+   zero-allocation transition may retain an existing process in that margin. Unmanaged resident
+   workloads consume capacity first.
 2. **Never place on an ineligible host.** Paused, draining, unhealthy, quarantined, stale, missing-
    heartbeat, or implausibly future-heartbeat hosts receive no new placement. Runtime, backend,
    data tier, tags, allow/deny lists, pins, and per-host model limits are enforced.
