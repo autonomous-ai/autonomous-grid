@@ -165,6 +165,62 @@ def test_controller_learns_and_persists_bounded_warm_duration(tmp_path):
     assert restored.status(now=31 * 24 * 60 * 60)["learned_warm_seconds"] == []
 
 
+def test_learned_warm_time_prioritizes_faster_equal_priority_start():
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(max_concurrent_mutations=1),
+    )
+    slow = profile(
+        "slow",
+        pinned_nodes=("a-slow",),
+        warm_seconds=1,
+    )
+    controller.put_profile(slow)
+
+    def cached_node(node_id: str, model_id: str, heartbeat: float) -> NodeSnapshot:
+        return NodeSnapshot(
+            node_id,
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            cached_models=(model_id,),
+            residencies=(
+                ModelResidency(model_id, 8_000, ResidencyState.CACHED),
+            ),
+            last_heartbeat=heartbeat,
+        )
+
+    controller.tick([cached_node("a-slow", "slow", 10)], now=10)
+    learned_command = controller.commands_for("a-slow", now=10)[0]
+    assert learned_command.kind == ActionKind.WARM
+    controller.acknowledge(
+        "a-slow",
+        learned_command.action_id,
+        MutationStatus.SUCCEEDED,
+        duration_seconds=40,
+        now=11,
+    )
+
+    controller.put_profile(
+        profile(
+            "fast",
+            pinned_nodes=("z-fast",),
+            warm_seconds=5,
+        )
+    )
+    result = controller.tick(
+        [
+            cached_node("a-slow", "slow", 12),
+            cached_node("z-fast", "fast", 12),
+        ],
+        now=12,
+    )
+
+    assert [(action.kind, action.model_id) for action in result.executable_actions] == [
+        (ActionKind.WARM, "fast")
+    ]
+
+
 def test_controller_does_not_reuse_warm_timing_across_artifact_revisions():
     controller = AllocatorController(mode=AllocatorMode.AUTOMATIC)
     controller.put_profile(profile(artifact_sha256="a" * 64))

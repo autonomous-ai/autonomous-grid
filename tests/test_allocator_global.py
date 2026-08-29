@@ -3175,6 +3175,48 @@ def test_mutation_governor_starts_direct_demand_before_speculative_prewarm():
     ]
 
 
+def test_mutation_governor_prefers_fast_cached_start_within_service_class():
+    machines = [
+        node("a-cold"),
+        node("z-cached", cached=("cached",)),
+    ]
+    profiles = [
+        model(
+            "cold",
+            pinned_nodes=("a-cold",),
+            load_seconds=60,
+            warm_seconds=5,
+        ),
+        model(
+            "cached",
+            pinned_nodes=("z-cached",),
+            load_seconds=60,
+            warm_seconds=5,
+        ),
+    ]
+    plan = PlacementPlanner().plan(machines, profiles, now=10)
+
+    result = Reconciler(
+        ReconcilePolicy(max_concurrent_mutations=1)
+    ).reconcile(
+        plan,
+        machines,
+        profiles,
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+
+    assert [(item.kind, item.model_id) for item in result.executable_actions] == [
+        (ActionKind.WARM, "cached")
+    ]
+    assert any(
+        item.kind == ActionKind.LOAD
+        and item.model_id == "cold"
+        and item.code == "global_mutation_limit"
+        for item in result.deferred
+    )
+
+
 def test_mutation_governor_prioritizes_drain_for_preemption_beneficiary():
     machines = [
         node("a-routine", 8_000, residencies=(ready("obsolete", 8_000),)),

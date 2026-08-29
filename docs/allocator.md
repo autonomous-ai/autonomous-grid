@@ -263,7 +263,9 @@ The planner and reconciler keep these rules even when demand, membership, or clo
    churn and retry storms. Scarce execution slots go to higher-priority service even across
    lifecycle phases; an explicit preemption drain inherits the beneficiary's priority, while
    routine cleanup remains behind availability work. Within one administrator-priority class,
-   required baseline and direct demand execute before correlation-only prewarming.
+   required baseline and direct demand execute before correlation-only prewarming. Equal-priority,
+   equal-urgency work uses its estimated remaining cold-start path, so a cached model that can serve
+   soon is not stranded behind an unrelated artifact download.
 9. **Make retries idempotent.** Actions have stable IDs, pending equivalents are suppressed, and
    duplicate acknowledgements are harmless. Command delivery is durably marked before the response
    is returned to a node. A late success or failure may complete an action that the controller had

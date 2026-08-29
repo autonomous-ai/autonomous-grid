@@ -218,12 +218,26 @@ class Reconciler:
             tuple[ActionKind, str, str], MutationStatus | str
         ] | None = None,
         blocked_destructive_models: Iterable[str] = (),
+        startup_seconds: Mapping[tuple[str, str], float] | None = None,
     ) -> ReconcileResult:
         timestamp = time.time() if now is None else float(now)
         if not math.isfinite(timestamp) or timestamp < 0:
             raise ValueError("now must be finite and non-negative")
         if not isinstance(mode, AllocatorMode):
             mode = AllocatorMode(mode)
+        startup_by_pair: dict[tuple[str, str], float] = {}
+        for key, raw_duration in (startup_seconds or {}).items():
+            if (
+                not isinstance(key, tuple)
+                or len(key) != 2
+                or not all(isinstance(item, str) and item for item in key)
+                or isinstance(raw_duration, bool)
+            ):
+                raise ValueError("startup estimates must identify a node/model pair")
+            duration = float(raw_duration)
+            if not math.isfinite(duration) or duration < 0:
+                raise ValueError("startup estimates must be finite and non-negative")
+            startup_by_pair[key] = duration
         node_by_id = {node.node_id: node for node in nodes}
         profile_by_id = {profile.model_id: profile for profile in profiles}
         # Controller history is an append-only transition log: one action commonly has PENDING,
@@ -532,7 +546,7 @@ class Reconciler:
 
         # Availability mutations have precedence over removals.  The governor limits executable
         # work, while recommend mode can show the full proposal set for human review.
-        priority = {
+        lifecycle_priority = {
             ActionKind.LOAD: 0,
             ActionKind.WARM: 1,
             ActionKind.DRAIN: 2,
@@ -558,12 +572,43 @@ class Reconciler:
             # every availability action and explicit capacity-unlocking preemption.
             return (-1, -1)
 
-        def proposal_sort_key(action: MutationAction) -> tuple[int, int, int, str, str]:
+        def time_to_ready(action: MutationAction) -> float:
+            """Estimate the beneficiary's remaining critical path for service.
+
+            A dependent WARM retains the full cold path so it cannot jump ahead of the LOAD that
+            makes its dependency deliverable.
+            """
+
+            preemption = preemptions.get((action.node_id, action.model_id))
+            model_id = (
+                preemption.for_model_id
+                if preemption is not None and preemption.for_model_id
+                else action.model_id
+            )
+            profile = profile_by_id.get(model_id)
+            if profile is None:
+                return math.inf
+            warm_seconds = startup_by_pair.get(
+                (action.node_id, model_id),
+                profile.warm_seconds,
+            )
+            if action.kind == ActionKind.WARM and not action.dependencies:
+                return warm_seconds
+            if action.kind in (ActionKind.LOAD, ActionKind.WARM):
+                return profile.load_seconds + warm_seconds
+            if preemption is not None:
+                return profile.load_seconds + warm_seconds
+            return math.inf
+
+        def proposal_sort_key(
+            action: MutationAction,
+        ) -> tuple[int, int, float, int, str, str]:
             admin_priority, demand_urgency = service_priority(action)
             return (
                 -admin_priority,
                 -demand_urgency,
-                priority[action.kind],
+                time_to_ready(action),
+                lifecycle_priority[action.kind],
                 action.node_id,
                 action.model_id,
             )

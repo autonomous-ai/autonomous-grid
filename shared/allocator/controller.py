@@ -321,6 +321,7 @@ class AllocatorController:
             blocked_until=self._mutation_blocks,
             blocked_causes=self._mutation_block_causes,
             blocked_destructive_models=blocked_destructive_models,
+            startup_seconds=startup_estimates,
         )
         if self.mode == AllocatorMode.AUTOMATIC:
             result = self._sequence_actions(result)
