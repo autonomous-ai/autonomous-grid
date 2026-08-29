@@ -15,6 +15,23 @@ reconstruction on another computer.
 - All three providers point at the same relay. Agent model requests point back through Grid
   inference; record the model-serving node separately from the agent-executing node.
 
+## Version and endpoint preflight
+
+Install the same release-candidate commits on the relay and every provider. Record both repository
+SHAs in the evidence artifact; a source checkout on one node and an older packaged binary on another
+is a failed preflight, not a compatibility test.
+
+Before creating work, the owner machine must get a non-404 response from:
+
+```bash
+grid goal list --all --json
+```
+
+On A and C, `grid agent status` must report Codex installed. On B, `claude --version` must succeed;
+the Claude-only canary below is the authoritative native-Goal wiring check. Stop every other
+task-serving provider for this project during the run; inference-only engines may stay online. The
+three intended task nodes must use distinct node ids and the expected harness allowlist below.
+
 Start each worker with an explicit harness policy and unique local root:
 
 ```bash
@@ -24,6 +41,10 @@ GRID_TASK_AGENT_KINDS=codex grid join <grid> --tasks --tasks-root <local-path>
 # B
 GRID_TASK_AGENT_KINDS=claude grid join <grid> --tasks --tasks-root <local-path>
 ```
+
+Do not continue until a Codex-only canary Goal is claimed by A or C and a Claude-only canary Goal is
+claimed by B. Cancel both canaries and save their evidence. This detects a worker that is online for
+inference but not actually polling the distributed task queue.
 
 ## Scenario
 
@@ -61,6 +82,10 @@ The commit chain must be ancestral and every replacement must fetch through the 
 Opaque Codex and Claude histories may remain harness-specific; cross-harness continuity comes from
 the shared committed tree, Goal metadata, events, and relay-authored eval evidence. A same-harness
 worker should additionally restore that harness's private transcript side-ref.
+
+Every terminal evaluation row used as proof must have `accepted: true`. A row with
+`accepted: false` proves only that a stale provider evaluated something after losing its lease; it
+must remain in the audit record and must not be counted toward completion or future training data.
 
 ## Failure criteria
 
