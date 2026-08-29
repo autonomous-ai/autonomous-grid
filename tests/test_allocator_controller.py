@@ -834,6 +834,81 @@ def test_learned_warm_time_prioritizes_faster_equal_priority_start():
     ]
 
 
+def test_controller_forecasts_against_fastest_learned_cached_path(monkeypatch):
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(max_concurrent_mutations=2),
+    )
+    initial_profile = ModelProfile(
+        "qwen",
+        8_000,
+        runtimes=("llama.cpp",),
+        min_replicas=2,
+        max_replicas=2,
+        target_utilization=1,
+        load_seconds=60,
+        warm_seconds=1,
+        min_residency_seconds=0,
+    )
+    controller.put_profile(initial_profile)
+    machines = tuple(
+        NodeSnapshot(
+            node_id,
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            cached_models=("qwen",),
+            last_heartbeat=10,
+        )
+        for node_id in ("a-fast", "z-slow")
+    )
+    controller.tick(machines, now=10)
+    commands = {
+        machine.node_id: controller.commands_for(machine.node_id, now=10)[0]
+        for machine in machines
+    }
+    for node_id, duration in (("a-fast", 1), ("z-slow", 100)):
+        controller.acknowledge(
+            node_id,
+            commands[node_id].action_id,
+            MutationStatus.SUCCEEDED,
+            duration_seconds=duration,
+            now=11,
+        )
+
+    controller.put_profile(
+        replace(initial_profile, min_replicas=0, max_replicas=10)
+    )
+    monkeypatch.setattr(
+        AllocatorController,
+        "_forecasts",
+        lambda _controller, _now: (
+            DemandForecast(
+                "qwen",
+                requests_per_minute=60,
+                observed_requests_per_minute=60,
+                offered_concurrency=1.5,
+                trend_per_minute=60,
+                confidence=1,
+                updated_at=12,
+            ),
+        ),
+    )
+
+    controller.tick(
+        tuple(replace(machine, last_heartbeat=12) for machine in machines),
+        now=12,
+    )
+
+    assert controller.last_plan is not None
+    assert controller.last_plan.target_for("qwen") == 2
+    learned = {
+        row["node_id"]: row["seconds"]
+        for row in controller.status(now=12)["learned_warm_seconds"]
+    }
+    assert learned == {"a-fast": 1, "z-slow": 25.75}
+
+
 def test_controller_does_not_reuse_warm_timing_across_artifact_revisions():
     controller = AllocatorController(mode=AllocatorMode.AUTOMATIC)
     controller.put_profile(profile(artifact_sha256="a" * 64))
