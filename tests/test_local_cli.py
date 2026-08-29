@@ -5,6 +5,7 @@ import base64
 import contextlib
 import datetime
 import errno
+import io
 import json
 import os
 import shlex
@@ -462,17 +463,54 @@ def test_cli_accepts_engine_runtime_commands():
     assert start.port == 8200
     assert start.detach is True
 
-    assert parser.parse_args(["engine", "stop"]).handler is cli.cmd_engine_stop
+    stop = parser.parse_args(["engine", "stop", "--port", "8200"])
+    assert stop.handler is cli.cmd_engine_stop
+    assert stop.port == 8200
 
 
 def test_engine_stop_delegates_to_comfyui(monkeypatch):
     calls = []
-    monkeypatch.setattr(comfyui, "stop_running", lambda: calls.append("stop") or 0)
+    monkeypatch.setattr(comfyui, "stop_running", lambda port: calls.append(port) or 0)
 
-    rc = cli.cmd_engine_stop(argparse.Namespace())
+    rc = cli.cmd_engine_stop(argparse.Namespace(port=8200))
 
     assert rc == 0
-    assert calls == ["stop"]
+    assert calls == [8200]
+
+
+def test_comfyui_start_detaches_engine_process_group(monkeypatch, tmp_path):
+    python = tmp_path / "python"
+    python.touch()
+    checkout = tmp_path / "ComfyUI"
+    checkout.mkdir()
+    output = tmp_path / "output"
+    spawned = {}
+    # `start()` stores the child handle globally. Make the test own that mutation so pytest restores
+    # it at teardown instead of leaking the fake process into later lifecycle tests.
+    monkeypatch.setattr(comfyui, "_active", None)
+
+    class FakeProc:
+        pid = 4321
+
+    def fake_popen(cmd, **kwargs):
+        spawned["cmd"] = cmd
+        spawned["kwargs"] = kwargs
+        return FakeProc()
+
+    monkeypatch.setattr(comfyui, "comfyui_python", lambda: python)
+    monkeypatch.setattr(comfyui, "comfyui_dir", lambda: checkout)
+    monkeypatch.setattr(comfyui, "output_dir", lambda: output)
+    monkeypatch.setattr(comfyui, "_is_port_in_use", lambda port: False)
+    monkeypatch.setattr(comfyui, "_vram_flags", lambda: [])
+    monkeypatch.setattr(comfyui, "_write_pid_file", lambda pid, port: None)
+    monkeypatch.setattr(comfyui.logging_setup, "cap_and_open_append", lambda *a, **k: io.StringIO())
+    monkeypatch.setattr(comfyui.subprocess, "Popen", fake_popen)
+
+    process = comfyui.start(8200)
+
+    assert process.proc.pid == 4321
+    assert spawned["kwargs"]["start_new_session"] is True
+    assert spawned["kwargs"]["cwd"] == str(checkout)
 
 
 def test_wait_for_media_server_fails_fast_when_child_exits():

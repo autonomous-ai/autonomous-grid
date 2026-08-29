@@ -63,7 +63,7 @@ def cmd_engine_start(args: argparse.Namespace) -> int:
 def cmd_engine_stop(args: argparse.Namespace) -> int:
     from shared.engine import comfyui
 
-    return comfyui.stop_running()
+    return comfyui.stop_running(getattr(args, "port", 8188))
 
 
 def cmd_engine_list(args: argparse.Namespace) -> int:

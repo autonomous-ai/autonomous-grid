@@ -65,6 +65,9 @@ from .logical_test import (
     cmd_test_watch,
     logical_machine_count,
     positive_seconds,
+    positive_tokens,
+    real_request_count,
+    real_user_count,
 )
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
@@ -209,8 +212,34 @@ def _add_logical_test(sub) -> None:
     start.add_argument(
         "--timeout",
         type=positive_seconds,
-        default=120.0,
-        help="Seconds to wait for every real model replica to become ready.",
+        default=600.0,
+        help="Seconds to wait for every real text/media engine to become ready.",
+    )
+    start.add_argument(
+        "--include-comfyui",
+        action="store_true",
+        help=(
+            "Use one of the N logical machines for a real ComfyUI/PyTorch media engine; "
+            "the remaining machines run llama.cpp."
+        ),
+    )
+    start.add_argument(
+        "--media-bundle",
+        choices=("image_generation", "z_image"),
+        default="z_image",
+        help="Installed ComfyUI bundle used by the real media node (default z_image).",
+    )
+    start.add_argument(
+        "--comfyui-port",
+        type=int,
+        default=22_200,
+        help="Loopback ComfyUI port for the mixed-framework test Grid.",
+    )
+    start.add_argument(
+        "--media-port",
+        type=int,
+        default=22_201,
+        help="Loopback Grid media-adapter port for the mixed-framework test Grid.",
     )
     start.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     start.set_defaults(handler=cmd_test_start)
@@ -225,28 +254,30 @@ def _add_logical_test(sub) -> None:
     )
     demo.add_argument(
         "--requests",
-        type=_positive_task_count,
-        default=60,
+        type=real_request_count,
+        default=12,
         metavar="N",
-        help="Synthetic requests in the current one-minute demand bucket (default 60).",
+        help="Total real concurrent chat requests in the multi-user phase (default 12).",
     )
     demo.add_argument(
-        "--service-seconds",
-        type=positive_seconds,
-        default=5.0,
-        help="Average synthetic service time per request (default 5).",
+        "--users",
+        type=real_user_count,
+        default=6,
+        metavar="N",
+        help="Distinct real client personas issuing inference requests (default 6).",
     )
     demo.add_argument(
-        "--queue-depth",
-        type=int,
-        default=0,
-        help="Synthetic queued requests (default 0).",
+        "--max-tokens",
+        type=positive_tokens,
+        default=32,
+        metavar="N",
+        help="Maximum generated tokens for each real chat request (default 32).",
     )
     demo.add_argument(
         "--timeout",
         type=positive_seconds,
-        default=120.0,
-        help="Seconds allowed for each real placement transition.",
+        default=600.0,
+        help="Seconds allowed for each real placement or ComfyUI generation transition.",
     )
     demo.set_defaults(handler=cmd_test_demo)
 
@@ -1934,6 +1965,7 @@ def _add_engine_setup(sub) -> None:
     start.set_defaults(handler=cmd_engine_start)
 
     stop = engine_sub.add_parser("stop", help="Stop the built-in media engine (ComfyUI)")
+    stop.add_argument("--port", type=int, default=8188)
     stop.set_defaults(handler=cmd_engine_stop)
 
     # `grid engine ls`/`list`: live engines joined to the grid (mode-aware, like `grid engines`).

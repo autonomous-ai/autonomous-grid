@@ -759,8 +759,9 @@ reusing `--seed` reproduces the same run. Artifact disk constraints are translat
 one-model logical node's admission set, while the allocator's native runtime, backend, lifecycle,
 memory, headroom, and model-slot rules remain authoritative.
 
-The scenario lab is the scale and decision-quality test. The persistent fixture below is the
-separate real-process proof for llama.cpp lifecycle actuation.
+The scenario lab is a planning-scale and decision-quality test only. It is not an inference test.
+The persistent fixture below is the real-process proof: every successful text or image result comes
+from an engine running on the development Mac.
 
 For interactive development, start a persistent Grid with any number of logical machines. Each
 machine gets a stable host id, failure domain, state file, credential, capacity share, and real
@@ -770,7 +771,7 @@ llama.cpp child while the Grid API remains available until explicitly stopped:
 uv run grid test start --machines 4
 uv run grid test status
 uv run grid test watch
-uv run grid test demo
+uv run grid test demo --users 6 --requests 12
 uv run grid --local models http://127.0.0.1:22100
 uv run grid --local chat --grid http://127.0.0.1:22100 \
   -m SmolLM2-135M-Instruct-Q3_K_M.gguf 'Reply with OK'
@@ -780,6 +781,22 @@ curl http://127.0.0.1:22100/v1/chat/completions \
   -d '{"model":"SmolLM2-135M-Instruct-Q3_K_M.gguf","messages":[{"role":"user","content":"Reply with OK"}],"max_tokens":8}'
 uv run grid test stop
 ```
+
+For a real mixed-framework Grid, install the runtime and bundle once, then reserve one of the N
+logical machines for ComfyUI. On Apple Silicon this is ComfyUI with PyTorch/MPS; the remaining
+logical machines run independently managed llama.cpp/Metal children:
+
+```bash
+uv run grid engine install comfyui
+uv run grid engine pull z_image
+uv run grid test start --machines 4 --include-comfyui --media-bundle z_image
+uv run grid test demo --users 6 --requests 12 --max-tokens 32
+```
+
+Here `--machines 4` means four total logical machines: three llama.cpp text nodes and one ComfyUI
+media node. All processes still share one physical Mac, so the fixture partitions reported capacity
+instead of multiplying it. It does not pretend that CUDA or vLLM exists on Apple hardware. A CUDA
+host can install/register vLLM as external inventory during the physical-node phase.
 
 `--machines N` accepts 1–32 logical machines; practical limits are the physical machine's memory
 and process capacity. Use `--model`, `--port`, and `--engine-port-base` to run a different cached
@@ -791,15 +808,23 @@ URL (`--local` makes that explicit even when remote mode is active), including `
 owner-only token file for allocator mutations. The fixture stays isolated from the active local or
 remote Grid configuration.
 
-`grid test demo` registers a second portfolio model and gives every logical host one real model
-slot. It first converges the baseline from four replicas to its idle floor of one. It then replays
-ordinary coding request/response exchanges—the fixture does not provide a workload label—so the
-allocator classifies the bounded observations and proactively fills the three spare hosts with the
-coding model. Direct named-model pressure then reclaims all hosts for the baseline before quiet
-demand safely returns it to one replica: `4+0 → 1+0 → 1+3 → 4+0 → 1+0`. The command narrates every
-real llama.cpp load, warm, drain, and unload transition. The replay endpoint is available only on
-the loopback test fixture behind its control token, and retained allocator state contains no prompt
-or response text.
+`grid test demo` performs no synthetic inference or demand injection. It first converges the
+baseline to one real replica and verifies a genuine OpenAI-compatible response. Three genuine
+coding requests for unresolved `auto` receive honest HTTP 503 responses with no router involved.
+The production request path classifies bounded features locally; after its minimum evidence
+threshold, the allocator projects that workload onto the configured coding portfolio and
+proactively loads and warms a real llama.cpp canary before any request names it. The first named
+specialist call must then return real output. Multiple client personas send concurrent requests to
+both text models with stable affinity keys and bounded production-style retries. The report requires
+non-empty assistant output, response IDs, usage, client-visible latency including retries, per-node performance samples,
+and the complete process lifecycle before passing. Observed demand expires naturally; the command
+never clears or fabricates it.
+
+When the Grid was started with `--include-comfyui`, the same command also sends a genuine image
+workflow through `/v1/media/image/generate`, validates returned PNG bytes, and writes the result into
+the logical test run directory. ComfyUI is currently registered as immutable media inventory: the
+fixture owns its process startup and teardown, while allocator mutations remain limited to
+Grid-owned llama.cpp residencies. This ownership boundary is reported rather than hidden.
 
 Before a physical multi-machine rollout, the development harness can partition one Mac into
 isolated logical hosts with separate host IDs, failure domains, durable state files, credentials,
@@ -833,9 +858,11 @@ complete another real streamed request before final cleanup.
 - The controller and status/control routes in this repository are the local Grid implementation.
   The hosted relay/control-plane service is separate, so remote fleet allocation needs a matching
   versioned persistence, authentication, lease, and command-delivery implementation there.
-- The first managed process boundary is Grid-owned model runtimes. External Ollama, vLLM, LM Studio,
-  API, and manually started engines are inventory and routing sources, not processes the allocator
-  may stop.
+- The first managed process boundary is Grid-owned llama.cpp model runtimes. ComfyUI, external
+  Ollama/vLLM/LM Studio, API, and manually started engines are inventory and routing sources, not
+  processes the allocator may stop. The mixed-framework logical fixture starts and stops its own
+  ComfyUI process as test-fixture setup/cleanup; allocator actions do not masquerade as ComfyUI
+  model lifecycle mutations.
 - The current autonomous.ai NVIDIA engines are vLLM/CUDA even though live discovery labels their
   ownership class `external`. Framework identity and lifecycle ownership are independent: those
   engines participate in routing and placement evidence, but discovery alone does not grant Grid

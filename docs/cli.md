@@ -620,16 +620,22 @@ process actuation:
 grid test scenario [--machines N] [--models N] [--users N]
     [--duration 30m|2h] [--seed N] [--timeline] [--json]
 grid test start [--machines N]
-grid test demo
+    [--include-comfyui --media-bundle z_image]
+    [--comfyui-port N] [--media-port N]
+grid test demo [--users N] [--requests N] [--max-tokens N] [--timeout SECONDS]
 grid test status [--json]
 grid test watch
 grid test stop
 ```
 
 `test scenario` runs deterministic heterogeneous planning with changing user demand and failures;
-it starts no GPU processes. `test demo` uses real small llama.cpp processes across persistent
-logical hosts to prove load, warm, drain, and unload behavior. See the allocator guide for the
-scenario inventory, scorecard, and limits.
+it starts no engine processes and is not an inference test. `test demo` sends real concurrent
+OpenAI-compatible requests to small llama.cpp processes across persistent logical hosts and proves
+proactive workload classification (without the router), load, warm, routing, response, drain, and
+unload behavior. Starting with `--include-comfyui` uses
+one of the N logical machines for a real ComfyUI/PyTorch-MPS node; the demo then requires an actual
+PNG from the installed image-generation bundle. Install it first with `grid engine install comfyui`
+and `grid engine pull z_image`. See the allocator guide for the ownership limits and full workflow.
 
 An external vLLM endpoint can declare homogeneous topology without changing lifecycle ownership:
 
@@ -2451,7 +2457,7 @@ grid engine install comfyui                    # default media engine
 grid engine pull <bundle>                      # ComfyUI media bundle: image_generation, image_editing, i2v
 grid engine status [--port 8188]               # ComfyUI: installed, its venv, output dir, bundles, running?
 grid engine start [--port 8188] [--detach]     # start ComfyUI (blocks unless --detach)
-grid engine stop                               # stop it
+grid engine stop [--port 8188]                 # stop the tracked ComfyUI on that port
 grid engine ls [grid] [--json]                 # live engines joined to a grid (same view as grid engines)
 ```
 

@@ -8,25 +8,20 @@ identity, idle signals, failure domains, and the physical-capacity share are sim
 from __future__ import annotations
 
 import argparse
-import math
-import secrets
 import signal
 import threading
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
 
 import httpx
 import uvicorn
-from fastapi import HTTPException, Request
 
 from local.allocator_node import AllocatorNodeAgent
-from local import server as server_module
 from local.server import create_app
 from shared import jsonio
 from shared.allocator.auth import mint_node_token
-from shared.allocator.intelligence import classify_request
 from shared.allocator.local import HostPolicy, LocalHostProtectionLoop
 from shared.allocator.models import ModelProfile, ResidencyState
 from shared.allocator.runtime import LlamaCppBackend, ManagedModelRuntime
@@ -54,18 +49,35 @@ class IdleLogicalSignals:
 
 
 def logical_resources(
-    physical: dict[str, Any], *, machine_index: int, machine_count: int
+    physical: dict[str, Any],
+    *,
+    machine_index: int,
+    machine_count: int,
+    capacity_bytes: int | None = None,
 ) -> Callable[[], dict[str, Any]]:
     """Partition one machine's capacity instead of multiplying it by the logical host count."""
 
     machine = dict(physical.get("machine") or {})
     memory = dict(physical.get("memory") or {})
-    total_gb = max(1.0, float(memory.get("total_gb") or 0) / machine_count)
+    physical_usable = max(1, int(physical.get("usable_bytes") or 0))
+    usable_bytes = (
+        max(1, int(capacity_bytes))
+        if capacity_bytes is not None
+        else max(1, physical_usable // machine_count)
+    )
+    capacity_fraction = min(1.0, usable_bytes / physical_usable)
+    total_gb = max(
+        1.0,
+        (
+            usable_bytes / (1024**3)
+            if capacity_bytes is not None
+            else float(memory.get("total_gb") or 0) / machine_count
+        ),
+    )
     available_gb = min(
         total_gb,
-        max(0.0, float(memory.get("available_gb") or 0) / machine_count),
+        max(0.0, float(memory.get("available_gb") or 0) * capacity_fraction),
     )
-    usable_bytes = max(0, int(physical.get("usable_bytes") or 0) // machine_count)
 
     def collect() -> dict[str, Any]:
         return {
@@ -107,8 +119,9 @@ def _profile(
         expected_service_seconds=5,
         latency_slo_ms=10_000,
         min_residency_seconds=0,
-        # The demo clears demand explicitly. Keep observed pressure alive long enough for a real
-        # staged drain/unload/load/warm replacement to complete.
+        # Keep observed pressure alive long enough for a real staged drain/unload/load/warm
+        # replacement to complete. The demo later shortens this policy and lets it expire; it
+        # never injects or clears demand.
         scale_down_cooldown_seconds=300,
         min_failure_domains=max(1, minimum),
         artifact_sha256=artifact_sha256,
@@ -140,129 +153,17 @@ def _wait_for_server(server: uvicorn.Server, thread: threading.Thread, timeout: 
     raise RuntimeError("timed out starting logical Grid HTTP server")
 
 
-def install_demand_simulation_routes(app, *, model: str, control_token: str) -> None:
-    """Add authenticated synthetic telemetry controls only to the development fixture."""
-
-    def require_control(request: Request) -> None:
-        supplied = request.headers.get("X-Grid-Allocator-Token", "")
-        if not supplied or not secrets.compare_digest(supplied, control_token):
-            raise HTTPException(status_code=403, detail="allocator control token is required")
-
-    @app.post("/test/demand")
-    async def inject_demand(request: Request):
-        require_control(request)
-        try:
-            body = await request.json()
-            requested_model = str(body.get("model") or model)
-            requests = body.get("requests", 60)
-            service_seconds = float(body.get("service_seconds", 5.0))
-            latency_ms = float(body.get("latency_ms", service_seconds * 1_000.0))
-            queue_depth = body.get("queue_depth", 0)
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="demand body is invalid") from exc
-        if requested_model != model:
-            raise HTTPException(status_code=400, detail=f"test Grid model is {model!r}")
-        if (
-            isinstance(requests, bool)
-            or not isinstance(requests, int)
-            or not 1 <= requests <= 10_000
-            or isinstance(queue_depth, bool)
-            or not isinstance(queue_depth, int)
-            or not 0 <= queue_depth <= 1_000_000
-            or not math.isfinite(service_seconds)
-            or service_seconds < 0
-            or not math.isfinite(latency_ms)
-            or latency_ms < 0
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "requests must be 1–10000, queue_depth must be non-negative, and timing "
-                    "values must be finite and non-negative"
-                ),
-            )
-        accepted = 0
-        for _ in range(requests):
-            accepted += int(
-                app.state.allocator.observe(
-                    model,
-                    service_seconds=service_seconds,
-                    latency_ms=latency_ms,
-                    queue_depth=queue_depth,
-                )
-            )
-        if accepted != requests:
-            raise HTTPException(status_code=409, detail="model profile is not accepting demand")
-        server_module._mark_allocator_dirty(app)
-        forecast = app.state.allocator.demand.forecast(model)
-        return {"accepted": accepted, "forecast": asdict(forecast)}
-
-    @app.delete("/test/demand")
-    async def clear_demand(request: Request):
-        require_control(request)
-        with app.state.allocator._demand_lock:
-            app.state.allocator.demand.clear(model)
-            app.state.allocator.intelligence.clear()
-        server_module._mark_allocator_dirty(app)
-        return {"cleared": model}
-
-    @app.post("/test/exchanges")
-    async def inject_exchanges(request: Request):
-        """Replay request/response lifecycles; the allocator must infer the workload itself."""
-
-        require_control(request)
-        try:
-            body = await request.json()
-            requests = body.get("requests", 3)
-            request_body = body.get("request") or {}
-            endpoint_path = str(body.get("endpoint") or "chat/completions")
-            service_seconds = float(body.get("service_seconds", 5.0))
-            output_units = body.get("output_units", 128)
-            error = bool(body.get("error", False))
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="exchange body is invalid") from exc
-        if (
-            isinstance(requests, bool)
-            or not isinstance(requests, int)
-            or not 1 <= requests <= 10_000
-            or not isinstance(request_body, dict)
-            or isinstance(output_units, bool)
-            or not isinstance(output_units, int)
-            or not 0 <= output_units <= 1_000_000_000
-            or not math.isfinite(service_seconds)
-            or service_seconds < 0
-        ):
-            raise HTTPException(status_code=400, detail="exchange values are outside test bounds")
-        features = classify_request(endpoint_path, request_body)
-        for _ in range(requests):
-            app.state.allocator.observe_lifecycle(
-                features,
-                service_seconds=service_seconds,
-                error=error,
-                output_units=output_units,
-            )
-        server_module._mark_allocator_dirty(app)
-        now = time.time()
-        return {
-            "accepted": requests,
-            "features": asdict(features),
-            "workloads": [
-                {**asdict(item), "workload": item.model_id}
-                for item in app.state.allocator.intelligence.workload_forecasts(now=now)
-            ],
-            "portfolio": list(
-                app.state.allocator.intelligence.projections(
-                    app.state.allocator.profiles,
-                    now=now,
-                )
-            ),
-        }
-
-
 def run_worker(config_path: Path) -> int:
     cfg = jsonio.load_json(config_path)
     run_dir = config_path.parent
     machines = int(cfg["machines"])
+    include_comfyui = bool(cfg.get("include_comfyui", False))
+    media_bundle = str(cfg.get("media_bundle") or "")
+    comfyui_port = int(cfg.get("comfyui_port") or 22_200)
+    media_port = int(cfg.get("media_port") or 22_201)
+    text_machines = machines - int(include_comfyui)
+    if text_machines < 1:
+        raise RuntimeError("a real logical Grid needs at least one text machine")
     model = str(cfg["model"])
     portfolio_model = str(cfg.get("portfolio_model") or "")
     control_token = Path(str(cfg["control_token_path"])).read_text(encoding="utf-8").strip()
@@ -289,7 +190,6 @@ def run_worker(config_path: Path) -> int:
         allocator_coalesce_seconds=0.05,
         allocator_min_tick_seconds=0.05,
     )
-    install_demand_simulation_routes(app, model=model, control_token=control_token)
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -307,17 +207,39 @@ def run_worker(config_path: Path) -> int:
     agents: list[AllocatorNodeAgent] = []
     runtimes: list[ManagedModelRuntime] = []
     agent_threads: list[threading.Thread] = []
+    media_proc = None
+    comfyui_started = False
+    media_node_id = "logical-media-1"
+    media_registration: dict[str, Any] | None = None
 
     try:
         server_thread.start()
         _wait_for_server(server, server_thread, min(15.0, startup_timeout))
 
         physical = collect_device_info()
+        physical_usable_bytes = max(1, int(physical.get("usable_bytes") or 0))
+        media_memory_mb = 20_480 if media_bundle == "z_image" else 32_768
+        media_capacity_bytes = (
+            media_memory_mb * 1024 * 1024 if include_comfyui else 0
+        )
+        minimum_text_capacity = text_machines * 256 * 1024 * 1024
+        if (
+            include_comfyui
+            and media_capacity_bytes + minimum_text_capacity > physical_usable_bytes
+        ):
+            raise RuntimeError(
+                f"physical usable memory cannot fit {media_bundle} plus {text_machines} text slots"
+            )
+        text_capacity_bytes = (
+            (physical_usable_bytes - media_capacity_bytes) // text_machines
+            if include_comfyui
+            else physical_usable_bytes // text_machines
+        )
         artifact_sha256 = LlamaCppBackend().artifact_sha256(model)
         portfolio_sha256 = (
             LlamaCppBackend().artifact_sha256(portfolio_model) if portfolio_model else ""
         )
-        for index in range(machines):
+        for index in range(text_machines):
             host_id = f"logical-host-{index + 1}"
             node_port_start = port_base + index * 10
             runtime = ManagedModelRuntime(
@@ -353,6 +275,7 @@ def run_worker(config_path: Path) -> int:
                     physical,
                     machine_index=index,
                     machine_count=machines,
+                    capacity_bytes=text_capacity_bytes,
                 ),
                 heartbeat_interval=0.25,
                 shutdown_drain_timeout=5.0,
@@ -361,12 +284,63 @@ def run_worker(config_path: Path) -> int:
             runtimes.append(runtime)
             agents.append(agent)
 
+        if include_comfyui:
+            from local import media_engine
+
+            prepared = media_engine.prepare_media_engine(
+                media_bundles=[media_bundle],
+                comfyui_port=comfyui_port,
+                media_port=media_port,
+                advertise_host="127.0.0.1",
+            )
+            media_proc = prepared["proc"]
+            comfyui_started = bool(prepared["comfyui_started"])
+            media_models = list(prepared["models"])
+            # Krea's task name and model name are aliases for the same resident graph.  A logical
+            # test node must account for that graph once, not report two separately allocated
+            # models that each consume the full bundle memory.
+            if media_bundle == "image_generation":
+                media_models = ["comfyui:image_generation"]
+            capacity_mb = media_memory_mb
+            backend = str(physical.get("backend") or "mps")
+            if backend == "metal":
+                backend = "mps"
+            media_registration = {
+                "role": "engine",
+                "models": media_models,
+                "media_url": str(prepared["media_url"]),
+                "name": media_node_id,
+                "pricing": {},
+                "capabilities": {
+                    "schema_version": 1,
+                    "models": {
+                        model_id: {
+                            "endpoints": ["media"],
+                            "input_modalities": ["text"],
+                            "output_modalities": ["image"],
+                            "features": {},
+                        }
+                        for model_id in media_models
+                    },
+                },
+                "load": {"active_tasks": 0, "max_concurrency": 1},
+                "resources": {
+                    "capacity_mb": capacity_mb,
+                    "runtimes": ["comfyui"],
+                    "backends": [backend],
+                    "gpu_count": 1,
+                    "gpu_memory_mb": [capacity_mb],
+                    "failure_domain": "logical-machine-media-1",
+                    "tags": ["logical-test", "comfyui", backend],
+                },
+            }
+
         headers = {"X-Grid-Allocator-Token": control_token}
         with httpx.Client(base_url=endpoint, timeout=10.0, trust_env=False) as client:
             response = client.put(
                 f"/allocator/models/{model}",
                 headers=headers,
-                json=_profile(model, machines, artifact_sha256).to_dict(),
+                json=_profile(model, text_machines, artifact_sha256).to_dict(),
             )
             response.raise_for_status()
             if portfolio_model:
@@ -375,13 +349,37 @@ def run_worker(config_path: Path) -> int:
                     headers=headers,
                     json=_profile(
                         portfolio_model,
-                        machines,
+                        text_machines,
                         portfolio_sha256,
                         min_replicas=0,
                         workload_scores=(("coding", 1.0), ("research", 0.8)),
                     ).to_dict(),
                 )
                 response.raise_for_status()
+            if media_registration is not None:
+                response = client.put(f"/nodes/{media_node_id}", json=media_registration)
+                response.raise_for_status()
+                for media_model in media_registration["models"]:
+                    response = client.put(
+                        f"/allocator/models/{quote(str(media_model), safe='')}",
+                        headers=headers,
+                        json=ModelProfile(
+                            model_id=str(media_model),
+                            memory_mb=media_memory_mb,
+                            runtimes=("comfyui",),
+                            backends=(str(media_registration["resources"]["backends"][0]),),
+                            min_replicas=1,
+                            max_replicas=1,
+                            expected_service_seconds=60.0,
+                            latency_slo_ms=300_000.0,
+                            min_residency_seconds=0,
+                            scale_down_cooldown_seconds=300,
+                            min_failure_domains=1,
+                            max_colocated_models=1,
+                            workload_scores=(("image", 1.0), ("design", 0.5)),
+                        ).to_dict(),
+                    )
+                    response.raise_for_status()
             response = client.put(
                 "/allocator/mode",
                 headers=headers,
@@ -400,19 +398,40 @@ def run_worker(config_path: Path) -> int:
 
         deadline = time.monotonic() + startup_timeout
         ready_written = False
+        next_media_heartbeat = 0.0
         while not stop_event.wait(0.1):
             alive = sum(thread.is_alive() for thread in agent_threads)
-            if alive != machines:
+            if alive != text_machines:
                 raise RuntimeError(
-                    f"a logical node agent exited unexpectedly ({alive}/{machines} remain)"
+                    f"a logical node agent exited unexpectedly ({alive}/{text_machines} remain)"
                 )
+            if media_proc is not None and media_proc.poll() is not None:
+                raise RuntimeError(
+                    "the logical ComfyUI media adapter exited unexpectedly "
+                    f"(code {media_proc.returncode})"
+                )
+            if media_registration is not None and time.monotonic() >= next_media_heartbeat:
+                with httpx.Client(base_url=endpoint, timeout=10.0, trust_env=False) as client:
+                    response = client.post(
+                        "/nodes/heartbeat",
+                        json={"node_id": media_node_id, "load": media_registration["load"]},
+                    )
+                    if response.status_code == 404:
+                        response = client.put(
+                            f"/nodes/{media_node_id}", json=media_registration
+                        )
+                    response.raise_for_status()
+                next_media_heartbeat = time.monotonic() + 5.0
             ready = _ready_count(runtimes, model)
-            if ready == machines and not ready_written:
+            if ready == text_machines and not ready_written:
                 jsonio.atomic_write_json(
                     run_dir / "ready.json",
                     {
                         "endpoint": endpoint,
                         "machines": machines,
+                        "text_machines": text_machines,
+                        "include_comfyui": include_comfyui,
+                        "media_bundle": media_bundle,
                         "model": model,
                         "ready_replicas": ready,
                         "engine_ports": [
@@ -429,7 +448,8 @@ def run_worker(config_path: Path) -> int:
                 ready_written = True
             if not ready_written and time.monotonic() >= deadline:
                 raise RuntimeError(
-                    f"timed out waiting for {machines} ready replicas; {_ready_count(runtimes, model)} ready"
+                    f"timed out waiting for {text_machines} ready replicas; "
+                    f"{_ready_count(runtimes, model)} ready"
                 )
     except BaseException as exc:
         try:
@@ -452,6 +472,26 @@ def run_worker(config_path: Path) -> int:
                     runtime.stop_all(wait_timeout=2.0, force=True)
                 except Exception:
                     pass
+        if media_registration is not None:
+            try:
+                httpx.delete(f"{endpoint}/nodes/{media_node_id}", timeout=2.0)
+            except Exception:
+                pass
+        if media_proc is not None:
+            from local import media_runtime
+
+            media_runtime.stop_media_server(media_proc)
+        if comfyui_started:
+            from shared.engine import comfyui
+
+            try:
+                # The fixture started this child in this process, so use the owned handle and
+                # wait for termination. `stop_running` is the cross-process CLI fallback and only
+                # sends a signal; using it here could report fixture shutdown while MPS memory was
+                # still being released.
+                comfyui.stop()
+            except OSError:
+                pass
         server.should_exit = True
         server_thread.join(timeout=5.0)
         (run_dir / "ready.json").unlink(missing_ok=True)

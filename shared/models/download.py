@@ -12,6 +12,8 @@ from shared import paths
 
 HF_BASE = "https://huggingface.co"
 CHUNK = 1024 * 1024
+DOWNLOAD_ATTEMPTS = 8
+DOWNLOAD_READ_TIMEOUT_SECONDS = 30.0
 
 
 def hf_url(repo: str, quantized_file: str) -> str:
@@ -147,29 +149,66 @@ def download(repo: str, quantized_file: str, *, out: Path | None = None, on_prog
     target.parent.mkdir(parents=True, exist_ok=True)
     url = hf_url(repo, quantized_file)
 
-    headers: dict[str, str] = {}
     have = part.stat().st_size if part.exists() else 0
-    if have > 0:
-        headers["Range"] = f"bytes={have}-"
-
-    mode = "ab" if have > 0 else "wb"
     try:
-        with httpx.stream("GET", url, headers=headers, timeout=httpx.Timeout(30, read=None), follow_redirects=True) as resp:
-            if resp.status_code not in (200, 206):
-                try:
-                    body = resp.read().decode(errors="replace")[:300]
-                except httpx.HTTPError:
-                    body = "(could not read response body)"
-                raise SystemExit(f"Download failed ({resp.status_code}): {body}")
-            total = have + int(resp.headers.get("Content-Length") or 0)
-            with part.open(mode) as fh:
-                for chunk in resp.iter_bytes(CHUNK):
-                    if not chunk:
-                        continue
-                    fh.write(chunk)
-                    have += len(chunk)
-                    if on_progress:
-                        on_progress(have, total)
+        last_error: httpx.TransportError | None = None
+        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+            have = part.stat().st_size if part.exists() else 0
+            headers = {"Range": f"bytes={have}-"} if have else {}
+            try:
+                with httpx.stream(
+                    "GET",
+                    url,
+                    headers=headers,
+                    timeout=httpx.Timeout(30, read=DOWNLOAD_READ_TIMEOUT_SECONDS),
+                    follow_redirects=True,
+                ) as resp:
+                    if resp.status_code not in (200, 206):
+                        try:
+                            body = resp.read().decode(errors="replace")[:300]
+                        except httpx.HTTPError:
+                            body = "(could not read response body)"
+                        raise SystemExit(f"Download failed ({resp.status_code}): {body}")
+
+                    # A server may ignore Range and return the complete file with 200. Appending
+                    # that response to a partial would silently create a corrupt oversized model;
+                    # restart this one response from byte zero instead.
+                    if have and resp.status_code == 200:
+                        have = 0
+                        mode = "wb"
+                    else:
+                        mode = "ab" if have else "wb"
+                    remaining = int(resp.headers.get("Content-Length") or 0)
+                    total = have + remaining if remaining else 0
+                    with part.open(mode) as fh:
+                        for chunk in resp.iter_bytes(CHUNK):
+                            if not chunk:
+                                continue
+                            fh.write(chunk)
+                            have += len(chunk)
+                            if on_progress:
+                                on_progress(have, total)
+                    if total and have < total:
+                        raise httpx.ReadError(
+                            f"download ended at {have} of {total} bytes"
+                        )
+                part.replace(target)
+                return target
+            except httpx.TransportError as exc:
+                last_error = exc
+                if attempt == DOWNLOAD_ATTEMPTS:
+                    break
+                kept = part.stat().st_size if part.exists() else 0
+                print(
+                    f"\nDownload connection interrupted ({exc}); reconnecting "
+                    f"{attempt + 1}/{DOWNLOAD_ATTEMPTS} from {kept / 1e6:.0f} MB...",
+                    file=sys.stderr,
+                )
+        kept = part.stat().st_size if part.exists() else 0
+        raise SystemExit(
+            f"Download stopped after {DOWNLOAD_ATTEMPTS} connection attempts: {last_error}. "
+            f"{kept / 1e6:.0f} MB kept; rerun the same command to resume."
+        )
     except KeyboardInterrupt:
         # `.part` is deliberately left in place, not deleted — it is what makes the `Range`
         # header above resume from `have` instead of restarting a multi-gigabyte download from
@@ -178,8 +217,7 @@ def download(repo: str, quantized_file: str, *, out: Path | None = None, on_prog
         # partway up the call stack, the reader got a 30-line stack trace instead of a cancellation.
         raise SystemExit(f"\nCancelled. Resume with the same command — {have / 1e6:.0f} MB kept.") from None
 
-    part.replace(target)
-    return target
+    raise AssertionError("download retry loop exited without an outcome")
 
 
 def stderr_progress(done: int, total: int) -> None:
@@ -195,4 +233,3 @@ def stderr_progress(done: int, total: int) -> None:
     sys.stderr.flush()
     if done >= total:
         sys.stderr.write("\n")
-
