@@ -379,6 +379,19 @@ def run_worker(config_path: Path) -> int:
 
         headers = {"X-Grid-Allocator-Token": control_token}
         with httpx.Client(base_url=endpoint, timeout=10.0, trust_env=False) as client:
+            # Logical test economics are operator fixtures, not worker claims. Register them via
+            # the same authenticated control surface a real Grid operator uses.
+            for index in range(text_machines):
+                response = client.put(
+                    f"/allocator/hosts/logical-host-{index + 1}/price",
+                    headers=headers,
+                    json={
+                        "cost_per_hour": (
+                            text_costs_per_hour[index] if text_costs_per_hour else 0.0
+                        )
+                    },
+                )
+                response.raise_for_status()
             response = client.put(
                 f"/allocator/models/{model}",
                 headers=headers,

@@ -24,6 +24,8 @@ from .agent import (
 )
 from .allocator import (
     cmd_allocator_budget,
+    cmd_allocator_host_price_remove,
+    cmd_allocator_host_price_set,
     cmd_allocator_mode,
     cmd_allocator_model_remove,
     cmd_allocator_model_set,
@@ -143,6 +145,8 @@ __all__ = [
     "cmd_agent_status",
     "cmd_allocator_mode",
     "cmd_allocator_budget",
+    "cmd_allocator_host_price_remove",
+    "cmd_allocator_host_price_set",
     "cmd_allocator_model_remove",
     "cmd_allocator_model_set",
     "cmd_allocator_node_override",

@@ -240,6 +240,23 @@ provably preserve resource use—aggregate free memory and model slots provide a
 bound, so an already saturated fleet fails fast. Runtime-specific memory and existing-residency
 cases retain the full repair search because relocation can change their net footprint.
 
+Physical-host prices are operator-owned accounting policy. Register them by stable host identity:
+
+```bash
+grid allocator host price set host-1 0.60
+grid allocator host price remove host-1
+```
+
+The authenticated price registry is durable and is applied once after control and engine records
+are merged into one physical host. Worker heartbeats cannot create or override an effective price;
+their discovery metadata is not trusted for budget enforcement. An explicit operator price of zero
+means known-free, while removing or never setting a price means unknown. `grid allocator status`
+shows each effective value and its `operator` or `unknown` provenance. A price increase or removal
+that would reduce currently achievable minimum service is rejected unless the operator supplies
+`--allow-service-shortfall`, using the same one-time acknowledgement as a budget reduction. The
+single-machine logical Grid registers its configured test prices through this production control
+surface rather than granting its simulated workers accounting authority.
+
 An operator may also set a durable hard fleet ceiling with
 `grid allocator budget --max-hourly-cost USD`. Cost is charged once per selected physical host,
 not once per colocated model. Zero disables the ceiling. Under a positive ceiling, missing price

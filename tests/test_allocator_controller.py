@@ -3101,3 +3101,86 @@ def test_membership_recovery_grace_rebases_after_wall_clock_rollback(tmp_path):
     replacement = restored.commands_for("new", now=130)
     assert len(replacement) == 1
     assert replacement[0].kind == ActionKind.WARM
+
+
+def test_host_prices_are_authoritative_durable_and_transactional(tmp_path, monkeypatch):
+    path = tmp_path / "allocator.json"
+    controller = AllocatorController(state_path=path)
+    controller.set_host_price("host-1", 0.0)
+
+    claimed = NodeSnapshot(
+        "host-1",
+        16_000,
+        cost_per_hour=100.0,
+        cost_known=True,
+        cost_source="node",
+    )
+    effective = controller.apply_host_prices((claimed,))[0]
+    assert effective.cost_per_hour == 0.0
+    assert effective.cost_known is True
+    assert effective.cost_source == "operator"
+    assert AllocatorController(state_path=path).host_prices == {"host-1": 0.0}
+
+    original_save = controller._save
+
+    def fail_save():
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(controller, "_save", fail_save)
+    with pytest.raises(OSError, match="injected"):
+        controller.set_host_price("host-1", 1.0)
+    assert controller.host_prices == {"host-1": 0.0}
+    monkeypatch.setattr(controller, "_save", original_save)
+
+
+def test_host_price_update_requires_service_shortfall_acknowledgement():
+    controller = AllocatorController(
+        planner_policy=PlannerPolicy(max_hourly_cost=0.5),
+    )
+    controller.put_profile(profile())
+    controller.set_host_price("host-1", 0.25)
+    discovered = NodeSnapshot(
+        "host-1",
+        16_000,
+        runtimes=("llama.cpp",),
+        cost_per_hour=0,
+        cost_known=False,
+        last_heartbeat=10,
+    )
+    current = controller.apply_host_prices((discovered,))
+
+    with pytest.raises(ValueError, match="host price update would reduce"):
+        controller.set_host_price("host-1", 1.0, nodes=current, now=10)
+    assert controller.host_prices == {"host-1": 0.25}
+
+    controller.set_host_price(
+        "host-1",
+        1.0,
+        nodes=current,
+        now=10,
+        allow_service_shortfall=True,
+    )
+    assert controller.host_prices == {"host-1": 1.0}
+
+
+def test_direct_controller_planning_reapplies_operator_price():
+    controller = AllocatorController(
+        planner_policy=PlannerPolicy(max_hourly_cost=1.0),
+    )
+    controller.put_profile(profile())
+    controller.set_host_price("host-1", 2.0)
+    forged_free = NodeSnapshot(
+        "host-1",
+        16_000,
+        runtimes=("llama.cpp",),
+        cost_per_hour=0.0,
+        cost_known=True,
+        cost_source="node",
+    )
+
+    controller.tick((forged_free,), now=10)
+    assert controller.last_plan is not None
+    assert controller.last_plan.assignments == ()
+    effective = controller.status((forged_free,), now=10)["nodes"][0]
+    assert effective["cost_per_hour"] == 2.0
+    assert effective["cost_source"] == "operator"

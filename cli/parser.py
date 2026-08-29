@@ -18,6 +18,8 @@ from ._constants import (
 from .agent import cmd_agent_install, cmd_agent_status
 from .allocator import (
     cmd_allocator_budget,
+    cmd_allocator_host_price_remove,
+    cmd_allocator_host_price_set,
     cmd_allocator_mode,
     cmd_allocator_model_remove,
     cmd_allocator_model_set,
@@ -530,6 +532,39 @@ def _add_allocator(sub) -> None:
     _add_allocator_grid(budget, token=True)
     budget.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     budget.set_defaults(handler=cmd_allocator_budget)
+
+    host = allocator_sub.add_parser("host", help="Manage physical-host accounting metadata")
+    host_sub = host.add_subparsers(dest="allocator_host_command", required=True)
+    host_price = host_sub.add_parser("price", help="Manage an authoritative hourly host price")
+    host_price_sub = host_price.add_subparsers(
+        dest="allocator_host_price_command", required=True
+    )
+    price_set = host_price_sub.add_parser("set", help="Set the operator-owned hourly price")
+    price_set.add_argument("host_id", help="Stable physical host identity")
+    price_set.add_argument("cost_per_hour", type=float, metavar="USD")
+    price_set.add_argument(
+        "--allow-service-shortfall",
+        action="store_true",
+        help="Acknowledge a minimum-service reduction under the current budget.",
+    )
+    _add_allocator_grid(price_set, token=True)
+    price_set.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    price_set.set_defaults(handler=cmd_allocator_host_price_set)
+    for verb in ("remove", "rm"):
+        price_remove = host_price_sub.add_parser(
+            verb, help="Remove the operator price so the host becomes unknown-priced"
+        )
+        price_remove.add_argument("host_id", help="Stable physical host identity")
+        price_remove.add_argument(
+            "--allow-service-shortfall",
+            action="store_true",
+            help="Acknowledge a minimum-service reduction under the current budget.",
+        )
+        _add_allocator_grid(price_remove, token=True)
+        price_remove.add_argument(
+            "--json", action="store_true", help="Emit machine-readable JSON."
+        )
+        price_remove.set_defaults(handler=cmd_allocator_host_price_remove)
 
     tick = allocator_sub.add_parser("tick", help="Run an immediate allocation pass")
     _add_allocator_grid(tick, token=True)

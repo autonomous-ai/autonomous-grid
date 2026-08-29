@@ -148,9 +148,14 @@ def cmd_allocator_status(args: argparse.Namespace) -> int:
             for item in node.get("residencies") or []
             if item.get("state") == "ready"
         ]
+        price = (
+            f"${float(node.get('cost_per_hour') or 0):g}/h:{node.get('cost_source')}"
+            if node.get("cost_known")
+            else "price:unknown"
+        )
         print(
             f"  {node.get('node_id')}  {node.get('state')}  "
-            f"{node.get('capacity_mb', 0)} MB  {','.join(ready) or '-'}"
+            f"{node.get('capacity_mb', 0)} MB  {','.join(ready) or '-'}  {price}"
         )
     return 0
 
@@ -289,6 +294,53 @@ def cmd_allocator_budget(args: argparse.Namespace) -> int:
             )
         else:
             print("Allocator hourly budget disabled")
+    return 0
+
+
+def cmd_allocator_host_price_set(args: argparse.Namespace) -> int:
+    cfg = config.select_grid(getattr(args, "grid", None))
+    payload = _request(
+        cfg,
+        "PUT",
+        f"/allocator/hosts/{quote(args.host_id, safe='')}/price",
+        body={
+            "cost_per_hour": args.cost_per_hour,
+            "allow_service_shortfall": bool(args.allow_service_shortfall),
+        },
+        token=_control_token(cfg, getattr(args, "token_file", None)),
+        allow_insecure_http=getattr(args, "allow_insecure_http", False),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        shortfall = (
+            " · minimum-service shortfall acknowledged"
+            if payload.get("allow_service_shortfall")
+            else ""
+        )
+        print(
+            f"Allocator host price: {payload['host_id']} = "
+            f"${float(payload['cost_per_hour']):g}/h · operator{shortfall}"
+        )
+    return 0
+
+
+def cmd_allocator_host_price_remove(args: argparse.Namespace) -> int:
+    cfg = config.select_grid(getattr(args, "grid", None))
+    payload = _request(
+        cfg,
+        "DELETE",
+        f"/allocator/hosts/{quote(args.host_id, safe='')}/price",
+        body={"allow_service_shortfall": bool(args.allow_service_shortfall)},
+        token=_control_token(cfg, getattr(args, "token_file", None)),
+        allow_insecure_http=getattr(args, "allow_insecure_http", False),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        print(
+            f"Allocator host price removed: {payload['host_id']} · effective price unknown"
+        )
     return 0
 
 

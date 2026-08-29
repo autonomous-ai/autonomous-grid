@@ -219,6 +219,7 @@ class NodeSnapshot:
     gpu_memory_mb: tuple[int, ...] = ()
     cost_per_hour: float = 0.0
     cost_known: bool = False
+    cost_source: str = ""
     host_priority: int = 0
     last_heartbeat: float = 0.0
     mutation_cooldown_until: float = 0.0
@@ -253,6 +254,12 @@ class NodeSnapshot:
         _finite_nonnegative(self.cost_per_hour, "cost_per_hour")
         if not isinstance(self.cost_known, bool):
             raise ValueError("cost_known must be a boolean")
+        cost_source = self.cost_source or ("node" if self.cost_known else "unknown")
+        if cost_source not in ("unknown", "node", "operator"):
+            raise ValueError("cost_source must be unknown, node, or operator")
+        if self.cost_known == (cost_source == "unknown"):
+            raise ValueError("cost_source and cost_known disagree")
+        object.__setattr__(self, "cost_source", cost_source)
         _finite_nonnegative(self.last_heartbeat, "last_heartbeat")
         _finite_nonnegative(self.mutation_cooldown_until, "mutation_cooldown_until")
         if (

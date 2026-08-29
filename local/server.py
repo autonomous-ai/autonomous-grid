@@ -849,6 +849,68 @@ def create_app(
             "reconciliation": _reconcile_summary(result),
         }
 
+    @app.put("/allocator/hosts/{host_id}/price")
+    async def allocator_set_host_price(host_id: str, request: Request):
+        _require_allocator_control(app, request)
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("Request body must be a JSON object")
+            allow_shortfall = body.get("allow_service_shortfall", False)
+            if not isinstance(allow_shortfall, bool):
+                raise ValueError("allow_service_shortfall must be a boolean")
+            price = float(body["cost_per_hour"])
+            prices = _allocator(app).set_host_price(
+                host_id,
+                price,
+                allow_service_shortfall=allow_shortfall,
+                nodes=_allocator_snapshots(app),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=400, detail="cost_per_hour is required") from exc
+        except (json.JSONDecodeError, TypeError, ValueError, OverflowError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _mark_allocator_dirty(app)
+        result = await _run_allocator_tick(app)
+        return {
+            "host_id": host_id,
+            "cost_per_hour": prices[host_id],
+            "cost_known": True,
+            "cost_source": "operator",
+            "allow_service_shortfall": allow_shortfall,
+            "reconciliation": _reconcile_summary(result),
+        }
+
+    @app.delete("/allocator/hosts/{host_id}/price")
+    async def allocator_delete_host_price(host_id: str, request: Request):
+        _require_allocator_control(app, request)
+        if host_id not in _allocator(app).host_prices:
+            raise HTTPException(status_code=404, detail="allocator host price not found")
+        try:
+            raw = await request.body()
+            body = json.loads(raw) if raw else {}
+            if not isinstance(body, dict):
+                raise ValueError("Request body must be a JSON object")
+            allow_shortfall = body.get("allow_service_shortfall", False)
+            if not isinstance(allow_shortfall, bool):
+                raise ValueError("allow_service_shortfall must be a boolean")
+            _allocator(app).set_host_price(
+                host_id,
+                None,
+                allow_service_shortfall=allow_shortfall,
+                nodes=_allocator_snapshots(app),
+            )
+        except (json.JSONDecodeError, TypeError, ValueError, OverflowError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _mark_allocator_dirty(app)
+        result = await _run_allocator_tick(app)
+        return {
+            "host_id": host_id,
+            "deleted": True,
+            "allow_service_shortfall": allow_shortfall,
+            "reconciliation": _reconcile_summary(result),
+        }
+
     @app.post("/allocator/tick")
     async def allocator_tick(request: Request):
         _require_allocator_control(app, request)
@@ -2908,7 +2970,7 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                 ),
             )
         )
-    return _merge_allocator_hosts(raw)
+    return _allocator(app).apply_host_prices(_merge_allocator_hosts(raw))
 
 
 def _merge_allocator_hosts(
@@ -3105,8 +3167,11 @@ def _merge_allocator_hosts(
                 ),
                 # Capacity-node and child-engine records describe one physical host, so host cost
                 # is metadata rather than an additive per-record charge.
-                cost_per_hour=max(member.cost_per_hour for member in members),
-                cost_known=all(member.cost_known for member in members),
+                # Worker price claims are untrusted diagnostics, never accounting authority.
+                # The controller registry is overlaid on this merged physical-host record below.
+                cost_per_hour=0.0,
+                cost_known=False,
+                cost_source="unknown",
                 host_priority=max(member.host_priority for member in members),
                 last_heartbeat=max(member.last_heartbeat for member in members),
                 mutation_cooldown_until=max(
