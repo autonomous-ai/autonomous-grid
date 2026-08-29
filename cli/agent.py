@@ -22,11 +22,18 @@ def cmd_agent_install(args: argparse.Namespace) -> int:
         return 0
 
     if args.name == "codex":
+        from remote import task_codex
         from shared.agent import codex_installer
 
         if codex_installer.is_installed() and not args.force:
-            print(f"Codex is already installed -> {codex_installer.codex_bin()}")
-            return 0
+            installed = codex_installer.codex_bin()
+            if task_codex.supports_distributed_goals(str(installed)):
+                print(f"Codex is already installed -> {installed}")
+                return 0
+            # Grid once pinned Codex before native Goal resume existed. File existence therefore
+            # cannot mean "installed" for this command: transparently replace that known-bad build
+            # with the current hash-pinned release instead of requiring users to discover --force.
+            print("Codex is installed but cannot resume distributed Goals; upgrading it ...")
         path = codex_installer.install_codex()
         print(f"Installed codex -> {path}")
         return 0
@@ -35,10 +42,15 @@ def cmd_agent_install(args: argparse.Namespace) -> int:
 
 
 def cmd_agent_status(args: argparse.Namespace) -> int:
+    from remote import task_codex
     from shared.agent import codex_installer, installer
 
     hermes = installer.is_installed()
     codex = codex_installer.is_installed()
     print(f"Hermes: {'installed' if hermes else 'not installed'} ({installer.hermes_bin()})")
-    print(f"Codex: {'installed' if codex else 'not installed'} ({codex_installer.codex_bin()})")
+    codex_state = "not installed"
+    if codex:
+        codex_state = ("installed" if task_codex.supports_distributed_goals(
+            str(codex_installer.codex_bin())) else "installed; Goal upgrade required")
+    print(f"Codex: {codex_state} ({codex_installer.codex_bin()})")
     return 0

@@ -18,6 +18,7 @@ On every computer allowed to execute Goals, install Codex or Claude Code and run
 provider:
 
 ```bash
+grid agent install codex
 codex --version
 grid join <grid-name> --tasks --tasks-root /short/grid-tasks
 ```

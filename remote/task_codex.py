@@ -134,10 +134,7 @@ def _binary_version(binary: str) -> tuple[int, int, int]:
     return version
 
 
-def resolve_binary() -> str:
-    binary = shutil.which("codex")
-    if not binary:
-        raise CodexGoalError("Codex is not installed on this provider")
+def _require_distributed_goal_version(binary: str) -> str:
     version = _binary_version(binary)
     if version < MIN_DISTRIBUTED_GOAL_VERSION:
         required = ".".join(str(part) for part in MIN_DISTRIBUTED_GOAL_VERSION)
@@ -147,12 +144,25 @@ def resolve_binary() -> str:
     return binary
 
 
-def available() -> bool:
+def supports_distributed_goals(binary: str) -> bool:
+    """Whether this exact executable is safe to advertise to the Goal scheduler."""
     try:
-        resolve_binary()
+        _require_distributed_goal_version(binary)
     except CodexGoalError:
         return False
     return True
+
+
+def resolve_binary() -> str:
+    binary = shutil.which("codex")
+    if not binary:
+        raise CodexGoalError("Codex is not installed on this provider")
+    return _require_distributed_goal_version(binary)
+
+
+def available() -> bool:
+    binary = shutil.which("codex")
+    return bool(binary and supports_distributed_goals(binary))
 
 
 def state_dir(workspace: Path) -> Path:

@@ -88,6 +88,7 @@ def test_codex_goal_capability_requires_a_measured_native_goal_version(monkeypat
     monkeypatch.setattr(task_codex, "_binary_version", lambda _binary: (0, 150, 0))
 
     assert task_codex.available() is False
+    assert task_codex.supports_distributed_goals("/fake/codex") is False
     try:
         task_codex.resolve_binary()
     except task_codex.CodexGoalError as exc:
@@ -97,6 +98,7 @@ def test_codex_goal_capability_requires_a_measured_native_goal_version(monkeypat
 
     monkeypatch.setattr(task_codex, "_binary_version", lambda _binary: (0, 150, 1))
     assert task_codex.available() is True
+    assert task_codex.supports_distributed_goals("/fake/codex") is True
     assert task_codex.resolve_binary() == "/fake/codex"
 
 

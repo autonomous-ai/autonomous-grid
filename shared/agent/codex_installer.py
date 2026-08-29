@@ -20,7 +20,7 @@ from shared.system import arch
 
 # Pin the release rather than tracking `latest`, so an install is reproducible and its SHA-256 can
 # be checked — the binary is fetched over the network and then executed.
-CODEX_RELEASE = "rust-v0.144.6"
+CODEX_RELEASE = "rust-v0.150.1"
 
 
 @dataclass(frozen=True)
@@ -46,32 +46,32 @@ CODEX_BUILDS: dict[str, CodexBuild] = {
     "aarch64-apple-darwin": _codex_build(
         "aarch64-apple-darwin",
         "codex-aarch64-apple-darwin.tar.gz",
-        "023590f828bc9507ac61132ee35e74d3c5d33fb5ba3e1ca4fc2e013a2f71a3d7",
+        "f66f1c45f1eda49d6a8aef86faee24121b0c8913cd9023f23ee44262606fc7b6",
     ),
     "x86_64-apple-darwin": _codex_build(
         "x86_64-apple-darwin",
         "codex-x86_64-apple-darwin.tar.gz",
-        "763c81a56ba24a4f6c2fd256ed7ee1775caeccd22537d28887de8f6864ac5947",
+        "d00bdeb113c2cb42b43fbe4916b681ab1405772ac38fc8ac7fa9cc0934d1d0aa",
     ),
     "x86_64-pc-windows-msvc": _codex_build(
         "x86_64-pc-windows-msvc",
         "codex-x86_64-pc-windows-msvc.exe.zip",
-        "0048604040fe61fa6163238fb0fcbda79e6bc465a8eecafc8f5ae8e4b69f77fd",
+        "6b4b13811c2e0a2dc7a79ad94686b7b665e69407c9dc25cdbc2dadfc31dd8e19",
     ),
     "aarch64-pc-windows-msvc": _codex_build(
         "aarch64-pc-windows-msvc",
         "codex-aarch64-pc-windows-msvc.exe.zip",
-        "de13275b7e31731474e0c1bce68ceaa07ba85ceecf63a1a4a9d5f7f58275b2d2",
+        "589e1c49d7b0fac369913c5f8195b49bd6fd458954ed47cd76c9b7e8f46eb056",
     ),
     "x86_64-unknown-linux-musl": _codex_build(
         "x86_64-unknown-linux-musl",
         "codex-x86_64-unknown-linux-musl.tar.gz",
-        "6a9def51a0ad8cea6684d8eb3bf033c89f33e3bc5cfe492f1a1e0a718451a1c6",
+        "ab308870bc7fc048c23dc49d03f6b8af9ce7fc99b9da882d6688be7a90155c7a",
     ),
     "aarch64-unknown-linux-musl": _codex_build(
         "aarch64-unknown-linux-musl",
         "codex-aarch64-unknown-linux-musl.tar.gz",
-        "8eddae5e6c009dff9ba51ae1bfe3bdd9ff4c1ccc93a48cc6860db1cd9fdf11be",
+        "5bb1f75e1a1588845b4a31f2c98fb2b394be5c2a8d90a24a8ab0ebbae1169264",
     ),
 }
 

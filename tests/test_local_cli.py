@@ -3260,6 +3260,18 @@ def test_pick_codex_build_follows_os_and_architecture(monkeypatch, system, machi
     assert build.url.endswith(asset)
 
 
+def test_pinned_codex_installer_can_run_the_distributed_goal_protocol():
+    from remote import task_codex
+
+    pinned = tuple(int(part) for part in codex_installer.CODEX_RELEASE.removeprefix(
+        "rust-v").split("."))
+
+    assert pinned >= task_codex.MIN_DISTRIBUTED_GOAL_VERSION
+    assert len(codex_installer.CODEX_BUILDS) == 6
+    assert len({build.sha256 for build in codex_installer.CODEX_BUILDS.values()}) == 6
+    assert all(len(build.sha256) == 64 for build in codex_installer.CODEX_BUILDS.values())
+
+
 def test_agent_install_is_a_no_op_when_hermes_is_already_there(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     hermes = agent_installer.hermes_bin()
@@ -3354,6 +3366,8 @@ def test_agent_install_forces_a_reinstall_when_asked(monkeypatch, tmp_path):
 
 
 def test_agent_install_is_a_no_op_when_codex_is_already_there(monkeypatch, tmp_path, capsys):
+    from remote import task_codex
+
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     codex = codex_installer.codex_bin()
     codex.parent.mkdir(parents=True)
@@ -3363,11 +3377,29 @@ def test_agent_install_is_a_no_op_when_codex_is_already_there(monkeypatch, tmp_p
         raise AssertionError("must not reinstall when codex is present")
 
     monkeypatch.setattr(codex_installer, "install_codex", fail)
+    monkeypatch.setattr(task_codex, "supports_distributed_goals", lambda _binary: True)
 
     rc = cli.cmd_agent_install(argparse.Namespace(name="codex", force=False))
 
     assert rc == 0
     assert "already installed" in capsys.readouterr().out
+
+
+def test_agent_install_upgrades_codex_that_cannot_resume_goals(monkeypatch, tmp_path, capsys):
+    from remote import task_codex
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    old = codex_installer.codex_bin()
+    old.parent.mkdir(parents=True)
+    old.write_text("#!/bin/sh\n", encoding="utf-8")
+    upgraded = tmp_path / "new-codex"
+    monkeypatch.setattr(task_codex, "supports_distributed_goals", lambda _binary: False)
+    monkeypatch.setattr(codex_installer, "install_codex", lambda: upgraded)
+
+    rc = cli.cmd_agent_install(argparse.Namespace(name="codex", force=False))
+
+    assert rc == 0
+    assert "upgrading" in capsys.readouterr().out
 
 
 def test_agent_install_rejects_an_unknown_agent():
