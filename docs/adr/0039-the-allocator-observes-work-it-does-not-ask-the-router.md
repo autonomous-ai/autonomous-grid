@@ -60,17 +60,6 @@ On a saturated fleet, a new speculative model may replace stale speculation or o
 to obtain its first canary. It cannot evict baseline/direct work or another hypothesis's only
 canary; further speculative scale-out still waits for spare capacity.
 
-Multi-user failure is stronger than one speculative hypothesis without becoming a router command.
-Grid maps bounded affinity digests into 16 anonymous cohorts and retains only five-minute aggregate
-workload latency/error buckets. At least three active cohorts, 12 samples, and a majority cohort SLO
-breach graduate that workload to ordinary service urgency. It may reclaim capacity from historical
-or portfolio speculation, but configured baselines, pins, and administrator priority remain
-stronger. One stable caller and requests without affinity remain a canary; rotating affinity keys
-cannot create unbounded state but can occupy more than one cohort, so this is bounded breadth
-evidence rather than a Sybil-proof tenant authority. Token-level fairness, authenticated tenant
-shares, and admission still belong to the router/runtime; the allocator changes supply, never queue
-order.
-
 This counterfactual step prevents a loaded-only feedback loop: a Grid containing only a general LLM
 can still notice sustained image demand and prewarm a configured image model.
 

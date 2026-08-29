@@ -907,7 +907,6 @@ class AllocatorController:
                     placement_hints=placement_hints,
                     chosen_models=portfolio_selection,
                 )
-                cohort_summaries = self.intelligence.cohort_summaries(now=timestamp)
                 model_workload_outcomes = self.intelligence.outcomes
             selected_portfolio_models = sorted(set((portfolio_selection or {}).values()))
             exploration_models: set[str] = set()
@@ -956,7 +955,6 @@ class AllocatorController:
                     {**asdict(item), "workload": item.model_id}
                     for item in workload_forecasts
                 ],
-                "cohort_summaries": list(cohort_summaries),
                 "portfolio_projections": list(portfolio_projections),
                 "portfolio_selection": dict(portfolio_selection or {}),
                 "portfolio_policy": {

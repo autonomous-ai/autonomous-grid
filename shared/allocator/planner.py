@@ -2083,16 +2083,6 @@ def _placement_demand_urgency(
         or (forecast.offered_concurrency > 0 and not forecast.correlation_sources)
     ):
         return 2
-    if (
-        forecast.correlation_sources
-        and forecast.active_cohorts >= 3
-        and forecast.sample_count >= 12
-        and forecast.cohort_slo_breach_rate >= 0.50
-    ):
-        # Broad, sustained SLO failure across anonymous affinity cohorts is real service pressure,
-        # not a speculative correlation. It may unlock idle/lower-urgency capacity, while one
-        # caller or anonymous traffic remains a non-destructive portfolio canary.
-        return 2
     if forecast.correlation_sources and forecast.correlated_requests_per_minute > 0:
         return 1
     return 0
@@ -2105,14 +2095,13 @@ def _scarcity_service_pressure(
     """Order equal-share contenders by attributable harm, never caller-chosen breadth.
 
     Fair rounds still give the next replica to the least-served models. This key only resolves a
-    tie at that level, which matters when budget or capacity runs out partway through the round.
-    Trusted cohort evidence is strongest; ordinary measured queue/SLO/error/load signals follow.
-    Untrusted ``active_cohorts`` is deliberately excluded so affinity-key fan-out cannot buy a
-    scarce slot.
+    tie at that level, which matters when capacity runs out partway through the round. Only direct,
+    attributable service measurements participate: queue, SLO latency, errors, concurrency, and
+    observed request rate.
     """
 
     if forecast is None:
-        return (0.0,) * 7
+        return (0.0,) * 5
     observed_rate = forecast.observed_requests_per_minute
     if not observed_rate and not forecast.correlation_sources:
         observed_rate = forecast.requests_per_minute
@@ -2121,14 +2110,8 @@ def _scarcity_service_pressure(
         if model.latency_slo_ms > 0
         else 0.0
     )
-    trusted_breached = (
-        forecast.trusted_active_cohorts
-        * forecast.trusted_cohort_slo_breach_rate
-    )
     # ``sorted`` is ascending; negate every descending service-impact component.
     return (
-        -trusted_breached,
-        -float(forecast.trusted_active_cohorts),
         -float(forecast.queue_depth),
         -latency_ratio,
         -forecast.error_rate,

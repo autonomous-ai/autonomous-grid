@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-
 import pytest
 
 import cli
@@ -10,7 +8,6 @@ from cli.logical_test import (
     _RealChatResult,
     _RealUser,
     _assert_ports_available,
-    _distinct_affinity_user_ids,
     _live_replicas,
     _print_status,
     _real_chat_request,
@@ -18,7 +15,6 @@ from cli.logical_test import (
     _wait_for_competition_choice,
     workload_model_binding,
 )
-from shared.allocator.intelligence import anonymous_tenant_cohort
 
 
 def test_logical_test_parser_defaults_to_four_machines():
@@ -119,19 +115,6 @@ def test_competition_wait_uses_typed_choice_not_explanation_prose(monkeypatch):
 
     assert chosen == "coder"
     assert observed is status
-
-
-def test_demo_fixture_users_occupy_distinct_bounded_cohorts():
-    user_ids = _distinct_affinity_user_ids(4)
-    cohorts = {
-        anonymous_tenant_cohort(hashlib.sha256(user_id.encode()).digest())
-        for user_id in user_ids
-    }
-
-    assert len(user_ids) == 4
-    assert len(cohorts) == 4
-
-
 def test_logical_test_parser_accepts_machine_count_and_lifecycle_commands():
     start = cli.build_parser().parse_args(["test", "start", "--machines", "7"])
     status = cli.build_parser().parse_args(["test", "status", "--json"])

@@ -582,9 +582,6 @@ class DemandForecast:
     sample_count: int = 0
     updated_at: float = 0.0
     observed_requests_per_minute: float = 0.0
-    active_cohorts: int = 0
-    cohort_slo_breach_rate: float = 0.0
-    cohort_fairness: float = 1.0
 
     def __post_init__(self) -> None:
         if not self.model_id:
@@ -598,23 +595,17 @@ class DemandForecast:
             "correlated_requests_per_minute",
             "correlation_confidence",
             "observed_requests_per_minute",
-            "cohort_slo_breach_rate",
-            "cohort_fairness",
             "updated_at",
         ):
             _finite_nonnegative(float(getattr(self, name)), name)
-        if self.queue_depth < 0 or self.sample_count < 0 or self.active_cohorts < 0:
-            raise ValueError(
-                "queue_depth, sample_count, and active_cohorts must be non-negative"
-            )
+        if self.queue_depth < 0 or self.sample_count < 0:
+            raise ValueError("queue_depth and sample_count must be non-negative")
         if (
             self.error_rate > 1
             or self.confidence > 1
             or self.correlation_confidence > 1
-            or self.cohort_slo_breach_rate > 1
-            or self.cohort_fairness > 1
         ):
-            raise ValueError("rates, fairness, and confidence cannot exceed 1")
+            raise ValueError("error_rate and confidence cannot exceed 1")
         if self.observed_requests_per_minute > self.requests_per_minute:
             raise ValueError(
                 "observed_requests_per_minute cannot exceed requests_per_minute"

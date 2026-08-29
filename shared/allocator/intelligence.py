@@ -39,15 +39,10 @@ KNOWN_WORKLOADS = frozenset(
 _MAX_CLASSIFICATION_CHARS = 32_768
 _MAX_FEATURE_UNITS = 1_000_000_000
 _TOKEN = re.compile(r"[a-z0-9_+#.-]+")
-_TENANT_CLASS_PATTERN = re.compile(r"cohort-(?:0[0-9]|1[0-5])\Z")
-_ACTIVE_COHORT_SECONDS = 300.0
 _OUTCOME_HALF_LIFE_SECONDS = 7 * 24 * 60 * 60.0
 _OUTCOME_FULL_CONFIDENCE_REQUESTS = 20.0
 _QUALITY_FULL_CONFIDENCE_SAMPLES = 8.0
 _MAX_EXPLORATION_BONUS = 0.06
-_GRADUATION_COHORTS = 3
-_GRADUATION_SAMPLES = 12
-_GRADUATION_BREACH_RATE = 0.50
 _KEYWORDS = {
     "coding": frozenset(
         {
@@ -139,7 +134,7 @@ class RequestFeatures:
     modalities: tuple[str, ...] = ("text",)
     input_units: int = 0
     requested_output_units: int = 0
-    tenant_class: str = "default"
+    is_evaluation: bool = False
 
     def __post_init__(self) -> None:
         if not self.endpoint or len(self.endpoint) > 256:
@@ -156,22 +151,8 @@ class RequestFeatures:
         if not modalities or any(len(item) > 64 for item in modalities):
             raise ValueError("modalities must contain bounded names")
         object.__setattr__(self, "modalities", modalities)
-        tenant = str(self.tenant_class or "default")
-        if tenant not in {"default", "anonymous", "allocator-evaluation"} and not (
-            _TENANT_CLASS_PATTERN.fullmatch(tenant)
-        ):
-            raise ValueError("tenant_class must be an anonymous bounded cohort")
-        object.__setattr__(self, "tenant_class", tenant)
-
-
-def anonymous_tenant_cohort(digest: bytes | None) -> str:
-    """Reduce an opaque digest to one fixed cohort; never accept or retain a raw identity."""
-
-    if digest is None:
-        return "anonymous"
-    if not isinstance(digest, bytes) or len(digest) < 2:
-        raise ValueError("tenant cohort requires a binary digest")
-    return f"cohort-{int.from_bytes(digest[:2], 'big') % 16:02d}"
+        if not isinstance(self.is_evaluation, bool):
+            raise ValueError("is_evaluation must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,10 +202,6 @@ class WorkloadIntelligence:
         self.portfolio_min_samples = int(portfolio_min_samples)
         self.demand = DemandTracker()
         self.unbound_demand = DemandTracker()
-        self.cohort_demand = DemandTracker(
-            window_seconds=_ACTIVE_COHORT_SECONDS,
-            max_samples_per_model=64,
-        )
         self._outcomes: dict[tuple[str, str, str], ModelWorkloadOutcome] = {}
 
     @property
@@ -254,14 +231,6 @@ class WorkloadIntelligence:
         )
         self.demand.observe(
             features.workload,
-            service_seconds=service_seconds,
-            latency_ms=measured_latency,
-            queue_depth=queue_depth,
-            errors=int(error),
-            timestamp=observed_at,
-        )
-        self.cohort_demand.observe(
-            _cohort_key(features.workload, features.tenant_class),
             service_seconds=service_seconds,
             latency_ms=measured_latency,
             queue_depth=queue_depth,
@@ -301,7 +270,6 @@ class WorkloadIntelligence:
 
         self.demand.clear()
         self.unbound_demand.clear()
-        self.cohort_demand.clear()
         self._outcomes.clear()
 
     def observe_model_evaluation(
@@ -410,11 +378,6 @@ class WorkloadIntelligence:
                         profile.model_id,
                     ),
                 )
-            cohort_summary = self._cohort_summary(
-                workload,
-                latency_slo_ms=chosen.latency_slo_ms,
-                now=now,
-            )
             projected = replace(
                 forecast,
                 model_id=chosen.model_id,
@@ -429,9 +392,6 @@ class WorkloadIntelligence:
                 correlated_requests_per_minute=forecast.requests_per_minute,
                 correlation_confidence=forecast.confidence,
                 correlation_sources=(f"workload:{workload}",),
-                active_cohorts=int(cohort_summary["active_cohorts"]),
-                cohort_slo_breach_rate=float(cohort_summary["slo_breach_rate"]),
-                cohort_fairness=float(cohort_summary["fairness"]),
             )
             merged[chosen.model_id] = _merge_forecasts(
                 merged.get(chosen.model_id), projected
@@ -528,11 +488,6 @@ class WorkloadIntelligence:
                         profile.model_id,
                     ),
                 )
-            cohort_summary = self._cohort_summary(
-                workload,
-                latency_slo_ms=chosen.latency_slo_ms,
-                now=timestamp,
-            )
             chosen_evidence = self._outcome_evidence(
                 chosen.model_id,
                 workload,
@@ -562,7 +517,6 @@ class WorkloadIntelligence:
                         self,
                         now=timestamp,
                     ),
-                    "cohort_evidence": cohort_summary,
                     "reason": (
                         (
                             "confidence-aware canary; "
@@ -580,31 +534,12 @@ class WorkloadIntelligence:
             )
         return tuple(rows)
 
-    def cohort_summaries(
-        self, *, now: float | None = None
-    ) -> tuple[dict[str, Any], ...]:
-        """Return bounded anonymous-cohort health without exposing identities or content."""
-
-        timestamp = time.time() if now is None else float(now)
-        workloads = sorted(
-            {
-                key.split(":", 1)[0]
-                for key in (self.cohort_demand.to_dict().get("models") or {})
-                if ":" in key
-            }
-        )
-        return tuple(
-            self._cohort_summary(workload, latency_slo_ms=0.0, now=timestamp)
-            for workload in workloads
-        )
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
             "portfolio_min_samples": self.portfolio_min_samples,
             "demand": self.demand.to_dict(),
             "unbound_demand": self.unbound_demand.to_dict(),
-            "cohort_demand": self.cohort_demand.to_dict(),
             "outcomes": [asdict(item) for item in self.outcomes],
         }
 
@@ -619,8 +554,6 @@ class WorkloadIntelligence:
             result.unbound_demand = DemandTracker.from_dict(
                 dict(value["unbound_demand"])
             )
-        if value.get("cohort_demand"):
-            result.cohort_demand = DemandTracker.from_dict(dict(value["cohort_demand"]))
         for row in value.get("outcomes") or ():
             fields = dict(row)
             # Legacy records shared one timestamp between service and quality. Retain their service
@@ -637,59 +570,6 @@ class WorkloadIntelligence:
                 (outcome.model_id, outcome.workload, outcome.artifact_sha256)
             ] = outcome
         return result
-
-    def _cohort_summary(
-        self,
-        workload: str,
-        *,
-        latency_slo_ms: float,
-        now: float,
-    ) -> dict[str, Any]:
-        prefix = f"{workload}:"
-        rows: list[DemandForecast] = []
-        for key in sorted((self.cohort_demand.to_dict().get("models") or {})):
-            if not key.startswith(prefix):
-                continue
-            forecast = self.cohort_demand.forecast(key, now=now)
-            age = (
-                max(0.0, now - forecast.updated_at) if forecast.updated_at else math.inf
-            )
-            if (
-                forecast.requests_per_minute > 0
-                and forecast.sample_count > 0
-                and age < _ACTIVE_COHORT_SECONDS
-            ):
-                rows.append(forecast)
-        attainments: list[float] = []
-        breaches = 0
-        for row in rows:
-            latency_attainment = 1.0
-            if latency_slo_ms > 0 and row.p95_latency_ms > 0:
-                latency_attainment = min(1.0, latency_slo_ms / row.p95_latency_ms)
-            attainment = max(0.0, (1.0 - row.error_rate) * latency_attainment)
-            attainments.append(attainment)
-            breaches += int(
-                row.error_rate >= 0.20
-                or (latency_slo_ms > 0 and row.p95_latency_ms > latency_slo_ms)
-            )
-        active = len(rows)
-        samples = sum(row.sample_count for row in rows)
-        breach_rate = breaches / active if active else 0.0
-        fairness = _jain(attainments)
-        graduated = (
-            active >= _GRADUATION_COHORTS
-            and samples >= _GRADUATION_SAMPLES
-            and breach_rate >= _GRADUATION_BREACH_RATE
-        )
-        return {
-            "workload": workload,
-            "active_cohorts": active,
-            "samples": samples,
-            "slo_ms": float(latency_slo_ms),
-            "slo_breach_rate": breach_rate,
-            "fairness": fairness,
-            "graduated_allocation_pressure": graduated,
-        }
 
     def _observe_outcome(
         self,
@@ -873,7 +753,7 @@ def _placement_feasible(
 
 
 def _placement_transition_penalty(hint: Mapping[str, Any]) -> float:
-    """Price avoidable model churn using the candidate's best current startup path.
+    """Penalize avoidable model churn using the best current startup path.
 
     The penalty disappears once a model is resident, which creates state-dependent hysteresis:
     a cold challenger must provide a meaningful score improvement, while an incumbent that becomes
@@ -887,21 +767,6 @@ def _placement_transition_penalty(hint: Mapping[str, Any]) -> float:
     if not math.isfinite(startup_seconds) or startup_seconds <= 0:
         return 0.0
     return min(0.05, 0.01 + startup_seconds / 1_200.0)
-
-
-def _cohort_key(workload: str, tenant_class: str) -> str:
-    return f"{workload}:{tenant_class}"
-
-
-def _jain(values: Iterable[float]) -> float:
-    items = tuple(max(0.0, float(value)) for value in values)
-    if not items:
-        return 1.0
-    squared_sum = sum(items) ** 2
-    sum_squares = sum(value * value for value in items)
-    return squared_sum / (len(items) * sum_squares) if sum_squares else 1.0
-
-
 def _candidate_rows(
     profiles: Iterable[ModelProfile],
     workload: str,
@@ -940,13 +805,6 @@ def _candidate_rows(
                 "selectable": _placement_feasible(
                     profile.model_id,
                     placement_hints,
-                    allow_preemption=bool(
-                        intelligence._cohort_summary(
-                            workload,
-                            latency_slo_ms=profile.latency_slo_ms,
-                            now=now,
-                        )["graduated_allocation_pressure"]
-                    ),
                 ),
                 "placement": dict((placement_hints or {}).get(profile.model_id) or {}),
             }
@@ -1088,10 +946,4 @@ def _merge_forecasts(
         ),
         sample_count=total_count,
         updated_at=max(direct.updated_at, projected.updated_at),
-        active_cohorts=max(direct.active_cohorts, projected.active_cohorts),
-        cohort_slo_breach_rate=max(
-            direct.cohort_slo_breach_rate,
-            projected.cohort_slo_breach_rate,
-        ),
-        cohort_fairness=min(direct.cohort_fairness, projected.cohort_fairness),
     )
