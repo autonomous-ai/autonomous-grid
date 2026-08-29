@@ -189,12 +189,16 @@ Open `index.html`, then click the moving button to increase your score.
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--version"]:
+        print("codex-cli 0.150.1")
+        return 0
     node = os.environ.get("GRID_E2E_GOAL_NODE", "?")
     thread_id = "grid-e2e-" + str(uuid.uuid4())
     native_status = "paused"
     tokens = 0
     dynamic_tools: list[dict] = []
     early_pause = False
+    initialized = False
 
     def call_tool(name: str, arguments: dict) -> dict:
         nonlocal early_pause
@@ -221,9 +225,14 @@ def main() -> int:
         request = json.loads(line)
         method = request.get("method")
         if "id" not in request:
+            if method == "initialized":
+                initialized = True
             continue
         if method == "initialize":
             reply(request, {"serverInfo": {"name": "fake-codex"}})
+        elif not initialized:
+            emit({"id": request["id"], "error": {
+                "code": -32600, "message": "Not initialized"}})
         elif method == "thread/start":
             dynamic_tools = request.get("params", {}).get("dynamicTools") or []
             reply(request, {"thread": {"id": thread_id}})

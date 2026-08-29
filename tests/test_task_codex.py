@@ -83,6 +83,23 @@ def test_goal_inference_proxy_attributes_requests_to_durable_turn_and_conversati
     assert headers["X-Grid-Conversation"] == "goal-1"
 
 
+def test_codex_goal_capability_requires_a_measured_native_goal_version(monkeypatch):
+    monkeypatch.setattr(task_codex.shutil, "which", lambda _name: "/fake/codex")
+    monkeypatch.setattr(task_codex, "_binary_version", lambda _binary: (0, 150, 0))
+
+    assert task_codex.available() is False
+    try:
+        task_codex.resolve_binary()
+    except task_codex.CodexGoalError as exc:
+        assert "install 0.150.1 or newer" in str(exc)
+    else:
+        raise AssertionError("an old Codex binary was accepted as a native Goal provider")
+
+    monkeypatch.setattr(task_codex, "_binary_version", lambda _binary: (0, 150, 1))
+    assert task_codex.available() is True
+    assert task_codex.resolve_binary() == "/fake/codex"
+
+
 def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch):
     events = []
     monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
@@ -100,6 +117,8 @@ def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch)
     checkpoint = json.loads((tmp_path / ".grid/agent/codex/goal-state.json").read_text())
     assert checkpoint["thread_id"] == "thread-portable"
     sent = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
+    assert sent[0]["method"] == "initialize"
+    assert sent[1] == {"method": "initialized"}
     # Creating the thread is the only thread/start request. Activating a native Codex Goal starts
     # its turn automatically; Grid must not add a second, ordinary user turn of its own.
     starts = [row for row in sent if row.get("method") == "thread/start"]

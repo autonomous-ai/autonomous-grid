@@ -22,6 +22,10 @@ codex --version
 grid join <grid-name> --tasks --tasks-root /short/grid-tasks
 ```
 
+Codex Goal workers require `codex-cli 0.150.1` or newer, the oldest release Grid has measured with
+the persisted `thread/goal/*` and `thread/resume` app-server contract. Older or unreadable binaries
+are not advertised to the distributed queue, so they cannot claim and strand a Goal.
+
 The provider advertises each native Goal harness it can actually run. Restrict a node explicitly
 with `GRID_TASK_AGENT_KINDS=codex` or `GRID_TASK_AGENT_KINDS=claude` when desired.
 

@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import shutil
 import signal
 import subprocess
@@ -31,6 +32,13 @@ HOME_DIR = "home"
 _MAX_TOOL_RESULT = 64 * 1024
 _MAX_RECORDED_TOOL_VALUE = 24 * 1024
 _SECRET_FIELD_PARTS = ("authorization", "api_key", "apikey", "password", "secret", "token")
+# Oldest binary measured against the stable thread/goal/{set,get,clear} and thread/resume contract.
+# A binary's presence alone is not a capability proof: advertising an older Codex strands the Goal
+# after it has already been leased to that node.
+MIN_DISTRIBUTED_GOAL_VERSION = (0, 150, 1)
+_VERSION_PATTERN = re.compile(r"\Acodex-cli (\d+)\.(\d+)\.(\d+)")
+_VERSION_TIMEOUT_SECONDS = 10
+_VERSION_CACHE: dict[tuple[str, int, int], tuple[int, int, int]] = {}
 
 
 def _recorded_tool_value(value: Any) -> Any:
@@ -96,15 +104,55 @@ def _spawn(argv: list[str], env: dict[str, str], cwd: Path) -> ProcessLike:
         text=True, bufsize=1, cwd=cwd, env=env, start_new_session=True)
 
 
+def _version_cache_key(binary: str) -> tuple[str, int, int] | None:
+    try:
+        info = os.stat(binary)
+    except OSError:
+        return None
+    return (binary, info.st_mtime_ns, info.st_size)
+
+
+def _binary_version(binary: str) -> tuple[int, int, int]:
+    key = _version_cache_key(binary)
+    cached = _VERSION_CACHE.get(key) if key is not None else None
+    if cached is not None:
+        return cached
+    try:
+        proc = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, errors="replace",
+            timeout=_VERSION_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CodexGoalError(f"could not ask {binary} for its version: {exc}") from exc
+    reported = (proc.stdout or proc.stderr or "").strip()
+    match = _VERSION_PATTERN.match(reported)
+    if match is None:
+        raise CodexGoalError(
+            f"{binary} --version said {reported!r}, which is not a Codex version Grid can check")
+    version = (int(match[1]), int(match[2]), int(match[3]))
+    if key is not None:
+        _VERSION_CACHE[key] = version
+    return version
+
+
 def resolve_binary() -> str:
     binary = shutil.which("codex")
     if not binary:
         raise CodexGoalError("Codex is not installed on this provider")
+    version = _binary_version(binary)
+    if version < MIN_DISTRIBUTED_GOAL_VERSION:
+        required = ".".join(str(part) for part in MIN_DISTRIBUTED_GOAL_VERSION)
+        found = ".".join(str(part) for part in version)
+        raise CodexGoalError(
+            f"Codex {found} cannot resume distributed native Goals; install {required} or newer")
     return binary
 
 
 def available() -> bool:
-    return shutil.which("codex") is not None
+    try:
+        resolve_binary()
+    except CodexGoalError:
+        return False
+    return True
 
 
 def state_dir(workspace: Path) -> Path:
