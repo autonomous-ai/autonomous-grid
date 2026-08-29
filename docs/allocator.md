@@ -112,8 +112,9 @@ a cold-start prior; a bounded eight-sample EWMA becomes authoritative after four
 node/model/artifact revision. A checksum change starts with the configured prior instead of
 inheriting an optimistic timing from different weights. Placement favors a faster cached host,
 and the predictive prewarm horizon follows the fastest eligible next host's learned warm time and
-cache state. An unknown host keeps the conservative configured load-plus-warm fallback, while one
-known slow host does not inflate the whole fleet's target when a faster path is available. Samples
+cache/lifecycle state; a replica already warming does not pay the artifact-load phase twice. An
+unknown host keeps the conservative configured load-plus-warm fallback, while one known slow host
+does not inflate the whole fleet's target when a faster path is available. Samples
 expire after 30 days so a runtime or hardware upgrade can relearn. Invalid, non-finite, negative, or
 over-one-hour reports are ignored rather than poisoning scheduling or receipt delivery. Persisted
 failed warm/load attempts apply a bounded per-model penalty, allowing a healthy peer to be tried

@@ -1539,6 +1539,37 @@ def test_predictive_prewarm_uses_fastest_eligible_learned_startup_path():
     assert plan.nodes_for("qwen") == ("a-fast", "z-slow")
 
 
+def test_predictive_prewarm_does_not_recount_load_for_warming_replica():
+    profile = model(
+        min_replicas=0,
+        max_replicas=10,
+        target_utilization=1,
+        load_seconds=100,
+        warm_seconds=1,
+    )
+    warming = node(
+        "warming",
+        residencies=(
+            ModelResidency(
+                "qwen",
+                8_000,
+                ResidencyState.WARMING,
+            ),
+        ),
+    )
+    rising = DemandForecast(
+        "qwen",
+        requests_per_minute=60,
+        offered_concurrency=1,
+        trend_per_minute=60,
+        confidence=1,
+    )
+
+    plan = PlacementPlanner().plan((warming,), (profile,), (rising,), now=100)
+
+    assert plan.target_for("qwen") == 2
+
+
 @pytest.mark.parametrize("startup_horizon", (-1, math.inf, math.nan, True))
 def test_replica_count_rejects_invalid_startup_horizon(startup_horizon):
     with pytest.raises(ValueError, match="startup horizon"):

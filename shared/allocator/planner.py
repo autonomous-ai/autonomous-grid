@@ -1499,6 +1499,14 @@ def _next_replica_startup_seconds(
             (node.node_id, model.model_id),
             model.warm_seconds,
         )
+        if (
+            residency is not None
+            and residency.managed
+            and residency.state == ResidencyState.WARMING
+            and model.matches_artifact(residency)
+        ):
+            candidates.append(warm_seconds)
+            continue
         artifact_cached = (
             (not model.artifact_sha256 and model.model_id in node.cached_models)
             or bool(
