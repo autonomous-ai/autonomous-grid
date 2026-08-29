@@ -536,6 +536,91 @@ def test_direct_demand_is_delivered_before_older_speculative_prewarm(monkeypatch
     )
 
 
+def test_controller_starts_equal_services_one_replica_round_at_a_time():
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(max_concurrent_mutations=2),
+    )
+    pairs = (
+        ("a-alpha-0", "alpha"),
+        ("b-alpha-1", "alpha"),
+        ("y-beta-0", "beta"),
+        ("z-beta-1", "beta"),
+    )
+    machines = tuple(
+        NodeSnapshot(
+            node_id,
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            cached_models=(model_id,),
+            last_heartbeat=10,
+        )
+        for node_id, model_id in pairs
+    )
+    for model_id, pinned_nodes in (
+        ("alpha", ("a-alpha-0", "b-alpha-1")),
+        ("beta", ("y-beta-0", "z-beta-1")),
+    ):
+        controller.put_profile(
+            ModelProfile(
+                model_id,
+                8_000,
+                runtimes=("llama.cpp",),
+                pinned_nodes=pinned_nodes,
+                min_replicas=2,
+                max_replicas=2,
+                min_residency_seconds=0,
+            )
+        )
+
+    first = controller.tick(machines, now=10)
+    assert [action.model_id for action in first.executable_actions] == [
+        "alpha",
+        "beta",
+    ]
+    started: dict[str, str] = {}
+    for machine in machines:
+        commands = controller.commands_for(machine.node_id, now=10)
+        if not commands:
+            continue
+        command = commands[0]
+        started[machine.node_id] = command.model_id
+        controller.acknowledge(
+            machine.node_id,
+            command.action_id,
+            MutationStatus.SUCCEEDED,
+            now=10.5,
+        )
+
+    observed = tuple(
+        replace(
+            machine,
+            residencies=(
+                ModelResidency(
+                    started[machine.node_id],
+                    8_000,
+                    ResidencyState.READY,
+                    loaded_at=10.5,
+                ),
+            ),
+            last_heartbeat=11,
+        )
+        if machine.node_id in started
+        else replace(machine, last_heartbeat=11)
+        for machine in machines
+    )
+    second = controller.tick(observed, now=11)
+
+    assert [action.model_id for action in second.executable_actions] == [
+        "alpha",
+        "beta",
+    ]
+    assert {
+        action.node_id for action in first.executable_actions
+    }.isdisjoint(action.node_id for action in second.executable_actions)
+
+
 def test_undelivered_reprioritization_indexes_large_command_queue_once():
     count = 64
     controller = AllocatorController(

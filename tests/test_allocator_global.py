@@ -3217,6 +3217,48 @@ def test_mutation_governor_prefers_fast_cached_start_within_service_class():
     )
 
 
+def test_mutation_governor_preserves_replica_round_fairness():
+    machines = [
+        node(node_id, cached=(model_id,))
+        for node_id, model_id in (
+            ("a-alpha-0", "alpha"),
+            ("b-alpha-1", "alpha"),
+            ("y-beta-0", "beta"),
+            ("z-beta-1", "beta"),
+        )
+    ]
+    profiles = [
+        model(
+            "alpha",
+            min_replicas=2,
+            max_replicas=2,
+            pinned_nodes=("a-alpha-0", "b-alpha-1"),
+        ),
+        model(
+            "beta",
+            min_replicas=2,
+            max_replicas=2,
+            pinned_nodes=("y-beta-0", "z-beta-1"),
+        ),
+    ]
+    plan = PlacementPlanner().plan(machines, profiles, now=10)
+
+    result = Reconciler(
+        ReconcilePolicy(max_concurrent_mutations=2)
+    ).reconcile(
+        plan,
+        machines,
+        profiles,
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+
+    assert [item.model_id for item in result.executable_actions] == [
+        "alpha",
+        "beta",
+    ]
+
+
 def test_reconciler_indexes_high_cardinality_inputs_once(
     monkeypatch,
 ):

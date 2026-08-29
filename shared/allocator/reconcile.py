@@ -311,6 +311,10 @@ class Reconciler:
         deferred: list[DeferredMutation] = []
         desired = plan.desired_pairs
         urgency_by_model = dict(plan.model_urgencies)
+        replica_index_by_pair = {
+            (assignment.node_id, assignment.model_id): assignment.replica_index
+            for assignment in plan.assignments
+        }
         preemptions = {
             (item.node_id, item.model_id): item for item in plan.preemptions
         }
@@ -653,13 +657,14 @@ class Reconciler:
 
         def proposal_sort_key(
             action: MutationAction,
-        ) -> tuple[int, int, float, int, str, str]:
+        ) -> tuple[int, int, float, int, int, str, str]:
             admin_priority, demand_urgency = service_priority(action)
             return (
                 -admin_priority,
                 -demand_urgency,
                 time_to_ready(action),
                 action_stage(action),
+                replica_index_by_pair.get((action.node_id, action.model_id), 0),
                 action.node_id,
                 action.model_id,
             )
