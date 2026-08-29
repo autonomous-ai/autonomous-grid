@@ -622,8 +622,8 @@ unregister and exit cleanly.
 The local signaling server exposes:
 
 - `GET /allocator/status` — current mode, host snapshots, profiles, forecasts, latest plan,
-  reconciliation result, pending commands, withdrawn destructive commands, and bounded action
-  history;
+  reconciliation result, last successful tick duration, pending commands, withdrawn destructive
+  commands, and bounded action history;
 - `PUT /allocator/models/{model_id}` — create or replace a model profile;
 - `DELETE /allocator/models/{model_id}` — retire a model profile and safely converge to zero;
 - `PUT /allocator/mode` — select `observe`, `recommend`, or `automatic`;

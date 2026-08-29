@@ -74,6 +74,20 @@ def test_controller_recommend_is_the_safe_default_and_queues_nothing():
     assert controller.commands_for("n", now=10) == ()
 
 
+def test_controller_status_reports_last_successful_tick_duration(monkeypatch):
+    monotonic_times = iter((100.0, 100.25))
+    monkeypatch.setattr(
+        "shared.allocator.controller.time.monotonic",
+        lambda: next(monotonic_times),
+    )
+    controller = AllocatorController()
+    controller.put_profile(profile())
+
+    controller.tick([node()], now=10)
+
+    assert controller.status([node()], now=10)["last_tick_duration_seconds"] == 0.25
+
+
 def test_controller_automatic_queues_repeats_and_acknowledges_action():
     controller = AllocatorController(
         mode=AllocatorMode.AUTOMATIC,

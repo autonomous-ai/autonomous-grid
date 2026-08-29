@@ -93,6 +93,7 @@ class AllocatorController:
         self._last_plan: PlacementPlan | None = None
         self._last_result: ReconcileResult | None = None
         self._last_tick_at = 0.0
+        self._last_tick_duration_seconds = 0.0
         self._last_delivery_safety_error = ""
         self._lock = threading.RLock()
         # Demand completion runs on the inference event-loop thread. Planning can legitimately
@@ -208,8 +209,14 @@ class AllocatorController:
         node_list = tuple(nodes)
         with self._lock:
             checkpoint = self._checkpoint()
+            started_at = time.monotonic()
             try:
-                return self._tick_locked(node_list, timestamp, checkpoint)
+                result = self._tick_locked(node_list, timestamp, checkpoint)
+                self._last_tick_duration_seconds = max(
+                    0.0,
+                    time.monotonic() - started_at,
+                )
+                return result
             except jsonio.AtomicWriteCommittedError:
                 raise
             except BaseException:
@@ -551,6 +558,7 @@ class AllocatorController:
                 "controller_epoch": self._controller_epoch,
                 "plan_sequence": self._plan_sequence,
                 "last_tick_at": self._last_tick_at,
+                "last_tick_duration_seconds": self._last_tick_duration_seconds,
                 "nodes": [node.to_dict() for node in sorted(nodes, key=lambda item: item.node_id)],
                 "models": [
                     {
