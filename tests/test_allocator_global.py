@@ -305,6 +305,44 @@ def test_portfolio_hint_excludes_unknown_cost_under_hard_budget():
     assert "hourly cost is unknown" in str(hint["reason"])
 
 
+def test_portfolio_hint_accepts_candidate_after_safe_incumbent_relocation():
+    baseline = model("baseline", 256, min_replicas=1, max_replicas=1)
+    specialist = model("specialist", 714, min_replicas=0, max_replicas=1)
+    machines = (
+        node(
+            "small",
+            512,
+            max_models=1,
+            residencies=(
+                ModelResidency("baseline", 256, ResidencyState.CACHED),
+            ),
+        ),
+        node(
+            "large",
+            4_096,
+            max_models=1,
+            residencies=(
+                ready("baseline", 256),
+                ModelResidency("specialist", 714, ResidencyState.CACHED),
+            ),
+        ),
+    )
+
+    hint = PlacementPlanner(
+        PlannerPolicy(memory_headroom_fraction=0)
+    ).portfolio_placement_hints(machines, (baseline, specialist), now=10)[
+        "specialist"
+    ]
+
+    assert hint["feasible_now"] is False
+    assert hint["feasible_after_preemption"] is True
+    assert hint["best_node_id"] == "large"
+    assert hint["preemption_victims"] == ["baseline"]
+    assert hint["relocation_targets"] == [
+        {"model_id": "baseline", "node_id": "small"}
+    ]
+
+
 def test_hard_hourly_budget_evicts_an_existing_owned_replica_it_cannot_afford():
     planner = PlacementPlanner(
         PlannerPolicy(

@@ -181,10 +181,85 @@ class PlacementPlanner:
         profile_by_id = {model.model_id: model for model in model_list}
         hints: dict[str, dict[str, object]] = {}
 
+        def relocation_target(
+            victim: ModelProfile,
+            *,
+            blocked_node_id: str,
+            excluded_node_ids: frozenset[str] = frozenset(),
+        ) -> str:
+            """Find a host that can receive a required victim before its current copy drains."""
+
+            candidates: list[tuple[float, float, str]] = []
+            for candidate_node in node_list:
+                if (
+                    candidate_node.node_id == blocked_node_id
+                    or candidate_node.node_id in excluded_node_ids
+                ):
+                    continue
+                residency = candidate_node.residency(victim.model_id)
+                for_new = _requires_new_runtime(residency, victim)
+                reason = _ineligible_reason(
+                    candidate_node,
+                    victim,
+                    timestamp,
+                    self.policy,
+                    for_new=for_new,
+                )
+                allocatable = candidate_node.capacity_mb - candidate_node.reserved_mb
+                if candidate_node.state == NodeState.THROTTLED:
+                    allocatable *= self.policy.throttled_capacity_fraction
+                allocatable = max(0, math.floor(allocatable))
+                if reason is None and victim.memory_for(candidate_node.runtimes) > allocatable:
+                    reason = "model exceeds allocatable memory"
+                if reason is None and self.policy.max_hourly_cost > 0:
+                    if not candidate_node.cost_known and not self.policy.allow_unknown_cost:
+                        reason = "node hourly cost is unknown"
+                    elif (
+                        candidate_node.cost_known
+                        and candidate_node.cost_per_hour > self.policy.max_hourly_cost
+                    ):
+                        reason = "node exceeds fleet hourly cost budget"
+                if reason is not None or candidate_node.max_models == 0:
+                    continue
+                if (
+                    residency is not None
+                    and residency.state == ResidencyState.READY
+                    and not residency.managed
+                ):
+                    # Reconciliation requires an allocator-owned replacement before removing a
+                    # required managed baseline. External inventory cannot prove that boundary.
+                    continue
+                if (
+                    _portfolio_dynamic_fit_reason(
+                        candidate_node,
+                        victim,
+                        profile_by_id,
+                        self.policy,
+                    )
+                    is not None
+                ):
+                    continue
+                candidates.append(
+                    (
+                        float(candidate_node.cost_per_hour),
+                        _portfolio_startup_seconds(residency, victim),
+                        candidate_node.node_id,
+                    )
+                )
+            return min(candidates)[2] if candidates else ""
+
         for model in model_list:
             rejected: Counter[str] = Counter()
             eligible: list[tuple[float, float, str]] = []
-            preemptible: list[tuple[float, float, str, tuple[str, ...]]] = []
+            preemptible: list[
+                tuple[
+                    float,
+                    float,
+                    str,
+                    tuple[str, ...],
+                    tuple[tuple[str, str], ...],
+                ]
+            ] = []
             hard_compatible_nodes = 0
             if model.max_replicas <= 0:
                 rejected["model is disabled"] += 1
@@ -243,37 +318,54 @@ class PlacementPlanner:
                         continue
                     rejected[reason] += 1
 
-                    removable = sorted(
-                        (
-                            item
-                            for item in node.residencies
-                            if item.model_id != model.model_id
-                            and not _adds_model_slot(item)
-                            and item.state
-                            in (
+                    removable: list[tuple[ModelResidency, str]] = []
+                    for item in node.residencies:
+                        victim = profile_by_id.get(item.model_id)
+                        if (
+                            item.model_id == model.model_id
+                            or _adds_model_slot(item)
+                            or item.state
+                            not in (
                                 ResidencyState.READY,
                                 ResidencyState.DRAINING,
                                 ResidencyState.FAILED,
                             )
-                            and item.managed
-                            and not item.pinned
-                            and not node.manually_managed
-                            and (victim := profile_by_id.get(item.model_id)) is not None
-                            and victim.min_replicas == 0
-                            and not victim.pinned_nodes
-                            and victim.priority <= model.priority
-                        ),
-                        key=lambda item: (
-                            profile_by_id[item.model_id].priority,
-                            item.active_requests,
-                            _preemption_state_cost(item.state),
-                            -item.memory_mb,
-                            item.model_id,
-                        ),
+                            or not item.managed
+                            or item.pinned
+                            or node.manually_managed
+                            or victim is None
+                            or victim.pinned_nodes
+                            or victim.priority > model.priority
+                        ):
+                            continue
+                        destination = ""
+                        if victim.min_replicas > 0:
+                            destination = relocation_target(
+                                victim,
+                                blocked_node_id=node.node_id,
+                            )
+                            if not destination:
+                                continue
+                        removable.append((item, destination))
+                    removable.sort(
+                        key=lambda pair: (
+                            profile_by_id[pair[0].model_id].priority,
+                            pair[0].active_requests,
+                            _preemption_state_cost(pair[0].state),
+                            -pair[0].memory_mb,
+                            pair[0].model_id,
+                        )
                     )
                     selected: list[ModelResidency] = []
-                    for victim_residency in removable:
+                    relocations: list[tuple[str, str]] = []
+                    relocation_nodes: set[str] = set()
+                    for victim_residency, destination in removable:
+                        if destination and destination in relocation_nodes:
+                            continue
                         selected.append(victim_residency)
+                        if destination:
+                            relocations.append((victim_residency.model_id, destination))
+                            relocation_nodes.add(destination)
                         projected = replace(
                             node,
                             residencies=tuple(
@@ -295,6 +387,7 @@ class PlacementPlanner:
                                     float(startup_seconds),
                                     node.node_id,
                                     tuple(item.model_id for item in selected),
+                                    tuple(relocations),
                                 )
                             )
                             break
@@ -314,7 +407,7 @@ class PlacementPlanner:
                     "reason": "fleet-feasible",
                 }
             elif preemptible:
-                cost, startup_seconds, node_id, victims = min(preemptible)
+                cost, startup_seconds, node_id, victims, relocations = min(preemptible)
                 hints[model.model_id] = {
                     "model_id": model.model_id,
                     # Preserve the old field as current-headroom feasibility. Callers must opt in
@@ -329,7 +422,11 @@ class PlacementPlanner:
                     "cost_per_hour": cost,
                     "startup_seconds": startup_seconds,
                     "preemption_victims": list(victims),
-                    "reason": "fleet-feasible after planner-authorized preemption",
+                    "relocation_targets": [
+                        {"model_id": victim, "node_id": destination}
+                        for victim, destination in relocations
+                    ],
+                    "reason": "fleet-feasible after planner-authorized relocation/preemption",
                 }
             else:
                 reason = "no live node is currently eligible"
