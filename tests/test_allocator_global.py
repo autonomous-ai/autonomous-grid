@@ -3338,6 +3338,68 @@ def test_reconciler_indexes_plan_once_for_broad_retirement_wave():
     assert assignments.iterations <= 5
 
 
+def test_constructive_command_revalidation_skips_destructive_safety_index(monkeypatch):
+    machine = node("n", cached=("qwen",))
+    profile = model()
+    plan = PlacementPlanner().plan((machine,), (profile,), now=10)
+    warm = Reconciler().reconcile(plan, (machine,), (profile,), now=10).actions[0]
+
+    def unexpected_safety_index(*_args, **_kwargs):
+        raise AssertionError("constructive-only validation built destructive safety state")
+
+    monkeypatch.setattr(
+        "shared.allocator.reconcile._destructive_safety_state",
+        unexpected_safety_index,
+    )
+
+    assert Reconciler().destructive_command_deferrals(
+        plan,
+        (machine,),
+        (profile,),
+        (warm,),
+        now=10,
+    ) == {}
+
+
+def test_dense_host_retirement_reuses_observed_residencies(monkeypatch):
+    count = 64
+    residencies = tuple(
+        replace(ready(f"old-{index}"), state=ResidencyState.DRAINING)
+        for index in range(count)
+    )
+    machine = node("dense", 8_000 * count, residencies=residencies)
+    profiles = tuple(
+        model(
+            f"old-{index}",
+            min_replicas=0,
+            max_replicas=0,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=0,
+        )
+        for index in range(count)
+    )
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        profiles,
+        now=10,
+    )
+    residency_lookups = 0
+    original_residency = NodeSnapshot.residency
+
+    def counted_residency(snapshot, model_id):
+        nonlocal residency_lookups
+        residency_lookups += 1
+        return original_residency(snapshot, model_id)
+
+    monkeypatch.setattr(NodeSnapshot, "residency", counted_residency)
+
+    result = Reconciler().reconcile(plan, (machine,), profiles, now=10)
+
+    assert len(result.actions) == count
+    assert {action.kind for action in result.actions} == {ActionKind.UNLOAD}
+    assert residency_lookups <= 1
+
+
 def test_mutation_governor_prioritizes_drain_for_preemption_beneficiary():
     machines = [
         node("a-routine", 8_000, residencies=(ready("obsolete", 8_000),)),

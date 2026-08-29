@@ -152,12 +152,6 @@ class Reconciler:
         timestamp = time.time() if now is None else float(now)
         if not math.isfinite(timestamp) or timestamp < 0:
             raise ValueError("now must be finite and non-negative")
-        node_by_id = {node.node_id: node for node in nodes}
-        profile_by_id = {profile.model_id: profile for profile in profiles}
-        safety = _destructive_safety_state(plan, node_by_id, profile_by_id)
-        desired_pairs = plan.desired_pairs
-        preempted_pairs = plan.preempted_pairs
-        deferrals: dict[str, DeferredMutation] = {}
         destructive = sorted(
             (
                 action
@@ -166,6 +160,14 @@ class Reconciler:
             ),
             key=lambda action: (action.created_at, action.action_id),
         )
+        if not destructive:
+            return {}
+        node_by_id = {node.node_id: node for node in nodes}
+        profile_by_id = {profile.model_id: profile for profile in profiles}
+        safety = _destructive_safety_state(plan, node_by_id, profile_by_id)
+        desired_pairs = plan.desired_pairs
+        preempted_pairs = plan.preempted_pairs
+        deferrals: dict[str, DeferredMutation] = {}
         for action in destructive:
             pair = (action.node_id, action.model_id)
             priority_preemption = pair in preempted_pairs
@@ -526,6 +528,7 @@ class Reconciler:
                         blocked_causes=mutation_block_causes,
                         history_cooldowns=history_cooldowns,
                         bypass_success_observation=True,
+                        residency=residency,
                     )
                 else:
                     action = self._proposal(
@@ -541,6 +544,7 @@ class Reconciler:
                         blocked_causes=mutation_block_causes,
                         history_cooldowns=history_cooldowns,
                         bypass_success_observation=True,
+                        residency=residency,
                     )
                 if action is None:
                     deferred.extend(
@@ -555,6 +559,7 @@ class Reconciler:
                             blocked_causes=mutation_block_causes,
                             history_cooldowns=history_cooldowns,
                             bypass_success_observation=True,
+                            residency=residency,
                         )
                     )
                 else:
@@ -708,10 +713,16 @@ class Reconciler:
         history_cooldowns: bool,
         bypass_success_observation: bool = False,
         memory_mb: int | None = None,
+        residency: ModelResidency | None = None,
     ) -> MutationAction | None:
         if kind.value not in node.actuator_capabilities or node.manually_managed:
             return None
-        artifact_sha256 = _action_artifact_sha256(kind, node, profile)
+        artifact_sha256 = _action_artifact_sha256(
+            kind,
+            node,
+            profile,
+            residency=residency,
+        )
         matching = history_by_transition.get(
             (kind, node.node_id, profile.model_id, artifact_sha256),
             (),
@@ -827,6 +838,7 @@ class Reconciler:
         blocked_causes: Mapping[tuple[ActionKind, str, str], MutationStatus],
         history_cooldowns: bool,
         bypass_success_observation: bool = False,
+        residency: ModelResidency | None = None,
     ) -> list[DeferredMutation]:
         if node.manually_managed or kind.value not in node.actuator_capabilities:
             return [
@@ -838,7 +850,12 @@ class Reconciler:
                     f"Node does not permit allocator action {kind.value!r}",
                 )
             ]
-        artifact_sha256 = _action_artifact_sha256(kind, node, profile)
+        artifact_sha256 = _action_artifact_sha256(
+            kind,
+            node,
+            profile,
+            residency=residency,
+        )
         matching = history_by_transition.get(
             (kind, node.node_id, profile.model_id, artifact_sha256),
             (),
@@ -975,12 +992,15 @@ def _action_artifact_sha256(
     kind: ActionKind,
     node: NodeSnapshot,
     profile: ModelProfile,
+    *,
+    residency: ModelResidency | None = None,
 ) -> str:
     """Bind constructive work to desired weights and destructive work to observed weights."""
 
     if kind in (ActionKind.LOAD, ActionKind.WARM):
         return profile.artifact_sha256
-    residency = node.residency(profile.model_id)
+    if residency is None:
+        residency = node.residency(profile.model_id)
     return residency.artifact_sha256 if residency is not None else ""
 
 
