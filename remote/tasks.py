@@ -1355,9 +1355,12 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
             report_kwargs: dict[str, Any] = {
                 "state": outcome.state, "output": outcome.output, "error": outcome.error,
                 "session_id": outcome.session_id, "result_commit": outcome.result_commit,
-                "transcript_result_commit": outcome.transcript_result_commit,
                 "session_reset_reason": outcome.session_reset_reason,
             }
+            # Additive rolling upgrade: an older relay ignores this key, while a worker that
+            # produced no transcript keeps the exact pre-feature report shape.
+            if outcome.transcript_result_commit:
+                report_kwargs["transcript_result_commit"] = outcome.transcript_result_commit
             # Preserve the established Claude report shape. Besides compatibility with older
             # relays, omitting absent Goal fields keeps `goal_status: null` from being mistaken for
             # an attempted checkpoint by an intermediary that validates keys rather than values.
