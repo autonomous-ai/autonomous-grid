@@ -3217,6 +3217,57 @@ def test_mutation_governor_prefers_fast_cached_start_within_service_class():
     )
 
 
+def test_reconciler_indexes_plan_urgencies_instead_of_rebuilding_per_action(
+    monkeypatch,
+):
+    machines = [
+        node(f"node-{index}", cached=(f"model-{index}",))
+        for index in range(64)
+    ]
+    profiles = [
+        model(
+            f"model-{index}",
+            pinned_nodes=(f"node-{index}",),
+        )
+        for index in range(64)
+    ]
+    plan = PlacementPlanner().plan(machines, profiles, now=10)
+
+    class CountingAssignments(tuple):
+        def __new__(cls, values):
+            instance = super().__new__(cls, values)
+            instance.iterations = 0
+            return instance
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    assignments = CountingAssignments(plan.assignments)
+    plan = replace(plan, assignments=assignments)
+    assignments.iterations = 0
+
+    def unexpected_lookup(_plan, _model_id):
+        raise AssertionError("per-action urgency lookup rebuilt the plan index")
+
+    residency_lookups = 0
+    original_residency = NodeSnapshot.residency
+
+    def counted_residency(snapshot, model_id):
+        nonlocal residency_lookups
+        residency_lookups += 1
+        return original_residency(snapshot, model_id)
+
+    monkeypatch.setattr(type(plan), "urgency_for", unexpected_lookup)
+    monkeypatch.setattr(NodeSnapshot, "residency", counted_residency)
+
+    result = Reconciler().reconcile(plan, machines, profiles, now=10)
+
+    assert len(result.actions) == 64
+    assert assignments.iterations <= 5
+    assert residency_lookups <= len(machines) * 2
+
+
 def test_mutation_governor_prioritizes_drain_for_preemption_beneficiary():
     machines = [
         node("a-routine", 8_000, residencies=(ready("obsolete", 8_000),)),

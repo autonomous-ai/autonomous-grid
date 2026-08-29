@@ -282,6 +282,7 @@ class Reconciler:
         proposals: list[MutationAction] = []
         deferred: list[DeferredMutation] = []
         desired = plan.desired_pairs
+        urgency_by_model = dict(plan.model_urgencies)
         preemptions = {
             (item.node_id, item.model_id): item for item in plan.preemptions
         }
@@ -366,6 +367,7 @@ class Reconciler:
                     blocked_until=mutation_blocks,
                     blocked_causes=mutation_block_causes,
                     history_cooldowns=history_cooldowns,
+                    memory_mb=assignment.memory_mb,
                 )
                 if load_action is None:
                     deferred.extend(
@@ -408,6 +410,7 @@ class Reconciler:
                 blocked_causes=mutation_block_causes,
                 history_cooldowns=history_cooldowns,
                 bypass_success_observation=authoritative_rewarm_state,
+                memory_mb=assignment.memory_mb,
             )
             if warm_action is None:
                 deferred.extend(
@@ -560,13 +563,13 @@ class Reconciler:
                 if beneficiary is not None:
                     return (
                         beneficiary.priority,
-                        plan.urgency_for(beneficiary.model_id),
+                        urgency_by_model.get(beneficiary.model_id, 0),
                     )
             if action.kind in (ActionKind.LOAD, ActionKind.WARM):
                 profile = profile_by_id.get(action.model_id)
                 return (
                     profile.priority if profile is not None else 0,
-                    plan.urgency_for(action.model_id),
+                    urgency_by_model.get(action.model_id, 0),
                 )
             # Routine removal is maintenance, not service for the retired model. Keep it behind
             # every availability action and explicit capacity-unlocking preemption.
@@ -687,6 +690,7 @@ class Reconciler:
         blocked_causes: Mapping[tuple[ActionKind, str, str], MutationStatus],
         history_cooldowns: bool,
         bypass_success_observation: bool = False,
+        memory_mb: int | None = None,
     ) -> MutationAction | None:
         if kind.value not in node.actuator_capabilities or node.manually_managed:
             return None
@@ -773,25 +777,15 @@ class Reconciler:
         attempt_ids = sorted({item.action_id for item in matching})
         attempt_identity = stable_digest(attempt_ids)[:16] if attempt_ids else "initial"
         transition = f"{plan.generation}:attempts:{attempt_identity}"
-        assignment = next(
-            (
-                item
-                for item in plan.assignments
-                if item.node_id == node.node_id and item.model_id == profile.model_id
-            ),
-            None,
-        )
-        memory_mb = (
-            assignment.memory_mb
-            if assignment is not None
-            else profile.memory_for(node.runtimes)
+        action_memory_mb = (
+            profile.memory_for(node.runtimes) if memory_mb is None else memory_mb
         )
         return MutationAction(
             action_id=MutationAction.stable_id(kind, node.node_id, profile.model_id, transition),
             kind=kind,
             node_id=node.node_id,
             model_id=profile.model_id,
-            memory_mb=memory_mb,
+            memory_mb=action_memory_mb,
             reason=reason,
             plan_generation=plan.generation,
             created_at=now,
@@ -956,43 +950,36 @@ def _destructive_safety_state(
         for node in node_by_id.values()
         if node.state in (NodeState.ACCEPTING, NodeState.THROTTLED)
     )
-    ready_pairs = {
-        (node.node_id, residency.model_id)
-        for node in routable_nodes
-        for residency in node.residencies
-        if residency.state == ResidencyState.READY
-        and (
-            (profile := profile_by_id.get(residency.model_id)) is not None
-            and profile.matches_artifact(residency)
-        )
-    }
-    managed_ready_pairs = {
-        (node.node_id, residency.model_id)
-        for node in routable_nodes
-        for residency in node.residencies
-        if residency.state == ResidencyState.READY
-        and residency.managed
-        and (
-            (profile := profile_by_id.get(residency.model_id)) is not None
-            and profile.matches_artifact(residency)
-        )
-    }
+    ready_pairs: set[tuple[str, str]] = set()
+    managed_ready_pairs: set[tuple[str, str]] = set()
     domain_counts: dict[str, dict[str, int]] = {}
-    domain_floors: dict[str, int] = {}
-    for profile in profile_by_id.values():
-        counts: dict[str, int] = {}
-        for node in routable_nodes:
-            residency = node.residency(profile.model_id)
+    # Index actual READY inventory in one fleet scan. Iterating every node once per configured
+    # model made an otherwise empty large fleet quadratic even though no destructive work existed.
+    for node in routable_nodes:
+        domain = node.failure_domain or node.node_id
+        for residency in node.residencies:
+            profile = profile_by_id.get(residency.model_id)
             if (
-                residency is None
-                or residency.state != ResidencyState.READY
+                residency.state != ResidencyState.READY
+                or profile is None
                 or not profile.matches_artifact(residency)
             ):
                 continue
-            domain = node.failure_domain or node.node_id
+            pair = (node.node_id, residency.model_id)
+            ready_pairs.add(pair)
+            if residency.managed:
+                managed_ready_pairs.add(pair)
+            counts = domain_counts.setdefault(residency.model_id, {})
             counts[domain] = counts.get(domain, 0) + 1
-        domain_counts[profile.model_id] = counts
-        required = min(profile.min_failure_domains, plan.target_for(profile.model_id))
+
+    target_by_model = dict(plan.desired_replicas)
+    domain_floors: dict[str, int] = {}
+    for profile in profile_by_id.values():
+        counts = domain_counts.setdefault(profile.model_id, {})
+        required = min(
+            profile.min_failure_domains,
+            target_by_model.get(profile.model_id, 0),
+        )
         domain_floors[profile.model_id] = min(len(counts), required)
     return _DestructiveSafetyState(
         ready_pairs,
