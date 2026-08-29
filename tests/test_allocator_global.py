@@ -1953,6 +1953,80 @@ def test_planner_reserves_obsolete_managed_memory_until_it_is_unloaded():
     )
 
 
+def test_reserve_growth_moves_low_priority_incumbent_to_safe_peer():
+    policy = PlannerPolicy(memory_headroom_fraction=0.05)
+    profiles = (
+        model("code", 12_000, min_replicas=1, max_replicas=1, priority=400),
+        model("assistant", 8_000, min_replicas=1, max_replicas=1, priority=300),
+        model("embeddings", 4_000, min_replicas=1, max_replicas=1, priority=100),
+    )
+    pressured = node(
+        "pressured",
+        32_000,
+        reserved_mb=9_000,
+        residencies=(
+            ready("code", 12_000),
+            ready("assistant", 8_000),
+            ready("embeddings", 4_000),
+        ),
+    )
+    peer = node("peer", 6_000)
+
+    plan = PlacementPlanner(policy).plan((pressured, peer), profiles, now=10)
+
+    assert plan.models_for("pressured") == ("assistant", "code")
+    assert plan.nodes_for("embeddings") == ("peer",)
+    assert sum(
+        assignment.memory_mb
+        for assignment in plan.assignments
+        if assignment.node_id == "pressured"
+    ) <= 32_000 - 9_000
+    result = Reconciler().reconcile(plan, (pressured, peer), profiles, now=10)
+    assert [action.kind for action in result.actions] == [
+        ActionKind.LOAD,
+        ActionKind.WARM,
+    ]
+    assert all(
+        action.kind not in (ActionKind.DRAIN, ActionKind.UNLOAD)
+        for action in result.actions
+    )
+    assert any(item.code == "replacement_not_ready" for item in result.deferred)
+
+
+def test_reserve_growth_without_safe_peer_reports_shortfall_before_drain():
+    policy = PlannerPolicy(memory_headroom_fraction=0.05)
+    profiles = (
+        model("code", 12_000, min_replicas=1, max_replicas=1, priority=400),
+        model("assistant", 8_000, min_replicas=1, max_replicas=1, priority=300),
+        model("embeddings", 4_000, min_replicas=1, max_replicas=1, priority=100),
+    )
+    pressured = node(
+        "pressured",
+        32_000,
+        reserved_mb=9_000,
+        residencies=(
+            ready("code", 12_000),
+            ready("assistant", 8_000),
+            ready("embeddings", 4_000),
+        ),
+    )
+
+    plan = PlacementPlanner(policy).plan((pressured,), profiles, now=10)
+
+    assert plan.models_for("pressured") == ("assistant", "code")
+    assert plan.nodes_for("embeddings") == ()
+    assert any(
+        item.model_id == "embeddings" and item.code == "insufficient_capacity"
+        for item in plan.unsatisfied
+    )
+    result = Reconciler().reconcile(plan, (pressured,), profiles, now=10)
+    assert all(
+        action.kind not in (ActionKind.DRAIN, ActionKind.UNLOAD)
+        for action in result.actions
+    )
+    assert any(item.code == "replacement_not_ready" for item in result.deferred)
+
+
 def test_planner_prefers_existing_then_cached_then_cold():
     profile = model()
     existing = node("existing", residencies=(ready(),), now=1_000)

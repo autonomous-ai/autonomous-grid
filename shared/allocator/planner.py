@@ -166,13 +166,24 @@ class PlacementPlanner:
         forecast_by_model = {item.model_id: item for item in forecast_list}
         startup_by_pair = _validated_startup_seconds(startup_seconds)
         capacity = {}
+        placement_budget: dict[str, int] = {}
         for node in node_list:
-            usable = (node.capacity_mb - node.reserved_mb) * (
+            allocatable = node.capacity_mb - node.reserved_mb
+            usable = allocatable * (
                 1.0 - self.policy.memory_headroom_fraction
             )
             if node.state == NodeState.THROTTLED:
+                allocatable *= self.policy.throttled_capacity_fraction
                 usable *= self.policy.throttled_capacity_fraction
             capacity[node.node_id] = max(0, math.floor(usable))
+            placement_budget[node.node_id] = max(0, math.floor(allocatable))
+        # ``capacity`` becomes the physical *incremental* memory ledger after live
+        # residencies are reserved below. Keep a separate immutable raw budget for the
+        # complete desired placement. Headroom is an admission margin, so an incumbent may
+        # continue to occupy it and perform a zero-allocation state transition. It may not,
+        # however, remain selected once non-model reserve or thermal derating has made the
+        # combined resident footprint physically unsafe.
+        desired_memory: dict[str, int] = {node.node_id: 0 for node in node_list}
         occupied_models: dict[str, int] = {node.node_id: 0 for node in node_list}
         desired_model_slots: dict[str, int] = {node.node_id: 0 for node in node_list}
         assignments: list[PlacementAssignment] = []
@@ -217,7 +228,7 @@ class PlacementPlanner:
             profile.max_colocated_models or profile.colocation_excludes
             for profile in model_list
         )
-        fit_cache: dict[tuple[str, str, int, int, int], bool] = {}
+        fit_cache: dict[tuple[str, str, int, int, int, int], bool] = {}
 
         def compatibility(
             node: NodeSnapshot,
@@ -237,6 +248,12 @@ class PlacementPlanner:
             return compatibility_cache[key]
 
         def fits_node(node: NodeSnapshot, model: ModelProfile) -> bool:
+            model_memory_mb = model.memory_for(node.runtimes)
+            if (
+                desired_memory[node.node_id] + model_memory_mb
+                > placement_budget[node.node_id]
+            ):
+                return False
             if colocation_policy_active:
                 return _fits(
                     node,
@@ -251,6 +268,7 @@ class PlacementPlanner:
                 node.node_id,
                 model.model_id,
                 capacity[node.node_id],
+                desired_memory[node.node_id],
                 occupied_models[node.node_id],
                 desired_model_slots[node.node_id],
             )
@@ -338,6 +356,7 @@ class PlacementPlanner:
                     capacity,
                     occupied_models,
                     desired_model_slots,
+                    desired_memory,
                 )
                 pinned_successes_by_model[model.model_id] += 1
 
@@ -375,6 +394,7 @@ class PlacementPlanner:
             dict[str, int],
             dict[str, int],
             dict[str, int],
+            dict[str, int],
         ]:
             return (
                 list(assignments),
@@ -383,6 +403,7 @@ class PlacementPlanner:
                 dict(capacity),
                 dict(occupied_models),
                 dict(desired_model_slots),
+                dict(desired_memory),
             )
 
         def restore_placement_state(
@@ -390,6 +411,7 @@ class PlacementPlanner:
                 list[PlacementAssignment],
                 set[tuple[str, str]],
                 dict[str, set[str]],
+                dict[str, int],
                 dict[str, int],
                 dict[str, int],
                 dict[str, int],
@@ -402,6 +424,7 @@ class PlacementPlanner:
                 saved_capacity,
                 saved_occupied,
                 saved_slots,
+                saved_desired_memory,
             ) = state
             assignments[:] = saved_assignments
             assigned_pairs.clear()
@@ -414,6 +437,8 @@ class PlacementPlanner:
             occupied_models.update(saved_occupied)
             desired_model_slots.clear()
             desired_model_slots.update(saved_slots)
+            desired_memory.clear()
+            desired_memory.update(saved_desired_memory)
 
         candidate_score_cache: dict[
             tuple[str, str, int, bool, bool],
@@ -460,6 +485,7 @@ class PlacementPlanner:
                 residency,
                 assignment.memory_mb,
             )
+            desired_memory[assignment.node_id] -= assignment.memory_mb
             desired_model_slots[assignment.node_id] -= 1
             if _adds_model_slot(residency):
                 occupied_models[assignment.node_id] -= 1
@@ -582,6 +608,7 @@ class PlacementPlanner:
                     capacity,
                     occupied_models,
                     desired_model_slots,
+                    desired_memory,
                 )
                 if place_pending_replicas(
                     remaining,
@@ -711,6 +738,7 @@ class PlacementPlanner:
                             capacity,
                             occupied_models,
                             desired_model_slots,
+                            desired_memory,
                         )
                         pending = (*displaced, *remaining)
                         if place_pending_replicas(
@@ -785,6 +813,7 @@ class PlacementPlanner:
                         capacity,
                         occupied_models,
                         desired_model_slots,
+                        desired_memory,
                     )
                     return True
             candidates: list[tuple[float, str, NodeSnapshot, tuple[str, ...]]] = []
@@ -859,6 +888,7 @@ class PlacementPlanner:
                 capacity,
                 occupied_models,
                 desired_model_slots,
+                desired_memory,
             )
             return True
 
@@ -960,6 +990,7 @@ class PlacementPlanner:
                     capacity,
                     occupied_models,
                     desired_model_slots,
+                    desired_memory,
                 )
                 placed += 1
 
@@ -2506,12 +2537,14 @@ def _place(
     capacity: dict[str, int],
     occupied_models: dict[str, int],
     desired_model_slots: dict[str, int],
+    desired_memory: dict[str, int],
 ) -> None:
     assignments.append(assignment)
     assigned_pairs.add((assignment.model_id, assignment.node_id))
     domains.add(node.failure_domain or node.node_id)
     residency = node.residency(assignment.model_id)
     capacity[node.node_id] -= _incremental_memory_mb(residency, assignment.memory_mb)
+    desired_memory[node.node_id] += assignment.memory_mb
     desired_model_slots[node.node_id] += 1
     if _adds_model_slot(residency):
         occupied_models[node.node_id] += 1
