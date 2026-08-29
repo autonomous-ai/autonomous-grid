@@ -60,10 +60,31 @@ class DemandTracker:
         correlation_max_growth: float = 2.0,
         correlation_max_sources: int = 32,
     ) -> None:
-        if window_seconds <= 0 or bucket_seconds <= 0:
-            raise ValueError("window_seconds and bucket_seconds must be positive")
-        if max_samples_per_model < 1 or confidence_samples < 1:
-            raise ValueError("sample limits must be positive")
+        try:
+            window_seconds = float(window_seconds)
+            bucket_seconds = float(bucket_seconds)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "window_seconds and bucket_seconds must be finite and positive"
+            ) from exc
+        if (
+            not math.isfinite(window_seconds)
+            or not math.isfinite(bucket_seconds)
+            or window_seconds <= 0
+            or bucket_seconds <= 0
+        ):
+            raise ValueError(
+                "window_seconds and bucket_seconds must be finite and positive"
+            )
+        if (
+            isinstance(max_samples_per_model, bool)
+            or not isinstance(max_samples_per_model, int)
+            or max_samples_per_model < 1
+            or isinstance(confidence_samples, bool)
+            or not isinstance(confidence_samples, int)
+            or confidence_samples < 1
+        ):
+            raise ValueError("sample limits must be positive integers")
         if not 0 < ewma_alpha <= 1:
             raise ValueError("ewma_alpha must be in (0, 1]")
         if not math.isfinite(max_future_skew_seconds) or max_future_skew_seconds < 0:

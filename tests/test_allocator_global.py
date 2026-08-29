@@ -1399,6 +1399,27 @@ def test_demand_correlation_configuration_round_trips_and_validates():
         DemandTracker(correlation_max_sources=True)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("window_seconds", math.inf),
+        ("window_seconds", math.nan),
+        ("bucket_seconds", math.inf),
+        ("bucket_seconds", math.nan),
+        ("max_samples_per_model", True),
+        ("max_samples_per_model", 1.5),
+        ("confidence_samples", True),
+        ("confidence_samples", 1.5),
+    ),
+)
+def test_demand_tracker_rejects_nonfinite_windows_and_fractional_limits(
+    field,
+    value,
+):
+    with pytest.raises(ValueError):
+        DemandTracker(**{field: value})
+
+
 def test_observed_demand_is_placed_before_inferred_only_prewarm():
     inferred = model("a-inferred", min_replicas=0, max_replicas=1)
     observed = model("z-observed", min_replicas=0, max_replicas=1)
