@@ -76,6 +76,19 @@ and rejection reason. An ordinary canary may use only current headroom. Trusted 
 pressure may consider a host after removable managed speculation is drained, but the normal planner
 still proves victim priority, evidence, ownership, pins, active work, and capacity before acting.
 
+When two or more workload classes are active, Grid no longer picks each model independently. It
+starts from the evidence-backed choices and runs a deterministic bounded coordinate search over
+complete workload-to-model maps, evaluating each candidate portfolio with the authoritative fleet
+planner. Configured baselines and direct demand are preserved first; then the search maximizes
+demand-weighted workload coverage, minimizes missing replicas, and compares measured utility,
+unknown-price exposure, and known hourly cost. A shared generalist can therefore beat two slightly
+better specialists when only one model slot is affordable. Search considers at most four candidates
+per workload and 64 distinct portfolios, so catalog size cannot create an unbounded planning pass.
+Only one distinct model may differ from the exploitation-only portfolio because of uncertainty at a
+time; this is an explicit fleet exploration budget, not one canary allowance per workload. Status
+shows the joint mapping, selected model set, and the model currently consuming that exploration
+slot.
+
 Counterfactual portfolio demand is deliberately weaker than direct evidence: it may fill spare
 capacity but cannot evict a baseline or a directly demanded model. Workload-wide latency, queues,
 and errors remain workload evidence and are never copied into a candidate model as if that model

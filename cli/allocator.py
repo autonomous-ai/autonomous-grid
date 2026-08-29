@@ -106,6 +106,20 @@ def cmd_allocator_status(args: argparse.Namespace) -> int:
         )
     if payload.get("last_tick_at"):
         print(f"  last tick          {payload['last_tick_at']:.3f}")
+    portfolio_policy = payload.get("portfolio_policy") or {}
+    if portfolio_policy.get("joint"):
+        selected_models = portfolio_policy.get("selected_models") or []
+        print(
+            f"  joint portfolio    {int(portfolio_policy.get('workloads') or 0)} workloads"
+            f" -> {len(selected_models)} models"
+        )
+        if portfolio_policy.get("exploration_models"):
+            print(
+                "  exploration slot  "
+                + ", ".join(
+                    str(item) for item in portfolio_policy["exploration_models"]
+                )
+            )
     if payload.get("last_error"):
         print(f"  error              {payload['last_error']}")
     if payload.get("warning"):

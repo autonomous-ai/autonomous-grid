@@ -53,16 +53,19 @@ budgets matter, but correctness boundaries must come first.
    explicitly allowed, and a tighter ceiling stages removal only for Grid-owned unpinned work.
    Status separates affordable desired cost from current live cost so pinned, external, or manual
    overage cannot masquerade as compliance.
+7. **Portfolio choices were independent per workload.** Multi-workload demand now enters a bounded
+   joint search whose complete candidate sets are evaluated by the real placement planner. It can
+   reuse one generalist when independently preferred specialists cannot coexist, preserves baseline
+   and direct service first, and limits uncertainty-driven exploration to one distinct model across
+   the fleet. Status exposes the chosen mapping and exploration slot.
 
 ### Open panel priorities
 
-1. Extend the new confidence-aware exploration from one selected model per workload to a jointly
-   optimized model set with an explicit exploration budget.
-2. Extend the new hourly placement ceiling into spend forecasts, cumulative budget windows, and
+1. Extend the new hourly placement ceiling into spend forecasts, cumulative budget windows, and
    budget-constrained capacity recommendations.
-3. Expand model utility evaluation beyond tiny exact-answer coding probes and exercise real vLLM,
+2. Expand model utility evaluation beyond tiny exact-answer coding probes and exercise real vLLM,
    ComfyUI, artifact transfer, long-context, and multi-physical-node failure conditions.
-4. Replace the local lease-file authority with a consensus-backed term allocator before running
+3. Replace the local lease-file authority with a consensus-backed term allocator before running
    multiple active control-plane replicas on separate physical machines.
 
 Every later panel should record the exact revision, workload, hardware, real-versus-modeled boundary,

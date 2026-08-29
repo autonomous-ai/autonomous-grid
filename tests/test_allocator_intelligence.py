@@ -143,6 +143,40 @@ def test_direct_and_portfolio_pressure_merge_without_erasing_direct_lineage():
     assert result.sample_count == 3
 
 
+def test_joint_selector_can_force_different_fleet_feasible_candidates_per_workload():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    candidates = (
+        profile("general", 1_000, ("coding", 0.8), ("research", 0.8)),
+        profile("coder", 1_000, ("coding", 1.0)),
+        profile("researcher", 1_000, ("research", 1.0)),
+    )
+    for workload in ("coding", "research"):
+        intelligence.observe(
+            RequestFeatures("chat/completions", "auto", workload),
+            portfolio_unbound=True,
+            timestamp=100,
+        )
+
+    forecasts = intelligence.portfolio_forecasts(
+        candidates,
+        (),
+        now=100,
+        chosen_models={"coding": "general", "research": "researcher"},
+    )
+    projections = intelligence.projections(
+        candidates,
+        now=100,
+        chosen_models={"coding": "general", "research": "researcher"},
+    )
+
+    assert {item.model_id for item in forecasts} == {"general", "researcher"}
+    assert {item["workload"]: item["chosen_model"] for item in projections} == {
+        "coding": "general",
+        "research": "researcher",
+    }
+    assert all("joint fleet optimization" in item["reason"] for item in projections)
+
+
 def test_model_outcomes_are_bounded_and_persisted_without_content():
     intelligence = WorkloadIntelligence()
     features = RequestFeatures("chat/completions", "coder", "coding")

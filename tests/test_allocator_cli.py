@@ -150,6 +150,12 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
             "current_unknown_cost_nodes": [],
             "compliance": "over_budget",
         },
+        "portfolio_policy": {
+            "joint": True,
+            "workloads": 2,
+            "selected_models": ["general"],
+            "exploration_models": ["general"],
+        },
     }
     calls = []
 
@@ -164,6 +170,8 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
     assert "Allocator recommend · 1 hosts · 1 models" in output
     assert "desired cost       $0.4/h of $0.5/h" in output
     assert "current cost       $0.8/h · over_budget" in output
+    assert "joint portfolio    2 workloads -> 1 models" in output
+    assert "exploration slot  general" in output
     assert "secret-token" not in output
     assert calls[0][2]["headers"] == {}
 

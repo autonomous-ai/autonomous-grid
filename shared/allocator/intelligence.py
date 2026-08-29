@@ -292,6 +292,7 @@ class WorkloadIntelligence:
         *,
         now: float,
         placement_hints: Mapping[str, Mapping[str, Any]] | None = None,
+        chosen_models: Mapping[str, str] | None = None,
     ) -> tuple[DemandForecast, ...]:
         """Project unbound workload demand onto a bounded speculative model portfolio.
 
@@ -328,20 +329,35 @@ class WorkloadIntelligence:
             ]
             if not candidates:
                 continue
-            chosen = max(
-                candidates,
-                key=lambda profile: (
-                    self._portfolio_score_with_placement(
-                        profile,
-                        workload,
-                        placement_hints,
-                        now=now,
-                    ),
-                    -profile.maximum_memory_mb,
-                    -(profile.load_seconds + profile.warm_seconds),
-                    profile.model_id,
-                ),
+            forced_model_id = (
+                chosen_models.get(workload) if chosen_models is not None else None
             )
+            if forced_model_id is not None:
+                chosen = next(
+                    (
+                        profile
+                        for profile in candidates
+                        if profile.model_id == forced_model_id
+                    ),
+                    None,
+                )
+                if chosen is None:
+                    continue
+            else:
+                chosen = max(
+                    candidates,
+                    key=lambda profile: (
+                        self._portfolio_score_with_placement(
+                            profile,
+                            workload,
+                            placement_hints,
+                            now=now,
+                        ),
+                        -profile.maximum_memory_mb,
+                        -(profile.load_seconds + profile.warm_seconds),
+                        profile.model_id,
+                    ),
+                )
             cohort_summary = self._cohort_summary(
                 workload,
                 latency_slo_ms=chosen.latency_slo_ms,
@@ -381,6 +397,7 @@ class WorkloadIntelligence:
         *,
         now: float | None = None,
         placement_hints: Mapping[str, Mapping[str, Any]] | None = None,
+        chosen_models: Mapping[str, str] | None = None,
     ) -> tuple[dict[str, Any], ...]:
         timestamp = time.time() if now is None else float(now)
         rows: list[dict[str, Any]] = []
@@ -430,19 +447,50 @@ class WorkloadIntelligence:
                     }
                 )
                 continue
-            chosen = max(
-                candidates,
-                key=lambda profile: (
-                    self._portfolio_score_with_placement(
-                        profile,
-                        workload,
-                        placement_hints,
-                        now=timestamp,
-                    ),
-                    -profile.maximum_memory_mb,
-                    profile.model_id,
-                ),
+            forced_model_id = (
+                chosen_models.get(workload) if chosen_models is not None else None
             )
+            if forced_model_id is not None:
+                chosen = next(
+                    (
+                        profile
+                        for profile in candidates
+                        if profile.model_id == forced_model_id
+                    ),
+                    None,
+                )
+                if chosen is None:
+                    rows.append(
+                        {
+                            "workload": workload,
+                            "requests_per_minute": forecast.requests_per_minute,
+                            "samples": forecast.sample_count,
+                            "chosen_model": "",
+                            "reason": "joint portfolio selection is no longer fleet-feasible",
+                            "candidates": _candidate_rows(
+                                configured_candidates,
+                                workload,
+                                placement_hints,
+                                self,
+                                now=timestamp,
+                            ),
+                        }
+                    )
+                    continue
+            else:
+                chosen = max(
+                    candidates,
+                    key=lambda profile: (
+                        self._portfolio_score_with_placement(
+                            profile,
+                            workload,
+                            placement_hints,
+                            now=timestamp,
+                        ),
+                        -profile.maximum_memory_mb,
+                        profile.model_id,
+                    ),
+                )
             cohort_summary = self._cohort_summary(
                 workload,
                 latency_slo_ms=chosen.latency_slo_ms,
@@ -493,7 +541,8 @@ class WorkloadIntelligence:
                             if chosen_evidence["exploration_bonus"] > 0
                             else "evidence-backed portfolio choice"
                         )
-                    ),
+                    )
+                    + ("; joint fleet optimization" if chosen_models is not None else ""),
                 }
             )
         return tuple(rows)
@@ -825,25 +874,45 @@ def _candidate_rows(
     *,
     now: float,
 ) -> list[dict[str, Any]]:
-    rows = [
-        {
-            "model_id": profile.model_id,
-            "score": intelligence._portfolio_score_with_placement(
-                profile,
-                workload,
-                placement_hints,
-                now=now,
-            ),
-            "evidence": intelligence._outcome_evidence(
-                profile.model_id,
-                workload,
-                now=now,
-            ),
-            "feasible": _placement_feasible(profile.model_id, placement_hints),
-            "placement": dict((placement_hints or {}).get(profile.model_id) or {}),
-        }
-        for profile in profiles
-    ]
+    rows: list[dict[str, Any]] = []
+    for profile in profiles:
+        evidence = intelligence._outcome_evidence(
+            profile.model_id,
+            workload,
+            now=now,
+        )
+        score = intelligence._portfolio_score_with_placement(
+            profile,
+            workload,
+            placement_hints,
+            now=now,
+        )
+        rows.append(
+            {
+                "model_id": profile.model_id,
+                "score": score,
+                # This counterfactual removes only optimism under uncertainty. It lets the joint
+                # optimizer distinguish serving an unevaluated workload from deliberately spending
+                # one of its bounded exploration slots on a non-incumbent arm.
+                "exploitation_score": score - evidence["exploration_bonus"],
+                "evidence": evidence,
+                "feasible": _placement_feasible(profile.model_id, placement_hints),
+                "selectable": _placement_feasible(
+                    profile.model_id,
+                    placement_hints,
+                    allow_preemption=bool(
+                        intelligence._cohort_summary(
+                            workload,
+                            latency_slo_ms=profile.latency_slo_ms,
+                            now=now,
+                        )["graduated_allocation_pressure"]
+                    ),
+                ),
+                "placement": dict(
+                    (placement_hints or {}).get(profile.model_id) or {}
+                ),
+            }
+        )
     return sorted(rows, key=lambda row: (-float(row["score"]), str(row["model_id"])))
 
 

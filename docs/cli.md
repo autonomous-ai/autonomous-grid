@@ -588,7 +588,9 @@ budget; that unavoidable difference remains visible as current cost and an unmet
 Repeat `--workload-score WORKLOAD=SCORE` to describe where a model fits the portfolio, for example
 `--workload-score coding=1 --workload-score research=.8`. Scores are capability hints in `(0, 1]`;
 the allocator combines them with observed workload demand, compatibility, resource cost, cold-start
-time, and measured outcomes. They do not route an individual request.
+time, and measured outcomes. They do not route an individual request. With several active workload
+classes, allocator status also shows the jointly optimized workload-to-model map, how many distinct
+models it selected, and the one uncertainty-driven model—if any—using the fleet exploration slot.
 
 `grid allocator node start` joins this computer as managed capacity and starts a detached local
 protection loop. `drain`, `pause`, and `quarantine` are durable local overrides that outrank global

@@ -148,6 +148,190 @@ def test_controller_portfolio_uses_a_fleet_feasible_fallback():
     assert hints["feasible-small"]["best_node_id"] == "only-node"
 
 
+def test_joint_portfolio_chooses_one_shared_model_when_independent_specialists_do_not_fit():
+    controller = AllocatorController()
+    for candidate in (
+        ModelProfile(
+            "coding-specialist",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("coding", 1.0),),
+        ),
+        ModelProfile(
+            "research-specialist",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("research", 1.0),),
+        ),
+        ModelProfile(
+            "shared-generalist",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("coding", 0.9), ("research", 0.9)),
+        ),
+    ):
+        controller.put_profile(candidate)
+    for workload in ("coding", "research"):
+        for timestamp in (98, 99, 100):
+            controller.observe_lifecycle(
+                RequestFeatures("chat/completions", "auto", workload),
+                service_seconds=1,
+                timestamp=timestamp,
+            )
+    machine = NodeSnapshot(
+        "one-slot",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        max_models=1,
+        last_heartbeat=100,
+    )
+
+    controller.tick((machine,), now=100)
+    status = controller.status((machine,), now=100)
+
+    assert status["portfolio_selection"] == {
+        "coding": "shared-generalist",
+        "research": "shared-generalist",
+    }
+    assert controller.last_plan is not None
+    assert {item.model_id for item in controller.last_plan.assignments} == {
+        "shared-generalist"
+    }
+    assert status["portfolio_policy"]["joint"] is True
+
+
+def test_joint_portfolio_allows_only_one_uncertainty_driven_model_experiment():
+    controller = AllocatorController()
+    candidates = []
+    for workload in ("coding", "research"):
+        for suffix in ("incumbent", "cold"):
+            candidate = ModelProfile(
+                f"{workload}-{suffix}",
+                8_000,
+                runtimes=("llama.cpp",),
+                backends=("metal",),
+                min_replicas=0,
+                max_replicas=1,
+                min_residency_seconds=0,
+                workload_scores=((workload, 1.0),),
+            )
+            candidates.append(candidate)
+            controller.put_profile(candidate)
+        controller.observe_evaluation(
+            f"{workload}-incumbent",
+            workload,
+            quality=0.5,
+            timestamp=99,
+        )
+        for timestamp in (98, 99, 100):
+            controller.observe_lifecycle(
+                RequestFeatures("chat/completions", "auto", workload),
+                service_seconds=1,
+                timestamp=timestamp,
+            )
+    machines = tuple(
+        NodeSnapshot(
+            f"node-{index}",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            last_heartbeat=100,
+        )
+        for index in range(2)
+    )
+
+    controller.tick(machines, now=100)
+    selection = controller.status(machines, now=100)["portfolio_selection"]
+
+    assert sum(model_id.endswith("-cold") for model_id in selection.values()) == 1
+    policy = controller.status(machines, now=100)["portfolio_policy"]
+    assert len(policy["exploration_models"]) == 1
+    assert policy["max_exploration_models"] == 1
+
+
+def test_joint_portfolio_search_has_a_hard_planner_evaluation_bound(monkeypatch):
+    controller = AllocatorController()
+    workloads = (
+        "general",
+        "coding",
+        "research",
+        "marketing",
+        "sales",
+        "design",
+        "image",
+        "video",
+        "embedding",
+    )
+    for index in range(6):
+        controller.put_profile(
+            ModelProfile(
+                f"candidate-{index}",
+                1_000,
+                runtimes=("llama.cpp",),
+                backends=("metal",),
+                min_replicas=0,
+                max_replicas=1,
+                min_residency_seconds=0,
+                workload_scores=tuple((workload, 1.0) for workload in workloads),
+            )
+        )
+    for workload in workloads:
+        for timestamp in (98, 99, 100):
+            controller.observe_lifecycle(
+                RequestFeatures("chat/completions", "auto", workload),
+                service_seconds=1,
+                timestamp=timestamp,
+            )
+    machines = tuple(
+        NodeSnapshot(
+            f"node-{index}",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            last_heartbeat=100,
+        )
+        for index in range(6)
+    )
+    hints = controller.planner.portfolio_placement_hints(
+        machines,
+        controller.profiles,
+        now=100,
+    )
+    original_plan = controller.planner.plan
+    calls = 0
+
+    def counted_plan(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_plan(*args, **kwargs)
+
+    monkeypatch.setattr(controller.planner, "plan", counted_plan)
+
+    _, selection = controller._forecast_bundle(
+        100,
+        placement_hints=hints,
+        nodes=machines,
+    )
+
+    assert selection is not None
+    assert calls <= 65  # one baseline plus at most 64 distinct portfolio evaluations
+
+
 @pytest.mark.parametrize("attested,expect_preemption", [(False, False), (True, True)])
 def test_controller_only_preempts_speculation_for_trusted_broad_portfolio_pressure(
     attested,

@@ -49,6 +49,9 @@ _STARTUP_ESTIMATE_SAMPLES = 8
 _STARTUP_ESTIMATE_FULL_CONFIDENCE_SAMPLES = 4
 _STARTUP_ESTIMATE_EWMA_ALPHA = 0.25
 _STARTUP_ESTIMATE_TTL_SECONDS = 30 * 24 * 60 * 60
+_MAX_JOINT_PORTFOLIO_CANDIDATES = 4
+_MAX_JOINT_PORTFOLIO_EVALUATIONS = 64
+_MAX_JOINT_EXPLORATION_MODELS = 1
 
 
 class AllocatorController:
@@ -462,6 +465,7 @@ class AllocatorController:
         forecasts = self._forecasts(
             timestamp,
             placement_hints=placement_hints,
+            nodes=node_list,
         )
         startup_estimates, _ = self._learned_warm_estimates(now=timestamp)
         learned_by_model = {
@@ -884,9 +888,10 @@ class AllocatorController:
                 profiles,
                 now=timestamp,
             )
-            forecasts = self._forecasts(
+            forecasts, portfolio_selection = self._forecast_bundle(
                 timestamp,
                 placement_hints=placement_hints,
+                nodes=node_list,
             )
             startup_estimates, startup_samples = self._learned_warm_estimates(
                 now=timestamp
@@ -897,6 +902,7 @@ class AllocatorController:
                     profiles,
                     now=timestamp,
                     placement_hints=placement_hints,
+                    chosen_models=portfolio_selection,
                 )
                 projected_cohorts = {
                     str(row.get("workload") or ""): dict(row["cohort_evidence"])
@@ -908,6 +914,27 @@ class AllocatorController:
                     for row in self.intelligence.cohort_summaries(now=timestamp)
                 )
                 model_workload_outcomes = self.intelligence.outcomes
+            selected_portfolio_models = sorted(set((portfolio_selection or {}).values()))
+            exploration_models: set[str] = set()
+            for row in portfolio_projections:
+                workload = str(row.get("workload") or "")
+                selected = (portfolio_selection or {}).get(workload)
+                selectable = [
+                    candidate
+                    for candidate in row.get("candidates") or ()
+                    if candidate.get("selectable")
+                ]
+                if not selected or not selectable:
+                    continue
+                exploitation = max(
+                    selectable,
+                    key=lambda candidate: (
+                        float(candidate.get("exploitation_score") or 0.0),
+                        str(candidate.get("model_id") or ""),
+                    ),
+                )
+                if selected != str(exploitation.get("model_id") or ""):
+                    exploration_models.add(selected)
             active_cost_nodes = tuple(
                 node
                 for node in node_list
@@ -976,6 +1003,16 @@ class AllocatorController:
                 ],
                 "cohort_summaries": list(cohort_summaries),
                 "portfolio_projections": list(portfolio_projections),
+                "portfolio_selection": dict(portfolio_selection or {}),
+                "portfolio_policy": {
+                    "joint": bool(portfolio_selection is not None),
+                    "workloads": len(portfolio_selection or {}),
+                    "selected_models": selected_portfolio_models,
+                    "exploration_models": sorted(exploration_models),
+                    "max_candidates_per_workload": _MAX_JOINT_PORTFOLIO_CANDIDATES,
+                    "max_evaluations": _MAX_JOINT_PORTFOLIO_EVALUATIONS,
+                    "max_exploration_models": _MAX_JOINT_EXPLORATION_MODELS,
+                },
                 "portfolio_placement_hints": [
                     placement_hints[model_id]
                     for model_id in sorted(placement_hints)
@@ -1049,19 +1086,221 @@ class AllocatorController:
         now: float,
         *,
         placement_hints: Mapping[str, Mapping[str, Any]] | None = None,
+        nodes: Iterable[NodeSnapshot] = (),
     ) -> tuple[DemandForecast, ...]:
+        forecasts, _ = self._forecast_bundle(
+            now,
+            placement_hints=placement_hints,
+            nodes=nodes,
+        )
+        return forecasts
+
+    def _forecast_bundle(
+        self,
+        now: float,
+        *,
+        placement_hints: Mapping[str, Mapping[str, Any]] | None = None,
+        nodes: Iterable[NodeSnapshot] = (),
+    ) -> tuple[tuple[DemandForecast, ...], dict[str, str] | None]:
         active_models = tuple(
             model_id for model_id in self._profiles if model_id not in self._retiring
         )
         with self._demand_lock:
             direct = self.demand.forecasts(active_models, now=now)
             profiles = tuple(self._profiles[model_id] for model_id in active_models)
-            return self.intelligence.portfolio_forecasts(
+            node_list = tuple(nodes)
+            selection = self._joint_portfolio_selection(
+                profiles,
+                direct,
+                node_list,
+                now=now,
+                placement_hints=placement_hints,
+            )
+            forecasts = self.intelligence.portfolio_forecasts(
                 profiles,
                 direct,
                 now=now,
                 placement_hints=placement_hints,
+                chosen_models=selection,
             )
+            return forecasts, selection
+
+    def _joint_portfolio_selection(
+        self,
+        profiles: tuple[ModelProfile, ...],
+        direct: tuple[DemandForecast, ...],
+        nodes: tuple[NodeSnapshot, ...],
+        *,
+        now: float,
+        placement_hints: Mapping[str, Mapping[str, Any]] | None,
+    ) -> dict[str, str] | None:
+        """Coordinate workload choices against one real fleet plan.
+
+        Independent argmax decisions can each be feasible in isolation while their combined model
+        set cannot coexist. A bounded deterministic coordinate search evaluates complete portfolios
+        with the authoritative placement planner. The cap keeps planning work independent of user
+        cardinality and prevents a large catalog from turning one request burst into an unbounded
+        combinatorial search.
+        """
+
+        if len(nodes) == 0:
+            return None
+        projections = self.intelligence.projections(
+            profiles,
+            now=now,
+            placement_hints=placement_hints,
+        )
+        active_rows = [
+            row
+            for row in projections
+            if int(row.get("samples") or 0) >= self.intelligence.portfolio_min_samples
+            and float(row.get("requests_per_minute") or 0.0) > 0
+            and any(candidate.get("selectable") for candidate in row.get("candidates") or ())
+        ]
+        if len(active_rows) <= 1:
+            return None
+
+        row_by_workload = {str(row["workload"]): row for row in active_rows}
+        options: dict[str, tuple[str, ...]] = {}
+        exploitation_best: dict[str, str] = {}
+        candidate_by_workload: dict[str, dict[str, Mapping[str, Any]]] = {}
+        for workload, row in row_by_workload.items():
+            selectable = [
+                candidate
+                for candidate in row.get("candidates") or ()
+                if candidate.get("selectable")
+            ]
+            exploitation = max(
+                selectable,
+                key=lambda candidate: (
+                    float(candidate.get("exploitation_score") or 0.0),
+                    str(candidate.get("model_id") or ""),
+                ),
+            )
+            exploitation_best[workload] = str(exploitation["model_id"])
+            bounded = list(selectable[:_MAX_JOINT_PORTFOLIO_CANDIDATES])
+            if exploitation not in bounded:
+                bounded[-1:] = [exploitation]
+            options[workload] = tuple(str(candidate["model_id"]) for candidate in bounded)
+            candidate_by_workload[workload] = {
+                str(candidate["model_id"]): candidate for candidate in selectable
+            }
+
+        # Begin from the exploitation-only portfolio. Coordinate descent may then spend the single
+        # exploration slot where its optimism buys the most workload utility without ever entering
+        # an invalid multi-experiment state that one-at-a-time moves cannot escape.
+        selection = dict(exploitation_best)
+        profile_by_id = {profile.model_id: profile for profile in profiles}
+        baseline = self.planner.plan(nodes, profiles, direct, now=now)
+        baseline_targets = dict(baseline.desired_replicas)
+        evaluation_cache: dict[tuple[tuple[str, str], ...], tuple[float, ...]] = {}
+
+        def metric(candidate_selection: Mapping[str, str]) -> tuple[float, ...]:
+            key = tuple(sorted(candidate_selection.items()))
+            cached = evaluation_cache.get(key)
+            if cached is not None:
+                return cached
+            exploration_models = {
+                model_id
+                for workload, model_id in candidate_selection.items()
+                if model_id != exploitation_best[workload]
+            }
+            if len(exploration_models) > _MAX_JOINT_EXPLORATION_MODELS:
+                result = (float("-inf"),)
+                evaluation_cache[key] = result
+                return result
+            forecasts = self.intelligence.portfolio_forecasts(
+                profiles,
+                direct,
+                now=now,
+                placement_hints=placement_hints,
+                chosen_models=candidate_selection,
+            )
+            plan = self.planner.plan(nodes, profiles, forecasts, now=now)
+            placed: dict[str, int] = {}
+            for assignment in plan.assignments:
+                placed[assignment.model_id] = placed.get(assignment.model_id, 0) + 1
+            baseline_coverage = sum(
+                min(placed.get(model_id, 0), target)
+                * (1.0 + profile_by_id[model_id].priority)
+                for model_id, target in baseline_targets.items()
+                if target > 0 and model_id in profile_by_id
+            )
+            workload_coverage = 0.0
+            utility = 0.0
+            for workload, model_id in candidate_selection.items():
+                row = row_by_workload[workload]
+                weight = max(1e-6, float(row.get("requests_per_minute") or 0.0)) * (
+                    0.5 + 0.5 * float(row.get("confidence") or 0.0)
+                )
+                desired = max(1, plan.target_for(model_id))
+                ratio = min(1.0, placed.get(model_id, 0) / desired)
+                workload_coverage += weight * ratio
+                utility += weight * ratio * float(
+                    candidate_by_workload[workload][model_id].get("score") or 0.0
+                )
+            missing = sum(item.missing_replicas for item in plan.unsatisfied)
+            result = (
+                baseline_coverage,
+                workload_coverage,
+                -float(missing),
+                utility,
+                -float(len(plan.unknown_cost_nodes)),
+                -plan.hourly_cost,
+            )
+            evaluation_cache[key] = result
+            return result
+
+        # Heaviest and best-observed workloads choose first. Each trial still evaluates the full
+        # current mapping, so an early specialist sees the capacity needs of every later workload.
+        order = sorted(
+            row_by_workload,
+            key=lambda workload: (
+                -float(row_by_workload[workload].get("requests_per_minute") or 0.0),
+                -float(row_by_workload[workload].get("confidence") or 0.0),
+                workload,
+            ),
+        )
+        best_metric = metric(selection)
+        shared_models = sorted(
+            {
+                model_id
+                for model_ids in options.values()
+                for model_id in model_ids
+                if sum(model_id in choices for choices in options.values()) > 1
+            }
+        )
+        for model_id in shared_models:
+            if len(evaluation_cache) >= _MAX_JOINT_PORTFOLIO_EVALUATIONS:
+                break
+            trial = dict(selection)
+            for workload, model_ids in options.items():
+                if model_id in model_ids:
+                    trial[workload] = model_id
+            trial_metric = metric(trial)
+            if trial_metric > best_metric:
+                selection = trial
+                best_metric = trial_metric
+        for _pass in range(2):
+            changed = False
+            for workload in order:
+                best_model = selection[workload]
+                best_metric = metric(selection)
+                for model_id in options[workload]:
+                    if len(evaluation_cache) >= _MAX_JOINT_PORTFOLIO_EVALUATIONS:
+                        break
+                    trial = dict(selection)
+                    trial[workload] = model_id
+                    trial_metric = metric(trial)
+                    if trial_metric > best_metric:
+                        best_model = model_id
+                        best_metric = trial_metric
+                if best_model != selection[workload]:
+                    selection[workload] = best_model
+                    changed = True
+            if not changed or len(evaluation_cache) >= _MAX_JOINT_PORTFOLIO_EVALUATIONS:
+                break
+        return dict(sorted(selection.items()))
 
     def _learned_warm_estimates(
         self,
