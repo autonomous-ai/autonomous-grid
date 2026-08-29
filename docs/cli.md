@@ -549,6 +549,9 @@ grid allocator model remove|rm <model>
 
 grid allocator mode observe|recommend|automatic
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
+grid allocator budget --max-hourly-cost <USD>
+    [--allow-unknown-cost]
+    [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
 grid allocator tick
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
 
@@ -572,6 +575,15 @@ actions, `recommend` shows the actions it would take, and `automatic` delivers e
 load/warm/drain/unload commands within the allocator's safety limits. For the initial managed
 runtime, `<model>` must be the exact filename of a GGUF already cached with `grid pull` on each
 eligible computer; allocation never invents a download source.
+
+`grid allocator budget --max-hourly-cost 2.50` sets a durable hard ceiling on the sum of the
+selected hosts' declared hourly costs. A host is charged once even when it serves several models.
+While a positive ceiling is active, a node without explicit cost metadata is ineligible by default;
+`--allow-unknown-cost` is an explicit fail-open override, and status continues to name every
+unknown-cost host. Setting the value to `0` disables the ceiling. If a tighter ceiling makes live
+Grid-owned capacity unaffordable, the allocator stages normal drain/unload transitions until the
+desired fleet fits. It never stops a pinned, manually managed, or external process merely to meet a
+budget; that unavoidable difference remains visible as current cost and an unmet constraint.
 
 Repeat `--workload-score WORKLOAD=SCORE` to describe where a model fits the portfolio, for example
 `--workload-score coding=1 --workload-score research=.8`. Scores are capability hints in `(0, 1]`;
@@ -602,8 +614,10 @@ managed node on the same machine as its Grid advertises the Grid's literal loopb
 by default. Remote workers need
 an explicit reachable address and end-to-end TLS.
 
-`status` is a read-only LAN status view and needs no allocator credential. Model profile changes,
-allocator mode changes, immediate ticks, and node-token minting use the operator capability from
+`status` is a read-only LAN status view and needs no allocator credential. Under a budget it prints
+desired selected-host cost separately from current active-host cost and reports whether current
+known spend is within, over, or unverifiable because a live host has unknown cost. Model profile
+changes, allocator budget and mode changes, immediate ticks, and node-token minting use the operator capability from
 the managed local grid config, `GRID_ALLOCATOR_CONTROL_TOKEN`, or `--token-file`. A managed node
 uses the separate host-scoped `GRID_ALLOCATOR_NODE_TOKEN` or its own `--token-file`; never copy the
 operator capability to a worker. Operator calls retain the explicit legacy

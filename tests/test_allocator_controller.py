@@ -1264,6 +1264,53 @@ def test_controller_status_contains_forecast_plan_and_reconciliation():
     assert status["reconciliation"]["actions"]
 
 
+def test_controller_status_distinguishes_current_cost_from_desired_budget_cost():
+    controller = AllocatorController(
+        planner_policy=PlannerPolicy(max_hourly_cost=0.5)
+    )
+    active = (
+        NodeSnapshot(
+            "known",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            residencies=(
+                ModelResidency(
+                    "qwen",
+                    8_000,
+                    ResidencyState.READY,
+                    loaded_at=1,
+                ),
+            ),
+            cost_per_hour=0.6,
+            cost_known=True,
+            last_heartbeat=10,
+        ),
+        NodeSnapshot(
+            "unknown",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            residencies=(
+                ModelResidency(
+                    "qwen",
+                    8_000,
+                    ResidencyState.READY,
+                    loaded_at=1,
+                ),
+            ),
+            last_heartbeat=10,
+        ),
+    )
+
+    cost = controller.status(active, now=10)["cost"]
+
+    assert cost["current_hourly_cost"] == pytest.approx(0.6)
+    assert cost["current_unknown_cost_nodes"] == ["unknown"]
+    assert cost["desired_hourly_cost"] == 0
+    assert cost["compliance"] == "over_budget"
+
+
 def test_controller_prewarms_correlated_model_group_before_peer_request_arrives():
     controller = AllocatorController()
     for model_id in ("source", "target"):

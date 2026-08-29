@@ -17,6 +17,7 @@ from ._constants import (
 )
 from .agent import cmd_agent_install, cmd_agent_status
 from .allocator import (
+    cmd_allocator_budget,
     cmd_allocator_mode,
     cmd_allocator_model_remove,
     cmd_allocator_model_set,
@@ -502,6 +503,26 @@ def _add_allocator(sub) -> None:
     _add_allocator_grid(mode, token=True)
     mode.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     mode.set_defaults(handler=cmd_allocator_mode)
+
+    budget = allocator_sub.add_parser(
+        "budget",
+        help="Set a hard hourly placement-cost ceiling",
+    )
+    budget.add_argument(
+        "--max-hourly-cost",
+        type=float,
+        required=True,
+        metavar="USD",
+        help="Maximum selected-host cost per hour; 0 disables the ceiling.",
+    )
+    budget.add_argument(
+        "--allow-unknown-cost",
+        action="store_true",
+        help="Permit nodes without explicit cost metadata (blocked by default under a budget).",
+    )
+    _add_allocator_grid(budget, token=True)
+    budget.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    budget.set_defaults(handler=cmd_allocator_budget)
 
     tick = allocator_sub.add_parser("tick", help="Run an immediate allocation pass")
     _add_allocator_grid(tick, token=True)

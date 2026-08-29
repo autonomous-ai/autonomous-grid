@@ -70,10 +70,34 @@ def cmd_allocator_status(args: argparse.Namespace) -> int:
     nodes = payload.get("nodes") or []
     pending = payload.get("pending_commands") or []
     plan = payload.get("plan") or {}
+    cost = payload.get("cost") or {}
     unsatisfied = plan.get("unsatisfied") or []
     print(f"Allocator {payload.get('mode', 'unknown')} · {len(nodes)} hosts · {len(models)} models")
     print(f"  pending mutations  {len(pending)}")
     print(f"  unmet constraints  {len(unsatisfied)}")
+    hourly_cost_budget = float(
+        plan.get("hourly_cost_budget") or cost.get("max_hourly_cost") or 0
+    )
+    if hourly_cost_budget:
+        print(
+            f"  desired cost       ${float(plan.get('hourly_cost') or 0):g}/h of "
+            f"${hourly_cost_budget:g}/h"
+        )
+        current_unknown = cost.get("current_unknown_cost_nodes") or []
+        current_suffix = (
+            " + unknown: " + ", ".join(str(item) for item in current_unknown)
+            if current_unknown
+            else ""
+        )
+        print(
+            f"  current cost       ${float(cost.get('current_hourly_cost') or 0):g}/h"
+            f"{current_suffix} · {cost.get('compliance', 'unknown')}"
+        )
+        if plan.get("unknown_cost_nodes"):
+            print(
+                "  desired unknown    "
+                + ", ".join(str(item) for item in plan["unknown_cost_nodes"])
+            )
     authority = payload.get("authority") or {}
     if authority:
         print(
@@ -199,6 +223,31 @@ def cmd_allocator_mode(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
     else:
         print(f"Allocator mode: {payload['mode']}")
+    return 0
+
+
+def cmd_allocator_budget(args: argparse.Namespace) -> int:
+    cfg = config.select_grid(getattr(args, "grid", None))
+    payload = _request(
+        cfg,
+        "PUT",
+        "/allocator/budget",
+        body={
+            "max_hourly_cost": args.max_hourly_cost,
+            "allow_unknown_cost": bool(args.allow_unknown_cost),
+        },
+        token=_control_token(cfg, getattr(args, "token_file", None)),
+        allow_insecure_http=getattr(args, "allow_insecure_http", False),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        maximum = float(payload["max_hourly_cost"])
+        if maximum:
+            unknown = "allowed" if payload["allow_unknown_cost"] else "blocked"
+            print(f"Allocator hourly budget: ${maximum:g}/h · unknown-cost nodes {unknown}")
+        else:
+            print("Allocator hourly budget disabled")
     return 0
 
 

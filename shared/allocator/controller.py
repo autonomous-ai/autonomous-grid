@@ -220,6 +220,30 @@ class AllocatorController:
                 )
             self._save_or_rollback(checkpoint)
 
+    def set_hourly_cost_budget(
+        self,
+        max_hourly_cost: float,
+        *,
+        allow_unknown_cost: bool = False,
+    ) -> PlannerPolicy:
+        """Persist a hard fleet placement budget; zero disables the ceiling."""
+
+        maximum = float(max_hourly_cost)
+        if not math.isfinite(maximum) or maximum < 0:
+            raise ValueError("max_hourly_cost must be finite and non-negative")
+        if not isinstance(allow_unknown_cost, bool):
+            raise ValueError("allow_unknown_cost must be a boolean")
+        with self._lock:
+            checkpoint = self._checkpoint()
+            policy = replace(
+                self.planner.policy,
+                max_hourly_cost=maximum,
+                allow_unknown_cost=allow_unknown_cost,
+            )
+            self.planner = PlacementPlanner(policy)
+            self._save_or_rollback(checkpoint)
+            return policy
+
     def put_profile(self, profile: ModelProfile) -> None:
         with self._lock:
             checkpoint = self._checkpoint()
@@ -884,6 +908,30 @@ class AllocatorController:
                     for row in self.intelligence.cohort_summaries(now=timestamp)
                 )
                 model_workload_outcomes = self.intelligence.outcomes
+            active_cost_nodes = tuple(
+                node
+                for node in node_list
+                if any(
+                    residency.state
+                    not in (ResidencyState.CACHED, ResidencyState.FAILED)
+                    for residency in node.residencies
+                )
+            )
+            current_hourly_cost = sum(
+                node.cost_per_hour for node in active_cost_nodes if node.cost_known
+            )
+            current_unknown_cost_nodes = tuple(
+                sorted(node.node_id for node in active_cost_nodes if not node.cost_known)
+            )
+            maximum_hourly_cost = self.planner.policy.max_hourly_cost
+            if not maximum_hourly_cost:
+                budget_compliance = "disabled"
+            elif current_hourly_cost > maximum_hourly_cost + 1e-12:
+                budget_compliance = "over_budget"
+            elif current_unknown_cost_nodes:
+                budget_compliance = "unknown"
+            else:
+                budget_compliance = "within_budget"
             return {
                 "schema_version": SCHEMA_VERSION,
                 "mode": self.mode.value,
@@ -891,6 +939,22 @@ class AllocatorController:
                 "controller_term": self._controller_term,
                 "controller_id": self._controller_id,
                 "controller_lease_expires_at": self._controller_lease_expires_at,
+                "planner_policy": asdict(self.planner.policy),
+                "cost": {
+                    "max_hourly_cost": maximum_hourly_cost,
+                    "allow_unknown_cost": self.planner.policy.allow_unknown_cost,
+                    "current_hourly_cost": current_hourly_cost,
+                    "current_unknown_cost_nodes": list(current_unknown_cost_nodes),
+                    "desired_hourly_cost": (
+                        self._last_plan.hourly_cost if self._last_plan else 0.0
+                    ),
+                    "desired_unknown_cost_nodes": (
+                        list(self._last_plan.unknown_cost_nodes)
+                        if self._last_plan
+                        else []
+                    ),
+                    "compliance": budget_compliance,
+                },
                 "plan_sequence": self._plan_sequence,
                 "last_tick_at": self._last_tick_at,
                 "last_tick_duration_seconds": self._last_tick_duration_seconds,
@@ -1081,6 +1145,9 @@ class AllocatorController:
             input_digest=plan.input_digest,
             preemptions=plan.preemptions,
             model_urgencies=plan.model_urgencies,
+            hourly_cost=plan.hourly_cost,
+            unknown_cost_nodes=plan.unknown_cost_nodes,
+            hourly_cost_budget=plan.hourly_cost_budget,
         )
 
     def _sequence_actions(self, result: ReconcileResult) -> ReconcileResult:
@@ -1681,6 +1748,7 @@ class AllocatorController:
 
         return {
             "mode": self.mode,
+            "planner": self.planner,
             "profiles": dict(self._profiles),
             "retiring": set(self._retiring),
             "history": list(self._history),
@@ -1723,6 +1791,7 @@ class AllocatorController:
         """Restore controller-owned transaction state without rewinding request telemetry."""
 
         self.mode = checkpoint["mode"]
+        self.planner = checkpoint["planner"]
         self._profiles = checkpoint["profiles"]
         self._retiring = checkpoint["retiring"]
         self._history = checkpoint["history"]

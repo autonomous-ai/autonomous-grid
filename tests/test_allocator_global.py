@@ -125,6 +125,229 @@ def test_portfolio_hints_explain_when_no_live_node_can_host_a_model():
     assert "model slots are disabled" in str(hint["reason"])
 
 
+def test_hard_hourly_budget_charges_each_selected_host_once():
+    planner = PlacementPlanner(
+        PlannerPolicy(memory_headroom_fraction=0, max_hourly_cost=0.5)
+    )
+    nodes = (
+        node(
+            "shared-cheap",
+            32_000,
+            max_models=2,
+            cost_per_hour=0.4,
+            cost_known=True,
+        ),
+        node(
+            "single-expensive",
+            32_000,
+            max_models=1,
+            cost_per_hour=0.8,
+            cost_known=True,
+        ),
+    )
+    models = (model("coding"), model("research"))
+
+    plan = planner.plan(nodes, models, now=10)
+
+    assert {(item.model_id, item.node_id) for item in plan.assignments} == {
+        ("coding", "shared-cheap"),
+        ("research", "shared-cheap"),
+    }
+    assert plan.hourly_cost == pytest.approx(0.4)
+    assert plan.hourly_cost_budget == pytest.approx(0.5)
+    assert plan.unknown_cost_nodes == ()
+
+
+def test_hard_hourly_budget_reports_service_it_cannot_afford():
+    planner = PlacementPlanner(
+        PlannerPolicy(memory_headroom_fraction=0, max_hourly_cost=0.5)
+    )
+    nodes = tuple(
+        node(
+            node_id,
+            max_models=1,
+            cost_per_hour=0.4,
+            cost_known=True,
+        )
+        for node_id in ("a", "b")
+    )
+
+    plan = planner.plan(nodes, (model("coding"), model("research")), now=10)
+
+    assert len(plan.assignments) == 1
+    assert plan.hourly_cost == pytest.approx(0.4)
+    assert any(item.code == "hourly_cost_budget" for item in plan.unsatisfied)
+
+
+def test_budget_fails_closed_on_unknown_cost_unless_operator_allows_it():
+    machine = node("unknown-price", cost_per_hour=0.0, cost_known=False)
+    profile = model("coding")
+
+    blocked = PlacementPlanner(
+        PlannerPolicy(memory_headroom_fraction=0, max_hourly_cost=1.0)
+    ).plan((machine,), (profile,), now=10)
+    allowed = PlacementPlanner(
+        PlannerPolicy(
+            memory_headroom_fraction=0,
+            max_hourly_cost=1.0,
+            allow_unknown_cost=True,
+        )
+    ).plan((machine,), (profile,), now=10)
+
+    assert blocked.assignments == ()
+    assert blocked.unsatisfied[0].code == "unknown_node_cost"
+    assert len(allowed.assignments) == 1
+    assert allowed.unknown_cost_nodes == ("unknown-price",)
+
+
+def test_budget_reports_unknown_cost_for_live_external_inventory_without_stopping_it():
+    machine = node(
+        "external-media",
+        capacity_mb=16_000,
+        runtime="comfyui",
+        backend="mps",
+        cost_known=False,
+        manually_managed=True,
+        actuator_capabilities=(),
+        residencies=(
+            ModelResidency(
+                "image",
+                8_000,
+                ResidencyState.READY,
+                loaded_at=1,
+                managed=False,
+            ),
+        ),
+    )
+    profile = ModelProfile(
+        "image",
+        8_000,
+        runtimes=("comfyui",),
+        backends=("mps",),
+    )
+
+    plan = PlacementPlanner(
+        PlannerPolicy(memory_headroom_fraction=0, max_hourly_cost=1.0)
+    ).plan((machine,), (profile,), now=10)
+
+    assert plan.assignments == ()
+    assert plan.unsatisfied[0].code == "unknown_node_cost"
+    assert plan.preemptions == ()
+
+
+def test_portfolio_hint_excludes_unknown_cost_under_hard_budget():
+    planner = PlacementPlanner(PlannerPolicy(max_hourly_cost=1.0))
+    hint = planner.portfolio_placement_hints(
+        (node("unknown", cost_known=False),),
+        (model("coder", min_replicas=0),),
+        now=10,
+    )["coder"]
+
+    assert hint["feasible"] is False
+    assert "hourly cost is unknown" in str(hint["reason"])
+
+
+def test_hard_hourly_budget_evicts_an_existing_owned_replica_it_cannot_afford():
+    planner = PlacementPlanner(
+        PlannerPolicy(
+            memory_headroom_fraction=0,
+            max_hourly_cost=0.5,
+            max_staged_preemptions=4,
+        )
+    )
+    nodes = tuple(
+        node(
+            node_id,
+            max_models=1,
+            cost_per_hour=0.4,
+            cost_known=True,
+            residencies=(
+                ModelResidency(
+                    model_id,
+                    8_000,
+                    ResidencyState.READY,
+                    loaded_at=1,
+                    last_used_at=10,
+                ),
+            ),
+        )
+        for node_id, model_id in (("a", "coding"), ("b", "research"))
+    )
+
+    plan = planner.plan(nodes, (model("coding"), model("research")), now=10)
+
+    assert len(plan.assignments) == 1
+    selected = plan.assignments[0]
+    victim = next(
+        (node_id, model_id)
+        for node_id, model_id in (("a", "coding"), ("b", "research"))
+        if model_id != selected.model_id
+    )
+    assert plan.preemptions == (
+        PlacementPreemption(node_id=victim[0], model_id=victim[1]),
+    )
+    assert any(item.code == "hourly_cost_budget" for item in plan.unsatisfied)
+
+
+def test_hard_hourly_budget_never_evicts_a_pinned_over_budget_residency():
+    planner = PlacementPlanner(
+        PlannerPolicy(memory_headroom_fraction=0, max_hourly_cost=0.5)
+    )
+    nodes = (
+        node(
+            "a",
+            max_models=1,
+            cost_per_hour=0.4,
+            cost_known=True,
+            residencies=(
+                ModelResidency(
+                    "coding",
+                    8_000,
+                    ResidencyState.READY,
+                    loaded_at=1,
+                    last_used_at=10,
+                ),
+            ),
+        ),
+        node(
+            "b",
+            max_models=1,
+            cost_per_hour=0.4,
+            cost_known=True,
+            residencies=(
+                ModelResidency(
+                    "research",
+                    8_000,
+                    ResidencyState.READY,
+                    loaded_at=1,
+                    last_used_at=10,
+                    pinned=True,
+                ),
+            ),
+        ),
+    )
+
+    plan = planner.plan(nodes, (model("coding"), model("research")), now=10)
+
+    assert ("b", "research") not in plan.preempted_pairs
+    assert any(item.code == "hourly_cost_budget" for item in plan.unsatisfied)
+
+
+def test_budget_policy_change_advances_plan_generation_even_when_placement_does_not():
+    machine = node("known", cost_per_hour=0.1, cost_known=True)
+    profile = model("coding")
+
+    unbounded = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,), (profile,), now=10
+    )
+    bounded = PlacementPlanner(
+        PlannerPolicy(memory_headroom_fraction=0, max_hourly_cost=1.0)
+    ).plan((machine,), (profile,), now=10)
+
+    assert unbounded.assignments == bounded.assignments
+    assert unbounded.generation != bounded.generation
+
+
 def test_scale_down_cooldown_does_not_preserve_a_policy_ineligible_residency():
     machine = node(
         "worker",

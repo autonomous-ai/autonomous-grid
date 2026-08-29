@@ -294,6 +294,13 @@ def test_allocator_model_mode_tick_and_persistence(tmp_path):
     ticked = client.post("/allocator/tick", headers=AUTH)
     assert ticked.status_code == 200
     assert ticked.json()["mode"] == "observe"
+    budget = client.put(
+        "/allocator/budget",
+        json={"max_hourly_cost": 1.25, "allow_unknown_cost": False},
+        headers=AUTH,
+    )
+    assert budget.status_code == 200, budget.text
+    assert budget.json()["max_hourly_cost"] == 1.25
 
     restored = create_app(
         grid_id="ag-test",
@@ -303,6 +310,8 @@ def test_allocator_model_mode_tick_and_persistence(tmp_path):
     )
     status = TestClient(restored).get("/allocator/status").json()
     assert status["mode"] == "observe"
+    assert status["planner_policy"]["max_hourly_cost"] == 1.25
+    assert status["planner_policy"]["allow_unknown_cost"] is False
     assert [model["model_id"] for model in status["models"]] == ["qwen"]
 
     removed = client.delete("/allocator/models/qwen", headers=AUTH)

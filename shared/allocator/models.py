@@ -218,6 +218,7 @@ class NodeSnapshot:
     gpu_count: int = 0
     gpu_memory_mb: tuple[int, ...] = ()
     cost_per_hour: float = 0.0
+    cost_known: bool = False
     host_priority: int = 0
     last_heartbeat: float = 0.0
     mutation_cooldown_until: float = 0.0
@@ -250,6 +251,8 @@ class NodeSnapshot:
         _finite_nonnegative(self.memory_bandwidth_gbps, "memory_bandwidth_gbps")
         _finite_nonnegative(self.compute_gflops, "compute_gflops")
         _finite_nonnegative(self.cost_per_hour, "cost_per_hour")
+        if not isinstance(self.cost_known, bool):
+            raise ValueError("cost_known must be a boolean")
         _finite_nonnegative(self.last_heartbeat, "last_heartbeat")
         _finite_nonnegative(self.mutation_cooldown_until, "mutation_cooldown_until")
         if (
@@ -711,6 +714,9 @@ class PlacementPlan:
     input_digest: str = ""
     preemptions: tuple[PlacementPreemption, ...] = ()
     model_urgencies: tuple[tuple[str, int], ...] = ()
+    hourly_cost: float = 0.0
+    unknown_cost_nodes: tuple[str, ...] = ()
+    hourly_cost_budget: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.generation:
@@ -718,6 +724,9 @@ class PlacementPlan:
         _finite_nonnegative(self.created_at, "created_at")
         if not math.isfinite(self.objective_score):
             raise ValueError("objective_score must be finite")
+        _finite_nonnegative(self.hourly_cost, "hourly_cost")
+        _finite_nonnegative(self.hourly_cost_budget, "hourly_cost_budget")
+        object.__setattr__(self, "unknown_cost_nodes", _unique(self.unknown_cost_nodes))
         pairs = [(item.model_id, item.node_id) for item in self.assignments]
         if len(pairs) != len(set(pairs)):
             raise ValueError("a model cannot be assigned twice to the same node")
@@ -776,6 +785,9 @@ class PlacementPlan:
             "input_digest": self.input_digest,
             "preemptions": [asdict(item) for item in self.preemptions],
             "model_urgencies": dict(self.model_urgencies),
+            "hourly_cost": self.hourly_cost,
+            "unknown_cost_nodes": list(self.unknown_cost_nodes),
+            "hourly_cost_budget": self.hourly_cost_budget,
         }
 
 

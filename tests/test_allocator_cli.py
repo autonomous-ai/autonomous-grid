@@ -91,6 +91,12 @@ def test_parser_exposes_complete_allocator_surface():
     assert parser.parse_args(
         ["allocator", "mode", "automatic"]
     ).handler is cli.cmd_allocator_mode
+    budget_args = parser.parse_args(
+        ["allocator", "budget", "--max-hourly-cost", "1.25"]
+    )
+    assert budget_args.handler is cli.cmd_allocator_budget
+    assert budget_args.max_hourly_cost == 1.25
+    assert budget_args.allow_unknown_cost is False
     assert parser.parse_args(["allocator", "tick"]).handler is cli.cmd_allocator_tick
     assert parser.parse_args(
         ["allocator", "token", "write", "/tmp/token"]
@@ -134,7 +140,16 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
         ],
         "models": [{"model_id": "qwen.gguf"}],
         "pending_commands": [],
-        "plan": {"unsatisfied": []},
+        "plan": {
+            "unsatisfied": [],
+            "hourly_cost": 0.4,
+            "hourly_cost_budget": 0.5,
+        },
+        "cost": {
+            "current_hourly_cost": 0.8,
+            "current_unknown_cost_nodes": [],
+            "compliance": "over_budget",
+        },
     }
     calls = []
 
@@ -147,6 +162,8 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
     assert args.handler(args) == 0
     output = capsys.readouterr().out
     assert "Allocator recommend · 1 hosts · 1 models" in output
+    assert "desired cost       $0.4/h of $0.5/h" in output
+    assert "current cost       $0.8/h · over_budget" in output
     assert "secret-token" not in output
     assert calls[0][2]["headers"] == {}
 
@@ -372,6 +389,11 @@ def test_model_set_rejects_invalid_bounds_before_network(monkeypatch):
     [
         (["allocator", "model", "remove", "qwen.gguf"], "DELETE", "/allocator/models/qwen.gguf"),
         (["allocator", "mode", "observe"], "PUT", "/allocator/mode"),
+        (
+            ["allocator", "budget", "--max-hourly-cost", "1.25"],
+            "PUT",
+            "/allocator/budget",
+        ),
         (["allocator", "tick"], "POST", "/allocator/tick"),
     ],
 )
@@ -385,6 +407,8 @@ def test_mutating_commands_use_authenticated_routes(
         calls.append((actual_method, url, kwargs))
         if path == "/allocator/mode":
             payload = {"mode": "observe"}
+        elif path == "/allocator/budget":
+            payload = {"max_hourly_cost": 1.25, "allow_unknown_cost": False}
         elif path == "/allocator/tick":
             payload = {"actions": [], "deferred": []}
         else:

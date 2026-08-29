@@ -48,13 +48,18 @@ budgets matter, but correctness boundaries must come first.
    confidence now decays with a seven-day half-life, quality and request evidence have separate
    sample thresholds, and an uncertainty bonus grants bounded canaries to feasible cold peers. The
    bonus decays to zero with evidence and is smaller than the penalty for a preemption-only arm.
+6. **Cost was only a soft ranking hint.** Operators can now set a durable hard hourly fleet ceiling.
+   Selected-host cost is charged once across colocated models, unknown prices fail closed unless
+   explicitly allowed, and a tighter ceiling stages removal only for Grid-owned unpinned work.
+   Status separates affordable desired cost from current live cost so pinned, external, or manual
+   overage cannot masquerade as compliance.
 
 ### Open panel priorities
 
 1. Extend the new confidence-aware exploration from one selected model per workload to a jointly
    optimized model set with an explicit exploration budget.
-2. Add explicit fleet cost budgets, unknown-cost handling, spend forecasts, and budget-constrained
-   capacity recommendations.
+2. Extend the new hourly placement ceiling into spend forecasts, cumulative budget windows, and
+   budget-constrained capacity recommendations.
 3. Expand model utility evaluation beyond tiny exact-answer coding probes and exercise real vLLM,
    ComfyUI, artifact transfer, long-context, and multi-physical-node failure conditions.
 4. Replace the local lease-file authority with a consensus-backed term allocator before running

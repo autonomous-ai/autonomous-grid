@@ -212,6 +212,17 @@ provably preserve resource use—aggregate free memory and model slots provide a
 bound, so an already saturated fleet fails fast. Runtime-specific memory and existing-residency
 cases retain the full repair search because relocation can change their net footprint.
 
+An operator may also set a durable hard fleet ceiling with
+`grid allocator budget --max-hourly-cost USD`. Cost is charged once per selected physical host,
+not once per colocated model. Zero disables the ceiling. Under a positive ceiling, missing price
+metadata fails closed unless the operator explicitly supplies `--allow-unknown-cost`; both desired
+and currently active unknown-cost hosts remain visible in status. Tightening the ceiling does not
+merely prevent new placements: Grid stages drain/unload for unselected managed, unpinned
+residencies so current state can converge to the affordable desired set. Manual, external, and
+pinned processes remain untouched because a budget does not grant ownership. Their cost and the
+resulting service shortfall stay explicit. Plan generations include the budget policy so a policy
+change is fenced like every other desired-state transition.
+
 Request routing uses the same heterogeneous capacity evidence after placement. Among engines in the
 same host-protection class that already serve the requested model, Grid compares active requests as
 a fraction of each engine's effective concurrency limit rather than comparing raw request counts.
@@ -677,6 +688,7 @@ grid allocator mode recommend
 grid allocator tick
 grid allocator status --json
 
+grid allocator budget --max-hourly-cost 2.50
 grid allocator mode automatic
 ```
 
@@ -684,7 +696,8 @@ grid allocator mode automatic
 eligible managed node; an uncached `load` fails safely and enters backoff rather than downloading
 unapproved weights.
 
-`status` shows host lifecycle and capacity, model count, pending mutations, withdrawn destructive
+`status` shows host lifecycle and capacity, model count, desired and current hourly cost under a
+configured ceiling, pending mutations, withdrawn destructive
 commands, unmet constraints, the dirty/processed/success/safety revisions, and any persistent-state
 warning; `--json` includes the full snapshots, demand forecasts, plan, reconciliation result,
 `pending_commands`, `delivered_pending_action_ids`, `withdrawn_destructive`, the latest bounded
