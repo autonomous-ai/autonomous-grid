@@ -201,6 +201,13 @@ class PlacementPlanner:
                 nodes=node_list,
                 now=timestamp,
                 policy=self.policy,
+                startup_horizon_seconds=_next_replica_startup_seconds(
+                    model,
+                    node_list,
+                    startup_by_pair,
+                    now=timestamp,
+                    policy=self.policy,
+                ),
             )
             for model in model_list
         }
@@ -1475,6 +1482,60 @@ def _placement_demand_urgency(
     return 0
 
 
+def _next_replica_startup_seconds(
+    model: ModelProfile,
+    nodes: Iterable[NodeSnapshot],
+    startup_seconds: Mapping[tuple[str, str], float],
+    *,
+    now: float,
+    policy: PlannerPolicy,
+) -> float:
+    """Estimate the fastest eligible path for the next not-yet-ready replica."""
+
+    candidates: list[float] = []
+    for node in nodes:
+        residency = node.residency(model.model_id)
+        if (
+            residency is not None
+            and residency.state == ResidencyState.READY
+            and model.matches_artifact(residency)
+        ):
+            continue
+        if (
+            _ineligible_reason(
+                node,
+                model,
+                now,
+                policy,
+                for_new=_requires_new_runtime(residency, model),
+            )
+            is not None
+        ):
+            continue
+        warm_seconds = startup_seconds.get(
+            (node.node_id, model.model_id),
+            model.warm_seconds,
+        )
+        artifact_cached = (
+            (not model.artifact_sha256 and model.model_id in node.cached_models)
+            or bool(
+                residency
+                and residency.managed
+                and residency.state
+                in (
+                    ResidencyState.CACHED,
+                    ResidencyState.DRAINING,
+                    ResidencyState.FAILED,
+                )
+                and model.matches_artifact(residency)
+            )
+        )
+        candidates.append(
+            warm_seconds if artifact_cached else model.load_seconds + warm_seconds
+        )
+    return min(candidates, default=model.load_seconds + model.warm_seconds)
+
+
 def desired_replica_count(
     model: ModelProfile,
     forecast: DemandForecast | None,
@@ -1482,9 +1543,16 @@ def desired_replica_count(
     nodes: Iterable[NodeSnapshot] = (),
     now: float | None = None,
     policy: PlannerPolicy | None = None,
+    startup_horizon_seconds: float | None = None,
 ) -> int:
     policy = policy or PlannerPolicy()
     timestamp = time.time() if now is None else float(now)
+    if startup_horizon_seconds is not None:
+        if isinstance(startup_horizon_seconds, bool):
+            raise ValueError("startup horizon must be finite and non-negative")
+        startup_horizon_seconds = float(startup_horizon_seconds)
+        if not math.isfinite(startup_horizon_seconds) or startup_horizon_seconds < 0:
+            raise ValueError("startup horizon must be finite and non-negative")
     if forecast is None:
         target = model.min_replicas
     else:
@@ -1522,6 +1590,7 @@ def desired_replica_count(
             forecast,
             offered_concurrency,
             policy,
+            startup_horizon_seconds=startup_horizon_seconds,
         )
         concurrency = offered_concurrency * (1.0 + policy.demand_headroom_fraction)
         required_capacity = _bounded_replica_ceil(
@@ -1615,6 +1684,8 @@ def _predictive_offered_concurrency(
     forecast: DemandForecast,
     offered_concurrency: float,
     policy: PlannerPolicy,
+    *,
+    startup_horizon_seconds: float | None = None,
 ) -> float:
     """Project a rising workload across the time needed to make a new replica ready.
 
@@ -1626,7 +1697,11 @@ def _predictive_offered_concurrency(
 
     startup_horizon = min(
         policy.max_predictive_lookahead_seconds,
-        model.load_seconds + model.warm_seconds,
+        (
+            model.load_seconds + model.warm_seconds
+            if startup_horizon_seconds is None
+            else startup_horizon_seconds
+        ),
     )
     base_rate = forecast.requests_per_minute
     if (

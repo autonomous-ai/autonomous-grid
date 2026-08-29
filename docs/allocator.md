@@ -50,10 +50,11 @@ Demand history is bounded by time buckets and contains aggregate timings and cou
 responses. Bursts are folded into their bucket rather than truncated at a raw-request limit. A
 bucketed EWMA and positive trend term make the near-term forecast. The target replica count adds
 demand headroom and reacts to queue, latency, and error pressure while respecting per-model minimum
-and maximum bounds. Rising demand is also projected across each model's declared load-plus-warm
-time, confidence-weighted and capped to a five-minute/2× horizon, so slow cold starts begin before
-the queue arrives without letting one noisy slope cause a fleet-wide load spike. Negative trends
-never accelerate scale-down. The tracker also learns mature groups of models that repeatedly become
+and maximum bounds. Rising demand is also projected across the fastest eligible next replica's
+artifact-locality-aware load-plus-warm path, confidence-weighted and capped to a five-minute/2×
+horizon, so slow cold starts begin before the queue arrives without letting one noisy slope cause a
+fleet-wide load spike. Negative trends never accelerate scale-down. The tracker also learns mature
+groups of models that repeatedly become
 active in the same time buckets and directional pairs that repeatedly activate one bucket apart.
 Current demand for one group member can prewarm a quiet peer; a current workflow stage can likewise
 prewarm its historically next model. Both use a confidence-weighted historical rate ratio, require
@@ -110,10 +111,11 @@ times are retained in bounded controller history and blended with the configured
 a cold-start prior; a bounded eight-sample EWMA becomes authoritative after four samples for that
 node/model/artifact revision. A checksum change starts with the configured prior instead of
 inheriting an optimistic timing from different weights. Placement favors a faster cached host,
-while the fleet-wide predictive prewarm
-horizon never falls below the configured prior and expands when a measured host is slower. Samples
-expire after 30 days so a runtime or hardware upgrade can relearn. Invalid, non-finite, negative,
-or over-one-hour reports are ignored rather than poisoning scheduling or receipt delivery. Persisted
+and the predictive prewarm horizon follows the fastest eligible next host's learned warm time and
+cache state. An unknown host keeps the conservative configured load-plus-warm fallback, while one
+known slow host does not inflate the whole fleet's target when a faster path is available. Samples
+expire after 30 days so a runtime or hardware upgrade can relearn. Invalid, non-finite, negative, or
+over-one-hour reports are ignored rather than poisoning scheduling or receipt delivery. Persisted
 failed warm/load attempts apply a bounded per-model penalty, allowing a healthy peer to be tried
 after backoff instead of selecting the same broken cache forever; the failed node remains a fallback
 when it is the only feasible target. Explicit pins, per-host model limits, compatibility policies,

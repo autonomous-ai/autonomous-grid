@@ -1483,6 +1483,52 @@ def test_replica_count_prewarms_across_model_startup_horizon():
     assert desired_replica_count(slow, rising, now=100) == 3
 
 
+def test_predictive_prewarm_uses_fastest_eligible_learned_startup_path():
+    profile = model(
+        min_replicas=0,
+        max_replicas=10,
+        target_utilization=1,
+        load_seconds=60,
+        warm_seconds=100,
+    )
+    machines = (
+        node("a-fast", cached=("qwen",)),
+        node("z-slow", cached=("qwen",)),
+    )
+    rising = DemandForecast(
+        "qwen",
+        requests_per_minute=60,
+        offered_concurrency=1,
+        trend_per_minute=60,
+        confidence=1,
+    )
+
+    plan = PlacementPlanner().plan(
+        machines,
+        (profile,),
+        (rising,),
+        now=100,
+        startup_seconds={
+            ("a-fast", "qwen"): 1,
+            ("z-slow", "qwen"): 100,
+        },
+    )
+
+    assert plan.target_for("qwen") == 2
+    assert plan.nodes_for("qwen") == ("a-fast", "z-slow")
+
+
+@pytest.mark.parametrize("startup_horizon", (-1, math.inf, math.nan, True))
+def test_replica_count_rejects_invalid_startup_horizon(startup_horizon):
+    with pytest.raises(ValueError, match="startup horizon"):
+        desired_replica_count(
+            model(),
+            DemandForecast("qwen"),
+            now=100,
+            startup_horizon_seconds=startup_horizon,
+        )
+
+
 def test_predictive_prewarm_ignores_untrusted_or_falling_trends_and_bounds_growth():
     profile = model(
         min_replicas=0,
