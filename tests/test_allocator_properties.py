@@ -517,10 +517,11 @@ def test_seeded_live_framework_mix_never_crosses_runtime_or_ownership_boundaries
         )
 
 
-def test_seeded_vllm_batch_pressure_spills_only_to_owned_logical_llama_nodes():
+@pytest.mark.parametrize("seed", (0xBA7C4A11, 0x5090B47C, 0x6000A110))
+def test_seeded_vllm_batch_pressure_spills_only_to_owned_logical_llama_nodes(seed):
     """Stress capacity-aware spillover on the live framework mix without physical hosts."""
 
-    rng = random.Random(0xBA7C4A11)
+    rng = random.Random(seed)
     policy = PlannerPolicy(memory_headroom_fraction=0.05)
     planner = PlacementPlanner(policy)
     reconciler = Reconciler()
