@@ -55,12 +55,6 @@ _MAX_JOINT_PORTFOLIO_CANDIDATES = 4
 _MAX_JOINT_PORTFOLIO_EVALUATIONS = 64
 _MAX_JOINT_EXPLORATION_MODELS = 1
 _MAX_HOST_PRICES = 10_000
-_MAX_ECONOMICS_AUDIT_RECORDS = 256
-_MAX_ECONOMICS_IMPACT_MODELS = 128
-
-
-class EconomicsRevisionConflict(ValueError):
-    """An operator tried to mutate economics from a stale observed revision."""
 
 
 class AllocatorController:
@@ -109,8 +103,6 @@ class AllocatorController:
         self.membership_recovery_grace_seconds = float(membership_recovery_grace_seconds)
         self._profiles: dict[str, ModelProfile] = {}
         self._host_prices: dict[str, float] = {}
-        self._economics_revision = 0
-        self._economics_audit: list[dict[str, Any]] = []
         self._retiring: set[str] = set()
         self._history: list[MutationRecord] = []
         self._commands: dict[str, MutationAction] = {}
@@ -177,16 +169,6 @@ class AllocatorController:
         with self._lock:
             return dict(self._host_prices)
 
-    @property
-    def economics_revision(self) -> int:
-        with self._lock:
-            return self._economics_revision
-
-    @property
-    def economics_audit(self) -> tuple[dict[str, Any], ...]:
-        with self._lock:
-            return tuple(dict(row) for row in self._economics_audit)
-
     def apply_host_prices(
         self,
         nodes: Iterable[NodeSnapshot],
@@ -219,7 +201,6 @@ class AllocatorController:
         host_id: str,
         cost_per_hour: float | None,
         *,
-        expected_revision: int | None = None,
         allow_service_shortfall: bool = False,
         nodes: Iterable[NodeSnapshot] = (),
         now: float | None = None,
@@ -239,7 +220,6 @@ class AllocatorController:
             raise ValueError("now must be finite and non-negative")
         current_nodes = tuple(nodes)
         with self._lock:
-            self._check_economics_revision(expected_revision)
             checkpoint = self._checkpoint()
             proposed_prices = dict(self._host_prices)
             if cost_per_hour is None:
@@ -248,8 +228,6 @@ class AllocatorController:
                 if host_id not in proposed_prices and len(proposed_prices) >= _MAX_HOST_PRICES:
                     raise ValueError("allocator host price registry is full")
                 proposed_prices[host_id] = cost_per_hour
-            if proposed_prices == self._host_prices:
-                return dict(self._host_prices)
             proposed_nodes = self.apply_host_prices(
                 tuple(
                     replace(
@@ -264,32 +242,13 @@ class AllocatorController:
                 ),
                 prices=proposed_prices,
             )
-            regressions = (
-                self._minimum_coverage_regressions(
+            if current_nodes and not allow_service_shortfall:
+                self._reject_minimum_coverage_regression(
                     current_nodes,
                     proposed_nodes,
                     timestamp,
+                    "host price update",
                 )
-                if current_nodes
-                else {}
-            )
-            if regressions and not allow_service_shortfall:
-                self._raise_service_coverage_regression(
-                    "host price update", regressions
-                )
-            previous_cost = self._host_prices.get(host_id)
-            self._record_economics_change(
-                "host_price_remove" if cost_per_hour is None else "host_price_set",
-                timestamp,
-                allow_service_shortfall=allow_service_shortfall,
-                service_impact=regressions,
-                details={
-                    "host_id": host_id,
-                    "before_cost_per_hour": previous_cost,
-                    "after_cost_per_hour": cost_per_hour,
-                    "inventory_present": bool(current_nodes),
-                },
-            )
             self._host_prices = proposed_prices
             self._save_or_rollback(checkpoint)
             return dict(self._host_prices)
@@ -369,7 +328,6 @@ class AllocatorController:
         self,
         max_hourly_cost: float,
         *,
-        expected_revision: int | None = None,
         allow_unknown_cost: bool = False,
         allow_service_shortfall: bool = False,
         nodes: Iterable[NodeSnapshot] = (),
@@ -394,54 +352,34 @@ class AllocatorController:
             raise ValueError("now must be finite and non-negative")
         node_list = tuple(nodes)
         with self._lock:
-            self._check_economics_revision(expected_revision)
             node_list = self.apply_host_prices(node_list)
             checkpoint = self._checkpoint()
-            previous_policy = self.planner.policy
             policy = replace(
-                previous_policy,
+                self.planner.policy,
                 max_hourly_cost=maximum,
                 allow_unknown_cost=allow_unknown_cost,
             )
-            if policy == previous_policy:
-                return policy
-            regressions = (
-                self._minimum_coverage_regressions(
+            if node_list and not allow_service_shortfall:
+                self._reject_minimum_coverage_regression(
                     node_list,
                     node_list,
                     timestamp,
+                    "budget update",
                     proposed_planner=PlacementPlanner(policy),
                 )
-                if node_list
-                else {}
-            )
-            if regressions and not allow_service_shortfall:
-                self._raise_service_coverage_regression("budget update", regressions)
-            self._record_economics_change(
-                "budget_set",
-                timestamp,
-                allow_service_shortfall=allow_service_shortfall,
-                service_impact=regressions,
-                details={
-                    "before_max_hourly_cost": previous_policy.max_hourly_cost,
-                    "after_max_hourly_cost": maximum,
-                    "before_allow_unknown_cost": previous_policy.allow_unknown_cost,
-                    "after_allow_unknown_cost": allow_unknown_cost,
-                    "inventory_present": bool(node_list),
-                },
-            )
             self.planner = PlacementPlanner(policy)
             self._save_or_rollback(checkpoint)
             return policy
 
-    def _minimum_coverage_regressions(
+    def _reject_minimum_coverage_regression(
         self,
         current_nodes: tuple[NodeSnapshot, ...],
         proposed_nodes: tuple[NodeSnapshot, ...],
         timestamp: float,
+        change: str,
         *,
         proposed_planner: PlacementPlanner | None = None,
-    ) -> dict[str, tuple[int, int, int]]:
+    ) -> None:
         profiles = tuple(
             self._profiles[model_id]
             for model_id in sorted(self._profiles)
@@ -484,77 +422,15 @@ class AllocatorController:
             and minimum_coverage(proposed, profile.model_id)
             < minimum_coverage(current, profile.model_id)
         }
-        return regressions
-
-    @staticmethod
-    def _raise_service_coverage_regression(
-        change: str,
-        regressions: Mapping[str, tuple[int, int, int]],
-    ) -> None:
-        detail = ", ".join(
-            f"{model_id} {after}/{target} desired replicas (currently {before})"
-            for model_id, (before, after, target) in sorted(regressions.items())
-        )
-        raise ValueError(
-            f"{change} would reduce minimum service coverage: {detail}; "
-            "repeat with allow_service_shortfall=true to acknowledge"
-        )
-
-    def _check_economics_revision(self, expected_revision: int | None) -> None:
-        if expected_revision is None:
-            return
-        if (
-            isinstance(expected_revision, bool)
-            or not isinstance(expected_revision, int)
-            or not 0 <= expected_revision <= MAX_COUNTER
-        ):
-            raise ValueError("expected_revision must be a supported non-negative integer")
-        if expected_revision != self._economics_revision:
-            raise EconomicsRevisionConflict(
-                f"stale allocator economics revision {expected_revision}; "
-                f"current revision is {self._economics_revision}"
+        if regressions:
+            detail = ", ".join(
+                f"{model_id} {after}/{target} desired replicas (currently {before})"
+                for model_id, (before, after, target) in sorted(regressions.items())
             )
-
-    def _record_economics_change(
-        self,
-        kind: str,
-        timestamp: float,
-        *,
-        allow_service_shortfall: bool,
-        service_impact: Mapping[str, tuple[int, int, int]],
-        details: Mapping[str, Any],
-    ) -> None:
-        if self._economics_revision >= MAX_COUNTER:
-            raise OverflowError("allocator economics revision is exhausted")
-        self._economics_revision += 1
-        impact_rows = sorted(service_impact.items())
-        self._economics_audit.append(
-            {
-                "revision": self._economics_revision,
-                "kind": kind,
-                "updated_at": timestamp,
-                "controller_term": self._controller_term,
-                "controller_id": self._controller_id,
-                "allow_service_shortfall": allow_service_shortfall,
-                "impact_assessed": bool(service_impact) or bool(details.get("inventory_present")),
-                "service_impact": [
-                    {
-                        "model_id": model_id,
-                        "before_replicas": before,
-                        "after_replicas": after,
-                        "desired_replicas": desired,
-                    }
-                    for model_id, (before, after, desired) in impact_rows[
-                        :_MAX_ECONOMICS_IMPACT_MODELS
-                    ]
-                ],
-                "service_impact_truncated": max(
-                    0, len(impact_rows) - _MAX_ECONOMICS_IMPACT_MODELS
-                ),
-                **dict(details),
-            }
-        )
-        del self._economics_audit[:-_MAX_ECONOMICS_AUDIT_RECORDS]
+            raise ValueError(
+                f"{change} would reduce minimum service coverage: {detail}; "
+                "repeat with allow_service_shortfall=true to acknowledge"
+            )
 
     def put_profile(self, profile: ModelProfile) -> None:
         with self._lock:
@@ -1372,10 +1248,6 @@ class AllocatorController:
                 "controller_id": self._controller_id,
                 "controller_lease_expires_at": self._controller_lease_expires_at,
                 "planner_policy": asdict(self.planner.policy),
-                "economics": {
-                    "revision": self._economics_revision,
-                    "audit": list(self._economics_audit),
-                },
                 "cost": {
                     "max_hourly_cost": maximum_hourly_cost,
                     "allow_unknown_cost": self.planner.policy.allow_unknown_cost,
@@ -2379,8 +2251,6 @@ class AllocatorController:
             "membership_recovery_grace_seconds": self.membership_recovery_grace_seconds,
             "planner_policy": asdict(self.planner.policy),
             "host_prices": dict(sorted(self._host_prices.items())),
-            "economics_revision": self._economics_revision,
-            "economics_audit": list(self._economics_audit),
             "reconcile_policy": asdict(self.reconciler.policy),
             "profiles": [profile.to_dict() for profile in self.profiles],
             "retiring_models": sorted(self._retiring),
@@ -2441,8 +2311,6 @@ class AllocatorController:
             "mode": self.mode,
             "planner": self.planner,
             "host_prices": dict(self._host_prices),
-            "economics_revision": self._economics_revision,
-            "economics_audit": list(self._economics_audit),
             "profiles": dict(self._profiles),
             "retiring": set(self._retiring),
             "history": list(self._history),
@@ -2487,8 +2355,6 @@ class AllocatorController:
         self.mode = checkpoint["mode"]
         self.planner = checkpoint["planner"]
         self._host_prices = checkpoint["host_prices"]
-        self._economics_revision = checkpoint["economics_revision"]
-        self._economics_audit = checkpoint["economics_audit"]
         self._profiles = checkpoint["profiles"]
         self._retiring = checkpoint["retiring"]
         self._history = checkpoint["history"]
@@ -2597,65 +2463,6 @@ class AllocatorController:
             self._host_prices[host_id] = cost
         if len(self._host_prices) > _MAX_HOST_PRICES:
             raise ValueError("persisted allocator host price registry is too large")
-        economics_revision = int(value.get("economics_revision") or 0)
-        if not 0 <= economics_revision <= MAX_COUNTER:
-            raise ValueError("invalid persisted allocator economics revision")
-        audit_rows = value.get("economics_audit") or []
-        if not isinstance(audit_rows, list) or len(audit_rows) > _MAX_ECONOMICS_AUDIT_RECORDS:
-            raise ValueError("invalid persisted allocator economics audit")
-        economics_audit: list[dict[str, Any]] = []
-        prior_revision = 0
-        for raw_row in audit_rows:
-            if not isinstance(raw_row, dict):
-                raise ValueError("invalid persisted allocator economics audit")
-            row = dict(raw_row)
-            revision = int(row.get("revision") or 0)
-            updated_at = float(row.get("updated_at") or 0.0)
-            controller_term = int(row.get("controller_term") or 0)
-            controller_id = str(row.get("controller_id") or "")
-            impacts = row.get("service_impact") or []
-            if (
-                revision <= prior_revision
-                or revision > economics_revision
-                or not math.isfinite(updated_at)
-                or updated_at < 0
-                or not 0 < controller_term <= MAX_COUNTER
-                or not controller_id
-                or len(controller_id) > MAX_ID_LENGTH
-                or not isinstance(row.get("allow_service_shortfall"), bool)
-                or not isinstance(row.get("impact_assessed"), bool)
-                or not isinstance(impacts, list)
-                or len(impacts) > _MAX_ECONOMICS_IMPACT_MODELS
-                or int(row.get("service_impact_truncated") or 0) < 0
-            ):
-                raise ValueError("invalid persisted allocator economics audit")
-            for impact in impacts:
-                if not isinstance(impact, dict):
-                    raise ValueError("invalid persisted allocator economics audit")
-                model_id = str(impact.get("model_id") or "")
-                counts = (
-                    impact.get("before_replicas"),
-                    impact.get("after_replicas"),
-                    impact.get("desired_replicas"),
-                )
-                if (
-                    not model_id
-                    or len(model_id) > MAX_ID_LENGTH
-                    or any(
-                        isinstance(count, bool)
-                        or not isinstance(count, int)
-                        or not 0 <= count <= MAX_COUNTER
-                        for count in counts
-                    )
-                ):
-                    raise ValueError("invalid persisted allocator economics audit")
-            prior_revision = revision
-            economics_audit.append(row)
-        if economics_revision and not economics_audit:
-            # Older states legitimately predate audit support and therefore have revision zero.
-            raise ValueError("persisted allocator economics revision has no audit trail")
-        self._economics_revision = economics_revision
-        self._economics_audit = economics_audit
         self.reconciler = Reconciler(
             ReconcilePolicy(**dict(value.get("reconcile_policy") or {}))
         )

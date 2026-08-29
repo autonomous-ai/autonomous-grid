@@ -32,7 +32,7 @@ from shared.allocator.auth import (
     verify_tenant_attestation,
 )
 from shared.allocator.authority import ControllerAuthorityLease
-from shared.allocator.controller import AllocatorController, EconomicsRevisionConflict
+from shared.allocator.controller import AllocatorController
 from shared.allocator.intelligence import (
     RequestFeatures,
     anonymous_tenant_cohort,
@@ -824,18 +824,7 @@ def create_app(
     async def allocator_set_budget(request: Request):
         _require_allocator_control(app, request)
         try:
-            await asyncio.to_thread(_ensure_allocator_authority, app)
-        except Exception as exc:  # noqa: BLE001 - conflicting writer is an operator error
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        try:
             body = await request.json()
-            if not isinstance(body, dict):
-                raise ValueError("Request body must be a JSON object")
-            if "expected_revision" not in body:
-                raise HTTPException(
-                    status_code=428,
-                    detail="expected_revision is required for allocator economics updates",
-                )
             maximum = float(body.get("max_hourly_cost", 0.0))
             allow_unknown = body.get("allow_unknown_cost", False)
             if not isinstance(allow_unknown, bool):
@@ -845,15 +834,10 @@ def create_app(
                 raise ValueError("allow_service_shortfall must be a boolean")
             policy = _allocator(app).set_hourly_cost_budget(
                 maximum,
-                expected_revision=body["expected_revision"],
                 allow_unknown_cost=allow_unknown,
                 allow_service_shortfall=allow_shortfall,
                 nodes=_allocator_snapshots(app),
             )
-        except HTTPException:
-            raise
-        except EconomicsRevisionConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (AttributeError, json.JSONDecodeError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _mark_allocator_dirty(app)
@@ -862,7 +846,6 @@ def create_app(
             "max_hourly_cost": policy.max_hourly_cost,
             "allow_unknown_cost": policy.allow_unknown_cost,
             "allow_service_shortfall": allow_shortfall,
-            "economics_revision": _allocator(app).economics_revision,
             "reconciliation": _reconcile_summary(result),
         }
 
@@ -870,18 +853,9 @@ def create_app(
     async def allocator_set_host_price(host_id: str, request: Request):
         _require_allocator_control(app, request)
         try:
-            await asyncio.to_thread(_ensure_allocator_authority, app)
-        except Exception as exc:  # noqa: BLE001 - conflicting writer is an operator error
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        try:
             body = await request.json()
             if not isinstance(body, dict):
                 raise ValueError("Request body must be a JSON object")
-            if "expected_revision" not in body:
-                raise HTTPException(
-                    status_code=428,
-                    detail="expected_revision is required for allocator economics updates",
-                )
             allow_shortfall = body.get("allow_service_shortfall", False)
             if not isinstance(allow_shortfall, bool):
                 raise ValueError("allow_service_shortfall must be a boolean")
@@ -889,16 +863,11 @@ def create_app(
             prices = _allocator(app).set_host_price(
                 host_id,
                 price,
-                expected_revision=body["expected_revision"],
                 allow_service_shortfall=allow_shortfall,
                 nodes=_allocator_snapshots(app),
             )
-        except HTTPException:
-            raise
         except KeyError as exc:
             raise HTTPException(status_code=400, detail="cost_per_hour is required") from exc
-        except EconomicsRevisionConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (json.JSONDecodeError, TypeError, ValueError, OverflowError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _mark_allocator_dirty(app)
@@ -909,17 +878,12 @@ def create_app(
             "cost_known": True,
             "cost_source": "operator",
             "allow_service_shortfall": allow_shortfall,
-            "economics_revision": _allocator(app).economics_revision,
             "reconciliation": _reconcile_summary(result),
         }
 
     @app.delete("/allocator/hosts/{host_id}/price")
     async def allocator_delete_host_price(host_id: str, request: Request):
         _require_allocator_control(app, request)
-        try:
-            await asyncio.to_thread(_ensure_allocator_authority, app)
-        except Exception as exc:  # noqa: BLE001 - conflicting writer is an operator error
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if host_id not in _allocator(app).host_prices:
             raise HTTPException(status_code=404, detail="allocator host price not found")
         try:
@@ -927,25 +891,15 @@ def create_app(
             body = json.loads(raw) if raw else {}
             if not isinstance(body, dict):
                 raise ValueError("Request body must be a JSON object")
-            if "expected_revision" not in body:
-                raise HTTPException(
-                    status_code=428,
-                    detail="expected_revision is required for allocator economics updates",
-                )
             allow_shortfall = body.get("allow_service_shortfall", False)
             if not isinstance(allow_shortfall, bool):
                 raise ValueError("allow_service_shortfall must be a boolean")
             _allocator(app).set_host_price(
                 host_id,
                 None,
-                expected_revision=body["expected_revision"],
                 allow_service_shortfall=allow_shortfall,
                 nodes=_allocator_snapshots(app),
             )
-        except HTTPException:
-            raise
-        except EconomicsRevisionConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (json.JSONDecodeError, TypeError, ValueError, OverflowError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _mark_allocator_dirty(app)
@@ -954,7 +908,6 @@ def create_app(
             "host_id": host_id,
             "deleted": True,
             "allow_service_shortfall": allow_shortfall,
-            "economics_revision": _allocator(app).economics_revision,
             "reconciliation": _reconcile_summary(result),
         }
 

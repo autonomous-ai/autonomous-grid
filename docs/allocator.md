@@ -272,20 +272,6 @@ the configured minimum—is rejected unless the operator supplies
 single-machine logical Grid registers its configured test prices through this production control
 surface rather than granting its simulated workers accounting authority.
 
-Budget and host-price mutations acquire the same durable controller term/lease used by automatic
-allocation before changing state. A second live control-plane process sharing the state path gets
-HTTP 409 and cannot last-writer-win the active leader's economics, including while both controllers
-are still in recommend mode. After release or lease expiry, takeover advances the term before the
-successor reloads the latest durable prices, budget, demand, and command state, then writes. This
-prevents an older standby snapshot from erasing changes made during the departed leader's term.
-Every material economics transaction also advances a durable monotonic revision. The API requires
-the revision the operator observed and returns HTTP 409 if it is stale; the CLI reads status and
-supplies that compare-and-swap value automatically, or accepts `--expected-revision N` for scripts.
-The controller retains the latest 256 audit records with controller term/identity, before/after
-policy, whether impact was assessed, and up to 128 exact before/after/desired model coverage rows.
-An explicit service-shortfall acknowledgement is therefore durable evidence tied to the revision
-and impact it authorized, not a transient Boolean lost after the request.
-
 An operator may also set a durable hard fleet ceiling with
 `grid allocator budget --max-hourly-cost USD`. Cost is charged once per selected physical host,
 not once per colocated model. Zero disables the ceiling. Under a positive ceiling, missing price

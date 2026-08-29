@@ -296,11 +296,7 @@ def test_allocator_model_mode_tick_and_persistence(tmp_path):
     assert ticked.json()["mode"] == "observe"
     budget = client.put(
         "/allocator/budget",
-        json={
-            "expected_revision": 0,
-            "max_hourly_cost": 1.25,
-            "allow_unknown_cost": False,
-        },
+        json={"max_hourly_cost": 1.25, "allow_unknown_cost": False},
         headers=AUTH,
     )
     assert budget.status_code == 200, budget.text
@@ -332,11 +328,7 @@ def test_budget_api_requires_service_shortfall_acknowledgement(tmp_path):
 
     rejected = client.put(
         "/allocator/budget",
-        json={
-            "expected_revision": 0,
-            "max_hourly_cost": 1.0,
-            "allow_unknown_cost": False,
-        },
+        json={"max_hourly_cost": 1.0, "allow_unknown_cost": False},
         headers=AUTH,
     )
     assert rejected.status_code == 400
@@ -346,7 +338,6 @@ def test_budget_api_requires_service_shortfall_acknowledgement(tmp_path):
     accepted = client.put(
         "/allocator/budget",
         json={
-            "expected_revision": 0,
             "max_hourly_cost": 1.0,
             "allow_unknown_cost": False,
             "allow_service_shortfall": True,
@@ -356,33 +347,6 @@ def test_budget_api_requires_service_shortfall_acknowledgement(tmp_path):
 
     assert accepted.status_code == 200
     assert accepted.json()["allow_service_shortfall"] is True
-
-
-def test_economics_api_requires_revision_and_rejects_stale_cas(tmp_path):
-    app, client, _ = _app(tmp_path)
-    missing = client.put(
-        "/allocator/budget",
-        json={"max_hourly_cost": 1.0},
-        headers=AUTH,
-    )
-    assert missing.status_code == 428
-
-    created = client.put(
-        "/allocator/hosts/host-1/price",
-        json={"expected_revision": 0, "cost_per_hour": 0.25},
-        headers=AUTH,
-    )
-    assert created.status_code == 200
-    assert created.json()["economics_revision"] == 1
-
-    stale = client.put(
-        "/allocator/budget",
-        json={"expected_revision": 0, "max_hourly_cost": 1.0},
-        headers=AUTH,
-    )
-    assert stale.status_code == 409
-    assert "current revision is 1" in stale.json()["detail"]
-    assert app.state.allocator.planner.policy.max_hourly_cost == 0
 
 
 def test_allocator_profile_route_supports_namespaced_model_ids(tmp_path):
@@ -666,60 +630,6 @@ def test_automatic_mode_has_one_leader_and_takeover_advances_term(tmp_path):
     )
     assert takeover.status_code == 200, takeover.text
     assert second_client.get("/allocator/status").json()["authority"]["term"] == 2
-
-
-def test_economics_writes_are_single_leader_even_before_automatic_mode(tmp_path):
-    state_path = tmp_path / "allocator.json"
-    first = create_app(
-        grid_id="ag-test",
-        grid_name="first",
-        allocator_state_path=state_path,
-        allocator_control_token=TOKEN,
-        allocator_interval_seconds=60,
-    )
-    second = create_app(
-        grid_id="ag-test",
-        grid_name="second",
-        allocator_state_path=state_path,
-        allocator_control_token=TOKEN,
-        allocator_interval_seconds=60,
-    )
-    first_client = TestClient(first)
-    second_client = TestClient(second)
-
-    acquired = first_client.put(
-        "/allocator/hosts/host-1/price",
-        json={"expected_revision": 0, "cost_per_hour": 0.1},
-        headers=AUTH,
-    )
-    assert acquired.status_code == 200, acquired.text
-    refused = second_client.put(
-        "/allocator/budget",
-        json={"expected_revision": 0, "max_hourly_cost": 1.0},
-        headers=AUTH,
-    )
-    assert refused.status_code == 409
-    assert "another live controller" in refused.json()["detail"]
-    assert second.state.allocator.planner.policy.max_hourly_cost == 0.0
-
-    first.state.allocator_authority.release()
-    stale = second_client.put(
-        "/allocator/budget",
-        json={"expected_revision": 0, "max_hourly_cost": 1.0},
-        headers=AUTH,
-    )
-    assert stale.status_code == 409
-    assert "current revision is 1" in stale.json()["detail"]
-    takeover = second_client.put(
-        "/allocator/budget",
-        json={"expected_revision": 1, "max_hourly_cost": 1.0},
-        headers=AUTH,
-    )
-    assert takeover.status_code == 200, takeover.text
-    status = second_client.get("/allocator/status").json()
-    assert status["authority"]["term"] == 2
-    assert status["cost"]["operator_host_prices"] == {"host-1": 0.1}
-    assert status["planner_policy"]["max_hourly_cost"] == 1.0
 
 
 def test_stale_ack_is_ignored_without_poisoning_later_receipts(tmp_path):
@@ -1109,14 +1019,14 @@ def test_operator_host_price_overrides_node_claim_and_persists(tmp_path):
     unauthorized = client.put(
         "/allocator/hosts/host-1/price",
         headers=_node_auth("host-1"),
-        json={"expected_revision": 0, "cost_per_hour": 0.6},
+        json={"cost_per_hour": 0.6},
     )
     assert unauthorized.status_code in (401, 403)
 
     response = client.put(
         "/allocator/hosts/host-1/price",
         headers=AUTH,
-        json={"expected_revision": 0, "cost_per_hour": 0.6},
+        json={"cost_per_hour": 0.6},
     )
     assert response.status_code == 200, response.text
     assert response.json()["cost_source"] == "operator"
@@ -1140,7 +1050,7 @@ def test_operator_zero_is_known_and_removal_returns_host_to_unknown(tmp_path):
     response = client.put(
         "/allocator/hosts/host-1/price",
         headers=AUTH,
-        json={"expected_revision": 0, "cost_per_hour": 0},
+        json={"cost_per_hour": 0},
     )
     assert response.status_code == 200
     effective = client.get("/allocator/status").json()["nodes"][0]
@@ -1152,7 +1062,7 @@ def test_operator_zero_is_known_and_removal_returns_host_to_unknown(tmp_path):
         "DELETE",
         "/allocator/hosts/host-1/price",
         headers=AUTH,
-        json={"expected_revision": 1},
+        json={},
     )
     assert response.status_code == 200, response.text
     effective = client.get("/allocator/status").json()["nodes"][0]

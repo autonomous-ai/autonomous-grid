@@ -98,7 +98,6 @@ def test_parser_exposes_complete_allocator_surface():
     assert budget_args.max_hourly_cost == 1.25
     assert budget_args.allow_unknown_cost is False
     assert budget_args.allow_service_shortfall is False
-    assert budget_args.expected_revision is None
     acknowledged_budget = parser.parse_args(
         [
             "allocator",
@@ -114,20 +113,6 @@ def test_parser_exposes_complete_allocator_surface():
     )
     assert host_price.handler is cli.cmd_allocator_host_price_set
     assert host_price.cost_per_hour == 0.75
-    assert host_price.expected_revision is None
-    explicit_revision = parser.parse_args(
-        [
-            "allocator",
-            "host",
-            "price",
-            "set",
-            "host-1",
-            "0.75",
-            "--expected-revision",
-            "12",
-        ]
-    )
-    assert explicit_revision.expected_revision == 12
     assert parser.parse_args(
         ["allocator", "host", "price", "remove", "host-1"]
     ).handler is cli.cmd_allocator_host_price_remove
@@ -174,7 +159,6 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
         ],
         "models": [{"model_id": "qwen.gguf"}],
         "pending_commands": [],
-        "economics": {"revision": 12, "audit": [{"revision": 12}]},
         "plan": {
             "unsatisfied": [],
             "hourly_cost": 0.4,
@@ -218,7 +202,6 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
     assert "Allocator recommend · 1 hosts · 1 models" in output
     assert "desired cost       $0.4/h of $0.5/h" in output
     assert "current cost       $0.8/h · over_budget" in output
-    assert "economics revision 12 · 1 retained change(s)" in output
     assert "joint portfolio    2 workloads -> 1 models" in output
     assert "exploration slot  general" in output
     assert "projected 24h      $9.6 · complete · confidence 75%" in output
@@ -474,16 +457,10 @@ def test_mutating_commands_use_authenticated_routes(
 
     def request(actual_method, url, **kwargs):
         calls.append((actual_method, url, kwargs))
-        if url.endswith("/allocator/status"):
-            payload = {"economics": {"revision": 7}}
-        elif path == "/allocator/mode":
+        if path == "/allocator/mode":
             payload = {"mode": "observe"}
         elif path == "/allocator/budget":
-            payload = {
-                "max_hourly_cost": 1.25,
-                "allow_unknown_cost": False,
-                "economics_revision": 8,
-            }
+            payload = {"max_hourly_cost": 1.25, "allow_unknown_cost": False}
         elif path == "/allocator/tick":
             payload = {"actions": [], "deferred": []}
         elif path.startswith("/allocator/hosts/") and method == "PUT":
@@ -491,28 +468,18 @@ def test_mutating_commands_use_authenticated_routes(
                 "host_id": "host-1",
                 "cost_per_hour": 0.75,
                 "cost_source": "operator",
-                "economics_revision": 8,
             }
         elif path.startswith("/allocator/hosts/"):
-            payload = {
-                "host_id": "host-1",
-                "deleted": True,
-                "economics_revision": 8,
-            }
+            payload = {"host_id": "host-1", "deleted": True}
         else:
             payload = {"deleted": "qwen.gguf"}
         return response(payload=payload)
 
     patch_http_client(monkeypatch, request)
     assert cli.build_parser().parse_args(argv).handler(cli.build_parser().parse_args(argv)) == 0
-    mutation = calls[-1]
-    assert mutation[0] == method
-    assert mutation[1].endswith(path)
-    assert mutation[2]["headers"]["X-Grid-Allocator-Token"] == "secret-token"
-    if path in ("/allocator/budget", "/allocator/hosts/host-1/price"):
-        assert calls[0][0] == "GET"
-        assert calls[0][1].endswith("/allocator/status")
-        assert mutation[2]["json"]["expected_revision"] == 7
+    assert calls[0][0] == method
+    assert calls[0][1].endswith(path)
+    assert calls[0][2]["headers"]["X-Grid-Allocator-Token"] == "secret-token"
     assert "secret-token" not in capsys.readouterr().out
 
 

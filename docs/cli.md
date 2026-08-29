@@ -552,15 +552,12 @@ grid allocator mode observe|recommend|automatic
 grid allocator budget --max-hourly-cost <USD>
     [--allow-unknown-cost]
     [--allow-service-shortfall]
-    [--expected-revision <N>]
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
 grid allocator host price set <host-id> <USD>
     [--allow-service-shortfall]
-    [--expected-revision <N>]
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
 grid allocator host price remove|rm <host-id>
     [--allow-service-shortfall]
-    [--expected-revision <N>]
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
 grid allocator tick
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
@@ -592,12 +589,6 @@ free; `grid allocator host price remove host-1` returns the host to unknown pric
 that reduces achievable desired service, including demand-driven replicas above the minimum, needs
 `--allow-service-shortfall`. Status prints effective
 price provenance for every host.
-
-Economics updates use optimistic concurrency. The CLI reads the current durable revision from
-status and sends it with the mutation; a concurrent change returns HTTP 409 instead of silently
-overwriting it. Automation may pin the comparison explicitly with `--expected-revision N`. Status
-shows the current revision and retained audit count, and JSON status includes the bounded audit
-records, including any acknowledged before/after service impact.
 
 `grid allocator budget --max-hourly-cost 2.50` sets a durable hard ceiling on the sum of the
 selected hosts' operator prices. A host is charged once even when it serves several models.

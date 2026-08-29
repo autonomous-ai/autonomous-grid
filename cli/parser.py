@@ -112,16 +112,6 @@ def _positive_task_count(raw: str) -> int:
     return count
 
 
-def _nonnegative_revision(raw: str) -> int:
-    try:
-        revision = int(raw)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"{raw!r} is not a whole revision") from None
-    if revision < 0:
-        raise argparse.ArgumentTypeError(f"{raw!r} must be non-negative")
-    return revision
-
-
 def _positive_concurrency(raw: str) -> int:
     """Bound one explicitly advertised engine width before it reaches either control plane."""
 
@@ -552,13 +542,6 @@ def _add_allocator(sub) -> None:
             "Acknowledge that this budget may reduce currently achievable minimum replicas."
         ),
     )
-    budget.add_argument(
-        "--expected-revision",
-        type=_nonnegative_revision,
-        default=None,
-        metavar="N",
-        help="CAS revision (defaults to the revision read from allocator status).",
-    )
     _add_allocator_grid(budget, token=True)
     budget.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     budget.set_defaults(handler=cmd_allocator_budget)
@@ -577,13 +560,6 @@ def _add_allocator(sub) -> None:
         action="store_true",
         help="Acknowledge a minimum-service reduction under the current budget.",
     )
-    price_set.add_argument(
-        "--expected-revision",
-        type=_nonnegative_revision,
-        default=None,
-        metavar="N",
-        help="CAS revision (defaults to the revision read from allocator status).",
-    )
     _add_allocator_grid(price_set, token=True)
     price_set.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     price_set.set_defaults(handler=cmd_allocator_host_price_set)
@@ -596,13 +572,6 @@ def _add_allocator(sub) -> None:
             "--allow-service-shortfall",
             action="store_true",
             help="Acknowledge a minimum-service reduction under the current budget.",
-        )
-        price_remove.add_argument(
-            "--expected-revision",
-            type=_nonnegative_revision,
-            default=None,
-            metavar="N",
-            help="CAS revision (defaults to the revision read from allocator status).",
         )
         _add_allocator_grid(price_remove, token=True)
         price_remove.add_argument(
