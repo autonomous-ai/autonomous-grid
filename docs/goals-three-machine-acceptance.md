@@ -87,6 +87,13 @@ each output from `refs/grid/agent/<goal-id>` rather than trusting the worker's r
 and Claude records inside that checkpoint remain harness-specific; a returning harness restores its
 own native state while every harness receives the shared tree, Goal metadata and event history.
 
+For each reclaimed turn, use the relay-authored `task.retry.previous_provider_id` as the authority
+for the machine that disappeared, and the settled turn's `provider_node_id` as the authority for its
+replacement. A provider-authored `task.attempt_started` event is useful corroboration but is not
+required for the killed attempt: an abrupt power loss can happen before that best-effort event is
+flushed. The replacement's attempt number must still be 2 and the retry reason must be
+`lease_expired`.
+
 Every terminal evaluation row used as proof must have `accepted: true`. A row with
 `accepted: false` proves only that a stale provider evaluated something after losing its lease; it
 must remain in the audit record and must not be counted toward completion or future training data.

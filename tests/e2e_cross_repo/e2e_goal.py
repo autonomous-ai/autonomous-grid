@@ -140,8 +140,25 @@ def test_three_nodes_reclaim_goal_turns_and_finish_one_game(
         {"node": "B", "feature": 2},
         {"node": "C", "features": [3, 4]},
     ]
-    _assert_transcript_chain(
-        relay_client.get_goal_evidence(relay, owner_token, conversation_id), 3)
+    evidence = relay_client.get_goal_evidence(relay, owner_token, conversation_id)
+    _assert_transcript_chain(evidence, 3)
+    retries = {
+        item["turn_id"]: item["event"] for item in evidence["attempt_events"]
+        if item["event"].get("type") == "task.retry"
+    }
+    assert retries[second_turn]["previous_provider_id"] == node_a.node_id
+    assert retries[third_turn]["previous_provider_id"] == node_b.node_id
+    assert all(event["reason"] == "lease_expired" for event in retries.values())
+    starts = {}
+    for item in evidence["attempt_events"]:
+        if item["event"].get("type") == "task.attempt_started":
+            starts.setdefault(item["turn_id"], []).append(
+                (item["event"]["attempt"], item["event"]["provider_id"]))
+    # The killed process can lose its best-effort provider-authored start event. The relay-authored
+    # retry above is the authority for the lost provider; these events prove the replacements also
+    # announced the attempts that eventually settled.
+    assert (2, node_b.node_id) in starts[second_turn]
+    assert (2, node_c.node_id) in starts[third_turn]
 
 
 def test_three_nodes_reclaim_one_goal_codex_then_claude_then_codex(
