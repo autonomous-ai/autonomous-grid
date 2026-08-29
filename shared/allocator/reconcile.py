@@ -620,8 +620,27 @@ class Reconciler:
             if action.kind in (ActionKind.LOAD, ActionKind.WARM):
                 return profile.load_seconds + warm_seconds
             if preemption is not None:
-                return profile.load_seconds + warm_seconds
+                wait_seconds = 0.0
+                if action.kind == ActionKind.DRAIN:
+                    node = node_by_id.get(action.node_id)
+                    victim = (
+                        node.residency(action.model_id) if node is not None else None
+                    )
+                    victim_profile = profile_by_id.get(action.model_id)
+                    if victim is not None and victim_profile is not None:
+                        wait_seconds = (
+                            victim.active_requests
+                            * victim_profile.expected_service_seconds
+                        )
+                return profile.load_seconds + warm_seconds + wait_seconds
             return math.inf
+
+        def action_stage(action: MutationAction) -> int:
+            if (action.node_id, action.model_id) in preemptions:
+                # An already-drained victim is one transition from free capacity. Starting another
+                # drain first would add a full controller/heartbeat round to the beneficiary path.
+                return 0 if action.kind == ActionKind.UNLOAD else 1
+            return lifecycle_priority[action.kind]
 
         def proposal_sort_key(
             action: MutationAction,
@@ -631,7 +650,7 @@ class Reconciler:
                 -admin_priority,
                 -demand_urgency,
                 time_to_ready(action),
-                lifecycle_priority[action.kind],
+                action_stage(action),
                 action.node_id,
                 action.model_id,
             )

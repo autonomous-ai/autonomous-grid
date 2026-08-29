@@ -3454,6 +3454,114 @@ def test_mutation_governor_prioritizes_drain_for_preemption_beneficiary():
     ] == [(ActionKind.DRAIN, "z-preempt", "batch")]
 
 
+def test_preemption_governor_unloads_drained_capacity_before_starting_new_drain():
+    machines = [
+        node("a-ready", 8_000, residencies=(ready("batch", 8_000),)),
+        node(
+            "z-drained",
+            8_000,
+            residencies=(
+                replace(
+                    ready("batch", 8_000),
+                    state=ResidencyState.DRAINING,
+                ),
+            ),
+        ),
+    ]
+    profiles = [
+        model(
+            "batch",
+            8_000,
+            min_replicas=0,
+            max_replicas=0,
+            priority=1,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=0,
+        ),
+        model(
+            "critical",
+            8_000,
+            min_replicas=2,
+            max_replicas=2,
+            priority=1_000,
+            min_residency_seconds=0,
+        ),
+    ]
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        machines,
+        profiles,
+        now=10,
+    )
+    assert len(plan.preemptions) == 2
+
+    result = Reconciler(
+        ReconcilePolicy(max_concurrent_mutations=1)
+    ).reconcile(
+        plan,
+        machines,
+        profiles,
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+
+    assert [
+        (action.kind, action.node_id)
+        for action in result.executable_actions
+    ] == [(ActionKind.UNLOAD, "z-drained")]
+
+
+def test_preemption_governor_drains_idle_capacity_before_busy_capacity():
+    machines = [
+        node(
+            "a-busy",
+            8_000,
+            residencies=(replace(ready("batch", 8_000), active_requests=5),),
+        ),
+        node("z-idle", 8_000, residencies=(ready("batch", 8_000),)),
+    ]
+    profiles = [
+        model(
+            "batch",
+            8_000,
+            min_replicas=0,
+            max_replicas=0,
+            priority=1,
+            expected_service_seconds=10,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=0,
+        ),
+        model(
+            "critical",
+            8_000,
+            min_replicas=2,
+            max_replicas=2,
+            priority=1_000,
+            min_residency_seconds=0,
+        ),
+    ]
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        machines,
+        profiles,
+        now=10,
+    )
+    assert len(plan.preemptions) == 2
+
+    result = Reconciler(
+        ReconcilePolicy(max_concurrent_mutations=1)
+    ).reconcile(
+        plan,
+        machines,
+        profiles,
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+
+    assert [
+        (action.kind, action.node_id)
+        for action in result.executable_actions
+    ] == [(ActionKind.DRAIN, "z-idle")]
+
+
 @pytest.mark.parametrize(
     ("residency_state", "expected_action"),
     (
