@@ -1322,6 +1322,9 @@ def cmd_test_compete(args: argparse.Namespace) -> int:
                     json={
                         "model_id": candidate,
                         "workload": "coding",
+                        "artifact_sha256": str(
+                            by_model[candidate].get("artifact_sha256") or ""
+                        ),
                         "quality": float(passed),
                         "error": result.status_code != 200,
                         "latency_ms": result.elapsed_seconds * 1_000.0,

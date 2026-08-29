@@ -403,6 +403,38 @@ def test_authenticated_evaluation_records_quality_without_creating_demand(tmp_pa
     assert app.state.allocator.intelligence.unbound_demand.to_dict()["models"] == {}
 
 
+def test_evaluation_api_rejects_stale_artifact_revision(tmp_path):
+    app, client, _ = _app(tmp_path)
+    revision_a = "a" * 64
+    revision_b = "b" * 64
+    assert client.put(
+        "/allocator/models/qwen",
+        json=_profile(artifact_sha256=revision_b),
+        headers=AUTH,
+    ).status_code == 200
+
+    stale = client.post(
+        "/allocator/evaluations",
+        headers=AUTH,
+        json={
+            "model_id": "qwen",
+            "workload": "coding",
+            "artifact_sha256": revision_a,
+            "quality": 1.0,
+        },
+    )
+    current = client.post(
+        "/allocator/evaluations",
+        headers=AUTH,
+        json={"model_id": "qwen", "workload": "coding", "quality": 1.0},
+    )
+
+    assert stale.status_code == 400
+    assert "does not match" in stale.json()["detail"]
+    assert current.status_code == 200
+    assert current.json()["evaluation"]["artifact_sha256"] == revision_b
+
+
 def test_authenticated_evaluation_inference_does_not_create_demand(tmp_path):
     app, client, _ = _app(tmp_path)
     assert client.put(

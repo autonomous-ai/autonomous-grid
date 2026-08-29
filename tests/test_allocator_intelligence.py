@@ -20,7 +20,12 @@ from shared.allocator.models import (
 from shared.allocator.planner import PlacementPlanner
 
 
-def profile(model: str, memory: int, *scores: tuple[str, float]) -> ModelProfile:
+def profile(
+    model: str,
+    memory: int,
+    *scores: tuple[str, float],
+    artifact_sha256: str = "",
+) -> ModelProfile:
     return ModelProfile(
         model_id=model,
         memory_mb=memory,
@@ -30,6 +35,7 @@ def profile(model: str, memory: int, *scores: tuple[str, float]) -> ModelProfile
         warm_seconds=0,
         min_residency_seconds=0,
         workload_scores=scores,
+        artifact_sha256=artifact_sha256,
     )
 
 
@@ -315,6 +321,87 @@ def test_stale_outcomes_decay_and_candidate_status_explains_effective_evidence()
     assert candidates["recent-good"]["evidence"]["confidence"] > candidates[
         "stale-perfect"
     ]["evidence"]["confidence"]
+
+
+def test_fresh_service_request_does_not_revive_stale_quality_evidence():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    candidate = profile("coder", 8_000, ("coding", 1.0))
+    half_life = 7 * 24 * 60 * 60
+    now = 8 * half_life
+    for _ in range(8):
+        intelligence.observe_model_evaluation(
+            "coder", "coding", quality=1.0, timestamp=0
+        )
+
+    intelligence.observe(
+        RequestFeatures("chat/completions", "coder", "coding"),
+        served_model="coder",
+        timestamp=now,
+    )
+
+    evidence = intelligence.projections((candidate,), now=now)
+    assert evidence == ()
+    outcome_evidence = intelligence._outcome_evidence("coder", "coding", now=now)
+    assert outcome_evidence["freshness"] == 1.0
+    assert outcome_evidence["quality_freshness"] == pytest.approx(1 / 256)
+    assert outcome_evidence["quality_confidence"] == pytest.approx(1 / 256)
+
+
+def test_eight_fresh_evaluations_give_full_independent_quality_confidence():
+    intelligence = WorkloadIntelligence()
+    for _ in range(8):
+        intelligence.observe_model_evaluation(
+            "coder", "coding", quality=0.8, timestamp=100
+        )
+
+    evidence = intelligence._outcome_evidence("coder", "coding", now=100)
+
+    assert evidence["confidence"] == pytest.approx(8 / 20)
+    assert evidence["quality_confidence"] == 1.0
+
+
+def test_model_quality_evidence_is_bound_to_artifact_revision():
+    intelligence = WorkloadIntelligence()
+    revision_a = "a" * 64
+    revision_b = "b" * 64
+    for _ in range(8):
+        intelligence.observe_model_evaluation(
+            "coder",
+            "coding",
+            artifact_sha256=revision_a,
+            quality=1.0,
+            timestamp=100,
+        )
+
+    evidence_a = intelligence._outcome_evidence(
+        "coder", "coding", artifact_sha256=revision_a, now=100
+    )
+    evidence_b = intelligence._outcome_evidence(
+        "coder", "coding", artifact_sha256=revision_b, now=100
+    )
+
+    assert evidence_a["quality_confidence"] == 1.0
+    assert evidence_b["quality_confidence"] == 0.0
+    assert evidence_b["exploration_bonus"] > 0
+
+
+def test_legacy_shared_timestamp_discards_ambiguous_quality_on_restore():
+    intelligence = WorkloadIntelligence()
+    intelligence.observe_model_evaluation(
+        "coder", "coding", quality=1.0, timestamp=100
+    )
+    payload = intelligence.to_dict()
+    legacy = payload["outcomes"][0]
+    legacy["updated_at"] = legacy.pop("service_updated_at")
+    legacy.pop("quality_updated_at")
+    legacy.pop("artifact_sha256")
+
+    restored = WorkloadIntelligence.from_dict(payload)
+    evidence = restored._outcome_evidence("coder", "coding", now=100)
+
+    assert restored.outcomes[0].quality_samples == 0
+    assert evidence["confidence"] > 0
+    assert evidence["quality_confidence"] == 0.0
 
 
 def test_uncertain_preemption_only_candidate_pays_more_than_exploration_bonus():

@@ -33,6 +33,7 @@ from shared.allocator.models import (
     NodeSnapshot,
     PlacementPlan,
     ResidencyState,
+    canonical_sha256,
 )
 from shared.allocator.planner import PlacementPlanner, PlannerPolicy
 from shared.allocator.reconcile import (
@@ -132,6 +133,7 @@ class AllocatorController:
         # waiting behind placement/backtracking or a durable controller fsync.
         self._demand_lock = threading.Lock()
         self._observable_models: frozenset[str] = frozenset()
+        self._observable_artifacts: dict[str, str] = {}
         if state_path and state_path.exists():
             self._restore(jsonio.load_json(state_path))
             self._restored_command_ids = set(self._commands)
@@ -319,6 +321,7 @@ class AllocatorController:
         features: RequestFeatures,
         *,
         served_model: str = "",
+        served_artifact_sha256: str = "",
         service_seconds: float,
         latency_ms: float | None = None,
         queue_depth: int = 0,
@@ -334,11 +337,13 @@ class AllocatorController:
         configured capable model to receive a conservative canary placement at planning time.
         """
 
+        served_artifact = canonical_sha256(served_artifact_sha256)
         direct_model = served_model or features.requested_model
         directly_observable = direct_model in self._observable_models
         with self._demand_lock:
             # Close a profile-retirement race after acquiring the telemetry lock.
             directly_observable = direct_model in self._observable_models
+            observable_artifact = self._observable_artifacts.get(served_model, "")
             if directly_observable:
                 self.demand.observe(
                     direct_model,
@@ -351,6 +356,7 @@ class AllocatorController:
             self.intelligence.observe(
                 features,
                 served_model=(served_model if served_model in self._observable_models else ""),
+                served_artifact_sha256=(served_artifact or observable_artifact),
                 portfolio_unbound=not directly_observable,
                 service_seconds=service_seconds,
                 latency_ms=latency_ms,
@@ -367,6 +373,7 @@ class AllocatorController:
         model_id: str,
         workload: str,
         *,
+        artifact_sha256: str = "",
         quality: float,
         error: bool = False,
         latency_ms: float = 0.0,
@@ -379,14 +386,21 @@ class AllocatorController:
         future portfolio choice without allowing a benchmark run to provision itself.
         """
 
+        artifact = canonical_sha256(artifact_sha256)
         if model_id not in self._observable_models:
             raise KeyError("allocator model profile not found")
         with self._demand_lock:
             if model_id not in self._observable_models:
                 raise KeyError("allocator model profile not found")
+            configured_artifact = self._observable_artifacts[model_id]
+            if artifact and artifact != configured_artifact:
+                raise ValueError(
+                    "evaluation artifact_sha256 does not match the configured model revision"
+                )
             return self.intelligence.observe_model_evaluation(
                 model_id,
                 workload,
+                artifact_sha256=configured_artifact,
                 quality=quality,
                 error=error,
                 latency_ms=latency_ms,
@@ -1424,6 +1438,10 @@ class AllocatorController:
         """Publish the configured non-retiring demand keys without blocking inference on plans."""
 
         self._observable_models = frozenset(self._profiles).difference(self._retiring)
+        self._observable_artifacts = {
+            model_id: self._profiles[model_id].artifact_sha256
+            for model_id in self._observable_models
+        }
 
     def _prune_unobservable_demand(self) -> None:
         """Drop telemetry keys that cannot influence any configured active profile."""

@@ -19,6 +19,7 @@ from shared.allocator.models import (
     SCHEMA_VERSION,
     DemandForecast,
     ModelProfile,
+    canonical_sha256,
 )
 
 GENERAL = "general"
@@ -134,22 +135,31 @@ def anonymous_tenant_cohort(digest: bytes | None) -> str:
 class ModelWorkloadOutcome:
     model_id: str
     workload: str
+    artifact_sha256: str = ""
     requests: int = 0
     errors: int = 0
     latency_ms: float = 0.0
     output_units: float = 0.0
     quality: float = 0.0
     quality_samples: int = 0
-    updated_at: float = 0.0
+    service_updated_at: float = 0.0
+    quality_updated_at: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.model_id or self.workload not in KNOWN_WORKLOADS:
             raise ValueError("model_id and known workload are required")
+        object.__setattr__(self, "artifact_sha256", canonical_sha256(self.artifact_sha256))
         if not 0 <= self.errors <= self.requests <= MAX_COUNTER:
             raise ValueError("outcome counters are invalid")
         if not 0 <= self.quality_samples <= self.requests:
             raise ValueError("quality sample count is invalid")
-        for name in ("latency_ms", "output_units", "quality", "updated_at"):
+        for name in (
+            "latency_ms",
+            "output_units",
+            "quality",
+            "service_updated_at",
+            "quality_updated_at",
+        ):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and non-negative")
@@ -170,7 +180,7 @@ class WorkloadIntelligence:
             window_seconds=_ACTIVE_COHORT_SECONDS,
             max_samples_per_model=64,
         )
-        self._outcomes: dict[tuple[str, str], ModelWorkloadOutcome] = {}
+        self._outcomes: dict[tuple[str, str, str], ModelWorkloadOutcome] = {}
 
     @property
     def outcomes(self) -> tuple[ModelWorkloadOutcome, ...]:
@@ -181,6 +191,7 @@ class WorkloadIntelligence:
         features: RequestFeatures,
         *,
         served_model: str = "",
+        served_artifact_sha256: str = "",
         portfolio_unbound: bool = False,
         service_seconds: float = 0.0,
         latency_ms: float | None = None,
@@ -227,6 +238,7 @@ class WorkloadIntelligence:
             self._observe_outcome(
                 served_model,
                 features.workload,
+                artifact_sha256=served_artifact_sha256,
                 error=error,
                 latency_ms=measured_latency,
                 output_units=output_units,
@@ -252,6 +264,7 @@ class WorkloadIntelligence:
         model_id: str,
         workload: str,
         *,
+        artifact_sha256: str = "",
         quality: float,
         error: bool = False,
         latency_ms: float = 0.0,
@@ -277,13 +290,14 @@ class WorkloadIntelligence:
         self._observe_outcome(
             model_id,
             workload,
+            artifact_sha256=artifact_sha256,
             error=bool(error),
             latency_ms=float(latency_ms),
             output_units=output_units,
             quality=float(quality),
             timestamp=observed_at,
         )
-        return self._outcomes[(model_id, workload)]
+        return self._outcomes[(model_id, workload, canonical_sha256(artifact_sha256))]
 
     def portfolio_forecasts(
         self,
@@ -499,6 +513,7 @@ class WorkloadIntelligence:
             chosen_evidence = self._outcome_evidence(
                 chosen.model_id,
                 workload,
+                artifact_sha256=chosen.artifact_sha256,
                 now=timestamp,
             )
             rows.append(
@@ -585,8 +600,20 @@ class WorkloadIntelligence:
         if value.get("cohort_demand"):
             result.cohort_demand = DemandTracker.from_dict(dict(value["cohort_demand"]))
         for row in value.get("outcomes") or ():
-            outcome = ModelWorkloadOutcome(**dict(row))
-            result._outcomes[(outcome.model_id, outcome.workload)] = outcome
+            fields = dict(row)
+            # Legacy records shared one timestamp between service and quality. Retain their service
+            # evidence, but conservatively age ambiguous quality evidence from the Unix epoch so a
+            # restart cannot revive it through a fresh latency-only request.
+            legacy_updated_at = fields.pop("updated_at", None)
+            if legacy_updated_at is not None:
+                fields.setdefault("service_updated_at", legacy_updated_at)
+                fields.setdefault("quality_updated_at", 0.0)
+                fields["quality"] = 0.0
+                fields["quality_samples"] = 0
+            outcome = ModelWorkloadOutcome(**fields)
+            result._outcomes[
+                (outcome.model_id, outcome.workload, outcome.artifact_sha256)
+            ] = outcome
         return result
 
     def _cohort_summary(
@@ -686,6 +713,7 @@ class WorkloadIntelligence:
         model_id: str,
         workload: str,
         *,
+        artifact_sha256: str,
         error: bool,
         latency_ms: float,
         output_units: int,
@@ -696,7 +724,8 @@ class WorkloadIntelligence:
             raise ValueError("quality must be in [0, 1]")
         if output_units < 0 or output_units > _MAX_FEATURE_UNITS:
             raise ValueError("output_units is outside the supported range")
-        key = (model_id, workload)
+        artifact = canonical_sha256(artifact_sha256)
+        key = (model_id, workload, artifact)
         prior = self._outcomes.get(key)
         requests = min(MAX_COUNTER, (prior.requests if prior else 0) + 1)
         alpha = 1.0 if prior is None else 0.20
@@ -712,6 +741,7 @@ class WorkloadIntelligence:
         self._outcomes[key] = ModelWorkloadOutcome(
             model_id=model_id,
             workload=workload,
+            artifact_sha256=artifact,
             requests=requests,
             errors=min(requests, (prior.errors if prior else 0) + int(error)),
             latency_ms=(
@@ -726,7 +756,12 @@ class WorkloadIntelligence:
             ),
             quality=quality_ewma,
             quality_samples=quality_samples,
-            updated_at=timestamp,
+            service_updated_at=timestamp,
+            quality_updated_at=(
+                timestamp
+                if quality is not None
+                else (prior.quality_updated_at if prior else 0.0)
+            ),
         )
 
     def _outcome_evidence(
@@ -734,31 +769,46 @@ class WorkloadIntelligence:
         model_id: str,
         workload: str,
         *,
+        artifact_sha256: str = "",
         now: float,
     ) -> dict[str, float]:
-        outcome = self._outcomes.get((model_id, workload))
+        outcome = self._outcomes.get(
+            (model_id, workload, canonical_sha256(artifact_sha256))
+        )
         if outcome is None or not outcome.requests:
             return {
                 "age_seconds": 0.0,
                 "freshness": 0.0,
                 "effective_requests": 0.0,
                 "confidence": 0.0,
+                "quality_age_seconds": 0.0,
+                "quality_freshness": 0.0,
                 "quality_confidence": 0.0,
                 "exploration_bonus": _MAX_EXPLORATION_BONUS,
             }
-        age = max(0.0, now - outcome.updated_at)
+        age = max(0.0, now - outcome.service_updated_at)
         freshness = math.pow(0.5, age / _OUTCOME_HALF_LIFE_SECONDS)
         effective_requests = outcome.requests * freshness
         confidence = min(1.0, effective_requests / _OUTCOME_FULL_CONFIDENCE_REQUESTS)
+        quality_age = max(0.0, now - outcome.quality_updated_at)
+        quality_freshness = (
+            math.pow(0.5, quality_age / _OUTCOME_HALF_LIFE_SECONDS)
+            if outcome.quality_samples
+            else 0.0
+        )
         quality_confidence = min(
-            confidence,
-            outcome.quality_samples * freshness / _QUALITY_FULL_CONFIDENCE_SAMPLES,
+            1.0,
+            outcome.quality_samples
+            * quality_freshness
+            / _QUALITY_FULL_CONFIDENCE_SAMPLES,
         )
         return {
             "age_seconds": age,
             "freshness": freshness,
             "effective_requests": effective_requests,
             "confidence": confidence,
+            "quality_age_seconds": quality_age,
+            "quality_freshness": quality_freshness,
             "quality_confidence": quality_confidence,
             "exploration_bonus": _MAX_EXPLORATION_BONUS * (1.0 - confidence),
         }
@@ -771,8 +821,15 @@ class WorkloadIntelligence:
         now: float,
     ) -> float:
         score = profile.workload_score(workload)
-        outcome = self._outcomes.get((profile.model_id, workload))
-        evidence = self._outcome_evidence(profile.model_id, workload, now=now)
+        outcome = self._outcomes.get(
+            (profile.model_id, workload, profile.artifact_sha256)
+        )
+        evidence = self._outcome_evidence(
+            profile.model_id,
+            workload,
+            artifact_sha256=profile.artifact_sha256,
+            now=now,
+        )
         if outcome and outcome.requests:
             confidence = evidence["confidence"]
             success = (outcome.requests - outcome.errors + 1.0) / (outcome.requests + 2.0)
@@ -879,6 +936,7 @@ def _candidate_rows(
         evidence = intelligence._outcome_evidence(
             profile.model_id,
             workload,
+            artifact_sha256=profile.artifact_sha256,
             now=now,
         )
         score = intelligence._portfolio_score_with_placement(

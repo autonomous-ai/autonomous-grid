@@ -57,13 +57,16 @@ inactive specialist receive a bounded canary without creating a loaded-only feed
 
 Measured model/workload outcomes use confidence that reaches full weight after twenty fresh
 requests; separately labeled quality reaches full weight after eight fresh evaluations. Both decay
-with a seven-day half-life, so an early benchmark or obsolete artifact-era result cannot permanently
-lock the portfolio. A six-point bounded optimism bonus lets an equally suitable, currently feasible
-cold candidate earn a canary, then falls to zero as fresh evidence accumulates. The bonus is smaller
-than meaningful configured-suitability differences and a preemption-only candidate pays a larger
-penalty, so uncertainty can spend spare capacity but cannot manufacture eviction authority. Status
-reports evidence age, freshness, effective sample count, confidence, quality confidence, and the
-remaining exploration bonus for every candidate.
+with independent seven-day half-lives: a fresh latency-only request cannot revive stale quality.
+Evidence is keyed by model, workload, and immutable artifact SHA-256, so a replacement artifact
+starts uncertain and a late response from the previous revision cannot update the new one. Legacy
+shared-timestamp quality is discarded conservatively during restore. A six-point bounded optimism
+bonus lets an equally suitable, currently feasible cold candidate earn a canary, then falls to zero
+as fresh evidence accumulates. The bonus is smaller than meaningful configured-suitability
+differences and a preemption-only candidate pays a larger penalty, so uncertainty can spend spare
+capacity but cannot manufacture eviction authority. Status reports service and quality evidence
+age/freshness, effective sample count, confidence, quality confidence, and the remaining exploration
+bonus for every candidate.
 
 Portfolio selection first scans the current fleet with the same hard runtime, backend, GPU, tag,
 data-tier, artifact, memory-headroom, model-slot, and colocation rules used by placement. An
@@ -928,7 +931,9 @@ the rejection, unloads it, loads a feasible runner-up, and serves another real a
 constraint must restore the measured winner. Evaluation-marked
 inference still updates per-engine performance, but only the owner capability may mark it and its
 quality is recorded separately at `POST /allocator/evaluations`; ordinary callers cannot suppress
-their demand signal. The command leaves the selected winner ready for interactive `grid chat` use.
+their demand signal. Evaluation submissions may include `artifact_sha256`; an explicit digest must
+match the currently configured revision. The command leaves the selected winner ready for
+interactive `grid chat` use.
 
 Configured logical capacities must fit within this machine's real usable memory. The list lengths
 must equal the number of text nodes (`--machines` minus the optional ComfyUI node), so a too-small

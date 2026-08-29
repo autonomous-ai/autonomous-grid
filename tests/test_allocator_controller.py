@@ -91,6 +91,57 @@ def test_controller_status_reports_last_successful_tick_duration(monkeypatch):
     assert controller.status([node()], now=10)["last_tick_duration_seconds"] == 0.25
 
 
+def test_late_response_from_old_artifact_cannot_update_new_revision_evidence():
+    controller = AllocatorController()
+    revision_a = "a" * 64
+    revision_b = "b" * 64
+    controller.put_profile(profile(artifact_sha256=revision_a))
+    controller.observe_lifecycle(
+        RequestFeatures("chat/completions", "qwen", "coding"),
+        served_model="qwen",
+        served_artifact_sha256=revision_a,
+        service_seconds=1,
+        quality=1.0,
+        timestamp=10,
+    )
+
+    controller.put_profile(profile(artifact_sha256=revision_b))
+    controller.observe_lifecycle(
+        RequestFeatures("chat/completions", "qwen", "coding"),
+        served_model="qwen",
+        served_artifact_sha256=revision_a,
+        service_seconds=1,
+        quality=1.0,
+        timestamp=11,
+    )
+
+    assert {item.artifact_sha256 for item in controller.intelligence.outcomes} == {
+        revision_a
+    }
+    evidence = controller.intelligence._outcome_evidence(
+        "qwen", "coding", artifact_sha256=revision_b, now=11
+    )
+    assert evidence["quality_confidence"] == 0.0
+
+
+def test_evaluation_rejects_explicit_artifact_mismatch_and_uses_current_revision():
+    controller = AllocatorController()
+    revision_a = "a" * 64
+    revision_b = "b" * 64
+    controller.put_profile(profile(artifact_sha256=revision_b))
+
+    with pytest.raises(ValueError, match="does not match"):
+        controller.observe_evaluation(
+            "qwen",
+            "coding",
+            artifact_sha256=revision_a,
+            quality=1.0,
+        )
+    outcome = controller.observe_evaluation("qwen", "coding", quality=1.0)
+
+    assert outcome.artifact_sha256 == revision_b
+
+
 def test_controller_portfolio_uses_a_fleet_feasible_fallback():
     controller = AllocatorController(mode=AllocatorMode.AUTOMATIC)
     for candidate in (

@@ -772,6 +772,7 @@ def create_app(
             outcome = _allocator(app).observe_evaluation(
                 model_id,
                 workload,
+                artifact_sha256=str(body.get("artifact_sha256") or ""),
                 quality=quality,
                 error=error,
                 latency_ms=latency_ms,
@@ -964,6 +965,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         )
     _mark_engine_used(engine, model)
     _change_active_tasks(engine, 1)
+    served_artifact_sha256 = _node_model_artifact_sha256(engine, model)
 
     # An external engine advertised under `--advertise-as` only knows its real model name; rewrite the
     # body's model alias→real before forwarding. Re-serialise only when it differs — otherwise forward
@@ -1002,6 +1004,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
                 started_at,
                 features=features,
                 served_model=model,
+                served_artifact_sha256=served_artifact_sha256,
                 error=True,
             )
             return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
@@ -1041,6 +1044,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
                     started_at,
                     features=features,
                     served_model=model,
+                    served_artifact_sha256=served_artifact_sha256,
                     error=(
                         stream_transport_error
                         or _allocator_capacity_error(engine_response.status_code)
@@ -1085,6 +1089,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
             started_at,
             features=features,
             served_model=model,
+            served_artifact_sha256=served_artifact_sha256,
             error=True,
         )
         return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
@@ -1100,6 +1105,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         started_at,
         features=features,
         served_model=model,
+        served_artifact_sha256=served_artifact_sha256,
         error=_allocator_capacity_error(engine_response.status_code),
         output_units=_completion_tokens(engine_response),
     )
@@ -1426,6 +1432,7 @@ async def _proxy_media(
 
     _mark_engine_used(engine, model)
     _change_active_tasks(engine, 1)
+    served_artifact_sha256 = _node_model_artifact_sha256(engine, model)
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(ENGINE_TIMEOUT_SECONDS, read=None),
         trust_env=False,
@@ -1456,6 +1463,7 @@ async def _proxy_media(
             started_at,
             features=features,
             served_model=model,
+            served_artifact_sha256=served_artifact_sha256,
             error=True,
         )
         return _openai_error(502, f"Engine media request failed: {exc}", "engine_error")
@@ -1484,6 +1492,7 @@ async def _proxy_media(
                 started_at,
                 features=features,
                 served_model=model,
+                served_artifact_sha256=served_artifact_sha256,
                 error=(
                     stream_transport_error
                     or _allocator_capacity_error(engine_response.status_code)
@@ -3133,6 +3142,7 @@ def _observe_allocator_request(
     *,
     features: RequestFeatures | None = None,
     served_model: str = "",
+    served_artifact_sha256: str = "",
     error: bool,
     queue_depth: int = 0,
     output_units: int = 0,
@@ -3148,6 +3158,7 @@ def _observe_allocator_request(
                 requested_model=model,
             ),
             served_model=served_model,
+            served_artifact_sha256=served_artifact_sha256,
             service_seconds=elapsed,
             latency_ms=elapsed * 1_000.0,
             queue_depth=queue_depth,
