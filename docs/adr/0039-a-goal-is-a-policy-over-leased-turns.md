@@ -124,6 +124,12 @@ and summaries are included in the parent's next handoff. Child turns advance onl
 and never publish directly to global `main`; explicit fan-in merges committed child branches, and
 only the root Goal enters trunk apply. A parent never reads a child's live workspace.
 
+Pause and cancel apply to the dependency subtree. A pause does not kill a leased process; every
+affected Goal preserves `paused` when that slice reports and receives no continuation. Resume
+restores only descendants marked as paused by that ancestor and their exact prior states, leaving
+an independently paused child alone. Cancel recursively fences queued/running turns, and a prepare
+that finishes after cancellation terminals itself without ever becoming claimable.
+
 ### Evidence required for release
 
 The feature is not production-proven by processes sharing one host. Release requires both:

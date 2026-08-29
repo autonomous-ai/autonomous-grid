@@ -53,6 +53,11 @@ grid goal resume <goal-id>
 grid goal cancel <goal-id>        # ends the Goal and cancels queued/running work
 ```
 
+For a Goal with children, pause and cancel are hierarchical. Pause lets already leased slices end
+but prevents every live descendant from receiving another turn; resume restores only descendants
+paused by that parent, so a child paused independently stays paused. Cancel recursively terminals
+queued/running descendants, including a child whose relay Git preparation was in flight.
+
 `objective` says what to achieve. `done-when` is one clear, verifiable finish line. The native Goal
 mechanism decides when to nominate completion. If independent evals are configured, Grid checks the
 exact result commit and is the only component allowed to accept that nomination.
