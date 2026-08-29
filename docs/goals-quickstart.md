@@ -216,7 +216,9 @@ already exported them may set `GOAL_TRAJECTORY_RETENTION_SECONDS` to a positive 
 The evidence export is schema-versioned and includes each turn's prompt, output/error, harness,
 execution node, inference usage, worktree commits, transcript input/output commits, recorded tool
 events, and accepted or rejected independent eval runs. Inference usage is grouped by turn, exact
-model, serving node, and transaction state. Failed requests remain useful failure evidence, but only
+model, model-serving node, transaction state, Goal attempt, agent-executing node, and harness. The
+attempt identity matters because a reclaimed turn keeps the same turn id while Codex on one machine
+may be replaced by Claude on another. Failed requests remain useful failure evidence, but only
 `completed` requests can prove that a turn actually executed through Grid inference.
 
 Inference attribution is relay-enforced, not trusted from agent headers. If `X-Request-Id` names a

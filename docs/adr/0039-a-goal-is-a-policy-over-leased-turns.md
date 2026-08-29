@@ -112,6 +112,13 @@ requests, authorization compares the original routed name while the transaction 
 concrete model Grid actually selected. Evidence exports retain every transaction state, but only a
 completed transaction can satisfy the physical inference gate.
 
+That insert also snapshots the Goal attempt number, agent-executing node, and selected harness.
+These are not derived later from the turn row: reclaim overwrites its current provider and harness
+while deliberately retaining the turn id. Without the snapshot, calls made by Codex/node A on
+attempt 1 and Claude/node B on attempt 2 collapse into one usage group whenever they share the same
+model-serving node. Historical transactions remain NULL/unattributed; migration must not relabel
+them with the final attempt's identity.
+
 The agent child never receives the node credential. Its loopback inference proxy reads the live
 provider token for each call. On one upstream 401 it invokes the provider's serialized,
 compare-and-swap refresh path and replays once before exposing any response bytes to the child.

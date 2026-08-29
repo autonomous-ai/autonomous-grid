@@ -264,6 +264,36 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     routed_model = (isinstance(requested_model, str)
                     and (requested_model == "auto" or requested_model.startswith("auto/")))
     turn_ids = {turn.get("id") for turn in turns if isinstance(turn, dict)}
+    valid_inference_identity: set[int] = set()
+    for index, item in enumerate(inference, 1):
+        if not isinstance(item, dict) or item.get("turn_id") not in turn_ids:
+            continue
+        attempt = item.get("goal_attempt")
+        executor = item.get("goal_executor_node_id")
+        harness = item.get("goal_agent_kind")
+        valid = True
+        if (not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0):
+            failures.append(f"inference record {index} has no valid Goal attempt")
+            valid = False
+        if not isinstance(executor, str) or not executor:
+            failures.append(f"inference record {index} has no Goal execution node")
+            valid = False
+        if harness not in ("codex", "claude"):
+            failures.append(f"inference record {index} has no valid Goal harness")
+            valid = False
+        starts = [event["event"] for event in attempt_events
+                  if isinstance(event, dict) and event.get("turn_id") == item.get("turn_id")
+                  and isinstance(event.get("event"), dict)
+                  and event["event"].get("type") == "task.attempt_started"
+                  and event["event"].get("attempt") == attempt]
+        if valid and not any(
+                start.get("provider_id") == executor
+                and start.get("agent_kind") == harness for start in starts):
+            failures.append(
+                f"inference record {index} has no matching relay-stamped attempt identity")
+            valid = False
+        if valid:
+            valid_inference_identity.add(index)
     if isinstance(requested_model, str) and requested_model and not routed_model:
         for item in inference:
             if (isinstance(item, dict) and item.get("turn_id") in turn_ids
@@ -275,7 +305,8 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         for index, turn in enumerate(turns, 1):
             if not isinstance(turn, dict):
                 continue
-            usage = [item for item in inference if isinstance(item, dict)
+            usage = [item for item_index, item in enumerate(inference, 1)
+                     if item_index in valid_inference_identity
                      and item.get("turn_id") == turn.get("id")
                     and isinstance(item.get("requests"), int)
                     and not isinstance(item.get("requests"), bool)

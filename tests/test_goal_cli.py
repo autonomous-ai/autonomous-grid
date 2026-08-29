@@ -489,7 +489,10 @@ def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
             "result_commit": "2" * 40, "transcript_commit": None,
             "transcript_result_commit": "a" * 40,
         }],
-        "attempt_events": [], "inference": [], "eval_runs": [],
+        "attempt_events": [{"turn_id": "turn-1", "event": {
+            "type": "task.attempt_started", "attempt": 1,
+            "provider_id": "node-A", "agent_kind": "codex",
+        }}], "inference": [], "eval_runs": [],
     }
     failures = _verify_evidence(record, min_execution_nodes=2, require_inference=True)
     assert any("fewer than required 2" in item for item in failures)
@@ -497,7 +500,8 @@ def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
 
     record["inference"].append({
         "turn_id": "turn-1", "model": "grid-model", "provider_node_id": "gpu-A",
-        "state": "completed", "requests": 1,
+        "state": "completed", "goal_attempt": 1,
+        "goal_executor_node_id": "node-A", "goal_agent_kind": "codex", "requests": 1,
     })
     assert _verify_evidence(record, require_inference=True) == []
 
@@ -513,6 +517,64 @@ def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
 
     record["goal"]["model"] = "auto"
     assert _verify_evidence(record, require_inference=True) == []
+
+    record["inference"][0]["goal_executor_node_id"] = "node-forged"
+    failures = _verify_evidence(record, require_inference=True)
+    assert any("no matching relay-stamped attempt identity" in item for item in failures)
+    assert any("no model requests attributed" in item for item in failures)
+
+
+def test_goal_evidence_keeps_mixed_harness_inference_bound_to_each_retry_attempt():
+    from cli.goal import _verify_evidence
+
+    record = {
+        "schema_version": 1,
+        "goal": {"status": "complete", "model": "grid-model", "evals": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
+        "turns": [{
+            "id": "turn-1", "attempt": 2, "state": "completed", "agent_kind": "claude",
+            "provider_node_id": "node-B", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [
+            {"turn_id": "turn-1", "event": {
+                "type": "task.attempt_started", "attempt": 1,
+                "provider_id": "node-A", "agent_kind": "codex",
+            }},
+            {"turn_id": "turn-1", "event": {
+                "type": "task.retry", "attempt": 1, "reason": "lease_expired",
+                "previous_provider_id": "node-A", "previous_agent_kind": "codex",
+            }},
+            {"turn_id": "turn-1", "event": {
+                "type": "task.attempt_started", "attempt": 2,
+                "provider_id": "node-B", "agent_kind": "claude",
+            }},
+        ],
+        "inference": [
+            {
+                "turn_id": "turn-1", "model": "grid-model",
+                "provider_node_id": "gpu-C", "state": "completed", "requests": 3,
+                "goal_attempt": 1, "goal_executor_node_id": "node-A",
+                "goal_agent_kind": "codex",
+            },
+            {
+                "turn_id": "turn-1", "model": "grid-model",
+                "provider_node_id": "gpu-C", "state": "completed", "requests": 4,
+                "goal_attempt": 2, "goal_executor_node_id": "node-B",
+                "goal_agent_kind": "claude",
+            },
+        ],
+        "eval_runs": [],
+    }
+
+    assert _verify_evidence(
+        record, min_execution_nodes=2, require_inference=True) == []
+
+    record["inference"][0]["goal_agent_kind"] = "claude"
+    assert any("no matching relay-stamped attempt identity" in failure
+               for failure in _verify_evidence(
+                   record, min_execution_nodes=2, require_inference=True))
 
 
 def test_goal_status_shows_budget_blocker_and_distributed_children(capsys):

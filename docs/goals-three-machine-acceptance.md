@@ -105,6 +105,7 @@ not accepted from screenshots alone.
 | Goal | id, objective, done condition, allowed harnesses, eval definition hashes |
 | Machine inventory | physical hostname, Grid node id, OS, harness and harness version for A/B/C |
 | Model assignment | requested model and every Grid inference provider node used per turn |
+| Inference attempt | each request group's Goal attempt, agent execution node and Codex/Claude harness |
 | Turn 1 | A node id, Codex, attempt 1, input/result commits, null transcript input, non-null transcript output |
 | Turn 2 | Retry names A and its Codex harness; B attempt 2, Claude, same turn id, result commit and transcript input/output |
 | Turn 3 | Retry names B and its Claude harness; C attempt 2, Codex, same turn id, result commit and transcript input/output |
