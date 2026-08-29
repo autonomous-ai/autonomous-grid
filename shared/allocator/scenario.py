@@ -385,7 +385,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         service_totals: defaultdict[str, float] = defaultdict(float)
         current_ready = _ready_models(nodes)
 
-        for persona in personas:
+        for persona_index, persona in enumerate(personas):
             expected = persona.requests_per_minute * _demand_multiplier(phase, persona.workload)
             count = math.floor(expected)
             if rng.random() < expected - count:
@@ -398,14 +398,17 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 if _DIRECT_MODEL_BY_WORKLOAD.get(persona.workload, "") in profile_by_id
                 else ""
             )
-            features = classify_request(
-                endpoint,
-                {
-                    "model": explicit_model or "auto",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "prompt": prompt,
-                    "max_completion_tokens": 256,
-                },
+            features = replace(
+                classify_request(
+                    endpoint,
+                    {
+                        "model": explicit_model or "auto",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "prompt": prompt,
+                        "max_completion_tokens": 256,
+                    },
+                ),
+                tenant_class=f"cohort-{persona_index % 16:02d}",
             )
             served_model = (
                 explicit_model

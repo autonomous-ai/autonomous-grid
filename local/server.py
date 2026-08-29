@@ -27,7 +27,11 @@ from pydantic import BaseModel, Field
 from local.runtime import GRID_TYPE
 from shared.allocator.auth import control_node_id, engine_node_id, verify_node_token
 from shared.allocator.controller import AllocatorController
-from shared.allocator.intelligence import RequestFeatures, classify_request
+from shared.allocator.intelligence import (
+    RequestFeatures,
+    anonymous_tenant_cohort,
+    classify_request,
+)
 from shared.allocator.models import (
     MAX_COUNTER,
     MAX_ID_LENGTH,
@@ -846,7 +850,11 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     model = body.get("model")
     if not isinstance(model, str) or not model:
         return _openai_error(400, "model is required", "invalid_request")
-    features = classify_request(endpoint_path, body)
+    affinity_digest = _affinity_digest(request.headers.get("x-grid-affinity-key"))
+    features = replace(
+        classify_request(endpoint_path, body),
+        tenant_class=_allocator_tenant_class(affinity_digest),
+    )
     if request.headers.get("x-grid-allocator-evaluation") == "1":
         # Canary traffic is real inference, so it should still update engine performance.
         # It is not user demand, however, and its bounded quality evidence is submitted through
@@ -859,7 +867,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         app,
         model,
         requested_output_tokens=_requested_output_tokens(body),
-        affinity_digest=_affinity_digest(request.headers.get("x-grid-affinity-key")),
+        affinity_digest=affinity_digest,
     )
     if not engine:
         _observe_allocator_request(
@@ -1288,7 +1296,11 @@ async def _proxy_media(
     model = body.get("model") or default_model
     if not isinstance(model, str):
         return _openai_error(400, "model must be a string", "invalid_request")
-    features = classify_request(endpoint_path, {**body, "model": model})
+    affinity_digest = _affinity_digest(request.headers.get("x-grid-affinity-key"))
+    features = replace(
+        classify_request(endpoint_path, {**body, "model": model}),
+        tenant_class=_allocator_tenant_class(affinity_digest),
+    )
 
     # Only a built-in name can be checked against the route; a non-builtin (an API media model) is
     # not this proxy's to validate — it either resolves to an engine below or 503s.
@@ -1309,7 +1321,7 @@ async def _proxy_media(
         app,
         model,
         media=True,
-        affinity_digest=_affinity_digest(request.headers.get("x-grid-affinity-key")),
+        affinity_digest=affinity_digest,
     )
 
     if not engine:
@@ -1659,6 +1671,12 @@ def _affinity_digest(value: str | None) -> bytes | None:
     if len(encoded) > _MAX_AFFINITY_KEY_BYTES:
         return None
     return hashlib.sha256(encoded).digest()
+
+
+def _allocator_tenant_class(digest: bytes | None) -> str:
+    """Map an opaque affinity digest into fixed anonymous telemetry cohorts."""
+
+    return anonymous_tenant_cohort(digest)
 
 
 def _affinity_rank(digest: bytes, *, model: str, node_id: str) -> int:

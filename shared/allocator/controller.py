@@ -788,6 +788,7 @@ class AllocatorController:
                     now=timestamp,
                     placement_hints=placement_hints,
                 )
+                cohort_summaries = self.intelligence.cohort_summaries(now=timestamp)
                 model_workload_outcomes = self.intelligence.outcomes
             return {
                 "schema_version": SCHEMA_VERSION,
@@ -812,6 +813,7 @@ class AllocatorController:
                     {**asdict(item), "workload": item.model_id}
                     for item in workload_forecasts
                 ],
+                "cohort_summaries": list(cohort_summaries),
                 "portfolio_projections": list(portfolio_projections),
                 "portfolio_placement_hints": [
                     placement_hints[model_id]

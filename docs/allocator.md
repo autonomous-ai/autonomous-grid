@@ -68,6 +68,26 @@ had served the work. If direct demand later needs the hosts, the normal drain an
 reclaim the canary first. See [ADR 0039](adr/0039-the-allocator-observes-work-it-does-not-ask-the-router.md)
 for the control-loop boundary.
 
+### Anonymous cohort fairness and SLO pressure
+
+K-user evidence is aggregated without retaining K identities. The request boundary immediately
+hashes an optional `X-Grid-Affinity-Key`, uses only four bits to assign it to one of 16 fixed
+anonymous cohorts, and discards the key and full digest. Requests without an affinity key share one
+anonymous class. The allocator stores five minutes of bucketed cohort counts, latency, and errors by
+workload; raw keys, users, prompts, and responses never enter controller state. Fixed cohort names
+bound cardinality even if a caller rotates affinity keys. Shipped Grid clients already send stable
+affinity keys; direct API clients should do so when they want multi-user fairness evidence.
+
+One cohort, including the anonymous class, can create only non-destructive portfolio-canary
+pressure. A workload graduates to ordinary service urgency only after at least three active cohorts,
+12 recent samples, and SLO failure in at least half the cohorts. This lets sustained multi-user
+failure reclaim capacity occupied only by speculation, but it cannot displace configured baselines,
+pins, higher administrator priorities, or incompatible workloads. Status reports active cohorts,
+SLO-breach rate, and Jain fairness over cohort attainment. This is fleet-level fairness: per-token
+queue ordering, weighted tenant shares, admission control, and rate limits remain responsibilities
+of the router and serving runtime, where the allocator has neither the timing nor authority to
+schedule individual requests.
+
 ### Global placement loop
 
 The global loop consumes:
@@ -849,11 +869,12 @@ must equal the number of text nodes (`--machines` minus the optional ComfyUI nod
 cheap node, a medium economical node, and a large expensive fallback can be tested explicitly.
 
 `grid test demo` performs no synthetic inference or demand injection. It first converges the
-baseline to one real replica and verifies a genuine OpenAI-compatible response. Three genuine
-coding requests for unresolved `auto` receive honest HTTP 503 responses with no router involved.
+baseline to one real replica and verifies a genuine OpenAI-compatible response. Twelve genuine
+coding requests from four fixed anonymous cohorts target unresolved `auto` and receive honest HTTP
+503 responses with no router involved.
 The production request path classifies bounded features locally; after its minimum evidence
-threshold, the allocator projects that workload onto the configured coding portfolio and
-proactively loads and warms a real llama.cpp canary before any request names it. The first named
+threshold, the allocator projects that workload onto the configured coding portfolio, proves broad
+cohort SLO failure, and proactively loads and warms a real llama.cpp deployment before any request names it. The first named
 specialist call must then return real output. Multiple client personas send concurrent requests to
 both text models with stable affinity keys and bounded production-style retries. The report requires
 non-empty assistant output, response IDs, usage, client-visible latency including retries, per-node performance samples,
@@ -903,8 +924,14 @@ The design follows several primary systems results while preserving Grid's alloc
   bounded cost insight in the allocator while leaving per-request routing independent.
 - [Fairness in Serving Large Language Models](https://www.usenix.org/conference/osdi24/presentation/sheng)
   motivates work-conserving, token-aware user fairness. Grid currently measures fairness in the
-  scenario lab; enforceable token fairness belongs primarily in the serving scheduler/router and
-  remains future work for the production plane.
+  scenario lab and uses bounded cohort-wide failure as fleet-allocation evidence; enforceable token
+  fairness belongs in the serving scheduler/router.
+- [Ensuring Fair LLM Serving Amid Diverse Applications](https://arxiv.org/abs/2411.15997) motivates
+  application-aware accounting and protection against noisy neighbors. Grid applies that insight
+  through fixed anonymous cohorts rather than durable user IDs.
+- [SLOs-Serve](https://arxiv.org/abs/2504.08784) motivates application-specific SLO accounting and
+  continuous adaptation. Grid applies it at the slower model-residency timescale; token allocation
+  remains inside each serving engine.
 - [Llumnix](https://www.usenix.org/conference/osdi24/presentation/sun-biao) and
   [Libra](https://www.usenix.org/conference/nsdi26/presentation/ruan-libra) motivate dynamic
   rescheduling, isolation, and SLO-aware adaptation under changing load. Grid's load/warm and

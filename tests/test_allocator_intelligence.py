@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import hashlib
+
+import pytest
+
 from shared.allocator.intelligence import (
     RequestFeatures,
     WorkloadIntelligence,
+    anonymous_tenant_cohort,
     classify_request,
 )
-from shared.allocator.models import DemandForecast, ModelProfile
+from shared.allocator.models import (
+    DemandForecast,
+    ModelProfile,
+    ModelResidency,
+    NodeSnapshot,
+    ResidencyState,
+)
+from shared.allocator.planner import PlacementPlanner
 
 
 def profile(model: str, memory: int, *scores: tuple[str, float]) -> ModelProfile:
@@ -44,6 +56,15 @@ def test_classification_retains_only_bounded_features():
     assert features.input_units > 0
     assert features.requested_output_units == 900
     assert "secret" not in repr(features)
+
+
+def test_request_features_accept_only_fixed_anonymous_tenant_cohorts():
+    assert RequestFeatures("chat/completions", "auto", tenant_class="cohort-15").tenant_class == (
+        "cohort-15"
+    )
+    for unsafe in ("alice@example.com", "cohort-16", "customer-secret"):
+        with pytest.raises(ValueError, match="anonymous bounded cohort"):
+            RequestFeatures("chat/completions", "auto", tenant_class=unsafe)
 
 
 def test_media_endpoint_is_a_hard_workload_signal():
@@ -264,3 +285,202 @@ def test_portfolio_cost_breaks_an_otherwise_equal_model_tie():
     )
 
     assert forecasts[0].model_id == "a-cheap"
+
+
+def test_broad_cohort_slo_failure_graduates_portfolio_allocation_pressure():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    candidate = profile("coder", 8_000, ("coding", 1.0))
+    for cohort in range(3):
+        for _ in range(4):
+            intelligence.observe(
+                RequestFeatures(
+                    "chat/completions",
+                    "auto",
+                    "coding",
+                    tenant_class=f"cohort-{cohort:02d}",
+                ),
+                portfolio_unbound=True,
+                service_seconds=2,
+                latency_ms=2_000,
+                error=True,
+                timestamp=100,
+            )
+
+    forecast = intelligence.portfolio_forecasts((candidate,), (), now=100)[0]
+    plan = PlacementPlanner().plan(
+        (NodeSnapshot("node", 16_000, last_heartbeat=100),),
+        (candidate,),
+        (forecast,),
+        now=100,
+    )
+    projection = intelligence.projections((candidate,), now=100)[0]
+
+    assert forecast.active_cohorts == 3
+    assert forecast.cohort_slo_breach_rate == 1
+    assert plan.urgency_for("coder") == 2
+    assert projection["cohort_evidence"]["graduated_allocation_pressure"] is True
+
+
+def test_one_noisy_cohort_remains_non_destructive_canary_pressure():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    candidate = profile("coder", 8_000, ("coding", 1.0))
+    for _ in range(20):
+        intelligence.observe(
+            RequestFeatures(
+                "chat/completions",
+                "auto",
+                "coding",
+                tenant_class="cohort-00",
+            ),
+            portfolio_unbound=True,
+            error=True,
+            timestamp=100,
+        )
+
+    forecast = intelligence.portfolio_forecasts((candidate,), (), now=100)[0]
+    plan = PlacementPlanner().plan(
+        (NodeSnapshot("node", 16_000, last_heartbeat=100),),
+        (candidate,),
+        (forecast,),
+        now=100,
+    )
+
+    assert forecast.active_cohorts == 1
+    assert plan.urgency_for("coder") == 1
+
+
+def test_minority_cohort_failure_does_not_promote_allocation_pressure():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    candidate = profile("coder", 8_000, ("coding", 1.0))
+    for cohort in range(4):
+        for _ in range(3):
+            intelligence.observe(
+                RequestFeatures(
+                    "chat/completions",
+                    "auto",
+                    "coding",
+                    tenant_class=f"cohort-{cohort:02d}",
+                ),
+                portfolio_unbound=True,
+                error=cohort == 0,
+                timestamp=100,
+            )
+
+    forecast = intelligence.portfolio_forecasts((candidate,), (), now=100)[0]
+    plan = PlacementPlanner().plan(
+        (NodeSnapshot("node", 16_000, last_heartbeat=100),),
+        (candidate,),
+        (forecast,),
+        now=100,
+    )
+
+    assert forecast.active_cohorts == 4
+    assert forecast.cohort_slo_breach_rate == 0.25
+    assert plan.urgency_for("coder") == 1
+
+
+def test_rotating_affinity_keys_cannot_create_unbounded_cohort_state():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    for index in range(1_000):
+        digest = hashlib.sha256(f"rotating-user-{index}".encode()).digest()
+        intelligence.observe(
+            RequestFeatures(
+                "chat/completions",
+                "auto",
+                "coding",
+                tenant_class=anonymous_tenant_cohort(digest),
+            ),
+            portfolio_unbound=True,
+            error=True,
+            timestamp=100,
+        )
+
+    state = intelligence.to_dict()["cohort_demand"]
+
+    assert len(state["models"]) == 16
+    assert all(len(buckets) == 1 for buckets in state["models"].values())
+
+
+def test_graduated_cohort_pressure_can_reclaim_a_speculative_only_slot():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    coder = profile("coder", 8_000, ("coding", 1.0))
+    speculative = profile("old-speculative", 8_000, ("general", 1.0))
+    for cohort in range(3):
+        for _ in range(4):
+            intelligence.observe(
+                RequestFeatures(
+                    "chat/completions",
+                    "auto",
+                    "coding",
+                    tenant_class=f"cohort-{cohort:02d}",
+                ),
+                portfolio_unbound=True,
+                error=True,
+                timestamp=100,
+            )
+    promoted = intelligence.portfolio_forecasts((coder, speculative), (), now=100)[0]
+    old_speculation = DemandForecast(
+        "old-speculative",
+        requests_per_minute=1,
+        correlated_requests_per_minute=1,
+        correlation_confidence=1,
+        correlation_sources=("historical-association",),
+        sample_count=3,
+        updated_at=100,
+    )
+    machine = NodeSnapshot(
+        "only-slot",
+        16_000,
+        max_models=1,
+        residencies=(
+            ModelResidency(
+                "old-speculative",
+                8_000,
+                ResidencyState.READY,
+                managed=True,
+            ),
+        ),
+        last_heartbeat=100,
+    )
+
+    plan = PlacementPlanner().plan(
+        (machine,),
+        (coder, speculative),
+        (promoted, old_speculation),
+        now=100,
+    )
+
+    assert plan.urgency_for("coder") == 2
+    assert plan.urgency_for("old-speculative") == 1
+    assert [(item.model_id, item.for_model_id) for item in plan.preemptions] == [
+        ("old-speculative", "coder")
+    ]
+
+
+def test_cohort_fairness_is_aggregated_and_persisted_without_identity():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    for cohort, error in (("cohort-00", False), ("cohort-01", True)):
+        for _ in range(4):
+            intelligence.observe(
+                RequestFeatures(
+                    "chat/completions",
+                    "auto",
+                    "coding",
+                    tenant_class=cohort,
+                ),
+                portfolio_unbound=True,
+                service_seconds=1,
+                error=error,
+                timestamp=100,
+            )
+    state = intelligence.to_dict()
+    restored = WorkloadIntelligence.from_dict(state)
+
+    summary = intelligence.cohort_summaries(now=100)[0]
+
+    assert summary["active_cohorts"] == 2
+    assert summary["slo_breach_rate"] == 0.5
+    assert summary["fairness"] == 0.5
+    assert restored.cohort_summaries(now=100) == intelligence.cohort_summaries(now=100)
+    assert "alice" not in str(state)
+    assert intelligence.cohort_summaries(now=401)[0]["active_cohorts"] == 0

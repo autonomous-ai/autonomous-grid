@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 import json
@@ -24,6 +25,7 @@ import uuid
 import httpx
 
 from shared import jsonio, paths, run_records
+from shared.allocator.intelligence import anonymous_tenant_cohort
 from shared.allocator.runtime import LlamaCppBackend
 
 DEFAULT_MODEL = "SmolLM2-135M-Instruct-Q3_K_M.gguf"
@@ -192,6 +194,7 @@ def _status_payload(record: dict[str, Any] | None = None) -> dict[str, Any]:
             models=status.get("models") or [],
             forecasts=status.get("forecasts") or [],
             workload_forecasts=status.get("workload_forecasts") or [],
+            cohort_summaries=status.get("cohort_summaries") or [],
             portfolio_projections=status.get("portfolio_projections") or [],
             portfolio_placement_hints=status.get("portfolio_placement_hints") or [],
             model_workload_outcomes=status.get("model_workload_outcomes") or [],
@@ -263,6 +266,15 @@ def _print_status(payload: dict[str, Any], *, as_json: bool) -> None:
                 f"    {action.get('kind')} {action.get('model_id')} on "
                 f"{action.get('node_id')} — {action.get('reason')}"
             )
+    for summary in payload.get("cohort_summaries") or []:
+        active = int(summary.get("active_cohorts") or 0)
+        if not active:
+            continue
+        print(
+            f"  demand    {summary.get('workload')} · {active} anonymous cohort(s) · "
+            f"SLO breaches {100 * float(summary.get('slo_breach_rate') or 0):.0f}% · "
+            f"fairness {100 * float(summary.get('fairness') or 0):.0f}%"
+        )
     history = payload.get("history") or []
     if history:
         print("  recent actions")
@@ -766,6 +778,22 @@ def _real_users(count: int, *, baseline: str, specialist: str) -> tuple[_RealUse
             )
         )
     return tuple(users)
+
+
+def _distinct_affinity_user_ids(count: int) -> tuple[str, ...]:
+    """Create deterministic fixture IDs that occupy distinct anonymous allocator cohorts."""
+
+    result: list[str] = []
+    cohorts: set[str] = set()
+    index = 1
+    while len(result) < count:
+        user_id = f"user-unresolved-coding-{index}"
+        cohort = anonymous_tenant_cohort(hashlib.sha256(user_id.encode()).digest())
+        if cohort not in cohorts:
+            result.append(user_id)
+            cohorts.add(cohort)
+        index += 1
+    return tuple(result)
 
 
 def _real_chat_request(
@@ -1609,19 +1637,21 @@ def cmd_test_demo(args: argparse.Namespace) -> int:
 
         print(f"[3/{phases}] Proactively allocating from unresolved coding requests")
         print(
-            "  Three genuine requests target unresolved 'auto'. The router is not involved; "
-            "the allocator must classify their bounded features and select a portfolio canary."
+            "  Twelve genuine requests from four anonymous cohorts target unresolved 'auto'. "
+            "The router is not involved; the allocator must classify bounded features, select a "
+            "portfolio model, and recognize broad SLO failure."
         )
+        unresolved_user_ids = _distinct_affinity_user_ids(4)
         unresolved = tuple(
             _RealUser(
-                user_id=f"user-unresolved-coding-{index}",
+                user_id=unresolved_user_ids[index % len(unresolved_user_ids)],
                 role="software-engineer",
                 model="auto",
                 prompt=(
                     "Debug this Python API function, explain the bug, and propose one unit test."
                 ),
             )
-            for index in range(1, 4)
+            for index in range(12)
         )
         unresolved_results = tuple(
             _real_chat_request(
@@ -1639,7 +1669,7 @@ def cmd_test_demo(args: argparse.Namespace) -> int:
                 "Expected unresolved requests to receive genuine HTTP 503 responses with the "
                 f"router uninvolved; got {codes}."
             )
-        print("  Real unresolved responses: 3 × HTTP 503 (no fabricated inference result)")
+        print("  Real unresolved responses: 12 × HTTP 503 (no fabricated inference result)")
         coding = _wait_for_demand_ready(
             record,
             model=portfolio_model,
@@ -1657,6 +1687,17 @@ def cmd_test_demo(args: argparse.Namespace) -> int:
         print(
             f"  Allocator classified {projection.get('workload') or 'coding'} work and made "
             f"{_ready_replicas(coding, portfolio_model)} specialist replica(s) routable."
+        )
+        cohort_evidence = projection.get("cohort_evidence") or {}
+        if cohort_evidence.get("graduated_allocation_pressure") is not True:
+            raise SystemExit(
+                "Broad unresolved demand did not graduate from canary to service pressure."
+            )
+        print(
+            f"  Cohort evidence: {int(cohort_evidence.get('active_cohorts') or 0)} active · "
+            f"{int(cohort_evidence.get('samples') or 0)} samples · "
+            f"{100 * float(cohort_evidence.get('slo_breach_rate') or 0):.0f}% SLO breaches · "
+            "graduated service pressure."
         )
 
         specialist_probe = _RealUser(
@@ -1747,8 +1788,8 @@ def cmd_test_demo(args: argparse.Namespace) -> int:
     print("Summary")
     print(f"  logical machines   {machines} total · {text_machines} llama.cpp" + (" · 1 ComfyUI" if record.get("include_comfyui") else ""))
     print(
-        f"  real text requests {5 + len(results)} attempted · {2 + len(results)} successful · "
-        "3 expected unresolved 503s"
+        f"  real text requests {14 + len(results)} attempted · {2 + len(results)} successful · "
+        "12 expected unresolved 503s"
     )
     print(f"  final placement    baseline={_ready_replicas(final, model)} · specialist={_ready_replicas(final, portfolio_model)}")
     if image_result is not None:

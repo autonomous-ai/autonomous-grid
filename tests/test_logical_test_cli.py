@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 import cli
@@ -8,10 +10,12 @@ from cli.logical_test import (
     _RealChatResult,
     _RealUser,
     _assert_ports_available,
+    _distinct_affinity_user_ids,
     _live_replicas,
     _real_chat_request,
     _real_users,
 )
+from shared.allocator.intelligence import anonymous_tenant_cohort
 
 
 def test_logical_test_parser_defaults_to_four_machines():
@@ -31,6 +35,17 @@ def test_logical_test_parser_defaults_to_four_machines():
     assert args.text_costs_per_hour == ()
     assert args.timeout == 600.0
     assert args.handler is cli.cmd_test_start
+
+
+def test_demo_fixture_users_occupy_distinct_bounded_cohorts():
+    user_ids = _distinct_affinity_user_ids(4)
+    cohorts = {
+        anonymous_tenant_cohort(hashlib.sha256(user_id.encode()).digest())
+        for user_id in user_ids
+    }
+
+    assert len(user_ids) == 4
+    assert len(cohorts) == 4
 
 
 def test_logical_test_parser_accepts_machine_count_and_lifecycle_commands():

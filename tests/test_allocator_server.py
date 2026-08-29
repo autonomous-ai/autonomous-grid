@@ -115,6 +115,27 @@ def _managed_engine(
     return response
 
 
+def test_allocator_observes_only_anonymous_fixed_affinity_cohorts(tmp_path):
+    _, client, _ = _app(tmp_path)
+    private_affinity = "person-alice-private-session"
+
+    for _ in range(4):
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"X-Grid-Affinity-Key": private_affinity},
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": "debug this code"}],
+            },
+        )
+        assert response.status_code == 503
+
+    status = client.get("/allocator/status").json()
+    assert status["cohort_summaries"][0]["workload"] == "coding"
+    assert status["cohort_summaries"][0]["active_cohorts"] == 1
+    assert private_affinity not in json.dumps(status)
+
+
 def _queue_pinned_replacement_drain(app, client: TestClient):
     _managed_node(client, host_id="host-old")
     _managed_engine(client, host_id="host-old", model_id="qwen")

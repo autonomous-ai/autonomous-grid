@@ -1700,6 +1700,16 @@ def _placement_demand_urgency(
         or (forecast.offered_concurrency > 0 and not forecast.correlation_sources)
     ):
         return 2
+    if (
+        forecast.correlation_sources
+        and forecast.active_cohorts >= 3
+        and forecast.sample_count >= 12
+        and forecast.cohort_slo_breach_rate >= 0.50
+    ):
+        # Broad, sustained SLO failure across anonymous affinity cohorts is real service pressure,
+        # not a speculative correlation. It may unlock idle/lower-urgency capacity, while one
+        # caller or anonymous traffic remains a non-destructive portfolio canary.
+        return 2
     if forecast.correlation_sources and forecast.correlated_requests_per_minute > 0:
         return 1
     return 0
