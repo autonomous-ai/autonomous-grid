@@ -294,7 +294,9 @@ history rather than their cross products.
 If a higher service class appears while the mutation governor is full, the controller may withdraw
 a lower-class constructive command only when it has never been delivered to its node. A delivered
 `pending` command is treated as potentially running and keeps its slot until the node acknowledges
-it; equal-class work is not churned merely to change queue order. When a host permits several
+it; equal-class work is not churned merely to change queue order. When one slot is enough, a leaf
+mutation is withdrawn before its useful prerequisite so reprioritization does not discard extra
+work. When a host permits several
 queued mutations, delivery preserves the reconciler's service ordering instead of re-sorting by
 opaque action identity. A higher service class queued on a later tick also precedes an older,
 undelivered lower-class entry; FIFO remains the tie-breaker within the same class.

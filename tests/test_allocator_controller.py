@@ -607,6 +607,64 @@ def test_undelivered_reprioritization_indexes_large_command_queue_once():
     assert len(controller.history) == 10
 
 
+def test_reprioritization_cancels_leaf_before_dependency_root(monkeypatch):
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(
+            max_concurrent_mutations=2,
+            max_mutations_per_node=2,
+        ),
+    )
+    controller.put_profile(
+        profile("low", pinned_nodes=("shared",), priority=1)
+    )
+    machine = NodeSnapshot(
+        "shared",
+        32_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        cached_models=("high",),
+        last_heartbeat=10,
+    )
+    original_stable_id = MutationAction.stable_id
+
+    def root_first_stable_id(kind, node_id, model_id, transition=""):
+        if "controller-attempt-v1" in transition and model_id == "low":
+            return "a-load" if kind == ActionKind.LOAD else "z-warm"
+        return original_stable_id(kind, node_id, model_id, transition)
+
+    monkeypatch.setattr(MutationAction, "stable_id", root_first_stable_id)
+    first = controller.tick((machine,), now=10)
+    assert [action.kind for action in first.executable_actions] == [
+        ActionKind.LOAD,
+        ActionKind.WARM,
+    ]
+
+    controller.put_profile(
+        profile("high", pinned_nodes=("shared",), priority=1_000)
+    )
+    second = controller.tick(
+        (replace(machine, last_heartbeat=11),),
+        now=11,
+    )
+
+    assert [action.model_id for action in second.executable_actions] == ["high"]
+    assert {
+        (action.kind, action.model_id) for action in controller._commands.values()
+    } == {
+        (ActionKind.LOAD, "low"),
+        (ActionKind.WARM, "high"),
+    }
+    cancelled = [
+        record
+        for record in controller.history
+        if record.status == MutationStatus.CANCELLED
+    ]
+    assert [(record.kind, record.model_id) for record in cancelled] == [
+        (ActionKind.WARM, "low")
+    ]
+
+
 def test_controller_learns_and_persists_bounded_warm_duration(tmp_path):
     state_path = tmp_path / "controller.json"
     controller = AllocatorController(

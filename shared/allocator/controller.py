@@ -1052,7 +1052,7 @@ class AllocatorController:
             for dependency in action.dependencies:
                 dependants_by_id.setdefault(dependency, []).append(action.action_id)
 
-        candidate_heaps: dict[str, list[tuple[int, int, float, str]]] = {
+        candidate_heaps: dict[str, list[tuple[int, int, int, float, str]]] = {
             "": []
         }
         for action in self._commands.values():
@@ -1062,7 +1062,13 @@ class AllocatorController:
             ):
                 continue
             rank = service_rank(action.model_id)
-            candidate = (rank[0], rank[1], action.created_at, action.action_id)
+            candidate = (
+                rank[0],
+                rank[1],
+                len(dependants_by_id.get(action.action_id, ())),
+                action.created_at,
+                action.action_id,
+            )
             candidate_heaps[""].append(candidate)
             candidate_heaps.setdefault(action.node_id, []).append(candidate)
         for candidates in candidate_heaps.values():
@@ -1074,7 +1080,7 @@ class AllocatorController:
         ) -> MutationAction | None:
             candidates = candidate_heaps.get(node_id, [])
             while candidates:
-                priority, urgency, _created_at, action_id = candidates[0]
+                priority, urgency, _dependants, _created_at, action_id = candidates[0]
                 action = self._commands.get(action_id)
                 if action is None or action_id in self._delivered_command_ids:
                     heapq.heappop(candidates)
