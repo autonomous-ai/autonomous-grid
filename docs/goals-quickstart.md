@@ -80,8 +80,9 @@ Each definition is immutable. Every score is stored with its definition hash, tu
 and exact Git commit. The guarded lease transaction marks a score `accepted`; a stale provider's
 completed evaluation remains visible as rejected audit evidence but cannot change Goal state or
 enter authoritative training data. A failed accepted check keeps the Goal active and becomes
-relay-authored guidance for the next worker. With no eval manifest, native Goal completion remains
-the stopping decision.
+relay-authored guidance for the next worker. Evaluator infrastructure errors block the Goal and
+remain `accepted: false`; after recovery, `grid goal resume` schedules a fresh nomination/eval.
+With no eval manifest, native Goal completion remains the stopping decision.
 
 ## Distributed child Goals
 

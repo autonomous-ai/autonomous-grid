@@ -107,6 +107,9 @@ If native completion is nominated and evaluation fails, the Goal stays active. T
 the failed checks and evidence as a relay-authored handoff block. In the synchronous file-eval slice,
 an evaluator infrastructure error leaves the Goal `blocked`, never complete; leased asynchronous
 evaluators will introduce an `evaluating` state. User cancellation wins every race.
+Infrastructure-error rows remain audit-only with `accepted=false`; holding the winning provider
+lease cannot turn a failed evaluator into a training label. Resume queues a fresh Goal turn so the
+recovered evaluator scores a new nomination.
 
 ### Subgoals are Goals with bounded dependencies
 
