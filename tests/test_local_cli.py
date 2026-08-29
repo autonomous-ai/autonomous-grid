@@ -28209,6 +28209,30 @@ def test_task_loop_reports_a_failed_run_without_raising(monkeypatch):
          "result_commit": None, "session_reset_reason": None}]
 
 
+def test_task_attempt_start_announces_the_claimed_native_harness(monkeypatch):
+    """Provider-first rollout retains harness attribution even before the relay stamps it."""
+    from remote import task_events, tasks
+
+    announced = []
+
+    class Publisher:
+        def __init__(self, state, task_id):
+            assert state == "serve-state" and task_id == "T1"
+
+        def publish(self, event, **fields):
+            announced.append((event, fields))
+
+    monkeypatch.setattr(task_events, "TaskEventPublisher", Publisher)
+    publisher = tasks._publisher_for("serve-state", "T1", {
+        "attempt": 2, "provider_id": "node-B", "agent_kind": "claude",
+    })
+
+    assert isinstance(publisher, Publisher)
+    assert announced == [("task.attempt_started", {
+        "attempt": 2, "provider_id": "node-B", "agent_kind": "claude",
+    })]
+
+
 def test_post_spawn_goal_harness_failure_is_left_for_another_machine(monkeypatch, capsys):
     """A local native-process crash is not allowed to terminally fail a durable Grid Goal."""
     tasks, state, fake_claim = _task_loop_state([{

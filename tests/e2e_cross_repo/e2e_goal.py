@@ -154,17 +154,20 @@ def test_three_nodes_reclaim_goal_turns_and_finish_one_game(
     }
     assert retries[second_turn]["previous_provider_id"] == node_a.node_id
     assert retries[third_turn]["previous_provider_id"] == node_b.node_id
+    assert retries[second_turn]["previous_agent_kind"] == "codex"
+    assert retries[third_turn]["previous_agent_kind"] == "codex"
     assert all(event["reason"] == "lease_expired" for event in retries.values())
     starts = {}
     for item in evidence["attempt_events"]:
         if item["event"].get("type") == "task.attempt_started":
             starts.setdefault(item["turn_id"], []).append(
-                (item["event"]["attempt"], item["event"]["provider_id"]))
+                (item["event"]["attempt"], item["event"]["provider_id"],
+                 item["event"]["agent_kind"]))
     # The killed process can lose its best-effort provider-authored start event. The relay-authored
     # retry above is the authority for the lost provider; these events prove the replacements also
     # announced the attempts that eventually settled.
-    assert (2, node_b.node_id) in starts[second_turn]
-    assert (2, node_c.node_id) in starts[third_turn]
+    assert (2, node_b.node_id, "codex") in starts[second_turn]
+    assert (2, node_c.node_id, "codex") in starts[third_turn]
 
 
 def test_three_nodes_reclaim_one_goal_codex_then_claude_then_codex(
@@ -241,8 +244,14 @@ def test_three_nodes_reclaim_one_goal_codex_then_claude_then_codex(
     ]
     claude_transcripts = list((goal_workspace_root / "mixed-C").rglob("*.jsonl"))
     assert claude_transcripts, "C did not fetch Claude B's opaque transcript side-ref"
-    _assert_transcript_chain(
-        relay_client.get_goal_evidence(relay, owner_token, conversation_id), 3, min_nodes=3)
+    evidence = relay_client.get_goal_evidence(relay, owner_token, conversation_id)
+    retries = {
+        item["turn_id"]: item["event"] for item in evidence["attempt_events"]
+        if item["event"].get("type") == "task.retry"
+    }
+    assert retries[second_turn]["previous_agent_kind"] == "codex"
+    assert retries[third_turn]["previous_agent_kind"] == "claude"
+    _assert_transcript_chain(evidence, 3, min_nodes=3)
 
 
 def test_four_nodes_cross_harness_eval_repair_resumes_claude_after_codex(
@@ -392,6 +401,7 @@ def test_native_codex_crash_immediately_checkpoints_same_turn_to_another_machine
                if item["event"].get("type") == "task.retry"]
     assert len(retries) == 1 and retries[0]["event"]["reason"] == "native_harness_failure"
     assert retries[0]["event"]["previous_provider_id"] == node_a.node_id
+    assert retries[0]["event"]["previous_agent_kind"] == "codex"
     turn = evidence["turns"][0]
     assert turn["checkpoint_commit"] and turn["transcript_checkpoint_commit"]
     assert turn["transcript_result_commit"]
@@ -474,6 +484,7 @@ def test_committed_business_action_survives_immediate_native_checkpoint_handoff(
                  if item["event"].get("type") == "task.retry")
     assert retry["reason"] == "native_harness_failure"
     assert retry["previous_provider_id"] == node_a.node_id
+    assert retry["previous_agent_kind"] == "codex"
     assert retry["checkpoint_commit"] and retry["transcript_checkpoint_commit"]
     from cli.goal import _verify_evidence
     assert _verify_evidence(evidence, min_execution_nodes=2) == []

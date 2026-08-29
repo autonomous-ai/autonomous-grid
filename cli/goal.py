@@ -289,6 +289,27 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"turn {index} attempt {attempt} has no authoritative retry event naming the "
                 "previous provider")
+    all_retries = [item for item in attempt_events if isinstance(item, dict)
+                   and isinstance(item.get("event"), dict)
+                   and item["event"].get("type") == "task.retry"]
+    for retry in all_retries:
+        event = retry["event"]
+        previous_agent = event.get("previous_agent_kind")
+        if previous_agent not in ("codex", "claude"):
+            failures.append(
+                f"turn {retry.get('turn_id')} retry attempt {event.get('attempt')} has no "
+                "relay-authored previous harness identity")
+        starts = [item["event"] for item in attempt_events if isinstance(item, dict)
+                  and item.get("turn_id") == retry.get("turn_id")
+                  and isinstance(item.get("event"), dict)
+                  and item["event"].get("type") == "task.attempt_started"
+                  and item["event"].get("attempt") == event.get("attempt")]
+        for start in starts:
+            if (start.get("provider_id") != event.get("previous_provider_id")
+                    or start.get("agent_kind") != previous_agent):
+                failures.append(
+                    f"turn {retry.get('turn_id')} retry attempt {event.get('attempt')} "
+                    "disagrees with its relay-stamped attempt start identity")
     native_retries = [item for item in attempt_events if isinstance(item, dict)
                       and isinstance(item.get("event"), dict)
                       and item["event"].get("type") == "task.retry"

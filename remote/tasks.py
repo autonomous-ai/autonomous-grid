@@ -1797,6 +1797,10 @@ def _publisher_for(state: Any, task_id: str, job: dict[str, Any]) -> Any:
             "task.attempt_started",
             attempt=job.get("attempt"),
             provider_id=job.get("provider_id"),
+            # The relay overwrites this from the claim row, so the durable trajectory does not
+            # trust the worker. Sending it keeps provider-first rolling upgrades informative when
+            # an older relay stores the event opaquely.
+            agent_kind=job.get("agent_kind"),
         )
     except (Exception, SystemExit) as exc:
         _warn(f"could not announce the start of task {task_id} ({exc!r}); running it anyway")

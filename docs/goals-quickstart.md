@@ -333,7 +333,11 @@ make that handshake and therefore correctly falls back to the last checkpoint th
 accepted.
 Evidence includes a relay-computed `retry_checkpoint_chain` for every accepted native-harness
 checkpoint. `grid goal evidence --verify` requires each retry event's exact worktree/transcript pins
-to match the stored turn pins and proves both are Git-ancestral to that turn's final outputs.
+to match the stored turn pins and proves both are Git-ancestral to that turn's final outputs. Every
+retry also retains the relay-selected `previous_agent_kind` beside `previous_provider_id`; the turn
+row can be reclaimed by a different harness, so its final `agent_kind` alone is not attempt history.
+Attempt-start events are stamped from the live claim row, overriding any provider-supplied node,
+attempt, or harness values before they enter training evidence.
 
 Owner controls are ordered against checkpoint settlement, not treated as best-effort UI state. A
 pause that races an accepted nonterminal checkpoint keeps its exact pins but makes the queued retry

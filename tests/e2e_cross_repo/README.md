@@ -71,7 +71,9 @@ The four-node repair case proves that Grid keeps Codex and Claude histories side
 overwriting or translating either: D's fresh disk contains both opaque namespaces, resumes B's
 Claude session after C's intervening Codex turn, and receives the failed deterministic score as
 relay-authored guidance. Evidence retains C's accepted failing score and D's accepted passing score
-against their distinct result commits.
+against their distinct result commits. Retry evidence also retains the relay-selected harness for
+the lost attempt, so a row later claimed by Claude cannot rewrite an earlier Codex attempt (or vice
+versa) in the training trajectory.
 The crash-after-action case covers the stronger handoff path while A still owns the lease. Grid
 flushes the action request/result trajectory before the retry endpoint revokes event authority,
 accepts exact worktree and transcript pins, and requeues the same logical turn immediately. B's

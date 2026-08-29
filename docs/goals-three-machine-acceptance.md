@@ -101,8 +101,8 @@ screenshots alone.
 | Machine inventory | physical hostname, Grid node id, OS, harness and harness version for A/B/C |
 | Model assignment | requested model and every Grid inference provider node used per turn |
 | Turn 1 | A node id, Codex, attempt 1, input/result commits, null transcript input, non-null transcript output |
-| Turn 2 | A attempt 1 lease expiry; B attempt 2, Claude, same turn id, result commit and transcript input/output |
-| Turn 3 | B attempt 1 lease expiry; C attempt 2, Codex, same turn id, result commit and transcript input/output |
+| Turn 2 | Retry names A and its Codex harness; B attempt 2, Claude, same turn id, result commit and transcript input/output |
+| Turn 3 | Retry names B and its Claude harness; C attempt 2, Codex, same turn id, result commit and transcript input/output |
 | Isolation | both uncommitted markers absent on replacement machines and final tree |
 | Native path portability | B and C resume Codex using rollout paths beneath their own distinct task roots; A's absolute path is never reused |
 | Detected harness crash | Retry reason is `native_harness_failure`; accepted worktree/transcript checkpoint pins become attempt 2 inputs |
@@ -119,13 +119,14 @@ For detected native-harness retries, the evidence artifact's `retry_checkpoint_c
 retry event sequence and exact accepted pins, with both `worktree_ancestor` and
 `transcript_ancestor` true against the turn's final result commits.
 
-For each reclaimed turn, use the relay-authored `task.retry.previous_provider_id` as the authority
-for the machine that disappeared, and the settled turn's `provider_node_id` as the authority for its
-replacement. A provider-authored `task.attempt_started` event is useful corroboration but is not
-required for the killed attempt: an abrupt power loss can happen before that best-effort event is
-flushed. `--min-execution-nodes` counts both the settled providers and these relay-authored retry
-predecessors; it never counts a provider-authored start marker. The replacement's attempt number
-must still be 2 and the retry reason must be
+For each reclaimed turn, use the relay-authored `task.retry.previous_provider_id` and
+`previous_agent_kind` as the authority for the machine and harness that disappeared, and the
+settled turn's `provider_node_id` plus `agent_kind` as the authority for its replacement. A
+`task.attempt_started` event is useful corroboration but is not required for the killed attempt: an
+abrupt power loss can happen before that best-effort event is flushed. When it does arrive, the
+relay overwrites its node, attempt, and harness fields from the live claim. `--min-execution-nodes`
+counts both the settled providers and relay-authored retry predecessors; it never counts a start
+marker. The replacement's attempt number must still be 2 and the retry reason must be
 `lease_expired`.
 
 Every terminal evaluation row used as proof must belong to the final turn and final result commit,
