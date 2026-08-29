@@ -250,10 +250,12 @@ def test_image_goal_waits_for_a_node_with_the_required_capability(
         relay, owner_token, name="p-capability-image-goal")["id"]
     H.seed_trunk(relay, owner_token, project_id)
 
-    # B can run native Claude Goals, but advertises no image-generation integration. Keeping it
+    # B can run native Claude Goals. Even a mistaken operator declaration cannot make this runner
+    # advertise image generation, because Grid wires no image tool into Claude Code. Keeping it
     # online proves the row is capability-blocked rather than merely waiting for any provider.
     node_b = spawn_goal_provider(
-        "B", agent_kinds="claude", scenario="image", disk_label="image-B")
+        "B", agent_kinds="claude", scenario="image", disk_label="image-B",
+        claude_capabilities="image_generation")
     assert H.wait_for(lambda: "provider" in node_b.output(), timeout=5), node_b.output()
     goal = relay_client.create_goal(
         relay, owner_token, project_id=project_id,

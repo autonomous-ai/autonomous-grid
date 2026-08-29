@@ -51,6 +51,10 @@ contains every required capability. The chosen harness is written onto the turn 
 transaction that grants its lease. Result validation uses this turn-level value; it must never
 recompute the choice from the Goal or from the reporting node.
 
+Grid refuses operator attempts to advertise `dynamic_tools`, `subgoals`, or `image_generation` on
+Claude because this runner wires none of those surfaces into Claude Code. A Codex profile may
+advertise `image_generation` only when that node's operator has actually configured the integration.
+
 Ordinary task conversations retain their existing Claude default. A Goal created without an agent
 policy retains the existing Codex-only behavior. An explicit `auto` policy permits both harnesses.
 The ordered list is a deterministic preference when one node can run several harnesses; failover

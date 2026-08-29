@@ -208,7 +208,7 @@ def test_claude_profile_cannot_claim_grid_runner_capabilities_it_does_not_wire(m
     monkeypatch.setattr(task_agent, "distributed_goal_available", lambda: True)
 
     assert tasks._agent_profiles() == ({
-        "kind": "claude", "capabilities": ["image_generation", "native_goal"],
+        "kind": "claude", "capabilities": ["native_goal"],
     },)
 
 

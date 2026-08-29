@@ -265,6 +265,9 @@ def _agent_kinds() -> tuple[str, ...]:
 
 
 _CAPABILITY = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
+_CODEX_ONLY_GOAL_CAPABILITIES = frozenset({
+    "dynamic_tools", "subgoals", "image_generation",
+})
 
 
 def _declared_capabilities(env_name: str) -> set[str]:
@@ -288,7 +291,9 @@ def _agent_profiles() -> tuple[dict[str, Any], ...]:
         # native `/goal`, but this provider does not inject arbitrary Goal HTTP tools or the built-in
         # child-spawn action into Claude Code. Letting an env var advertise either would schedule a
         # Goal onto a harness that cannot perform its required actions and strand it mid-run.
-        claude_capabilities.difference_update({"native_goal", "dynamic_tools", "subgoals"})
+        claude_capabilities.difference_update({
+            "native_goal", *_CODEX_ONLY_GOAL_CAPABILITIES,
+        })
         if task_agent.distributed_goal_available():
             claude_capabilities.add("native_goal")
         profiles.append({"kind": "claude", "capabilities": sorted(claude_capabilities)})
