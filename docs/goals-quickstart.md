@@ -76,6 +76,11 @@ but prevents every live descendant from receiving another turn; resume restores 
 paused by that parent, so a child paused independently stays paused. Cancel recursively terminals
 queued/running descendants, including a child whose relay Git preparation was in flight.
 
+Pause is an overlay, not a rollback. If the in-flight slice passes the final eval, fails terminally,
+or exhausts its budget after pause lands, Grid stores that underlying outcome while still showing
+`paused`. Resume reveals the stored terminal state and queues nothing; it cannot turn completed,
+failed, or budget-limited work back into an active Goal.
+
 `objective` says what to achieve. `done-when` is one clear, verifiable finish line. The native Goal
 mechanism decides when to nominate completion. If independent evals are configured, Grid checks the
 exact result commit and is the only component allowed to accept that nomination.
@@ -365,3 +370,6 @@ unclaimable until resume. A cancel in the same window terminals the turn and rej
 If the final allowed attempt has already terminalled as `retries_exhausted`, that terminal outcome
 overrides a pause arriving in the short turn-to-Goal reconciliation gap; the Goal is `failed` and
 cannot be resumed past its declared attempt budget.
+Likewise, a leased slice that settles while paused advances the pause's saved underlying state. A
+passing final eval resumes directly to `complete`; terminal failure and budget exhaustion resume to
+their terminal states, never to a fabricated repair turn.

@@ -249,6 +249,12 @@ restores only descendants marked as paused by that ancestor and their exact prio
 an independently paused child alone. Cancel recursively fences queued/running turns, and a prepare
 that finishes after cancellation terminals itself without ever becoming claimable.
 
+`paused` is an overlay over `goal_paused_status`. A leased slice settling under that overlay still
+advances the saved state through independent evaluation, terminal failure and budget enforcement.
+Resume exposes the saved terminal outcome verbatim and schedules nothing; only an underlying
+active/waiting state can continue. This prevents a pause/result race from resurrecting a Goal whose
+final eval already passed or whose declared failure/budget bound already ended it.
+
 ### Evidence required for release
 
 The feature is not production-proven by processes sharing one host. Release requires both:
