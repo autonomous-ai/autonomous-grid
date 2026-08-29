@@ -1045,13 +1045,13 @@ class PlacementPlanner:
                 for model in remaining_contenders:
                     cache_isolated_empty_order(model)
             blocked: set[str] = set()
+            placed_by_model = {
+                model.model_id: sum(
+                    item.model_id == model.model_id for item in assignments
+                )
+                for model in priority_models
+            }
             while True:
-                placed_by_model = {
-                    model.model_id: sum(
-                        1 for item in assignments if item.model_id == model.model_id
-                    )
-                    for model in priority_models
-                }
                 unfinished = [
                     model
                     for model in priority_models
@@ -1070,7 +1070,9 @@ class PlacementPlanner:
                 ]
                 progress = False
                 for model in current_level:
-                    progress = place_next_replica(model) or progress
+                    if place_next_replica(model):
+                        placed_by_model[model.model_id] += 1
+                        progress = True
                 if not progress:
                     # A model with no feasible next placement must not strand capacity usable by an
                     # equally important peer. Adding other replicas cannot create net resources;
