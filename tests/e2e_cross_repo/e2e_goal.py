@@ -245,6 +245,101 @@ def test_three_nodes_reclaim_one_goal_codex_then_claude_then_codex(
         relay_client.get_goal_evidence(relay, owner_token, conversation_id), 3, min_nodes=3)
 
 
+def test_four_nodes_cross_harness_eval_repair_resumes_claude_after_codex(
+        relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
+    """A -> B -> C fails independent behavior eval; D resumes B's Claude Goal and repairs it."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-mixed-eval-repair")['id']
+    H.seed_trunk(relay, owner_token, project_id)
+    node_a = spawn_goal_provider(
+        "A", agent_kinds="codex", scenario="mixed_eval_repair",
+        disk_label="repair-A")
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Build a playable game and repair any independently measured defect",
+        done_when="The commit-pinned interaction and presentation checks all pass",
+        model="fake-grid-model", token_budget=12_000, tools=[],
+        agents=["codex", "claude"], evals=GAME_EVALS)
+    conversation_id = goal["id"]
+
+    assert H.wait_for(
+        lambda: _partial(goal_workspace_root / "repair-A", "partial-feature-2.tmp"),
+        timeout=20), node_a.output()
+    node_a.die()
+
+    node_b = spawn_goal_provider(
+        "B", agent_kinds="claude", scenario="mixed_eval_repair",
+        disk_label="repair-B")
+    assert H.wait_for(
+        lambda: _partial(goal_workspace_root / "repair-B", "partial-feature-34.tmp"),
+        timeout=75), node_b.output()
+    node_b.die()
+
+    # C resumes Codex's A-era native state, receives B's project commit, and nominates a result
+    # whose JavaScript looks plausible but has no click handler. One-task mode withdraws C before
+    # it can claim the repair turn itself.
+    node_c = spawn_goal_provider(
+        "C", agent_kinds="codex", scenario="mixed_eval_repair",
+        disk_label="repair-C", one_task=True)
+    assert H.wait_for(lambda: node_c.proc.poll() is not None, timeout=75), node_c.output()
+    status = relay_client.get_goal(relay, owner_token, conversation_id)
+    assert status["status"] == "active", status
+    failed = [item for item in status["last_eval"]["results"] if not item["passed"]]
+    assert [item["name"] for item in failed] == ["click updates score"]
+    assert "required literal content is absent" in failed[0]["evidence"]
+    rows = _tasks(relay, owner_token, project_id, conversation_id)
+    assert len(rows) == 4, rows
+    assert rows[2]["state"] == "completed" and rows[2]["provider_id"] == node_c.node_id
+    assert rows[3]["state"] == "queued" and rows[3]["attempt"] == 0
+
+    # D is a fourth node with a fresh disk and only Claude. It must restore B's opaque Claude
+    # session across intervening Codex work, consume Grid's failed-eval handoff, and repair the tree.
+    node_d = spawn_goal_provider(
+        "D", agent_kinds="claude", scenario="mixed_eval_repair",
+        disk_label="repair-D", one_task=True)
+    complete = H.wait_for(
+        lambda: _completed_goal(relay, owner_token, conversation_id), timeout=60)
+    assert complete, node_d.output()
+    rows = _tasks(relay, owner_token, project_id, conversation_id)
+    assert len(rows) == 4 and rows[3]["state"] == "completed", rows
+    assert rows[3]["provider_id"] == node_d.node_id
+    assert rows[3]["agent_kind"] == "claude" and rows[3]["attempt"] == 1
+
+    destination = tmp_path / "mixed-eval-repaired-game"
+    destination.mkdir()
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=rows[3]["branch"], commit=rows[3]["result_commit"], project_id=project_id)
+    assert "addEventListener('click'" in (destination / "game.js").read_text()
+    assert "textContent" in (destination / "game.js").read_text()
+
+    transcripts = list((goal_workspace_root / "repair-D").rglob("*.jsonl"))
+    resolved_transcripts = {path.resolve() for path in transcripts}
+    # D legitimately carries both opaque histories: Claude's transcript and Codex's rollout. Pick
+    # the Claude record by its vendor shape rather than pretending mixed harnesses share one JSONL.
+    claude_histories = []
+    for transcript_path in resolved_transcripts:
+        records = [json.loads(line) for line in transcript_path.read_text().splitlines() if line]
+        if records and all("sessionId" in record and "prompt" in record for record in records):
+            claude_histories.append(records)
+    assert len(claude_histories) == 1 and len(resolved_transcripts) >= 2, transcripts
+    transcript_records = claude_histories[0]
+    assert len({record["sessionId"] for record in transcript_records}) == 1
+    assert any("required literal content is absent" in record["prompt"]
+               for record in transcript_records)
+
+    evidence = relay_client.get_goal_evidence(relay, owner_token, conversation_id)
+    _assert_transcript_chain(evidence, 4, min_nodes=4)
+    final_turn_id = rows[3]["id"]
+    nomination_turn_id = rows[2]["id"]
+    accepted = [run for run in evidence["eval_runs"] if run["accepted"]]
+    assert any(run["turn_id"] == nomination_turn_id and not run["passed"] for run in accepted)
+    assert all(run["passed"] for run in accepted if run["turn_id"] == final_turn_id)
+
+
 def test_native_codex_crash_immediately_checkpoints_same_turn_to_another_machine(
         relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
     """A graceful post-spawn harness failure preserves partial files *and* the native thread."""

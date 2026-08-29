@@ -53,6 +53,7 @@ real.
 | Four-feature game | A Codex -> B Codex -> C Codex | A and B are killed mid-turn | Same rows are reclaimed; commit-pinned wiring/click/score/style evals pass |
 | Native crash checkpoint | A Codex -> B Codex | A's app-server fails after partial work | Same turn immediately requeues; B restores partial tree/thread and behavior evals pass |
 | Mixed game | A Codex -> B Claude -> C Codex | Two machine losses across unlike harnesses | Shared continuity plus commit-pinned behavior evals across harnesses |
+| Cross-harness eval repair | A Codex -> B Claude -> C Codex -> D Claude | C nominates plausible but broken interaction | D restores B's Claude session across Codex, consumes failed eval evidence, and repairs it |
 | Image artifact | B Claude polls; A Codex executes | Goal requires `image_generation` | Ineligible node spends no attempt; independent PNG eval passes |
 | Support reply | A polls; B Codex -> C Codex | Origin restriction, crash after API commit, failed first eval | One business side effect, stable idempotency key, repair turn passes |
 | Required child | A parent; B Claude child; C parent | Parent waits while child runs | Independently evaluated child commit fans into parent exactly once |
@@ -65,6 +66,11 @@ The full matrix also leaves providers long-polling immediately before fixture te
 checks socket disconnects on both sides of assignment and returns any response that cannot be
 delivered to the queue without consuming an attempt; otherwise an orphan request from one scenario
 can steal the next scenario's first Goal turn.
+The four-node repair case proves that Grid keeps Codex and Claude histories side by side rather than
+overwriting or translating either: D's fresh disk contains both opaque namespaces, resumes B's
+Claude session after C's intervening Codex turn, and receives the failed deterministic score as
+relay-authored guidance. Evidence retains C's accepted failing score and D's accepted passing score
+against their distinct result commits.
 
 ## Prerequisites
 

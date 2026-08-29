@@ -92,7 +92,7 @@ def owner_token():
 
 @pytest.fixture(scope="session")
 def provider_nodes(relay, owner_token):
-    """Two REGISTERED provider nodes, each with a token carrying its own id.
+    """Four REGISTERED provider nodes, each with a token carrying its own id.
 
     Registration is not decoration: `_require_provider` gates the claim on the node registry's role,
     so an unregistered member cannot claim at all. Two real identities rather than one used twice,
@@ -103,7 +103,7 @@ def provider_nodes(relay, owner_token):
 
     nodes = {}
     with httpx.Client(base_url=relay, timeout=30.0) as client:
-        for label in ("A", "B", "C"):
+        for label in ("A", "B", "C", "D"):
             created = client.post(
                 "/nodes", json={"role": "both"},
                 headers={"Authorization": f"Bearer {owner_token}"})

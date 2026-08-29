@@ -53,7 +53,7 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
     cwd = Path.cwd()
     history = load_history()
     scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
-    mixed = scenario == "mixed"
+    mixed = scenario in ("mixed", "mixed_eval_repair")
 
     if scenario == "graceful_crash":
         if node == "A" and not history:
@@ -254,11 +254,20 @@ target.addEventListener('click', () => {
                 raise RuntimeError("Codex C did not receive Claude B's committed feature 2")
             assert not (cwd / "partial-feature-34.tmp").exists(), (
                 "Claude B's uncommitted file crossed machines")
+            if scenario == "mixed_eval_repair":
+                # Nominate completion with a plausible-looking but non-interactive implementation.
+                # Grid—not Codex—must reject it and give the exact failed literal checks to D.
+                (cwd / "game.js").write_text(
+                    "document.querySelector('#score').textContent='not wired';\n")
             (cwd / "style.css").write_text(
                 "body{font:18px system-ui;background:#111827;color:#f9fafb;text-align:center}\n")
             (cwd / "README.md").write_text(
                 "# Grid Click\n\nCodex, Claude, and Codex completed this game across Grid nodes.\n")
-            history.append({"node": "C", "features": [3, 4], "after": "claude-B"})
+            history.append({
+                "node": "C", "features": [3, 4], "after": "claude-B",
+                **({"eval_nomination": "missing-click-handler"}
+                   if scenario == "mixed_eval_repair" else {}),
+            })
             save_history(history)
             return "complete", "C completed features 3 and 4 after Claude B", 300
         if node == "B":

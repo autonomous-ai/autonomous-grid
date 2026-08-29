@@ -308,11 +308,35 @@ def main() -> int:
     # The mixed-harness Goal E2E. This is intentionally inside the ordinary fake Claude binary:
     # the provider must select Claude through the real capability claim, build `/goal` on the first
     # slice, and `--resume` the session on the next. No test helper calls this behavior directly.
-    if os.environ.get("GRID_E2E_GOAL_SCENARIO") == "mixed":
+    scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
+    if scenario in ("mixed", "mixed_eval_repair"):
         node = os.environ.get("GRID_E2E_GOAL_NODE")
-        if node != "B":
+        if node not in ("B", "D"):
             sys.stderr.write(f"fake claude goal unexpectedly reached node {node!r}\n")
             return 2
+        if node == "D":
+            if (scenario != "mixed_eval_repair" or resume != session
+                    or prompt.startswith("/goal ")):
+                sys.stderr.write("Claude D did not resume B's native Goal session\n")
+                return 2
+            if ("Grid's independent evaluation of the previous commit" not in prompt
+                    or "required literal content is absent" not in prompt
+                    or "addEventListener('click'" not in prompt):
+                sys.stderr.write("Claude D did not receive relay-authored failed-eval guidance\n")
+                return 2
+            if not pathlib.Path("style.css").exists() or not pathlib.Path("README.md").exists():
+                sys.stderr.write("Claude D did not receive Codex C's nominated result tree\n")
+                return 2
+            pathlib.Path("game.js").write_text(
+                "let score=0;document.querySelector('#target').addEventListener('click',()=>{"
+                "document.querySelector('#score').textContent=String(++score)});\n")
+            _emit({"type": "assistant", "message": {"usage": {
+                "input_tokens": 30, "output_tokens": 15}, "content": [
+                {"type": "text", "text": "Claude D repaired the failed behavior eval"}]}})
+            _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": True,
+                   "reason": "all independent behavior checks now pass", "iterations": 3,
+                   "tokens": 45}})
+            return 0
         if not pathlib.Path("game.js").exists():
             if not prompt.startswith("/goal ") or resume is not None:
                 sys.stderr.write("fake claude did not receive native /goal on its first slice\n")
