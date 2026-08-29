@@ -253,7 +253,10 @@ that finishes after cancellation terminals itself without ever becoming claimabl
 advances the saved state through independent evaluation, terminal failure and budget enforcement.
 Resume exposes the saved terminal outcome verbatim and schedules nothing; only an underlying
 active/waiting state can continue. This prevents a pause/result race from resurrecting a Goal whose
-final eval already passed or whose declared failure/budget bound already ended it.
+final eval already passed or whose declared failure/budget bound already ended it. When that
+terminal Goal is a parent, resume cancels and lease-fences all still-live descendants instead of
+restoring workers whose output has no nonterminal parent to receive it. Independently completed
+descendants remain immutable history.
 
 ### Evidence required for release
 

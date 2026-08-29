@@ -79,7 +79,9 @@ queued/running descendants, including a child whose relay Git preparation was in
 Pause is an overlay, not a rollback. If the in-flight slice passes the final eval, fails terminally,
 or exhausts its budget after pause lands, Grid stores that underlying outcome while still showing
 `paused`. Resume reveals the stored terminal state and queues nothing; it cannot turn completed,
-failed, or budget-limited work back into an active Goal.
+failed, or budget-limited work back into an active Goal. If a paused parent reveals a terminal
+outcome, Grid cancels its still-live descendant turns rather than waking workers whose results can
+no longer be reconciled into that parent.
 
 `objective` says what to achieve. `done-when` is one clear, verifiable finish line. The native Goal
 mechanism decides when to nominate completion. If independent evals are configured, Grid checks the
