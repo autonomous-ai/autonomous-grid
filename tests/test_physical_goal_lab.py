@@ -53,6 +53,19 @@ def test_configure_exposes_automation_bundle_parameter_with_warning():
     assert "shell history/process listings" in help_text
 
 
+def test_relay_restart_can_suppress_pairing_credential_output():
+    parser = lab.build_parser()
+    args = parser.parse_args([
+        "relay", "--relay-repo", "/tmp/private-relay", "--reuse", "--no-print-bundle",
+    ])
+
+    assert args.reuse is True
+    assert args.no_print_bundle is True
+    help_text = parser._subparsers._group_actions[0].choices["relay"].format_help()
+    assert "--no-print-bundle" in help_text
+    assert "credential" in help_text
+
+
 def test_pairing_refuses_expiry_identity_mismatch_and_oversize():
     expired = int(time.time()) - 1
     token = lab.issue_token(

@@ -370,11 +370,14 @@ def cmd_relay(args: argparse.Namespace) -> int:
         print(f"  relay node:  GRID_HOME={metadata['relay_home']}", flush=True)
         print(f"  relay state: {root}", flush=True)
         print(f"  relay SHA:   {metadata['relay_revision']}", flush=True)
-        print("\nOn the joining worker, run:", flush=True)
-        print("  uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \\", flush=True)
-        print("    --home /private/tmp/grid-goal-worker", flush=True)
-        print("\nThen paste this disposable bundle at its hidden prompt:", flush=True)
-        print(metadata["worker_pair"], flush=True)
+        if args.no_print_bundle:
+            print("\nPairing bundle suppressed; already-paired workers can reconnect.", flush=True)
+        else:
+            print("\nOn the joining worker, run:", flush=True)
+            print("  uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \\", flush=True)
+            print("    --home /private/tmp/grid-goal-worker", flush=True)
+            print("\nThen paste this disposable bundle at its hidden prompt:", flush=True)
+            print(metadata["worker_pair"], flush=True)
         print("\nKeep this terminal open. Ctrl-C stops only the disposable relay.", flush=True)
         return proc.wait()
     except KeyboardInterrupt:
@@ -429,6 +432,8 @@ def build_parser() -> argparse.ArgumentParser:
     relay.add_argument("--claim-timeout-seconds", type=int, default=30)
     relay.add_argument("--reuse", action="store_true",
                        help="Reuse this lab identity/database after a relay restart")
+    relay.add_argument("--no-print-bundle", action="store_true",
+                       help="Do not print the joining-worker credential (for paired restarts)")
     relay.set_defaults(func=cmd_relay)
 
     configure = actions.add_parser("configure", help="Pair this joining worker with the relay")
