@@ -609,8 +609,16 @@ def test_four_nodes_cross_harness_eval_repair_resumes_claude_after_codex(
     assert len(claude_histories) == 1 and len(resolved_transcripts) >= 2, transcripts
     transcript_records = claude_histories[0]
     assert len({record["sessionId"] for record in transcript_records}) == 1
-    assert any("required literal content is absent" in record["prompt"]
-               for record in transcript_records)
+    repair_prompts = [record["prompt"] for record in transcript_records
+                      if "required literal content is absent" in record["prompt"]]
+    assert repair_prompts
+    # A prose failure is not actionable enough: the physical two-machine run proved a local model
+    # will guess plausible filenames and tests when the immutable contract is omitted.  Claude must
+    # receive the same relay-owned path and exact literals as Codex, even after an intervening Codex
+    # nomination and restoration of Claude's opaque native session on a fourth machine.
+    assert any('"path": "game.js"' in prompt for prompt in repair_prompts)
+    assert any("addEventListener('click'" in prompt for prompt in repair_prompts)
+    assert any("textContent" in prompt for prompt in repair_prompts)
 
     evidence = relay_client.get_goal_evidence(relay, owner_token, conversation_id)
     _assert_transcript_chain(evidence, 4, min_nodes=4)
