@@ -327,11 +327,19 @@ def main() -> int:
         if marker_value:
             marker = pathlib.Path(marker_value)
             marker.unlink(missing_ok=True)
+            required_polls = int(os.environ.get("GRID_E2E_STALE_POLLS_REQUIRED", "1"))
             deadline = time.monotonic() + 10
-            while not marker.exists() and time.monotonic() < deadline:
+            while time.monotonic() < deadline:
+                observed = (marker.read_text().count("\n") if marker.exists() else 0)
+                if observed >= required_polls:
+                    break
                 time.sleep(0.02)
-            if not marker.exists():
-                sys.stderr.write("no concurrent stale claim poll entered before Claude drift\n")
+            else:
+                observed = 0
+            if observed < required_polls:
+                sys.stderr.write(
+                    f"only {observed}/{required_polls} concurrent stale claim polls entered "
+                    "before Claude drift\n")
                 return 2
         # Exit zero without goal_status. Grid must classify this as deterministic native protocol
         # drift, quarantine this exact Claude revision, and hand its Git/transcript checkpoint to a

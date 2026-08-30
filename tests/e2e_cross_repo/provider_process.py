@@ -108,7 +108,11 @@ def main() -> int:
         print(f"claim poll entered {ordinal}", file=sys.stderr, flush=True)
         marker = os.environ.get("GRID_E2E_CLAIM_MARKER")
         if marker:
-            Path(marker).touch()
+            # Append one record per entry so a native fixture can wait for N distinct fresh polls,
+            # not only learn that at least one happened. This write is inside the same lock as the
+            # ordinal, making each line one worker entry even on filesystems without append atomicity.
+            with Path(marker).open("a", encoding="utf-8") as handle:
+                handle.write(f"{ordinal}\n")
         return real_claim(*args, **kwargs)
 
     tasks.relay.claim_task = observed_claim

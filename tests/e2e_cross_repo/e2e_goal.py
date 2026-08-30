@@ -666,9 +666,9 @@ def test_codex_protocol_drift_quarantines_node_and_hands_same_turn_to_claude(
     H.seed_trunk(relay, owner_token, project_id)
     node_a = spawn_goal_provider(
         "A", agent_kinds="codex", scenario="codex_protocol_drift",
-        disk_label="codex-drift-A", task_workers=2)
+        disk_label="codex-drift-A", task_workers=4)
     assert H.wait_for(
-        lambda: "claim poll entered 2" in node_a.output(), timeout=15), node_a.output()
+        lambda: "claim poll entered 4" in node_a.output(), timeout=15), node_a.output()
     goal = relay_client.create_goal(
         relay, owner_token, project_id=project_id,
         objective="Recover a partial artifact when the Codex app-server protocol changes",
@@ -691,11 +691,12 @@ def test_codex_protocol_drift_quarantines_node_and_hands_same_turn_to_claude(
     queued = _tasks(relay, owner_token, project_id, goal["id"])
     assert len(queued) == 1 and queued[0]["id"] == goal["turn_id"], queued
     assert queued[0]["checkpoint_commit"]
-    # The second worker's long-poll began with Codex's pre-quarantine profile. It must receive and
-    # decline that stale delivery before B exists, proving Grid does not merely win a lucky claim
-    # race against the replacement machine or spend attempt 2 on the broken executable.
+    # Three sibling long-polls began with Codex's pre-quarantine profile. Every one must receive and
+    # decline a serial delivery before B exists, proving a worker herd cannot burn the retry cap and
+    # Grid does not merely win a lucky claim race against the replacement machine.
     assert H.wait_for(
-        lambda: "declined stale Goal claim" in node_a.output(), timeout=15), node_a.output()
+        lambda: node_a.output().count("declined stale Goal claim") >= 3,
+        timeout=15), node_a.output()
     after_decline = _tasks(relay, owner_token, project_id, goal["id"])
     assert len(after_decline) == 1
     assert after_decline[0]["state"] == "queued" and after_decline[0]["attempt"] == 1

@@ -481,13 +481,20 @@ def main() -> int:
                 if marker_value:
                     marker = Path(marker_value)
                     marker.unlink(missing_ok=True)
+                    required_polls = int(os.environ.get("GRID_E2E_STALE_POLLS_REQUIRED", "1"))
                     deadline = time.monotonic() + 10
-                    while not marker.exists() and time.monotonic() < deadline:
+                    while time.monotonic() < deadline:
+                        observed = (marker.read_text().count("\n") if marker.exists() else 0)
+                        if observed >= required_polls:
+                            break
                         time.sleep(0.02)
-                    if not marker.exists():
+                    else:
+                        observed = 0
+                    if observed < required_polls:
                         emit({"id": request["id"], "error": {
                             "code": -32000,
-                            "message": "no concurrent stale claim poll entered before drift"}})
+                            "message": (f"only {observed}/{required_polls} concurrent stale claim "
+                                        "polls entered before drift")}})
                         continue
                 emit({"id": request["id"], "error": {
                     "code": -32601, "message": "thread/goal/get removed after schema generation"}})

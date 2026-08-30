@@ -330,7 +330,9 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
         log_path = tmp_path_factory.mktemp(f"goal-provider-{label}") / "provider.log"
         claim_marker = log_path.parent / "claim-poll-entered"
         env["GRID_E2E_CLAIM_MARKER"] = str(claim_marker)
-        env["GRID_TASK_ENV_PASSTHROUGH"] += ",GRID_E2E_CLAIM_MARKER"
+        env["GRID_E2E_STALE_POLLS_REQUIRED"] = str(max(1, task_workers - 1))
+        env["GRID_TASK_ENV_PASSTHROUGH"] += (
+            ",GRID_E2E_CLAIM_MARKER,GRID_E2E_STALE_POLLS_REQUIRED")
         handle = open(log_path, "w", buffering=1)
         handles.append(handle)
         proc = subprocess.Popen(
