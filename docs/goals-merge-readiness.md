@@ -7,8 +7,8 @@ The detailed physical artifacts are indexed in
 
 ## Tested code revisions
 
-- Public worker/CLI: `ddf35d174c67480462d24b853fcc46aadd0cc22e`
-- Private relay: `2bd0479519a02b49501118edb343d0dd8139bc5a`
+- Public worker/CLI: `6d1de5a76fe39fa4f64035ef49476419c187553b`
+- Private relay: `c90b4fa6a03174fe05fc89f97425ea823be79b50`
 - Both `grid-goal-distributed` code revisions were clean and pushed when these gates completed.
   The public branch's following documentation-only commit adds this record and changes no runtime
   or test code.
@@ -17,8 +17,8 @@ The detailed physical artifacts are indexed in
 
 | Gate | Result | What it proves |
 |---|---:|---|
-| Full public suite | 3,336 passed, 56 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, and existing Grid behavior |
-| Private Goal + Goal migration suite | 122 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, evidence, inference attribution, capability matching, and schema upgrades |
+| Full public suite | 3,340 passed, 56 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
+| Private Goal + Goal migration suite | 123 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, evidence, inference attribution, capability matching, and schema upgrades |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
 | Cross-repository distributed matrix | 17 passed | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 | Claim-ingress regression | 3 passed | Disconnect during assignment remains cancellable and mixed Goal attempts retain exact inference identity |
@@ -44,6 +44,9 @@ sweep passed 684 tests and failed four: three domain-claim fixtures received `20
 and one Python JSON-depth fixture expected a 5,000-level body to parse but the installed decoder
 returned `400`. All four fail identically on private revision `7f16213`, before the final child
 validation/schema/yield fixes; none touches the Goal changes between that revision and the candidate.
+The 684-test sweep ran at private revision `2bd0479`; the following `c90b4fa` change only tightened
+the child capability schema/error and then passed the 123-test Goal suite plus the complete
+17-scenario cross-repository matrix.
 Other stale legacy tests on current `main` also independently fail against current contracts, such as
 constructing `AccountRow(node_id=...)` after the model moved to `user_id`. The dedicated Goal suite,
 the complete public suite, and the real cross-repository seam were therefore retained as the release
@@ -92,6 +95,12 @@ replace the remaining multi-physical-machine gate.
 computers and distinct local disks for Codex to Claude to Codex, with two abrupt losses. The
 single-host four-node matrix proves the protocol and harness integration but cannot prove laptop
 sleep, three independent filesystems, or the Claude binary on a second physical worker.
+
+The no-SSH lab now accepts `--joining-workers 2`, persists separate B/C credentials across relay
+restarts, and refuses missing or duplicate physical node ids. Its 369-test Goal preflight and 22
+lab-specific tests passed. At the time of this record, only the relay-host Mac task identities were
+online; no second and third physical worker were available, so the hardware event itself remains
+unexecuted.
 
 Do not label the release gate complete until that physical artifact passes, or until the project
 owner explicitly waives it. Merging before then is an informed MVP decision, not the same claim as
