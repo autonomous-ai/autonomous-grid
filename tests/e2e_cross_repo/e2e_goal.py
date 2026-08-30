@@ -195,8 +195,11 @@ def test_goal_waits_at_attempt_zero_while_advertised_inference_quota_is_exhauste
     assert H.wait_for(
         lambda: relay_client.get_goal(relay, owner_token, goal["id"])
         .get("model_readiness") == {"state": "ready", "agents": ["codex"]},
-        timeout=5,
-    )
+        # A relay under concurrent regression load can spend several seconds draining the
+        # invalidated readiness snapshot before the provider's next long poll republishes its
+        # eligible native profile. This is an eventual-dispatch assertion, not a 5-second SLO.
+        timeout=15,
+    ), (relay_client.get_goal(relay, owner_token, goal["id"]), node_a.output())
     complete = H.wait_for(
         lambda: _completed_goal(relay, owner_token, goal["id"]), timeout=25)
     assert complete, f"Goal did not wake after quota recovery; A output:\n{node_a.output()}"

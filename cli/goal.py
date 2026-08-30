@@ -561,6 +561,83 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"evaluation {spec.get('name') or definition_id or definition_hash or '?'} has no "
                 "accepted passing run from the final turn for the final result commit")
+
+    # The checks above prove that every final metric has a passing witness. Training safety needs
+    # the converse too: every row labelled authoritative must be one of this Goal's immutable
+    # metrics, internally consistent, relay-authored, and tied to the exact completed turn commit.
+    # Otherwise an extra poisoned label can ride beside a perfectly valid final witness and pass
+    # verification simply because nothing asked where that extra accepted row came from.
+    manifest = {
+        (spec.get("definition_id"), spec.get("definition_hash")): spec
+        for spec in evals
+        if (isinstance(spec, dict)
+            and isinstance(spec.get("definition_id"), str) and spec.get("definition_id")
+            and isinstance(spec.get("definition_hash"), str) and spec.get("definition_hash"))
+    }
+    accepted_coordinates: set[tuple[str, str, tuple[str, str]]] = set()
+    accepted_ids: set[str] = set()
+    for index, run in enumerate(runs, 1):
+        if not isinstance(run, dict):
+            failures.append(f"evaluation run {index} is not an object")
+            continue
+        if run.get("accepted") is not True:
+            if run.get("accepted_at") is not None:
+                failures.append(
+                    f"rejected evaluation run {run.get('id') or index} has an acceptance timestamp")
+            continue
+        run_id = run.get("id")
+        if not isinstance(run_id, str) or not run_id:
+            failures.append(f"accepted evaluation run {index} has no immutable run id")
+        elif run_id in accepted_ids:
+            failures.append(f"accepted evaluation run id {run_id} appears more than once")
+        else:
+            accepted_ids.add(run_id)
+        definition_id = run.get("definition_id")
+        definition_hash = run.get("definition_hash")
+        identity = ((definition_id, definition_hash)
+                    if isinstance(definition_id, str) and isinstance(definition_hash, str)
+                    else None)
+        spec = manifest.get(identity) if identity is not None else None
+        if spec is None:
+            failures.append(
+                f"accepted evaluation run {run_id or index} does not match the immutable "
+                "Goal eval manifest")
+        elif (spec.get("type") in ("file", "json")
+              and run.get("evaluator_node_id") != "relay"):
+            failures.append(
+                f"accepted evaluation run {run_id or index} was not authored by the relay")
+        run_turn_id = run.get("turn_id")
+        turn = (turns_by_id.get(run_turn_id)
+                if isinstance(run_turn_id, str) else None)
+        if turn is None:
+            failures.append(
+                f"accepted evaluation run {run_id or index} names an unknown Goal turn")
+        elif run.get("result_commit") != turn.get("result_commit"):
+            failures.append(
+                f"accepted evaluation run {run_id or index} does not score its turn's exact "
+                "result commit")
+        state = run.get("state")
+        passed = run.get("passed")
+        score = run.get("score")
+        if (state not in ("passed", "failed") or not isinstance(passed, bool)
+                or passed != (state == "passed")
+                or isinstance(score, bool) or not isinstance(score, (int, float))
+                or score != (1.0 if passed else 0.0) or run.get("error") is not None):
+            failures.append(
+                f"accepted evaluation run {run_id or index} has an inconsistent verdict")
+        accepted_at = run.get("accepted_at")
+        if not isinstance(accepted_at, str) or not accepted_at:
+            failures.append(
+                f"accepted evaluation run {run_id or index} has no acceptance timestamp")
+        result_commit = run.get("result_commit")
+        if isinstance(run_turn_id, str) and isinstance(result_commit, str) and identity is not None:
+            coordinate = (run_turn_id, result_commit, identity)
+            if coordinate in accepted_coordinates:
+                failures.append(
+                    f"accepted evaluation run {run_id or index} duplicates a "
+                    "turn/commit/metric verdict")
+            else:
+                accepted_coordinates.add(coordinate)
     return failures
 
 

@@ -218,12 +218,20 @@ never complete commit B. Evaluation jobs use leases and may be retried, but thei
 later turn cannot inherit the earlier attempt's acceptance state merely because it reached the same
 commit. The guarded provider-lease transaction marks a verdict authoritative. Rejected attempts
 remain audit evidence with `accepted=false` and cannot change Goal state or enter training outcomes.
+Acceptance is fenced to the exact eval-run ids returned by that independent invocation, plus the
+same Goal, turn, commit, relay evaluator, and non-error state. It is never a broad update over all
+rows sharing turn/commit coordinates. If any expected row changed or disappeared before settlement,
+the terminal transaction rolls back and an ordinary result retry reruns the deterministic eval.
 Malformed stored task-event or evaluator-evidence JSON is exported as an explicit corruption marker
 instead of failing or silently omitting the evidence response. Offline verification rejects every
 such marker, preserving inspectability without admitting damaged records as release or training
 evidence. A completion retry that collides with a damaged idempotent eval row atomically downgrades
 the cached verdict to `error`, clears acceptance and blocks the Goal; it never 500-loops or retains
 an unverifiable passing label.
+Parseable cached rows are likewise downgraded when definition identity, evaluator provenance,
+state, pass label, score, or error presence is inconsistent. Offline verification rejects every
+accepted run outside the immutable manifest or its own completed turn commit, even when a separate
+valid final witness exists, so stray authoritative labels cannot enter later SFT/RL selection.
 
 Evidence transport is turn-paginated without changing the assembled schema. A page contains at most
 100 turns (the CLI requests 20), only their event/inference/eval rows, and ancestry edges whose

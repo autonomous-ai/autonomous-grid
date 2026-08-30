@@ -197,7 +197,8 @@ Git/read failures remain blocking evaluator infrastructure errors.
 
 Each definition is immutable, and its hash includes the evaluator-semantics version. Every score is
 stored with that definition hash, its turn, evaluator node, and exact Git commit. The guarded lease
-transaction marks a score `accepted`; a stale provider's
+transaction marks only the exact run ids returned by that independent evaluation `accepted`; it
+never accepts every row that happens to share the same turn and commit. A stale provider's
 completed evaluation remains visible as rejected audit evidence but cannot change Goal state or
 enter authoritative training data. A failed accepted check keeps the Goal active and becomes
 relay-authored guidance for the next worker. Evaluator infrastructure errors block the Goal and
@@ -347,7 +348,13 @@ exports an explicit corruption marker so an operator can inspect the surviving t
 cannot become release proof or training data.
 If a completion retry encounters a damaged cached evaluator verdict, the relay atomically
 downgrades it to an unaccepted infrastructure error and blocks the Goal instead of returning 500 or
-re-blessing a stale passing label.
+re-blessing a stale passing label. Parseable cached evidence is also rejected when its immutable
+definition identity, relay provenance, state, pass label, score, and error marker disagree. If an
+eligible run disappears or changes between evaluation and terminal settlement, the whole terminal
+transaction rolls back; the provider's ordinary result retry recreates and accepts exact evidence.
+Offline verification checks the converse of final-pass proof as well: every `accepted: true` run
+must belong to the immutable manifest, score its own completed turn commit, carry a consistent
+binary verdict, and be relay-authored. An extra accepted label cannot hide beside a valid witness.
 
 Inference attribution is relay-enforced, not trusted from agent headers. If `X-Request-Id` names a
 Goal turn, the request must come from that turn's current leased node, carry the matching

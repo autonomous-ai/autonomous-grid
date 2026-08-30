@@ -275,7 +275,8 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
              "transcript_commit": "a" * 40, "transcript_result_commit": "b" * 40},
         ],
         "eval_runs": [{
-            "turn_id": "turn-2", "definition_id": "eval-1", "definition_hash": "hash-1",
+            "id": "run-1", "turn_id": "turn-2",
+            "definition_id": "eval-1", "definition_hash": "hash-1",
             "result_commit": "3" * 40, "evaluator_node_id": "relay", "state": "passed",
             "score": 1.0, "accepted": True, "accepted_at": "2026-08-29T12:00:00+00:00",
             "passed": True,
@@ -344,7 +345,7 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
         }],
         "attempt_events": [], "inference": [],
         "eval_runs": [{
-            "turn_id": "turn-1", "definition_id": "eval-1",
+            "id": "run-1", "turn_id": "turn-1", "definition_id": "eval-1",
             "definition_hash": definition_hash, "result_commit": "2" * 40,
             "evaluator_node_id": "relay", "state": "passed", "score": 1.0,
             "accepted": True, "accepted_at": "2026-08-29T12:00:00+00:00",
@@ -358,6 +359,29 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
     record["goal"]["evals"][0]["path"] = original_path
     record["eval_runs"][0]["evaluator_node_id"] = "node-A"
     assert any("no accepted passing run" in failure for failure in goal._verify_evidence(record))
+    record["eval_runs"][0]["evaluator_node_id"] = "relay"
+
+    # A valid final witness cannot hide an extra accepted label outside the immutable manifest.
+    stray = dict(record["eval_runs"][0])
+    stray.update({
+        "id": "run-stray", "definition_id": "eval-stray",
+        "definition_hash": "f" * 64,
+    })
+    record["eval_runs"].append(stray)
+    assert any("does not match the immutable Goal eval manifest" in failure
+               for failure in goal._verify_evidence(record))
+    record["eval_runs"].pop()
+
+    # Accepted binary eval rows must not carry a contradictory state/label/score tuple.
+    record["eval_runs"][0].update({"state": "failed", "passed": True, "score": 1.0})
+    assert any("has an inconsistent verdict" in failure
+               for failure in goal._verify_evidence(record))
+
+    # Malformed JSON field types are verifier failures, never verifier crashes.
+    record["eval_runs"][0].update({
+        "id": ["not", "hashable"], "state": "passed", "passed": True, "score": 1.0,
+    })
+    assert any("has no immutable run id" in failure for failure in goal._verify_evidence(record))
 
 
 def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
