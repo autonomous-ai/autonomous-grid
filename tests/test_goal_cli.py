@@ -190,6 +190,7 @@ def test_goal_evidence_prints_machine_readable_audit_record(monkeypatch, capsys)
 
 
 def test_goal_evidence_client_assembles_contiguous_bounded_pages(monkeypatch):
+    from cli import goal
     from remote import relay
 
     common = {
@@ -237,6 +238,12 @@ def test_goal_evidence_client_assembles_contiguous_bounded_pages(monkeypatch):
     pages[1]["pagination"]["cursor"] = 0
     with pytest.raises(relay.RelayError, match="pagination metadata is inconsistent"):
         relay.get_goal_evidence("http://relay", "token", "goal-1")
+
+    # Reading a rolling-upgrade relay remains compatible, but a release/training verifier must
+    # never accept a paginated artifact after its consistency fingerprint was omitted or removed.
+    record["export"].pop("snapshot")
+    assert any("no valid paginated snapshot" in failure
+               for failure in goal._verify_evidence(record))
 
     pages[1]["pagination"]["cursor"] = 1
     pages[1]["pagination"]["snapshot"] = "b" * 64

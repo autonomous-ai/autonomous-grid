@@ -184,10 +184,13 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 or export.get("total_turns") != len(turns)):
             failures.append("Goal evidence has inconsistent paginated export metadata")
         snapshot = export.get("snapshot") if isinstance(export, dict) else None
-        if snapshot is not None and (
-                not isinstance(snapshot, str)
+        if (not isinstance(snapshot, str)
                 or re.fullmatch(r"[0-9a-f]{64}", snapshot) is None):
-            failures.append("Goal evidence has a malformed paginated snapshot")
+            # The client may still READ pagination from the short-lived pre-fingerprint relay for
+            # rolling compatibility, but such an export is not strong enough to label training
+            # data or pass a release gate: removing the snapshot from an artifact must not weaken
+            # verification into accepting pages from different moments.
+            failures.append("Goal evidence has no valid paginated snapshot")
 
     trajectory = (record.get("trajectory")
                   if isinstance(record.get("trajectory"), dict) else {})
