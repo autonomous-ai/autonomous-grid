@@ -7,8 +7,8 @@ The detailed physical artifacts are indexed in
 
 ## Tested code revisions
 
-- Public worker/CLI: `4d85a8d5f1d2e15ae6564b6e2c89c3ea185af4c2`
-- Private relay: `019564b5591fd20e8fd7d569a0a7fd913118df14`
+- Public worker/CLI: `9f6cc5f42e36f19557e25d3593c8bdbe9a1c0fd2`
+- Private relay: `38ca1eb4180069342dec213a9759f92b30710f82`
 - Both `grid-goal-distributed` code revisions were clean and pushed when these gates completed.
   The public working tree contained only the documentation changes recorded by the following
   documentation-only commit; it changes no runtime or test code.
@@ -18,12 +18,12 @@ The detailed physical artifacts are indexed in
 | Gate | Result | What it proves |
 |---|---:|---|
 | Full public suite | 3,342 passed, 55 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
-| Private runbook release bundle | 136 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, retention, dead-branch pruning, inference attribution, and capability matching |
+| Private runbook release bundle | 137 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, retention, dead-branch pruning, inference attribution, and capability matching |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
 | Cross-repository distributed matrix | 17 passed | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 
-The full public suite, private runbook bundle, migration companion, and 17-scenario matrix were each
+The full public suite, private runbook bundle, migration suite, and 17-scenario matrix were each
 run uninterrupted against the exact revisions above. The evaluator audit also proves that:
 
 - completion checks read the relay-resolved immutable result commit rather than a provider-supplied
@@ -32,6 +32,9 @@ run uninterrupted against the exact revisions above. The evaluator audit also pr
   malformed Unicode, oversized inputs, and damaged cached evidence;
 - all checks in a nomination share a 45-second deadline inside the worker's 60-second result timeout,
   and one infrastructure failure prevents additional evaluator subprocesses from multiplying it;
+- after the native child exits and renewal stops, an exact-claim-fenced 70-second settlement lease
+  protects relay-owned Git/eval work from both lease reclaim and the run-deadline sweep. It never
+  shortens the normal 120-second lease, and the final terminal write repeats the claim fence;
 - remote Goal budgets and native counters are exact-JSON integers bounded so the maximum permitted
   eight-way, depth-three hierarchy cannot overflow signed database arithmetic. Goal budget, usage,
   time and child-accounting columns are `BIGINT` on PostgreSQL, and the startup migration widens

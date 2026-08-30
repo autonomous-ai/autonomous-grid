@@ -223,7 +223,10 @@ Git/read failures remain blocking evaluator infrastructure errors.
 All definitions in one completion nomination share a 45-second wall-clock evaluator deadline. The
 Goal worker has already stopped lease renewal at this point and its terminal-report request waits 60
 seconds, so the remaining headroom covers ref settlement, the lease-fenced database transaction and
-the response. One evaluator infrastructure error records blocked audit rows for the remaining
+the response. At authenticated result ingress, the relay extends that exact claim's lease and run
+deadline to at least 70 seconds without shortening a longer configured lease; a short task TTL
+therefore cannot reclaim valid work while relay-owned Git/eval settlement is still running. One
+evaluator infrastructure error records blocked audit rows for the remaining
 definitions without starting more Git subprocesses; a single wedged repository therefore cannot
 multiply its timeout by every check in the manifest.
 
