@@ -263,6 +263,7 @@ def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch)
     monkeypatch.setenv("GRID_TASK_ENV_PASSTHROUGH", "OPENAI_API_KEY CODEX_API_KEY")
     monkeypatch.setenv("OPENAI_API_KEY", "provider-openai-secret")
     monkeypatch.setenv("CODEX_API_KEY", "provider-codex-secret")
+    monkeypatch.setenv("NO_PROXY", "internal.example")
     monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
     monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
     rollout = (tmp_path / task_codex.AGENT_DIR / task_codex.HOME_DIR
@@ -305,6 +306,8 @@ def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch)
     assert not any(name.startswith(("ANTHROPIC_", "OPENAI_"))
                    for name in spawned["env"])
     assert "CODEX_API_KEY" not in spawned["env"]
+    assert spawned["env"]["NO_PROXY"] == "internal.example,127.0.0.1,localhost"
+    assert spawned["env"]["no_proxy"] == spawned["env"]["NO_PROXY"]
     assert events[-1][0] == "goal.slice.completed"
 
 

@@ -1156,8 +1156,24 @@ def goal_child_env(author=None, workspace: Path | None = None) -> dict[str, str]
     Grid so inference attribution, lease fencing, and credential refresh remain authoritative.
     """
     env = child_env(author=author, workspace=workspace)
-    return {
+    env = {
         name: value for name, value in env.items()
         if name not in _GOAL_MODEL_ENV_NAMES
         and not name.startswith(_GOAL_MODEL_ENV_PREFIXES)
     }
+    # Both native harnesses call a credential-bearing proxy on 127.0.0.1. Corporate proxy
+    # variables remain useful to the agent's shell commands and business traffic, but the model
+    # request must never leave the machine or depend on a proxy's localhost-bypass defaults.
+    bypasses: list[str] = []
+    for inherited_no_proxy in (env.get("NO_PROXY", ""), env.get("no_proxy", "")):
+        for part in inherited_no_proxy.split(","):
+            part = part.strip()
+            if part and part not in bypasses:
+                bypasses.append(part)
+    for loopback in ("127.0.0.1", "localhost"):
+        if loopback not in bypasses:
+            bypasses.append(loopback)
+    loopback_no_proxy = ",".join(bypasses)
+    env["NO_PROXY"] = loopback_no_proxy
+    env["no_proxy"] = loopback_no_proxy
+    return env

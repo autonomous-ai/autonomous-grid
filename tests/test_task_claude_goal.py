@@ -91,6 +91,7 @@ def test_claude_goal_uses_native_command_and_loopback_grid_model(tmp_path, monke
         "ANTHROPIC_CUSTOM_HEADERS": "x-provider-secret: hidden",
         "OPENAI_API_KEY": "provider-openai-key",
         "CLAUDE_CODE_OAUTH_TOKEN": "provider-oauth-token",
+        "no_proxy": "internal.example,127.0.0.1",
     })
     captured = {}
 
@@ -144,6 +145,8 @@ def test_claude_goal_uses_native_command_and_loopback_grid_model(tmp_path, monke
     }
     assert "OPENAI_API_KEY" not in captured["env"]
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in captured["env"]
+    assert captured["env"]["NO_PROXY"] == "internal.example,127.0.0.1,localhost"
+    assert captured["env"]["no_proxy"] == captured["env"]["NO_PROXY"]
     assert "GRID-SECRET" not in repr(captured)
     assert "claim-generation-secret" not in repr(captured)
 
