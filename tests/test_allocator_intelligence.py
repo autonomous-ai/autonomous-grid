@@ -124,6 +124,37 @@ def test_aggregate_unbound_demand_creates_one_non_destructive_portfolio_projecti
     assert projected[0].error_rate == 0
 
 
+def test_prepared_workload_forecasts_are_reused_without_reserializing_demand(monkeypatch):
+    intelligence = WorkloadIntelligence(portfolio_min_samples=1)
+    intelligence.observe(
+        RequestFeatures("chat/completions", "auto", "coding"),
+        portfolio_unbound=True,
+        service_seconds=4,
+        timestamp=100,
+    )
+    profiles = (profile("coder", 2_000, ("coding", 1.0)),)
+    prepared = intelligence.portfolio_workload_forecast_map(now=100)
+    expected_forecasts = intelligence.portfolio_forecasts(profiles, (), now=100)
+    expected_projections = intelligence.projections(profiles, now=100)
+
+    def fail_serialization(_self):
+        raise AssertionError("prepared workload forecasts must avoid tracker serialization")
+
+    monkeypatch.setattr(DemandTracker, "to_dict", fail_serialization)
+
+    assert intelligence.portfolio_forecasts(
+        profiles,
+        (),
+        now=100,
+        workload_forecasts=prepared,
+    ) == expected_forecasts
+    assert intelligence.projections(
+        profiles,
+        now=100,
+        workload_forecasts=prepared,
+    ) == expected_projections
+
+
 def test_long_sparse_job_crosses_device_time_evidence_gate_before_cheap_call():
     intelligence = WorkloadIntelligence(
         portfolio_min_samples=3,

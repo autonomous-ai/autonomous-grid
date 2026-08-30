@@ -336,6 +336,24 @@ class WorkloadIntelligence:
         keys = tuple(sorted((self.demand.to_dict().get("models") or {}).keys()))
         return tuple(self.demand.forecast(key, now=timestamp) for key in keys)
 
+    def portfolio_workload_forecast_map(
+        self,
+        *,
+        now: float | None = None,
+    ) -> dict[str, DemandForecast]:
+        """Prepare one immutable-snapshot workload forecast map for portfolio search.
+
+        A controller pass evaluates many model mappings against the same bounded demand snapshot.
+        Preparing these forecasts once avoids repeatedly serializing the tracker for every
+        counterfactual without changing any demand or placement decision.
+        """
+
+        timestamp = time.time() if now is None else float(now)
+        keys = tuple(
+            sorted((self.unbound_demand.to_dict().get("models") or {}).keys())
+        )
+        return self._portfolio_workload_forecasts(keys, now=timestamp)
+
     def portfolio_evidence_ready(
         self,
         sample_count: int,
@@ -421,6 +439,7 @@ class WorkloadIntelligence:
         now: float,
         placement_hints: Mapping[str, Mapping[str, Any]] | None = None,
         chosen_models: Mapping[str, str] | None = None,
+        workload_forecasts: Mapping[str, DemandForecast] | None = None,
     ) -> tuple[DemandForecast, ...]:
         """Project unbound workload demand onto a bounded speculative model portfolio.
 
@@ -431,15 +450,14 @@ class WorkloadIntelligence:
 
         profile_list = tuple(profiles)
         merged = {item.model_id: item for item in direct}
-        workload_keys = tuple(
-            sorted((self.unbound_demand.to_dict().get("models") or {}).keys())
+        prepared_workload_forecasts = (
+            self.portfolio_workload_forecast_map(now=now)
+            if workload_forecasts is None
+            else dict(workload_forecasts)
         )
-        workload_forecasts = self._portfolio_workload_forecasts(
-            workload_keys,
-            now=now,
-        )
+        workload_keys = tuple(sorted(prepared_workload_forecasts))
         for workload in workload_keys:
-            forecast = workload_forecasts[workload]
+            forecast = prepared_workload_forecasts[workload]
             if forecast.requests_per_minute <= 0:
                 continue
             candidates = [
@@ -547,17 +565,19 @@ class WorkloadIntelligence:
         now: float | None = None,
         placement_hints: Mapping[str, Mapping[str, Any]] | None = None,
         chosen_models: Mapping[str, str] | None = None,
+        workload_forecasts: Mapping[str, DemandForecast] | None = None,
     ) -> tuple[dict[str, Any], ...]:
         timestamp = time.time() if now is None else float(now)
         rows: list[dict[str, Any]] = []
         profile_list = tuple(profiles)
-        keys = tuple(sorted((self.unbound_demand.to_dict().get("models") or {}).keys()))
-        workload_forecasts = self._portfolio_workload_forecasts(
-            keys,
-            now=timestamp,
+        prepared_workload_forecasts = (
+            self.portfolio_workload_forecast_map(now=timestamp)
+            if workload_forecasts is None
+            else dict(workload_forecasts)
         )
+        keys = tuple(sorted(prepared_workload_forecasts))
         for workload in keys:
-            forecast = workload_forecasts[workload]
+            forecast = prepared_workload_forecasts[workload]
             configured_candidates = [
                 profile
                 for profile in profile_list

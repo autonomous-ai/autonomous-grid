@@ -1146,6 +1146,7 @@ class AllocatorController:
             # bounded telemetry under its own mutex, then release it before any optimization so
             # inference finalizers can keep recording demand while the controller holds `_lock`.
             intelligence = WorkloadIntelligence.from_dict(self.intelligence.to_dict())
+        workload_forecasts = intelligence.portfolio_workload_forecast_map(now=now)
         selection_hints = _portfolio_selection_hints(
             profiles,
             direct,
@@ -1154,6 +1155,7 @@ class AllocatorController:
             node_list,
             self.planner,
             now=now,
+            workload_forecasts=workload_forecasts,
         )
         if node_list:
             selection_hints = _spare_canary_hints(
@@ -1164,6 +1166,7 @@ class AllocatorController:
                 node_list,
                 self.planner,
                 now=now,
+                workload_forecasts=workload_forecasts,
             )
         selection = self._joint_portfolio_selection(
             profiles,
@@ -1172,6 +1175,7 @@ class AllocatorController:
             now=now,
             placement_hints=selection_hints,
             intelligence=intelligence,
+            workload_forecasts=workload_forecasts,
         )
         forecasts = intelligence.portfolio_forecasts(
             profiles,
@@ -1179,6 +1183,7 @@ class AllocatorController:
             now=now,
             placement_hints=selection_hints,
             chosen_models=selection,
+            workload_forecasts=workload_forecasts,
         )
         return forecasts, selection, selection_hints
 
@@ -1191,6 +1196,7 @@ class AllocatorController:
         now: float,
         placement_hints: Mapping[str, Mapping[str, Any]] | None,
         intelligence: WorkloadIntelligence,
+        workload_forecasts: Mapping[str, DemandForecast],
     ) -> dict[str, str] | None:
         """Coordinate workload choices against one real fleet plan.
 
@@ -1207,6 +1213,7 @@ class AllocatorController:
             profiles,
             now=now,
             placement_hints=placement_hints,
+            workload_forecasts=workload_forecasts,
         )
         exclusive_device_models = {
             profile.model_id for profile in profiles if profile.replica_concurrency == 1
@@ -1317,7 +1324,17 @@ class AllocatorController:
         # an invalid multi-experiment state that one-at-a-time moves cannot escape.
         selection = dict(exploitation_best)
         profile_by_id = {profile.model_id: profile for profile in profiles}
-        baseline = self.planner.plan(nodes, profiles, direct, now=now)
+        # These plans rank counterfactual portfolios only. They are never reconciled or sent to a
+        # node, so executable-plan identity hashing would serialize the same fleet dozens of times
+        # without adding fencing safety. The authoritative plan built by `_tick_locked` retains its
+        # normal digest and generation.
+        baseline = self.planner.plan(
+            nodes,
+            profiles,
+            direct,
+            now=now,
+            compute_input_digest=False,
+        )
         baseline_targets = dict(baseline.desired_replicas)
         horizon_planner = PlacementPlanner(
             replace(self.planner.policy, preserve_recent_residencies=False)
@@ -1382,15 +1399,28 @@ class AllocatorController:
                 now=now,
                 placement_hints=placement_hints,
                 chosen_models=candidate_selection,
+                workload_forecasts=workload_forecasts,
             )
-            plan = self.planner.plan(nodes, profiles, forecasts, now=now)
+            plan = self.planner.plan(
+                nodes,
+                profiles,
+                forecasts,
+                now=now,
+                compute_input_digest=False,
+            )
             # Current hysteresis is authoritative for the mutations issued on this tick, but it
             # must not make a better stable portfolio invisible. Evaluate the same forecast after
             # recent-residency holds expire; the live planner will reach that target safely over
             # subsequent ticks instead of the selector repeatedly recommitting to incumbents just
             # because they are incumbents.
             horizon_plan = (
-                horizon_planner.plan(nodes, profiles, forecasts, now=now)
+                horizon_planner.plan(
+                    nodes,
+                    profiles,
+                    forecasts,
+                    now=now,
+                    compute_input_digest=False,
+                )
                 if scarce_portfolio
                 else plan
             )
@@ -2724,6 +2754,7 @@ def _spare_canary_hints(
     planner: PlacementPlanner,
     *,
     now: float,
+    workload_forecasts: Mapping[str, DemandForecast] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Authorize weak media canaries only after proving fleet-level spare capacity.
 
@@ -2749,6 +2780,7 @@ def _spare_canary_hints(
         profile_list,
         now=now,
         placement_hints=result,
+        workload_forecasts=workload_forecasts,
     )
     ordinary_rows = tuple(
         row
@@ -2769,12 +2801,14 @@ def _spare_canary_hints(
         now=now,
         placement_hints=result,
         chosen_models=ordinary_selection,
+        workload_forecasts=workload_forecasts,
     )
     ordinary_plan = planner.plan(
         node_list,
         profile_list,
         ordinary_forecasts,
         now=now,
+        compute_input_digest=False,
     )
     ordinary_models = {assignment.model_id for assignment in ordinary_plan.assignments}
     for model_id in ordinary_models:
@@ -2900,6 +2934,7 @@ def _portfolio_selection_hints(
     planner: PlacementPlanner,
     *,
     now: float,
+    workload_forecasts: Mapping[str, DemandForecast] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Fence speculative replacement against demand visible in the same snapshot.
 
@@ -2939,7 +2974,11 @@ def _portfolio_selection_hints(
             }
             for profile in profile_list
         }
-    projections = intelligence.projections(profile_list, now=now)
+    projections = intelligence.projections(
+        profile_list,
+        now=now,
+        workload_forecasts=workload_forecasts,
+    )
     active_workloads = {
         str(row.get("workload") or "")
         for row in projections
@@ -2960,12 +2999,14 @@ def _portfolio_selection_hints(
         direct_list,
         now=now,
         chosen_models=preferred_selection,
+        workload_forecasts=workload_forecasts,
     )
     protection_plan = planner.plan(
         node_list,
         profile_list,
         protection_forecasts,
         now=now,
+        compute_input_digest=False,
     )
     demand_replica_floors = dict(protection_plan.desired_replicas)
     preferred_models = frozenset(preferred_selection.values())
@@ -3020,6 +3061,7 @@ def _portfolio_selection_hints(
         profile_list,
         tuple(structural_forecasts.values()),
         now=now,
+        compute_input_digest=False,
     )
     complete_portfolio_feasible = all(
         structural_plan.nodes_for(model_id) for model_id in preferred_models

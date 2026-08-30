@@ -151,7 +151,9 @@ suitability is below a specialist. Nominally roomy fleets keep the pressure-firs
 temporary outage does not switch portfolio policy. A shared generalist can therefore beat two
 slightly better specialists when only one model slot is available. Search considers at most four
 candidates per workload and 64 distinct portfolios, so catalog size cannot create an unbounded
-planning pass.
+planning pass. Every counterfactual reuses one immutable workload-forecast snapshot and omits the
+executable plan identity digest; the single authoritative plan still hashes its complete inputs for
+generation fencing before any command can reach a node.
 
 Each bounded workload set reserves representation for its exploitation leader and the broadest
 cross-workload candidate; a fifth-ranked generalist can therefore remain discoverable when four

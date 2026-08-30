@@ -481,10 +481,13 @@ class PlacementPlanner:
         now: float | None = None,
         startup_seconds: Mapping[tuple[str, str], float] | None = None,
         load_seconds: Mapping[tuple[str, str], float] | None = None,
+        compute_input_digest: bool = True,
     ) -> PlacementPlan:
         timestamp = time.time() if now is None else float(now)
         if not math.isfinite(timestamp) or timestamp < 0:
             raise ValueError("now must be finite and non-negative")
+        if not isinstance(compute_input_digest, bool):
+            raise ValueError("compute_input_digest must be boolean")
         node_list = sorted(nodes, key=lambda item: item.node_id)
         model_list = sorted(models, key=lambda item: item.model_id)
         _require_unique((node.node_id for node in node_list), "node")
@@ -2228,19 +2231,27 @@ class PlacementPlanner:
         # derived from it are. Include the resulting targets and placements so the controller
         # advances its logical generation exactly when a time-sensitive decision changes. A late
         # command from the old state can then be fenced by the node runtime.
-        input_digest = _input_digest(
-            node_list,
-            model_list,
-            forecast_by_model,
-            desired_by_model=desired_by_model,
-            assignments=assignments,
-            preemptions=preemptions,
+        input_digest = (
+            _input_digest(
+                node_list,
+                model_list,
+                forecast_by_model,
+                desired_by_model=desired_by_model,
+                assignments=assignments,
+                preemptions=preemptions,
+            )
+            if compute_input_digest
+            else ""
         )
         objective = sum(item.score for item in assignments) - 1_000_000 * sum(
             item.missing_replicas for item in unsatisfied
         )
         return PlacementPlan(
-            generation=new_generation(input_digest, timestamp),
+            generation=(
+                new_generation(input_digest, timestamp)
+                if compute_input_digest
+                else f"evaluation-{int(timestamp * 1000):013d}"
+            ),
             created_at=timestamp,
             assignments=tuple(assignments),
             desired_replicas=tuple(sorted(desired_by_model.items())),

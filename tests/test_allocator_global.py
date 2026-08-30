@@ -4515,6 +4515,30 @@ def test_planner_output_does_not_depend_on_input_order():
     assert first == second
 
 
+def test_counterfactual_plan_skips_identity_hash_without_changing_decisions():
+    machines = [node("b", domain="b"), node("a", domain="a")]
+    profiles = [model("small", 4_000), model("large", 8_000)]
+    planner = PlacementPlanner()
+
+    authoritative = planner.plan(machines, profiles, now=10)
+    counterfactual = planner.plan(
+        machines,
+        profiles,
+        now=10,
+        compute_input_digest=False,
+    )
+
+    assert authoritative.input_digest
+    assert counterfactual.input_digest == ""
+    assert counterfactual.generation == "evaluation-0000000010000"
+    assert counterfactual.assignments == authoritative.assignments
+    assert counterfactual.desired_replicas == authoritative.desired_replicas
+    assert counterfactual.unsatisfied == authoritative.unsatisfied
+    assert counterfactual.preemptions == authoritative.preemptions
+    with pytest.raises(ValueError, match="compute_input_digest must be boolean"):
+        planner.plan(machines, profiles, compute_input_digest=1)  # type: ignore[arg-type]
+
+
 def test_reconciler_proposes_load_then_dependent_warm():
     machine = node("n")
     profile = model()
