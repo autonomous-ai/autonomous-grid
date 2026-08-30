@@ -124,6 +124,22 @@ def test_continuation_does_not_duplicate_relay_supplied_exact_contracts():
     assert task_codex._continuation_prompt(job, 1) == prompt
 
 
+def test_continuation_matches_failed_contract_names_when_old_relay_omits_last_eval():
+    job = _job(prompt="Grid evaluation failed:\n- instructions: required file is absent")
+    job["goal"]["evals"] = [
+        {"type": "file", "name": "instructions", "path": "README.md", "exists": True,
+         "definition_id": "eval-readme"},
+        {"type": "file", "name": "game", "path": "game.js", "exists": True,
+         "definition_id": "eval-game"},
+    ]
+
+    prompt = task_codex._continuation_prompt(job, 1)
+
+    assert prompt is not None
+    assert '"path": "README.md"' in prompt
+    assert '"path": "game.js"' not in prompt
+
+
 def test_goal_inference_proxy_attributes_requests_to_durable_turn_and_conversation():
     class Handler:
         headers = Message()

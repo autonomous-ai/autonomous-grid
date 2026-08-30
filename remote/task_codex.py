@@ -789,18 +789,24 @@ def _continuation_prompt(job: dict[str, Any], turns_before: int) -> str | None:
     goal = job.get("goal")
     if not isinstance(goal, dict):
         return prompt
-    last_eval = goal.get("last_eval")
     evals = goal.get("evals")
-    if not isinstance(last_eval, dict) or not isinstance(evals, list):
+    if not isinstance(evals, list):
         return prompt
-    failed_ids = {
-        item.get("id") for item in last_eval.get("results", [])
-        if isinstance(item, dict) and item.get("passed") is False
-        and isinstance(item.get("id"), str)
-    }
+    last_eval = goal.get("last_eval")
+    failed_ids = set()
+    if isinstance(last_eval, dict):
+        failed_ids = {
+            item.get("id") for item in last_eval.get("results", [])
+            if isinstance(item, dict) and item.get("passed") is False
+            and isinstance(item.get("id"), str)
+        }
     contracts = [
         spec for spec in evals if isinstance(spec, dict)
-        and spec.get("definition_id") in failed_ids
+        and (spec.get("definition_id") in failed_ids
+             # Older claim payloads omitted last_eval. Their relay-authored prompt still names
+             # each failed check on an unambiguous bullet, so use that signed text as fallback.
+             or (isinstance(spec.get("name"), str)
+                 and f"- {spec['name']}:" in prompt))
     ]
     if not contracts:
         return prompt
