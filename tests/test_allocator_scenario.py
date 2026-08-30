@@ -48,6 +48,9 @@ def test_scenario_exercises_heterogeneous_fleet_catalog_users_and_events(
     assert report.metrics["direct_named_requests"] > 0
     assert report.metrics["joint_portfolio_ticks"] > 0
     assert report.metrics["portfolio_changes"] > 0
+    assert report.metrics["overloaded_model_minutes"] > 0
+    assert report.metrics["peak_modeled_queue_depth"] > 0
+    assert report.metrics["realized_failure_observations"] > 0
     assert sum(report.metrics["admission_state_minutes"].values()) >= 18
     assert report.metrics["admission_by_workload"]
     assert "admission_blocker_minutes" in report.metrics
@@ -55,6 +58,7 @@ def test_scenario_exercises_heterogeneous_fleet_catalog_users_and_events(
     assert any(row.get("portfolio_selection") for row in report.timeline)
     assert any(row.get("portfolio_admissions") for row in report.timeline)
     assert all("ready_replicas" in row for row in report.timeline)
+    assert any(row.get("overloaded_models") for row in report.timeline)
     assert all(0 <= row["service_rate_pct"] <= 100 for row in report.timeline)
     assert any(
         row["minute"] >= 0

@@ -978,7 +978,12 @@ The report explains joint portfolio changes, loads, unloads, node transitions, c
 persistent workload-admission states, demand served, least-user service and user/workload SLO
 attainment, portfolio suitability, memory use, cache locality,
 persistent modeled disk consumption, cold starts, capacity recommendations, and
-safety invariants. Admission metrics separately count state and concrete blocking-model minutes, so
+safety invariants. Requests are scored against the model that was actually READY and selected when
+they arrived. When routed device-time exceeds that model's effective capacity, the lab feeds the
+resulting deterministic failures, latency inflation, and queue depth into the next production
+controller tick; the timeline and summary report the overloaded models instead of letting a
+resident-but-saturated engine masquerade as successful service. Admission metrics separately count
+state and concrete blocking-model minutes, so
 an unselected workload cannot masquerade as a low replica shortfall. It intentionally reports
 shortfalls instead of inventing capacity. `--timeline`
 prints every changing tick; `--json` emits the complete stable report;

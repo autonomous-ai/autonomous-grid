@@ -151,6 +151,14 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
                     f"{item['model']}:{item['missing']}" for item in row["unsatisfied"]
                 )
             )
+        if row.get("overloaded_models"):
+            pressure = [
+                f"{model} {values['offered_concurrency']:g}/{values['ready_capacity']:g} q{values['queue_depth']}"
+                for model, values in sorted(row["overloaded_models"].items())[:2]
+            ]
+            if len(row["overloaded_models"]) > 2:
+                pressure.append(f"+{len(row['overloaded_models']) - 2}")
+            changes.append("overload " + ", ".join(pressure))
         detail = " | ".join(changes) or "placement stable"
         print(
             f"  m{row['minute']:02d} {row['phase']:<19} "
@@ -206,6 +214,11 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
     print(
         f"  capacity shortfall            {metrics['unsatisfied_replica_minutes']} "
         "replica-minutes"
+    )
+    print(
+        f"  realized serving pressure     {metrics['overloaded_model_minutes']} "
+        f"overloaded model-minutes · peak queue {metrics['peak_modeled_queue_depth']} · "
+        f"failed observations {metrics['realized_failure_observations']}"
     )
     if metrics["shortfall_by_model"]:
         largest_shortfall = max(
@@ -291,6 +304,7 @@ def _notable_timeline(rows: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any],
             or row["node_changes"]
             or row["loads"]
             or row["unloads"]
+            or row.get("overloaded_models")
         ):
             selected.append(row)
             seen_phases.add(row["phase"])

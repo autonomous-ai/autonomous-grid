@@ -331,6 +331,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     topology_rng = random.Random(config.seed ^ 0x4E4F4445)
     persona_rng = random.Random(config.seed ^ 0x55534552)
     rng = random.Random(config.seed ^ 0x44454D41)
+    outcome_rng = random.Random(config.seed ^ 0x4F555443)
     catalog = _build_catalog(config.models, config.machines)
     machines = _build_machines(config.machines, catalog, topology_rng)
     personas = _build_personas(config.users, persona_rng)
@@ -355,6 +356,9 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     cache_loads = 0
     cold_start_seconds = 0.0
     artifact_download_mb = 0
+    overloaded_model_minutes = 0
+    peak_modeled_queue_depth = 0
+    realized_failure_observations = 0
     unsatisfied_replica_minutes = 0
     shortfall_by_model: Counter[str] = Counter()
     peak_shortfall_by_model: Counter[str] = Counter()
@@ -414,6 +418,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 "ready_replicas": {},
                 "served_equivalent": 0.0,
                 "service_rate_pct": 0.0,
+                "overloaded_models": {},
                 "loads": sorted(bootstrap_loads),
                 "unloads": [],
                 "node_changes": [],
@@ -437,6 +442,34 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         request_counts_by_user: Counter[str] = Counter()
         service_totals: defaultdict[str, float] = defaultdict(float)
         current_ready = _ready_models(nodes)
+        capacity_by_model: defaultdict[str, float] = defaultdict(float)
+        ready_replicas_by_model: Counter[str] = Counter()
+        for node in nodes:
+            if node.state not in (NodeState.ACCEPTING, NodeState.THROTTLED):
+                continue
+            node_capacity_fraction = (
+                planner_policy.throttled_capacity_fraction
+                if node.state == NodeState.THROTTLED
+                else 1.0
+            )
+            for residency in node.residencies:
+                profile = profile_by_id.get(residency.model_id)
+                if (
+                    profile is None
+                    or residency.state != ResidencyState.READY
+                    or not profile.matches_artifact(residency)
+                ):
+                    continue
+                ready_replicas_by_model[residency.model_id] += 1
+                capacity_by_model[residency.model_id] += (
+                    profile.replica_concurrency
+                    * profile.target_utilization
+                    * node_capacity_fraction
+                )
+        observation_batches: list[
+            tuple[Persona, Any, tuple[float, ...], str, float]
+        ] = []
+        routed_by_workload: dict[str, str] = {}
 
         for persona in personas:
             multiplier = (
@@ -479,23 +512,89 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 if served_model
                 else 0.0
             )
-            for _ in range(count):
-                controller.observe_lifecycle(
+            routed_by_workload[features.workload] = served_model
+            observation_batches.append(
+                (
+                    persona,
                     features,
-                    served_model=served_model,
-                    service_seconds=persona.service_seconds,
-                    latency_ms=persona.service_seconds * 1_000.0,
-                    queue_depth=0 if served_model else 1,
-                    error=not served_model,
-                    output_units=128 if features.workload not in {"image", "video"} else 1,
-                    quality=(max(0.0, min(1.0, capability * 0.95)) if served_model else None),
-                    workflow_key=persona.user_id,
-                    timestamp=now + rng.random() * 30.0,
+                    tuple(now + rng.random() * 30.0 for _ in range(count)),
+                    served_model,
+                    capability,
                 )
+            )
             request_counts[features.workload] += count
             request_counts_by_user[persona.user_id] += count
             service_totals[features.workload] += count * persona.service_seconds
             direct_named_requests += count if explicit_model else 0
+
+        # Close the control loop with the capacity that was actually READY when requests arrived.
+        # Previously every routed request reported success and queue=0 even when several workloads
+        # overloaded the same residency; the report scored the shortfall afterward, but the
+        # production demand loop never got to react to it. Aggregate all routed device-time first,
+        # then feed deterministic realized failures and queue pressure into the next plan.
+        offered_by_model: defaultdict[str, float] = defaultdict(float)
+        for workload, model_id in routed_by_workload.items():
+            if model_id:
+                offered_by_model[model_id] += service_totals[workload] / 60.0
+        service_ratio_by_model = {
+            model_id: min(1.0, capacity_by_model.get(model_id, 0.0) / offered)
+            if offered > 0
+            else 1.0
+            for model_id, offered in offered_by_model.items()
+        }
+        queue_by_model = {
+            model_id: math.ceil(max(0.0, offered - capacity_by_model.get(model_id, 0.0)))
+            for model_id, offered in offered_by_model.items()
+        }
+        overloaded_models = {
+            model_id: {
+                "offered_concurrency": round(offered, 2),
+                "ready_capacity": round(capacity_by_model.get(model_id, 0.0), 2),
+                "queue_depth": queue_by_model[model_id],
+            }
+            for model_id, offered in sorted(offered_by_model.items())
+            if offered > capacity_by_model.get(model_id, 0.0)
+        }
+        overloaded_model_minutes += len(overloaded_models)
+        peak_modeled_queue_depth = max(
+            peak_modeled_queue_depth,
+            max(
+                (row["queue_depth"] for row in overloaded_models.values()),
+                default=0,
+            ),
+        )
+        for persona, features, timestamps, served_model, capability in observation_batches:
+            service_ratio = service_ratio_by_model.get(served_model, 0.0)
+            queue_depth = queue_by_model.get(served_model, 1 if not served_model else 0)
+            capacity = capacity_by_model.get(served_model, 0.0)
+            pressure = (
+                max(1.0, offered_by_model[served_model] / capacity)
+                if served_model and capacity > 0
+                else 1.0
+            )
+            for observation_timestamp in timestamps:
+                succeeded = bool(
+                    served_model and outcome_rng.random() < service_ratio
+                )
+                realized_failure_observations += int(not succeeded)
+                controller.observe_lifecycle(
+                    features,
+                    served_model=served_model,
+                    service_seconds=persona.service_seconds,
+                    latency_ms=persona.service_seconds * 1_000.0 * pressure,
+                    queue_depth=queue_depth,
+                    error=not succeeded,
+                    output_units=(
+                        128 if features.workload not in {"image", "video"} else 1
+                    ),
+                    quality=(
+                        max(0.0, min(1.0, capability * 0.95))
+                        if succeeded
+                        else None
+                    ),
+                    workflow_key=persona.user_id,
+                    timestamp=observation_timestamp,
+                )
 
         if config.oracle:
             oracle_demands.append(
@@ -579,61 +678,18 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         }
         admission_changed = admission_states != prior_admission_states
         portfolio_changes += int(portfolio_changed)
-        projection_by_workload = {
-            row["workload"]: row
-            for row in allocator_status["portfolio_projections"]
-        }
         # Requests arrived before this planning tick. Score them against capacity that was READY at
         # the start of the tick, not desired assignments whose load/warm mutations have only just
         # been issued. Materialization below makes successful mutations available next minute. This
         # one-tick actuation lag is deliberately conservative and is what lets the lab distinguish
         # proactive allocation from reactive scaling.
-        capacity_by_model: defaultdict[str, float] = defaultdict(float)
-        ready_replicas_by_model: Counter[str] = Counter()
-        for node in nodes:
-            if node.state not in (NodeState.ACCEPTING, NodeState.THROTTLED):
-                continue
-            node_capacity_fraction = (
-                planner_policy.throttled_capacity_fraction
-                if node.state == NodeState.THROTTLED
-                else 1.0
-            )
-            for residency in node.residencies:
-                profile = profile_by_id.get(residency.model_id)
-                if (
-                    profile is None
-                    or residency.state != ResidencyState.READY
-                    or not profile.matches_artifact(residency)
-                ):
-                    continue
-                ready_replicas_by_model[residency.model_id] += 1
-                capacity_by_model[residency.model_id] += (
-                    profile.replica_concurrency
-                    * profile.target_utilization
-                    * node_capacity_fraction
-                )
-        offered_by_model: defaultdict[str, float] = defaultdict(float)
-        chosen_by_workload: dict[str, str] = {}
+        chosen_by_workload = dict(routed_by_workload)
         for workload, count in request_counts.items():
-            chosen = _DIRECT_MODEL_BY_WORKLOAD.get(workload, "")
-            if chosen not in profile_by_id:
-                chosen = ""
-            if not chosen:
-                chosen = str(
-                    (projection_by_workload.get(workload) or {}).get("chosen_model") or ""
-                )
-            chosen_by_workload[workload] = chosen
+            chosen = chosen_by_workload.get(workload, "")
             if not chosen:
                 catalog_gap_requests += count
                 continue
-            offered_by_model[chosen] += service_totals[workload] / 60.0
             suitability_weight += count * profile_by_id[chosen].workload_score(workload)
-        service_ratio_by_model = {
-            model_id: min(1.0, capacity_by_model.get(model_id, 0.0) / offered)
-            if offered > 0
-            else 1.0
-            for model_id, offered in offered_by_model.items()
-        }
         minute_served = 0.0
         for workload, count in request_counts.items():
             chosen = chosen_by_workload.get(workload, "")
@@ -667,6 +723,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             or state_changes
             or portfolio_changed
             or admission_changed
+            or overloaded_models
         ):
             timeline.append(
                 {
@@ -681,6 +738,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                         100.0 * minute_served / max(1, sum(request_counts.values())),
                         2,
                     ),
+                    "overloaded_models": overloaded_models,
                     "loads": [f"{model}@{node}" for node, model in sorted(added)],
                     "unloads": [f"{model}@{node}" for node, model in sorted(removed)],
                     "node_changes": state_changes,
@@ -874,6 +932,9 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             "cache_hit_rate_pct": round(100.0 * cache_loads / loads, 2) if loads else 100.0,
             "modeled_cold_start_seconds": round(cold_start_seconds, 2),
             "artifact_download_mb": artifact_download_mb,
+            "overloaded_model_minutes": overloaded_model_minutes,
+            "peak_modeled_queue_depth": peak_modeled_queue_depth,
+            "realized_failure_observations": realized_failure_observations,
             "minimum_remaining_disk_mb": min(disk_available.values(), default=0),
             "unsatisfied_replica_minutes": unsatisfied_replica_minutes,
             "shortfall_by_model": dict(sorted(shortfall_by_model.items())),
