@@ -1534,10 +1534,25 @@ def test_the_event_ceiling_is_the_one_the_relay_actually_enforces():
 
 def test_goal_evaluation_finishes_inside_the_terminal_report_timeout():
     """The relay evaluates after this provider stops renewal, inside one result HTTP request."""
+    import ast
+    import os
+    import pathlib
+
     from remote import relay
 
-    evaluation_ceiling = _relay_constant(
-        "MAX_EVALUATION_SECONDS", module="goal_evals.py")
+    source_root = os.getenv("GRID_SRC_REPO")
+    if not source_root:
+        pytest.skip("GRID_SRC_REPO is required for the Goal evaluation timeout contract")
+    source = pathlib.Path(source_root) / "grid_cli" / "private_server" / "goal_evals.py"
+    assert source.is_file(), f"GRID_SRC_REPO has no private Goal evaluator at {source}"
+    assignments = [
+        node for node in ast.parse(source.read_text()).body
+        if isinstance(node, ast.Assign) and any(
+            getattr(target, "id", None) == "MAX_EVALUATION_SECONDS"
+            for target in node.targets)
+    ]
+    assert len(assignments) == 1
+    evaluation_ceiling = _numeric(assignments[0].value, "MAX_EVALUATION_SECONDS")
     assert evaluation_ceiling <= relay._TASK_RESULT_TIMEOUT - 10, (
         f"the relay can spend {evaluation_ceiling}s evaluating after the Goal agent exits, but "
         f"the provider stops waiting after {relay._TASK_RESULT_TIMEOUT}s; leave ten seconds for "
@@ -1810,12 +1825,8 @@ def _relay_module(name):
     is absent (`GRID_SRC_REPO` is the cross-repo E2E's override; this side has deliberately never
     needed one, because a developer without the worktree simply cannot check the duplicates).
     """
-    import os
     import pathlib
 
-    override = os.getenv("GRID_SRC_REPO")
-    if override:
-        return pathlib.Path(override) / "grid_cli" / "private_server" / name
     return pathlib.Path(
         "/Users/macbookpro/Projects/grid-src-feats/distributed-tasks"
         "/grid_cli/private_server") / name
