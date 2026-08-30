@@ -79,21 +79,26 @@ def test_root_goal_create_replay_returns_one_durable_identity(relay, owner_token
     }
 
     first = relay_client.create_goal(relay, owner_token, **request)
-    replay = relay_client.create_goal(relay, owner_token, **request)
-    assert replay["id"] == first["id"]
-    assert replay["turn_id"] == first["turn_id"]
-    rows = _tasks(relay, owner_token, project_id, first["id"])
-    assert len(rows) == 1, rows
-    assert rows[0]["id"] == first["turn_id"]
-
     try:
-        relay_client.create_goal(
-            relay, owner_token, **{**request, "objective": "Create a different Goal"})
-    except relay_client.TaskRefusal as exc:
-        assert exc.status == 409
-        assert exc.refusal_code == "goal_idempotency_key_reused"
-    else:
-        raise AssertionError("a changed Goal request reused an existing create key")
+        replay = relay_client.create_goal(relay, owner_token, **request)
+        assert replay["id"] == first["id"]
+        assert replay["turn_id"] == first["turn_id"]
+        rows = _tasks(relay, owner_token, project_id, first["id"])
+        assert len(rows) == 1, rows
+        assert rows[0]["id"] == first["turn_id"]
+
+        try:
+            relay_client.create_goal(
+                relay, owner_token, **{**request, "objective": "Create a different Goal"})
+        except relay_client.TaskRefusal as exc:
+            assert exc.status == 409
+            assert exc.refusal_code == "goal_idempotency_key_reused"
+        else:
+            raise AssertionError("a changed Goal request reused an existing create key")
+    finally:
+        # This module intentionally shares one relay queue across scenarios. A proof Goal with no
+        # provider must not remain queued for the next scenario's first provider to claim.
+        relay_client.control_goal(relay, owner_token, first["id"], "cancel")
 
 
 def test_three_nodes_reclaim_goal_turns_and_finish_one_game(
