@@ -251,13 +251,21 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
     assert any("from the final turn" in failure for failure in failures)
 
 
-def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_evaluator():
-    from cli import goal
-
-    spec = {
+@pytest.mark.parametrize("spec", [
+    {
         "type": "file", "version": 1, "name": "artifact",
         "path": "artifact.txt", "exists": True,
-    }
+    },
+    {
+        "type": "json", "version": 1, "name": "business metric",
+        "path": "metrics.json", "max_bytes": 2_000,
+        "checks": [{"pointer": "/errors", "op": "equals", "value": 0}],
+    },
+])
+def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_evaluator(spec):
+    from cli import goal
+
+    original_path = spec["path"]
     definition_hash = __import__("hashlib").sha256(json.dumps(
         spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")).hexdigest()
@@ -287,7 +295,7 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
 
     record["goal"]["evals"][0]["path"] = "silently-changed.txt"
     assert any("does not match" in failure for failure in goal._verify_evidence(record))
-    record["goal"]["evals"][0]["path"] = "artifact.txt"
+    record["goal"]["evals"][0]["path"] = original_path
     record["eval_runs"][0]["evaluator_node_id"] = "node-A"
     assert any("no accepted passing run" in failure for failure in goal._verify_evidence(record))
 

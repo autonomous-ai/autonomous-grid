@@ -119,6 +119,26 @@ For example, `game-evals.json` can require artifacts without trusting the acting
 }
 ```
 
+Structured business outcomes can use a commit-pinned JSON metric instead of brittle text matching:
+
+```json
+{"version": 1, "evals": [{
+  "type": "json", "name": "support outcome", "path": "metrics.json", "max_bytes": 20000,
+  "checks": [
+    {"pointer": "/tickets/resolved", "op": "greater_or_equal", "value": 100},
+    {"pointer": "/errors", "op": "equals", "value": 0},
+    {"pointer": "/status", "op": "equals", "value": "ready"},
+    {"pointer": "/debug", "op": "exists", "value": false}
+  ]
+}]}
+```
+
+Pointers use RFC 6901 escaping. Supported operations are `equals`, `not_equals`,
+`greater_or_equal`, `less_or_equal`, and `exists`. Numeric comparisons reject booleans and
+non-finite values. A JSON file is capped at 4 MiB, all JSON evals at 16 MiB per nomination, and
+parsing is bounded by depth and value count. Invalid JSON is a measured failure the next Goal turn
+can repair; Git/read failures remain blocking evaluator infrastructure errors.
+
 Each definition is immutable, and its hash includes the evaluator-semantics version. Every score is
 stored with that definition hash, its turn, evaluator node, and exact Git commit. The guarded lease
 transaction marks a score `accepted`; a stale provider's
@@ -374,7 +394,7 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 | Crash-safe game | A -> B | Codex -> Codex | A's native harness crashes after writing partial work | HTML wiring, click/score behavior, styling and instructions |
 | Crash-safe business action | A -> B | Codex -> Codex | API commits, then A's native harness crashes | One side effect; stable key; complete action evidence; passing proof |
 | Image artifact | B polls; A executes | Claude rejected; Codex selected | Capability mismatch | PNG file and size |
-| Support reply | A polls; B -> C execute | Codex | B dies after API commit; first eval fails | `DONE.md`; one API side effect |
+| Support reply | A polls; B -> C execute | Codex | B dies after API commit; first eval fails | `DONE.md`; JSON outcome; one API side effect |
 | Required child | A parent; B child; C parent | Codex -> Claude -> Codex | Parent moves while child runs | Child and parent files |
 | Optional child | A parent; B child; C parent | Codex | Child fails | Parent file; child failure retained |
 

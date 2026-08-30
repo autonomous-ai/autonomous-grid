@@ -160,6 +160,9 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
             # Nominate completion with deliberately insufficient evidence. Grid's independent eval
             # must reject it and create another turn without allowing the action to duplicate.
             (cwd / "DONE.md").write_text("# Ticket T-42 resolved\n\nPending full audit proof.\n")
+            (cwd / "metrics.json").write_text(json.dumps({
+                "ticket_id": "T-42", "side_effects": 1, "audit_complete": False,
+            }, sort_keys=True) + "\n")
             history.append({"node": "C", "eval_retry": 1})
             save_history(history)
             return "complete", "C nominated completion before the evidence was sufficient", 200
@@ -168,6 +171,9 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
             "failover and again after an independent evaluation rejected the first proof. The "
             "business API performed exactly one side effect across every replay. This expanded "
             "artifact is the independently measurable completion evidence.\n")
+        (cwd / "metrics.json").write_text(json.dumps({
+            "ticket_id": "T-42", "side_effects": 1, "audit_complete": True,
+        }, sort_keys=True) + "\n")
         history.append({"node": "C", "eval_retry": 2, "replayed": "R-1"})
         save_history(history)
         return "complete", "C repaired the evidence without duplicating the reply", 300

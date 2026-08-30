@@ -620,8 +620,16 @@ def test_business_goal_matches_api_origin_and_replays_action_across_nodes(
                 "http": {"method": "POST", "url": f"{origin}/tickets/reply"},
             },
         ],
-        evals=[{"type": "file", "name": "resolution proof", "path": "DONE.md",
-                "min_bytes": 200}])
+        evals=[
+            {"type": "file", "name": "resolution proof", "path": "DONE.md",
+             "min_bytes": 200},
+            {"type": "json", "name": "structured support outcome", "path": "metrics.json",
+             "max_bytes": 2_000, "checks": [
+                 {"pointer": "/ticket_id", "op": "equals", "value": "T-42"},
+                 {"pointer": "/side_effects", "op": "equals", "value": 1},
+                 {"pointer": "/audit_complete", "op": "equals", "value": True},
+             ]},
+        ])
     conversation_id = goal["id"]
     origin_caps = [item for item in goal["required_capabilities"]
                    if item.startswith("tool_origin.")]
@@ -672,6 +680,9 @@ def test_business_goal_matches_api_origin_and_replays_action_across_nodes(
         destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
         branch=rows[-1]["branch"], commit=rows[-1]["result_commit"], project_id=project_id)
     assert json.loads((destination / "ticket.json").read_text())["ticket_id"] == "T-42"
+    assert json.loads((destination / "metrics.json").read_text()) == {
+        "ticket_id": "T-42", "side_effects": 1, "audit_complete": True,
+    }
     assert (destination / "DONE.md").is_file()
     assert not (destination / "partial-reply.tmp").exists()
 
@@ -698,6 +709,8 @@ def test_business_goal_matches_api_origin_and_replays_action_across_nodes(
     evidence_keys = {item["idempotency_key"] for item in action_requests + action_results}
     assert evidence_keys == {business_api["write_requests"][0]["key"]}
     assert any(run["passed"] is False for run in evidence["eval_runs"])
+    assert len(evidence["eval_runs"]) == 4
+    assert sum(run["passed"] is True for run in evidence["eval_runs"]) == 2
     assert evidence["eval_runs"][-1]["passed"] is True
 
 

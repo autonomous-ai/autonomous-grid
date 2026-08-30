@@ -520,7 +520,7 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             continue
         # File v1 is executed by deterministic relay code, never by the acting harness. A random
         # nonempty node name is not proof of independent evaluation in a release artifact.
-        expected_evaluator = "relay" if spec.get("type") == "file" else None
+        expected_evaluator = "relay" if spec.get("type") in ("file", "json") else None
         accepted = [run for run in runs if isinstance(run, dict)
                     and run.get("accepted") is True and run.get("passed") is True
                     and run.get("state") == "passed"
