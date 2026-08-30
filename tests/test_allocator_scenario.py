@@ -282,6 +282,7 @@ def test_scenario_checks_real_planner_safety_and_persistent_disk(representative_
     assert report.metrics["predictive_prefetches"] >= 0
     assert report.metrics["predictive_prefetch_hits"] >= 0
     assert report.metrics["predictive_prefetch_evictions"] >= 0
+    assert report.metrics["predictive_prefetch_replacements"] >= 0
     assert report.metrics["predictive_prefetch_reclaimed_mb"] >= 0
     assert 0 <= report.metrics["predictive_prefetch_hit_rate_pct"] <= 100
     assert 0 <= report.metrics["service_rate_pct"] <= 100

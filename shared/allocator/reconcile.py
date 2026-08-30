@@ -760,7 +760,7 @@ class Reconciler:
             else:
                 proposals.append(action)
 
-        # Expiration is deliberately narrower than ordinary lifecycle removal. The controller may
+        # Predictive eviction is deliberately narrower than ordinary lifecycle removal. The controller may
         # delete only an exact, cache-only artifact that the managed node says was fetched for a
         # prediction and never warmed. Any snapshot drift turns the directive into a no-op rather
         # than widening authority over operator caches or live model processes.
@@ -814,7 +814,12 @@ class Reconciler:
                 profile,
                 plan,
                 timestamp,
-                "Expire an unused allocator-fetched predictive artifact",
+                (
+                    "Replace a lower-value predictive artifact for "
+                    f"{eviction.for_model_id}"
+                    if eviction.for_model_id
+                    else "Expire an unused allocator-fetched predictive artifact"
+                ),
                 history_by_transition=history_by_transition,
                 mode=mode,
                 blocked_until=mutation_blocks,
@@ -990,11 +995,26 @@ class Reconciler:
             ActionKind.UNLOAD: 3,
             ActionKind.EVICT: 4,
         }
+        eviction_beneficiaries = {
+            (item.node_id, item.model_id): item.for_model_id
+            for item in plan.artifact_evictions
+            if item.for_model_id
+        }
 
         def service_priority(action: MutationAction) -> tuple[int, int]:
             preemption = preemptions.get((action.node_id, action.model_id))
             if preemption is not None and preemption.for_model_id:
                 beneficiary = profile_by_id.get(preemption.for_model_id)
+                if beneficiary is not None:
+                    return (
+                        beneficiary.priority,
+                        urgency_by_model.get(beneficiary.model_id, 0),
+                    )
+            eviction_beneficiary_id = eviction_beneficiaries.get(
+                (action.node_id, action.model_id)
+            )
+            if action.kind == ActionKind.EVICT and eviction_beneficiary_id:
+                beneficiary = profile_by_id.get(eviction_beneficiary_id)
                 if beneficiary is not None:
                     return (
                         beneficiary.priority,
@@ -1018,10 +1038,14 @@ class Reconciler:
             """
 
             preemption = preemptions.get((action.node_id, action.model_id))
+            eviction_beneficiary_id = eviction_beneficiaries.get(
+                (action.node_id, action.model_id),
+                "",
+            )
             model_id = (
                 preemption.for_model_id
                 if preemption is not None and preemption.for_model_id
-                else action.model_id
+                else eviction_beneficiary_id or action.model_id
             )
             profile = profile_by_id.get(model_id)
             if profile is None:
@@ -1046,6 +1070,11 @@ class Reconciler:
                     (action.node_id, model_id),
                     profile.load_seconds,
                 ) + warm_seconds + wait_seconds
+            if action.kind == ActionKind.EVICT and eviction_beneficiary_id:
+                return load_by_pair.get(
+                    (action.node_id, model_id),
+                    profile.load_seconds,
+                ) + warm_seconds
             return math.inf
 
         def action_stage(action: MutationAction) -> int:
@@ -1053,6 +1082,11 @@ class Reconciler:
                 # An already-drained victim is one transition from free capacity. Starting another
                 # drain first would add a full controller/heartbeat round to the beneficiary path.
                 return 0 if action.kind == ActionKind.UNLOAD else 1
+            if (
+                action.kind == ActionKind.EVICT
+                and (action.node_id, action.model_id) in eviction_beneficiaries
+            ):
+                return 0
             return lifecycle_priority[action.kind]
 
         def proposal_sort_key(

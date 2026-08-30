@@ -15,11 +15,13 @@ from shared.allocator.intelligence import RequestFeatures
 from shared.allocator.models import (
     ActionKind,
     AllocatorMode,
+    ArtifactEviction,
     DemandForecast,
     ModelProfile,
     ModelResidency,
     MutationAction,
     NodeSnapshot,
+    PlacementPlan,
     ResidencyState,
 )
 from shared.allocator.planner import PlannerPolicy
@@ -111,6 +113,72 @@ def test_controller_revalidates_predictive_eviction_at_delivery():
         now=160,
         destructive_safety_factory=lambda: (changed,),
     ) == ()
+
+
+def test_replacement_eviction_inherits_its_beneficiary_delivery_priority():
+    controller = AllocatorController(mode=AllocatorMode.AUTOMATIC)
+    controller.put_profile(profile("beneficiary", priority=1_000))
+    controller.put_profile(
+        ModelProfile(
+            "replacement-victim",
+            8_000,
+            runtimes=("llama.cpp",),
+            min_replicas=0,
+            max_replicas=1,
+        )
+    )
+    controller.put_profile(
+        ModelProfile(
+            "routine-expiry",
+            8_000,
+            runtimes=("llama.cpp",),
+            min_replicas=0,
+            max_replicas=1,
+        )
+    )
+    controller._last_plan = PlacementPlan(
+        generation="replacement-plan",
+        created_at=10,
+        artifact_evictions=(
+            ArtifactEviction(
+                "shared",
+                "replacement-victim",
+                "beneficiary",
+            ),
+            ArtifactEviction("shared", "routine-expiry"),
+        ),
+        model_urgencies=(("beneficiary", 1),),
+    )
+    routine = MutationAction(
+        "a-routine",
+        ActionKind.EVICT,
+        "shared",
+        "routine-expiry",
+        8_000,
+        "routine expiry",
+        "replacement-plan",
+        1,
+        artifact_sha256="a" * 64,
+    )
+    replacement = MutationAction(
+        "z-replacement",
+        ActionKind.EVICT,
+        "shared",
+        "replacement-victim",
+        8_000,
+        "replacement",
+        "replacement-plan",
+        10,
+        artifact_sha256="b" * 64,
+    )
+    controller._commands = {
+        routine.action_id: routine,
+        replacement.action_id: replacement,
+    }
+
+    assert [
+        action.action_id for action in controller.commands_for("shared", now=10)
+    ] == ["z-replacement", "a-routine"]
 
 
 def node(

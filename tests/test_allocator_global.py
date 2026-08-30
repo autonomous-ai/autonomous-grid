@@ -1361,6 +1361,12 @@ def test_allocator_models_validate_impossible_values():
     with pytest.raises(ValueError, match="max_predictive_artifact_evictions"):
         PlannerPolicy(max_predictive_artifact_evictions=True)
     with pytest.raises(ValueError, match="non-negative"):
+        PlannerPolicy(predictive_artifact_replacement_min_age_seconds=-1)
+    with pytest.raises(ValueError, match="predictive_artifact_replacement_min_gain"):
+        PlannerPolicy(predictive_artifact_replacement_min_gain=0.99)
+    with pytest.raises(ValueError, match="predictive_artifact_replacement_min_gain"):
+        PlannerPolicy(predictive_artifact_replacement_min_gain=math.inf)
+    with pytest.raises(ValueError, match="non-negative"):
         PlannerPolicy(max_predictive_lookahead_seconds=-1)
     with pytest.raises(ValueError, match="predictive_growth_limit"):
         PlannerPolicy(predictive_growth_limit=0.9)
@@ -6131,6 +6137,205 @@ def test_stale_allocator_fetched_prediction_is_safely_evicted():
         now=161,
     )
     assert deferrals[action.action_id].code == "predictive_cache_changed"
+
+
+def test_higher_value_prediction_replaces_mature_speculative_cache_in_two_plans():
+    baseline = model("baseline", min_replicas=1, max_replicas=1)
+    old = model(
+        "old-prediction",
+        min_replicas=0,
+        max_replicas=1,
+        load_seconds=20,
+        artifact_sha256="a" * 64,
+        artifact_source="hf://example/models/old.gguf",
+        artifact_size_mb=4_000,
+    )
+    incoming = model(
+        "incoming-prediction",
+        min_replicas=0,
+        max_replicas=1,
+        load_seconds=120,
+        artifact_sha256="b" * 64,
+        artifact_source="hf://example/models/incoming.gguf",
+        artifact_size_mb=4_000,
+    )
+    cached_old = ModelResidency(
+        old.model_id,
+        old.memory_mb,
+        ResidencyState.CACHED,
+        loaded_at=100,
+        managed=True,
+        artifact_sha256=old.artifact_sha256,
+        predictive_cache=True,
+    )
+    constrained = node(
+        "cache-host",
+        8_000,
+        residencies=(ready("baseline", 8_000), cached_old),
+        max_models=1,
+        disk_capacity_mb=20_000,
+        disk_available_mb=1_000,
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+        now=1_000,
+    )
+    incoming_forecast = DemandForecast(
+        incoming.model_id,
+        requests_per_minute=8,
+        offered_concurrency=2,
+        confidence=0.9,
+        correlated_requests_per_minute=8,
+        correlation_confidence=0.9,
+        correlation_sources=("workflow:design-to-video",),
+        sample_count=20,
+        updated_at=1_000,
+    )
+    planner = PlacementPlanner(
+        PlannerPolicy(
+            memory_headroom_fraction=0,
+            predictive_artifact_disk_reserve_mb=0,
+            predictive_artifact_ttl_seconds=10_000,
+            predictive_artifact_replacement_min_age_seconds=300,
+            predictive_artifact_replacement_min_gain=2,
+        )
+    )
+
+    replacement = planner.plan(
+        (constrained,),
+        (baseline, old, incoming),
+        (incoming_forecast,),
+        now=1_000,
+    )
+
+    assert replacement.artifact_prefetches == ()
+    assert replacement.artifact_evictions == (
+        ArtifactEviction("cache-host", old.model_id, incoming.model_id),
+    )
+    assert replacement.to_dict()["artifact_evictions"] == [
+        {
+            "node_id": "cache-host",
+            "model_id": old.model_id,
+            "for_model_id": incoming.model_id,
+        }
+    ]
+    eviction = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
+        replacement,
+        (constrained,),
+        (baseline, old, incoming),
+        mode=AllocatorMode.AUTOMATIC,
+        now=1_000,
+    ).executable_actions
+    assert len(eviction) == 1
+    assert eviction[0].kind == ActionKind.EVICT
+    assert "incoming-prediction" in eviction[0].reason
+
+    reclaimed = replace(
+        constrained,
+        residencies=(ready("baseline", 8_000),),
+        cached_models=(),
+        disk_available_mb=5_000,
+        last_heartbeat=1_001,
+    )
+    after_heartbeat = planner.plan(
+        (reclaimed,),
+        (baseline, old, incoming),
+        (incoming_forecast,),
+        now=1_001,
+    )
+    assert after_heartbeat.artifact_evictions == ()
+    assert after_heartbeat.artifact_prefetches == (
+        ArtifactPrefetch("cache-host", incoming.model_id),
+    )
+
+
+def test_predictive_cache_replacement_obeys_age_gain_and_demand_hysteresis():
+    baseline = model("baseline", min_replicas=1, max_replicas=1)
+
+    def speculative(model_id: str, sha_character: str, load_seconds: float) -> ModelProfile:
+        return model(
+            model_id,
+            min_replicas=0,
+            max_replicas=1,
+            load_seconds=load_seconds,
+            artifact_sha256=sha_character * 64,
+            artifact_source=f"hf://example/models/{model_id}.gguf",
+            artifact_size_mb=4_000,
+        )
+
+    old = speculative("old", "a", 80)
+    incoming = speculative("incoming", "b", 120)
+
+    def correlated(profile: ModelProfile, concurrency: float) -> DemandForecast:
+        return DemandForecast(
+            profile.model_id,
+            requests_per_minute=8,
+            offered_concurrency=concurrency,
+            confidence=0.9,
+            correlated_requests_per_minute=8,
+            correlation_confidence=0.9,
+            correlation_sources=("workflow:research-to-code",),
+            sample_count=20,
+            updated_at=1_000,
+        )
+
+    cached = ModelResidency(
+        old.model_id,
+        old.memory_mb,
+        ResidencyState.CACHED,
+        loaded_at=900,
+        managed=True,
+        artifact_sha256=old.artifact_sha256,
+        predictive_cache=True,
+    )
+    machine = node(
+        "cache-host",
+        8_000,
+        residencies=(ready("baseline", 8_000), cached),
+        max_models=1,
+        disk_capacity_mb=20_000,
+        disk_available_mb=1_000,
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+        now=1_000,
+    )
+    policy = PlannerPolicy(
+        memory_headroom_fraction=0,
+        predictive_artifact_disk_reserve_mb=0,
+        predictive_artifact_ttl_seconds=10_000,
+        predictive_artifact_replacement_min_age_seconds=300,
+        predictive_artifact_replacement_min_gain=2,
+    )
+    planner = PlacementPlanner(policy)
+
+    too_young = planner.plan(
+        (machine,),
+        (baseline, old, incoming),
+        (correlated(incoming, 4),),
+        now=1_000,
+    )
+    assert too_young.artifact_evictions == ()
+
+    mature = replace(machine, residencies=(ready("baseline", 8_000), replace(cached, loaded_at=100)))
+    below_gain = planner.plan(
+        (mature,),
+        (baseline, old, incoming),
+        (correlated(old, 1), correlated(incoming, 1)),
+        now=1_000,
+    )
+    assert below_gain.artifact_evictions == ()
+
+    directly_needed_old = replace(
+        correlated(old, 1),
+        correlation_sources=(),
+        correlated_requests_per_minute=0,
+        correlation_confidence=0,
+        observed_requests_per_minute=8,
+    )
+    protected = planner.plan(
+        (mature,),
+        (baseline, old, incoming),
+        (directly_needed_old, correlated(incoming, 4)),
+        now=1_000,
+    )
+    assert protected.artifact_evictions == ()
 
 
 @pytest.mark.parametrize(

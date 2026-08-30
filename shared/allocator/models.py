@@ -752,6 +752,7 @@ class ArtifactEviction:
 
     node_id: str
     model_id: str
+    for_model_id: str = ""
 
     def __post_init__(self) -> None:
         if (
@@ -759,8 +760,11 @@ class ArtifactEviction:
             or not self.model_id
             or len(self.node_id) > MAX_ID_LENGTH
             or len(self.model_id) > MAX_ID_LENGTH
+            or len(self.for_model_id) > MAX_ID_LENGTH
         ):
             raise ValueError("artifact eviction node and model are required")
+        if self.for_model_id and self.for_model_id == self.model_id:
+            raise ValueError("an artifact cannot be evicted for itself")
 
 
 @dataclass(frozen=True, slots=True)
@@ -869,7 +873,16 @@ class PlacementPlan:
                 asdict(item) for item in self.artifact_prefetches
             ],
             "artifact_evictions": [
-                asdict(item) for item in self.artifact_evictions
+                {
+                    "node_id": item.node_id,
+                    "model_id": item.model_id,
+                    **(
+                        {"for_model_id": item.for_model_id}
+                        if item.for_model_id
+                        else {}
+                    ),
+                }
+                for item in self.artifact_evictions
             ],
             "model_urgencies": dict(self.model_urgencies),
         }

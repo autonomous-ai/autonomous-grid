@@ -378,6 +378,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     predictive_prefetch_hits = 0
     predictive_prefetch_download_mb = 0
     predictive_prefetch_evictions = 0
+    predictive_prefetch_replacements = 0
     predictive_prefetch_reclaimed_mb = 0
     predictive_cold_start_seconds_avoided = 0.0
     predictive_prefetch_lead_minutes: list[int] = []
@@ -751,9 +752,16 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             )
             predictively_cached_at.pop(pair, None)
             predictive_prefetch_evictions += 1
+            predictive_prefetch_replacements += int(bool(eviction.for_model_id))
             predictive_prefetch_reclaimed_mb += profile.artifact_size_mb
             evicted_pairs.add(pair)
-            eviction_labels.append(f"{eviction.model_id}@{eviction.node_id}")
+            eviction_labels.append(
+                (
+                    f"{eviction.model_id}->{eviction.for_model_id}@{eviction.node_id}"
+                    if eviction.for_model_id
+                    else f"{eviction.model_id}@{eviction.node_id}"
+                )
+            )
         before_nodes: defaultdict[str, set[str]] = defaultdict(set)
         after_nodes: defaultdict[str, set[str]] = defaultdict(set)
         for node_id, model_id in before_pairs:
@@ -1068,6 +1076,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             ),
             "resident_unused_predictive_prefetches": len(predictively_cached_at),
             "predictive_prefetch_evictions": predictive_prefetch_evictions,
+            "predictive_prefetch_replacements": predictive_prefetch_replacements,
             "predictive_prefetch_reclaimed_mb": predictive_prefetch_reclaimed_mb,
             "predictive_prefetch_download_mb": predictive_prefetch_download_mb,
             "predictive_cold_start_seconds_avoided": round(

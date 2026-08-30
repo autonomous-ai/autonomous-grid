@@ -141,10 +141,20 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
             if len(row["prefetches"]) > 3:
                 changes[-1] += f" +{len(row['prefetches']) - 3}"
         if row.get("artifact_evictions"):
-            changes.append(
-                "expire predictive cache "
-                + ", ".join(row["artifact_evictions"][:3])
-            )
+            replacements = [
+                item for item in row["artifact_evictions"] if "->" in item
+            ]
+            expirations = [
+                item for item in row["artifact_evictions"] if "->" not in item
+            ]
+            if replacements:
+                changes.append(
+                    "replace predictive cache " + ", ".join(replacements[:3])
+                )
+            if expirations:
+                changes.append(
+                    "expire predictive cache " + ", ".join(expirations[:3])
+                )
             if len(row["artifact_evictions"]) > 3:
                 changes[-1] += f" +{len(row['artifact_evictions']) - 3}"
         if row["loads"]:
@@ -227,7 +237,8 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
         f"hits {metrics['predictive_prefetch_hits']} "
         f"({metrics['predictive_prefetch_hit_rate_pct']:.2f}%) · "
         f"unused {metrics['unused_predictive_prefetches']} · "
-        f"expired {metrics['predictive_prefetch_evictions']} "
+        f"evicted {metrics['predictive_prefetch_evictions']} "
+        f"({metrics['predictive_prefetch_replacements']} replacements) "
         f"({metrics['predictive_prefetch_reclaimed_mb'] / 1024:.1f} GiB reclaimed) · "
         f"saved {metrics['predictive_cold_start_seconds_avoided']:.1f}s startup · "
         f"avg lead {metrics['average_predictive_prefetch_lead_minutes']:.1f}m"

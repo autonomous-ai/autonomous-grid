@@ -56,6 +56,8 @@ class PlannerPolicy:
     predictive_artifact_disk_reserve_mb: int = 10_240
     predictive_artifact_ttl_seconds: float = 21_600.0
     max_predictive_artifact_evictions: int = 1
+    predictive_artifact_replacement_min_age_seconds: float = 900.0
+    predictive_artifact_replacement_min_gain: float = 2.0
 
     def __post_init__(self) -> None:
         if not 0 <= self.memory_headroom_fraction < 1:
@@ -70,6 +72,7 @@ class PlannerPolicy:
                 self.performance_ttl_seconds,
                 self.max_predictive_lookahead_seconds,
                 self.predictive_artifact_ttl_seconds,
+                self.predictive_artifact_replacement_min_age_seconds,
             )
         ):
             raise ValueError("planner weights and TTL must be finite and non-negative")
@@ -120,6 +123,13 @@ class PlannerPolicy:
             raise ValueError(
                 "max_predictive_artifact_evictions must be in "
                 f"[0, {MAX_COUNTER}]"
+            )
+        if (
+            not math.isfinite(self.predictive_artifact_replacement_min_gain)
+            or self.predictive_artifact_replacement_min_gain < 1
+        ):
+            raise ValueError(
+                "predictive_artifact_replacement_min_gain must be finite and at least 1"
             )
         if (
             not math.isfinite(self.latency_pressure_limit)
@@ -2397,63 +2407,129 @@ class PlacementPlanner:
         prefetch_disk_remaining = dict(disk_remaining)
         artifact_prefetches: list[ArtifactPrefetch] = []
 
+        def predictive_artifact_present(
+            node: NodeSnapshot,
+            model: ModelProfile,
+        ) -> bool:
+            residency = node.residency(model.model_id)
+            return bool(
+                residency
+                and model.matches_artifact(residency)
+                and residency.state
+                in (
+                    ResidencyState.CACHED,
+                    ResidencyState.LOADING,
+                    ResidencyState.WARMING,
+                    ResidencyState.READY,
+                    ResidencyState.DRAINING,
+                    ResidencyState.FAILED,
+                )
+            )
+
         def predictive_prefetch_candidates(
             model: ModelProfile,
+            *,
+            require_disk: bool = True,
         ) -> list[NodeSnapshot]:
             candidates: list[NodeSnapshot] = []
-            for node_id in future_eligible_nodes.get(model.model_id, ()):
-                node = node_by_id[node_id]
-                pair = (node_id, model.model_id)
-                residency = node.residency(model.model_id)
-                artifact_present = bool(
-                    residency
-                    and model.matches_artifact(residency)
-                    and residency.state
-                    in (
-                        ResidencyState.CACHED,
-                        ResidencyState.LOADING,
-                        ResidencyState.WARMING,
-                        ResidencyState.READY,
-                        ResidencyState.DRAINING,
-                        ResidencyState.FAILED,
-                    )
+            candidate_nodes = (
+                (
+                    node_by_id[node_id]
+                    for node_id in future_eligible_nodes.get(model.model_id, ())
                 )
+                if require_disk
+                else iter(node_list)
+            )
+            for node in candidate_nodes:
+                node_id = node.node_id
+                pair = (node_id, model.model_id)
                 remaining_disk = prefetch_disk_remaining[node_id]
+                # The ordinary future-eligibility index deliberately includes current artifact
+                # disk. Replacement discovery must instead prove every other hard constraint while
+                # asking whether one exact victim would make disk sufficient.
+                disk_agnostic_compatible = require_disk or (
+                    _ineligible_reason(
+                        replace(node, disk_available_mb=None),
+                        model,
+                        timestamp,
+                        self.policy,
+                        for_new=requires_new_runtime(node, model),
+                    )
+                    is None
+                    and runtime_memory(node, model)
+                    <= placement_budget[node_id]
+                    and node.max_models != 0
+                )
                 if (
                     pair not in assignment_pairs
-                    and not artifact_present
+                    and not predictive_artifact_present(node, model)
                     # Predictive provenance and bounded cleanup arrived with the EVICT actuator.
                     # Legacy nodes may still receive ordinary/preemption LOAD work, but must not
                     # accumulate new speculative artifacts they cannot identify and expire.
                     and "evict" in node.actuator_capabilities
                     and remaining_disk is not None
-                    and model.artifact_size_mb
-                    + self.policy.predictive_artifact_disk_reserve_mb
-                    <= remaining_disk
+                    and disk_agnostic_compatible
+                    and (
+                        not require_disk
+                        or model.artifact_size_mb
+                        + self.policy.predictive_artifact_disk_reserve_mb
+                        <= remaining_disk
+                    )
                 ):
                     candidates.append(node)
             return candidates
+
+        def predictive_artifact_value(
+            model: ModelProfile,
+            node: NodeSnapshot,
+        ) -> tuple[float, float]:
+            """Return expected cold-path seconds saved per MB and in total."""
+
+            forecast = forecast_by_model.get(model.model_id)
+            if (
+                forecast is None
+                or _placement_demand_urgency(model, forecast) != 1
+            ):
+                return (0.0, 0.0)
+            expected_startup_value = (
+                forecast.correlation_confidence
+                * max(forecast.offered_concurrency, 0.01)
+                * load_by_pair.get(
+                    (node.node_id, model.model_id),
+                    model.load_seconds,
+                )
+            )
+            return (
+                expected_startup_value / max(1, model.artifact_size_mb),
+                expected_startup_value,
+            )
 
         def predictive_prefetch_rank(model: ModelProfile) -> tuple[float, float, float, str]:
             """Rank speculative transfers by expected critical-path value per stored byte."""
 
             forecast = forecast_by_model[model.model_id]
-            best_load_seconds = min(
-                (
+            candidates = predictive_prefetch_candidates(model)
+            preferred = min(
+                candidates,
+                key=lambda node: (
                     load_by_pair.get(
                         (node.node_id, model.model_id),
                         model.load_seconds,
                     )
-                    for node in predictive_prefetch_candidates(model)
+                    + startup_by_pair.get(
+                        (node.node_id, model.model_id),
+                        model.warm_seconds,
+                    ),
+                    node.host_priority,
+                    node.node_id,
                 ),
-                default=0.0,
+                default=None,
             )
-            expected_startup_value = (
-                forecast.correlation_confidence
-                * max(forecast.offered_concurrency, 0.01)
-                * best_load_seconds
+            value_per_mb, expected_startup_value = (
+                predictive_artifact_value(model, preferred)
+                if preferred is not None
+                else (0.0, 0.0)
             )
-            value_per_mb = expected_startup_value / max(1, model.artifact_size_mb)
             return (
                 -value_per_mb,
                 -expected_startup_value,
@@ -2461,7 +2537,7 @@ class PlacementPlanner:
                 model.model_id,
             )
 
-        predictive_models = [
+        all_predictive_models = [
             model
             for model in model_list
             if compute_input_digest
@@ -2473,6 +2549,7 @@ class PlacementPlanner:
             )
             == 1
         ]
+        predictive_models = list(all_predictive_models)
         while (
             predictive_models
             and len(artifact_prefetches)
@@ -2509,6 +2586,118 @@ class PlacementPlanner:
                 prefetch_disk_remaining[selected.node_id] = (
                     selected_disk - model.artifact_size_mb
                 )
+        # Disk pressure may otherwise strand a newly learned high-value prediction behind an old
+        # speculative artifact forever. Allow a bounded replacement only after the old artifact
+        # has aged, and only when the incoming prediction has both at least as much absolute value
+        # and a policy-sized value-per-byte gain. The eviction and replacement prefetch are
+        # intentionally separate plan generations: bytes are not credited until a heartbeat proves
+        # deletion completed.
+        prefetched_model_ids = {
+            item.model_id for item in artifact_prefetches
+        }
+        replacement_opportunities: list[
+            tuple[float, float, float, str, str, str]
+        ] = []
+        if (
+            self.policy.max_predictive_artifact_prefetches
+            and self.policy.max_predictive_artifact_evictions
+        ):
+            for incoming in all_predictive_models:
+                if (
+                    incoming.model_id in prefetched_model_ids
+                    or predictive_prefetch_candidates(incoming)
+                ):
+                    continue
+                for node in predictive_prefetch_candidates(
+                    incoming,
+                    require_disk=False,
+                ):
+                    remaining_disk = prefetch_disk_remaining[node.node_id]
+                    if remaining_disk is None:
+                        continue
+                    required_disk = (
+                        incoming.artifact_size_mb
+                        + self.policy.predictive_artifact_disk_reserve_mb
+                    )
+                    for residency in node.residencies:
+                        victim = profile_by_id.get(residency.model_id)
+                        pair = (node.node_id, residency.model_id)
+                        age = (
+                            timestamp - residency.loaded_at
+                            if 0 < residency.loaded_at <= timestamp
+                            else 0.0
+                        )
+                        if (
+                            victim is None
+                            or victim.model_id == incoming.model_id
+                            or residency.state != ResidencyState.CACHED
+                            or not residency.predictive_cache
+                            or not residency.managed
+                            or residency.pinned
+                            or not victim.matches_artifact(residency)
+                            or pair in assignment_pairs
+                            or demand_urgency_by_model.get(victim.model_id, 0) > 1
+                            or age
+                            < self.policy.predictive_artifact_replacement_min_age_seconds
+                            or required_disk
+                            > remaining_disk + victim.artifact_size_mb
+                        ):
+                            continue
+                        incoming_density, incoming_value = predictive_artifact_value(
+                            incoming,
+                            node,
+                        )
+                        victim_density, victim_value = predictive_artifact_value(
+                            victim,
+                            node,
+                        )
+                        if (
+                            incoming_value <= 0
+                            or incoming_value < victim_value
+                            or incoming_density
+                            < victim_density
+                            * self.policy.predictive_artifact_replacement_min_gain
+                        ):
+                            continue
+                        replacement_opportunities.append(
+                            (
+                                -(incoming_density - victim_density),
+                                -incoming_value,
+                                -age,
+                                node.node_id,
+                                victim.model_id,
+                                incoming.model_id,
+                            )
+                        )
+
+        artifact_evictions: list[ArtifactEviction] = []
+        replacement_victims: set[tuple[str, str]] = set()
+        replacement_beneficiaries: set[str] = set()
+        replacement_limit = min(
+            self.policy.max_predictive_artifact_evictions,
+            self.policy.max_predictive_artifact_prefetches,
+        )
+        for (
+            _negative_gain,
+            _negative_value,
+            _negative_age,
+            node_id,
+            victim_model_id,
+            incoming_model_id,
+        ) in sorted(replacement_opportunities):
+            pair = (node_id, victim_model_id)
+            if (
+                len(artifact_evictions) >= replacement_limit
+                or pair in replacement_victims
+                or incoming_model_id in replacement_beneficiaries
+            ):
+                continue
+            artifact_evictions.append(
+                ArtifactEviction(node_id, victim_model_id, incoming_model_id)
+            )
+            replacement_victims.add(pair)
+            replacement_beneficiaries.add(incoming_model_id)
+
         # A speculative artifact that was never warmed must not consume disk forever. Only exact
         # artifacts that a managed node explicitly labels as predictive are eligible; operator
         # caches, pinned entries, used models, live runtimes, and legacy nodes are never inferred
@@ -2551,12 +2740,14 @@ class PlacementPlanner:
                             profile.model_id,
                         )
                     )
-        artifact_evictions = [
-            ArtifactEviction(node_id, model_id)
-            for _loaded_at, _negative_size, node_id, model_id in sorted(
-                stale_predictive_artifacts
-            )[: self.policy.max_predictive_artifact_evictions]
-        ]
+        for _loaded_at, _negative_size, node_id, model_id in sorted(
+            stale_predictive_artifacts
+        ):
+            if len(artifact_evictions) >= self.policy.max_predictive_artifact_evictions:
+                break
+            if (node_id, model_id) in replacement_victims:
+                continue
+            artifact_evictions.append(ArtifactEviction(node_id, model_id))
         # Wall-clock time is not itself a desired-state input, but TTL and scale-down boundaries
         # derived from it are. Include the resulting targets and placements so the controller
         # advances its logical generation exactly when a time-sensitive decision changes. A late
@@ -4164,7 +4355,8 @@ def _input_digest(
                 (item.node_id, item.model_id) for item in artifact_prefetches
             ],
             "artifact_evictions": [
-                (item.node_id, item.model_id) for item in artifact_evictions
+                (item.node_id, item.model_id, item.for_model_id)
+                for item in artifact_evictions
             ],
         }
     )

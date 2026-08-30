@@ -721,12 +721,26 @@ class AllocatorController:
                     self._last_plan.preemptions if self._last_plan is not None else ()
                 )
             }
+            eviction_beneficiary_by_pair = {
+                (item.node_id, item.model_id): item.for_model_id
+                for item in (
+                    self._last_plan.artifact_evictions
+                    if self._last_plan is not None
+                    else ()
+                )
+                if item.for_model_id
+            }
 
             def delivery_rank(action: MutationAction) -> tuple[int, int]:
                 beneficiary_id = preemption_by_pair.get(
                     (action.node_id, action.model_id),
                     "",
                 )
+                if not beneficiary_id and action.kind == ActionKind.EVICT:
+                    beneficiary_id = eviction_beneficiary_by_pair.get(
+                        (action.node_id, action.model_id),
+                        "",
+                    )
                 if action.kind in (ActionKind.LOAD, ActionKind.WARM):
                     beneficiary_id = action.model_id
                 if not beneficiary_id:

@@ -1027,6 +1027,13 @@ When several workflow predictions compete for the bounded prefetch budget, Grid 
 confidence- and pressure-weighted cold-start value per artifact MB. The estimate uses current
 predicted concurrency and learned per-host transfer time, then is recomputed after every chosen
 transfer because each choice changes the remaining node disk ledger.
+If authenticated disk is full, a mature unused predictive artifact may be replaced by a stronger
+prediction. The incoming artifact must provide at least the configured value-per-byte gain (2× by
+default), must not have less total expected startup value, and the victim must have spent at least
+15 minutes in cache. Direct or queued demand, live/used weights, pins, operator-managed artifacts,
+and inexact revisions are never replacement candidates. Replacement is a two-generation
+transition: Grid evicts the exact victim first, waits for a heartbeat proving disk was reclaimed,
+then plans the incoming prefetch. The planner never credits intended deletion as free space.
 
 `--oracle` adds a bounded exhaustive benchmark for at most four machines, nine models, and 240
 minutes. It replays the exact observed request trace with perfect future knowledge, exhaustively
