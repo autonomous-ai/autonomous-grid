@@ -1039,7 +1039,7 @@ def run_task(job: dict[str, Any],
         argv = task_agent.agent_argv(
             binary, prompt if resume.session_id else first_prompt,
             workspace=workspace, resume=resume.session_id)
-        child_env = task_agent.child_env(
+        child_env = task_agent.goal_child_env(
             author=task_repo.identity_or_default(
                 job.get("author_name"), job.get("author_email")),
             workspace=workspace)

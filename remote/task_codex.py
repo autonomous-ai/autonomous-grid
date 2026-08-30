@@ -788,7 +788,7 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
     process: ProcessLike | None = None
     started = time.monotonic()
     try:
-        env = task_agent.child_env(workspace=workspace)
+        env = task_agent.goal_child_env(workspace=workspace)
         codex_home = state_dir(workspace) / HOME_DIR
         codex_home.mkdir(parents=True, exist_ok=True)
         env["CODEX_HOME"] = str(codex_home)

@@ -84,7 +84,14 @@ def test_claude_goal_uses_native_command_and_loopback_grid_model(tmp_path, monke
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
     monkeypatch.setattr(task_agent, "link_transcript", lambda *_args: tmp_path / "transcript")
     monkeypatch.setattr(task_agent, "resumable_session", lambda *_args: task_agent.ResumeDecision())
-    monkeypatch.setattr(task_agent, "child_env", lambda **_kwargs: {"PATH": os.environ["PATH"]})
+    monkeypatch.setattr(task_agent, "child_env", lambda **_kwargs: {
+        "PATH": os.environ["PATH"],
+        "ANTHROPIC_API_KEY": "provider-api-key",
+        "ANTHROPIC_AUTH_TOKEN": "provider-auth-token",
+        "ANTHROPIC_CUSTOM_HEADERS": "x-provider-secret: hidden",
+        "OPENAI_API_KEY": "provider-openai-key",
+        "CLAUDE_CODE_OAUTH_TOKEN": "provider-oauth-token",
+    })
     captured = {}
 
     def argv(binary, prompt, *, workspace, resume=None):
@@ -130,6 +137,13 @@ def test_claude_goal_uses_native_command_and_loopback_grid_model(tmp_path, monke
     assert captured["env"]["ANTHROPIC_MODEL"] == "grid-model"
     assert captured["env"]["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
     assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] != "GRID-SECRET"
+    assert {name for name in captured["env"] if name.startswith("ANTHROPIC_")} == {
+        "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    }
+    assert "OPENAI_API_KEY" not in captured["env"]
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in captured["env"]
     assert "GRID-SECRET" not in repr(captured)
     assert "claim-generation-secret" not in repr(captured)
 

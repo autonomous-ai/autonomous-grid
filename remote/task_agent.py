@@ -143,6 +143,14 @@ _ENV_ALLOWLIST = frozenset({
 # what the agent gets, the sandbox governs what its children see.
 _ENV_ALLOWED_PREFIXES = ("LC_", "ANTHROPIC_")
 
+# Native Goals authenticate model traffic only with a short-lived loopback proxy token. Ordinary
+# Claude tasks still need the provider's Anthropic environment, but reusing it for a Goal would
+# hand those credentials to an autonomous process that is explicitly configured to call Grid.
+# Include opt-in passthrough names for both supported harnesses so an operator extending the
+# ordinary task environment cannot accidentally create a second model-authentication path.
+_GOAL_MODEL_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_")
+_GOAL_MODEL_ENV_NAMES = frozenset({"CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY"})
+
 # The operator's own extension to the allowlist — comma- or space-separated names. It exists because
 # an allowlist nobody can extend is one a provider works around by not upgrading: a team with a
 # private package registry needs its token in a build, and "hand the agent the whole environment
@@ -1137,3 +1145,19 @@ def child_env(author=None, workspace: Path | None = None) -> dict[str, str]:
     if workspace is not None:
         env.update(_cache_env(workspace))
     return env
+
+
+def goal_child_env(author=None, workspace: Path | None = None) -> dict[str, str]:
+    """A task child environment with ambient model credentials removed.
+
+    Goal runners add exactly one harness-specific loopback credential after this boundary. Keep
+    this separate from :func:`child_env`: ordinary Claude tasks intentionally authenticate with
+    the provider's installation, while a distributed Goal must send every model request through
+    Grid so inference attribution, lease fencing, and credential refresh remain authoritative.
+    """
+    env = child_env(author=author, workspace=workspace)
+    return {
+        name: value for name, value in env.items()
+        if name not in _GOAL_MODEL_ENV_NAMES
+        and not name.startswith(_GOAL_MODEL_ENV_PREFIXES)
+    }
