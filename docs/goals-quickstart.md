@@ -267,6 +267,11 @@ fan-out is limited to eight children, nesting is limited to three levels, and at
 tokens remain for final fan-in. Subgoals are off by default because enabling them authorizes
 autonomous parallel work and budget allocation.
 
+Within one parent turn, the normalized child objective is the stable delegation identity. If a
+worker dies after spawning a child, its replacement may reconstruct optional eval or routing fields
+differently and still receives the original child instead of creating duplicate work. Give sibling
+children distinct objectives when they are intentionally separate delegations.
+
 A live child reserves its full allocation against the parent's cumulative token cap. When that
 child terminals, Grid releases the allocation and charges the child's actual usage exactly once;
 for nested Goals that actual usage already includes all descendants. `grid goal status` reports

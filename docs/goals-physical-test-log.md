@@ -191,3 +191,56 @@ the final two-physical-machine mixed-harness gate.
 - The run exposed two operator hardening items now covered by regression tests: Ctrl-C on
   `grid task follow` must detach cleanly without a traceback or cancellation, and physical-lab
   preflight must compare signed node IDs rather than process names.
+
+## 2026-08-30 — native Codex parent → Claude child → Codex fan-in
+
+This run exercises the real built-in `grid_spawn_subgoal` tool, a native Claude child Goal, Git
+fan-in, a resumed native Codex parent, and independent child and parent evals. The two signed task
+identities ran on one physical Mac, so this is mixed-harness protocol evidence rather than the final
+three-physical-machine gate.
+
+### Defect found by the first run
+
+- Parent Goal `20da64ec-c211-4fd5-ac79-f57c1bfe6eb5` spawned child
+  `bab929ff-8cdc-4b33-b2ba-3f0ebcac7a15`, then its Codex worker was killed after the durable action.
+- Attempt 2 reconstructed the same child objective with different optional eval fields. The old
+  exact-body action hash treated it as new and spawned `5da80387-a163-4420-bb49-ba74085223cd`.
+- Both children completed. Git correctly refused to silently choose between their conflicting
+  `CHILD.md` files and blocked the parent, proving the fan-in conflict fence worked while exposing
+  the action-identity bug.
+- Public commit `6f85936` keys an internal child delegation by normalized objective within the
+  stable parent turn. Distinct sibling work must use distinct objectives. A deterministic
+  four-node cross-repository test now fails on the old behavior and proves a replacement Codex
+  session can restate optional policy while receiving the original child id.
+
+### Passing hierarchy
+
+- Public worker commit: `6f85936`; private relay commit: `2bd0479`.
+- Project: `edad7eea-4d14-4b75-ae05-b5cff2ad055f`.
+- Parent Goal: `ca7eacfe-2bcc-41bb-95ee-e6babdb21335`; child Goal:
+  `fa3f9630-f0cc-4faa-ae05-cbb220057077`.
+- Codex execution identity: `goal-machine-b-48759900-4980-4b1a-ae6b-926e62ddd835`;
+  Claude execution identity: `goal-a-e1891074-24d0-4d3e-a67a-dba33e3eb377`.
+- Exact model: `Qwen3.6-35B-A3B`; inference identity:
+  `goal-b-c19853f3-8a8f-4a8d-a961-87e79b087a99`.
+- Codex parent turn `056e0b72-2f88-449c-af9d-0f7344d8959d` spawned exactly one child and ended
+  immediately at commit `09c92d2ccd89f2e6890c8b132fb7147778d4eb34`; the parent entered
+  `waiting_children` rather than polling a workspace that could not yet contain child output.
+- Claude child turn `122cd254-4314-4a93-95f6-7f4e1e8e39aa` completed at commit
+  `377e2cef5837d26effb1313572f5f13c606cd4b4`. Its independent file eval passed at score `1.0`.
+- Grid merged the child branch and scheduled Codex parent turn
+  `56c8b306-13e3-47c7-9aa7-bc09492ade10` from fan-in input commit
+  `ecea0a73f1c0fa0affce646af8419d9ae4fed3c8`. Codex completed the parent at
+  `a69ede94aa984ab0e68f45ec1791023c872b0a19`.
+- All three immutable parent evals passed at score `1.0`: the merged child marker, the parent fan-in
+  proof, and three exact JSON outcome checks.
+- Accounting reconciled to 161,253 parent tokens plus 14,942 descendant tokens = 176,195 total;
+  the child reservation returned to zero and the relation recorded one actual charge.
+- Strict evidence verification passed separately for parent and child with required Grid inference.
+  Parent snapshot: `f48eb5b06af477f86a622e5b3247e95c827c450a92f69ad5c23d6837469cd185`;
+  child snapshot: `13734f5ad45d1b046ee0c240e97fa8f1c7a3145f0fec52450cbc6a983058916d`.
+
+The attempted manual worker kill on the passing run landed after the first parent turn had already
+settled, so it is not described as a live retry. The checked-in deterministic test covers the exact
+post-spawn native failure window with four isolated node roots and proves two attempts emit one
+stable action key, return one child id, and fan in one branch.

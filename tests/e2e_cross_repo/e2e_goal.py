@@ -1294,6 +1294,87 @@ def test_parent_codex_spawns_claude_child_then_codex_fans_it_in(
     assert result["result"]["body"]["id"] == child_id
 
 
+def test_replacement_parent_reconstructs_one_child_after_spawn_failure(
+        relay, owner_token, spawn_goal_provider, tmp_path):
+    """A different Codex session may restate child policy, but it must replay one child identity."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-subgoal-retry-dedupe")["id"]
+    H.seed_trunk(relay, owner_token, project_id)
+    node_a = spawn_goal_provider(
+        "A", agent_kinds="codex", scenario="subgoal_retry",
+        disk_label="subgoal-retry-A", one_task=True)
+    parent = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Delegate one crash-safe child and merge its instructions exactly once",
+        done_when="README.md and FINAL.md exist after one child fan-in",
+        model="fake-grid-model", token_budget=10_000, tools=[], agents=["codex"],
+        allow_subgoals=True,
+        evals=[
+            {"type": "file", "name": "child instructions", "path": "README.md"},
+            {"type": "file", "name": "parent finish", "path": "FINAL.md"},
+        ])
+
+    assert H.wait_for(lambda: node_a.proc.poll() is not None, timeout=30), node_a.output()
+    first = relay_client.get_goal(relay, owner_token, parent["id"])
+    assert len(first["children"]) == 1, first
+    child_id = first["children"][0]["id"]
+
+    node_b = spawn_goal_provider(
+        "B", agent_kinds="codex", scenario="subgoal_retry",
+        disk_label="subgoal-retry-B", one_task=True)
+    waiting = H.wait_for(lambda: (lambda goal: goal if goal.get("status") == "waiting_children"
+                                  else None)(relay_client.get_goal(
+                                      relay, owner_token, parent["id"])), timeout=45)
+    assert waiting, f"replacement parent never yielded; B output:\n{node_b.output()}"
+    assert len(waiting["children"]) == 1
+    assert waiting["children"][0]["id"] == child_id
+    parent_turns = _tasks(relay, owner_token, project_id, parent["id"])
+    assert len(parent_turns) == 1 and parent_turns[0]["attempt"] == 2
+    assert parent_turns[0]["provider_id"] == node_b.node_id
+
+    node_c = spawn_goal_provider(
+        "C", agent_kinds="claude", scenario="subgoal_retry",
+        disk_label="subgoal-retry-C", one_task=True)
+    child_done = H.wait_for(lambda: (lambda goal: goal if goal.get("status") == "complete"
+                                    else None)(relay_client.get_goal(
+                                        relay, owner_token, child_id)), timeout=75)
+    assert child_done, f"Claude child did not complete; C output:\n{node_c.output()}"
+
+    node_d = spawn_goal_provider(
+        "D", agent_kinds="codex", scenario="subgoal_retry",
+        disk_label="subgoal-retry-D", one_task=True)
+    complete = H.wait_for(lambda: _completed_goal(
+        relay, owner_token, parent["id"]), timeout=75)
+    assert complete, f"parent did not finish after child fan-in; D output:\n{node_d.output()}"
+    assert len(complete["children"]) == 1
+    assert complete["children"][0]["merge_state"] == "merged"
+
+    destination = tmp_path / "subgoal-retry-result"
+    destination.mkdir()
+    parent_turns = _tasks(relay, owner_token, project_id, parent["id"])
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=parent_turns[-1]["branch"], commit=parent_turns[-1]["result_commit"],
+        project_id=project_id)
+    assert (destination / "README.md").is_file()
+    assert "exactly once" in (destination / "FINAL.md").read_text()
+
+    evidence = relay_client.get_goal_evidence(relay, owner_token, parent["id"])
+    requests = [item["event"] for item in evidence["attempt_events"]
+                if item["event"].get("type") == "goal.act.request"]
+    results = [item["event"] for item in evidence["attempt_events"]
+               if item["event"].get("type") == "goal.act.result"]
+    assert len(requests) == len(results) == 2
+    assert {item["idempotency_key"] for item in requests + results} == {
+        requests[0]["idempotency_key"]}
+    assert {item["result"]["body"]["id"] for item in results} == {child_id}
+    assert {item["attempt"] for item in requests + results} == {1, 2}
+    assert all(run["passed"] for run in evidence["eval_runs"])
+
+
 def test_failed_optional_child_does_not_block_parent_on_another_node(
         relay, owner_token, spawn_goal_provider):
     """A failed exploratory child stays in evidence while a third node finishes the parent."""

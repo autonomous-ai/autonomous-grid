@@ -306,6 +306,69 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
             return "complete", "C verified child fan-in and completed parent", 200
         raise RuntimeError(f"unexpected subgoal parent turn on {node}: {history!r}")
 
+    if scenario == "subgoal_retry":
+        if call_tool is None:
+            raise RuntimeError("subgoal retry scenario received no dynamic tool bridge")
+        objective = "Write the one crash-safe child instruction file"
+        if node == "A" and not history:
+            result = call_tool("grid_spawn_subgoal", {
+                "objective": objective,
+                "done_when": "README.md exists",
+                "model": "fake-grid-child-model",
+                "agents": ["claude"],
+                "evals": [{
+                    "type": "file", "name": "instructions v1", "path": "README.md",
+                    "exists": True,
+                }],
+                "token_budget": 2_000,
+            })
+            envelope = json.loads(
+                ((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+            child_id = ((envelope.get("body") or {}).get("id"))
+            if not result.get("success") or not child_id:
+                raise RuntimeError(f"first subgoal creation failed: {result!r}")
+            history.append({"node": "A", "spawned_child": child_id})
+            save_history(history)
+            # The action request and result are durable, but the native turn fails before it can
+            # settle. A replacement session must be free to reconstruct the delegation without
+            # creating a semantically duplicate child from differently-spelled optional policy.
+            raise RuntimeError("simulated parent harness failure after child spawn")
+        if (node == "B" and len(history) == 1
+                and history[0].get("node") == "A"):
+            result = call_tool("grid_spawn_subgoal", {
+                "objective": f"  {objective}  ",
+                "done_when": "README.md exists and has the child marker",
+                "model": "fake-grid-child-model",
+                "agents": ["claude"],
+                "evals": [{
+                    "type": "file", "name": "instructions reconstructed", "path": "README.md",
+                    "exists": True, "min_bytes": 20, "max_bytes": 2_000,
+                    "contains": ["Child instructions"],
+                }],
+                "required_capabilities": ["reconstructed-policy"],
+                "token_budget": 2_000,
+            })
+            envelope = json.loads(
+                ((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+            child_id = ((envelope.get("body") or {}).get("id"))
+            if (not result.get("success")
+                    or child_id != history[0].get("spawned_child")):
+                raise RuntimeError(
+                    f"replacement did not replay the original child: {result!r}")
+            history.append({"node": "B", "replayed_child": child_id})
+            save_history(history)
+            return "active", "B reconciled A's one child spawn", 100
+        if (node == "D" and len(history) == 2
+                and history[1].get("node") == "B"):
+            if not (cwd / "README.md").is_file():
+                raise RuntimeError("parent D resumed without the child README fan-in")
+            (cwd / "FINAL.md").write_text(
+                "# Parent complete\n\nOne crash-safe child was replayed and merged exactly once.\n")
+            history.append({"node": "D", "fan_in": "README.md"})
+            save_history(history)
+            return "complete", "D verified one idempotent child fan-in", 200
+        raise RuntimeError(f"unexpected subgoal retry turn on {node}: {history!r}")
+
     if not (cwd / "index.html").exists():
         if node != "A" or history:
             raise RuntimeError(f"feature 1 reached {node} with unexpected history {history!r}")

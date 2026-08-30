@@ -291,9 +291,11 @@ def main() -> int:
         with (transcript / f"{session}.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"sessionId": session, "prompt": prompt}) + "\n")
 
-    if os.environ.get("GRID_E2E_GOAL_SCENARIO") == "subgoal":
+    if os.environ.get("GRID_E2E_GOAL_SCENARIO") in ("subgoal", "subgoal_retry"):
         node = os.environ.get("GRID_E2E_GOAL_NODE")
-        if node != "B" or not prompt.startswith("/goal ") or resume is not None:
+        expected_node = ("C" if os.environ.get("GRID_E2E_GOAL_SCENARIO") == "subgoal_retry"
+                         else "B")
+        if node != expected_node or not prompt.startswith("/goal ") or resume is not None:
             sys.stderr.write("fake Claude received an invalid child Goal assignment\n")
             return 2
         pathlib.Path("README.md").write_text(

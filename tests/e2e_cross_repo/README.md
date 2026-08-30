@@ -70,6 +70,7 @@ interactive JSON-RPC fixture then proves those declared methods during execution
 | Image artifact | B Claude polls; A Codex executes | Goal requires `image_generation` | Ineligible node spends no attempt; independent PNG eval passes |
 | Support reply | A polls; B Codex -> C Codex | Origin restriction, crash after API commit, failed first eval | One business side effect, stable idempotency key, repair turn passes |
 | Required child | A parent model; B Claude child specialist model; C parent | Parent waits while child runs | Child model/harness survives the tool bridge; evaluated commit fans in once; allocation becomes one actual token charge |
+| Child spawn reconstruction | A Codex -> B Codex -> C Claude -> D Codex | A fails after the durable spawn; B reconstructs different optional child policy | Both attempts receive one child identity and one fan-in; action evidence carries one stable key |
 | Optional child | A parent; B child; C parent | Child returns native `failed` verdict | Failure remains evidence and does not block parent completion |
 
 The native-crash case starts each provider in one-claim mode so A withdraws after handing off its
@@ -99,6 +100,10 @@ flushes the action request/result trajectory before the retry endpoint revokes e
 accepts exact worktree and transcript pins, and requeues the same logical turn immediately. B's
 replay carries the identical Goal-wide idempotency key, so the business API performs no duplicate
 mutation.
+The child-spawn reconstruction case applies the same rule to Grid's own dependency table. A and B
+use different native sessions and deliberately restate the child eval and routing hints differently;
+the normalized objective still produces one parent-turn action key, so the relay returns the first
+reserved child and the parent later fans in exactly one branch.
 
 ## Prerequisites
 
