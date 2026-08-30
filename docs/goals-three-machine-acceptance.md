@@ -208,13 +208,13 @@ retry event sequence and exact accepted pins, with both `worktree_ancestor` and
 
 For each reclaimed turn, use the relay-authored `task.retry.previous_provider_id` and
 `previous_agent_kind` as the authority for the machine and harness that disappeared, and the
-settled turn's `provider_node_id` plus `agent_kind` as the authority for its replacement. A
-`task.attempt_started` event is useful corroboration but is not required for the killed attempt: an
-abrupt power loss can happen before that best-effort event is flushed. When it does arrive, the
-relay overwrites its node, attempt, and harness fields from the live claim. `--min-execution-nodes`
-counts both the settled providers and relay-authored retry predecessors; it never counts a start
-marker. The replacement's attempt number must still be 2 and the retry reason must be
-`lease_expired`.
+settled turn's `provider_node_id` plus `agent_kind` as the authority for its replacement. Native
+Goal workers durably flush `task.attempt_started` before checkout-independent agent execution and
+refuse to launch when the relay does not accept it. The relay overwrites that event's node, attempt,
+and harness from the live claim. Therefore each retry predecessor counted by
+`--min-execution-nodes` must have exactly one matching relay-stamped attempt-start event; a start
+marker without the later authoritative retry never counts by itself. The replacement's attempt
+number must still be 2 and the retry reason must be `lease_expired`.
 
 Every terminal evaluation row used as proof must belong to the final turn and final result commit,
 match both the immutable definition id and hash, name its evaluator, and have `accepted: true` with
