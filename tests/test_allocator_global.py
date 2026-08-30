@@ -3250,6 +3250,39 @@ def test_shared_host_fairness_rounds_reuse_exact_candidate_state(monkeypatch):
     assert calls["residency"] <= distinct_pairs * 10
 
 
+def test_counterfactual_plans_reuse_only_the_exact_fleet_topology(monkeypatch):
+    machines = tuple(node(f"n{index}", 16_000) for index in range(8))
+    profiles = tuple(
+        model(f"model-{index}", 8_000, min_replicas=0, max_replicas=2)
+        for index in range(4)
+    )
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    original = planner_module._ineligible_reason
+    compatibility_calls = 0
+
+    def counted_compatibility(*args, **kwargs):
+        nonlocal compatibility_calls
+        compatibility_calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(planner_module, "_ineligible_reason", counted_compatibility)
+    forecasts = (DemandForecast("model-0", requests_per_minute=1, sample_count=1),)
+    planner.plan(machines, profiles, forecasts, now=10)
+    initial_calls = compatibility_calls
+
+    planner.plan(machines, profiles, forecasts, now=10)
+    repeated_calls = compatibility_calls - initial_calls
+    assert repeated_calls < initial_calls
+
+    changed_machines = (replace(machines[0], host_priority=1), *machines[1:])
+    planner.plan(changed_machines, profiles, forecasts, now=10)
+    after_heartbeat = compatibility_calls
+    assert after_heartbeat - initial_calls - repeated_calls > repeated_calls
+
+    planner.plan(changed_machines, profiles, forecasts, now=11)
+    assert compatibility_calls - after_heartbeat > repeated_calls
+
+
 def test_independent_preemption_wave_scans_the_fleet_once(monkeypatch):
     machines = tuple(
         node(

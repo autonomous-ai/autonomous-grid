@@ -151,9 +151,62 @@ class _PendingReplica:
     domain_floor: int
 
 
+@dataclass(slots=True)
+class _PlanTopologyContext:
+    """Reusable hard fleet facts for counterfactual plans over one exact snapshot."""
+
+    timestamp: float
+    policy: PlannerPolicy
+    nodes: tuple[NodeSnapshot, ...]
+    models: tuple[ModelProfile, ...]
+    compatibility: dict[tuple[str, str, bool], str | None] = field(default_factory=dict)
+    runtime_requirements: dict[tuple[str, str], bool] = field(default_factory=dict)
+    runtime_memory: dict[tuple[str, str], int] = field(default_factory=dict)
+    future_eligible_nodes: dict[str, frozenset[str]] | None = None
+    eligible_host_counts: dict[str, int] | None = None
+
+    def matches(
+        self,
+        nodes: list[NodeSnapshot],
+        models: list[ModelProfile],
+        timestamp: float,
+        policy: PlannerPolicy,
+    ) -> bool:
+        # Retain the referenced objects in this context, so an id cannot be recycled while the
+        # cache is live. Identity matching is deliberately stricter and cheaper than deep hashing
+        # a complete fleet on every counterfactual plan.
+        return bool(
+            self.timestamp == timestamp
+            and self.policy == policy
+            and len(self.nodes) == len(nodes)
+            and len(self.models) == len(models)
+            and all(cached is current for cached, current in zip(self.nodes, nodes))
+            and all(cached is current for cached, current in zip(self.models, models))
+        )
+
+
 class PlacementPlanner:
     def __init__(self, policy: PlannerPolicy | None = None) -> None:
         self.policy = policy or PlannerPolicy()
+        self._plan_topology_context: _PlanTopologyContext | None = None
+
+    def _topology_context(
+        self,
+        nodes: list[NodeSnapshot],
+        models: list[ModelProfile],
+        timestamp: float,
+    ) -> _PlanTopologyContext:
+        cached = self._plan_topology_context
+        if cached is not None and cached.matches(nodes, models, timestamp, self.policy):
+            return cached
+        result = _PlanTopologyContext(
+            timestamp=timestamp,
+            policy=self.policy,
+            nodes=tuple(nodes),
+            models=tuple(models),
+        )
+        self._plan_topology_context = result
+        return result
 
     def portfolio_placement_hints(
         self,
@@ -494,6 +547,7 @@ class PlacementPlanner:
         _require_unique((model.model_id for model in model_list), "model")
         forecast_list = sorted(forecasts, key=lambda item: item.model_id)
         _require_unique((item.model_id for item in forecast_list), "forecast model")
+        topology_context = self._topology_context(node_list, model_list, timestamp)
         forecast_by_model = {item.model_id: item for item in forecast_list}
         startup_by_pair = _validated_startup_seconds(startup_seconds)
         load_by_pair = _validated_load_seconds(load_seconds)
@@ -554,9 +608,9 @@ class PlacementPlanner:
             for model in model_list
         }
         profile_by_id = {item.model_id: item for item in model_list}
-        compatibility_cache: dict[tuple[str, str, bool], str | None] = {}
-        runtime_requirement_cache: dict[tuple[str, str], bool] = {}
-        runtime_memory_cache: dict[tuple[str, str], int] = {}
+        compatibility_cache = topology_context.compatibility
+        runtime_requirement_cache = topology_context.runtime_requirements
+        runtime_memory_cache = topology_context.runtime_memory
         colocation_policy_active = any(
             profile.max_colocated_models or profile.colocation_excludes
             for profile in model_list
@@ -705,6 +759,11 @@ class PlacementPlanner:
 
         # Recompute scarcity after hard pins have consumed their declared capacity. Within one
         # administrator-priority class, constrained models go before flexible models.
+        if topology_context.eligible_host_counts is None:
+            topology_context.eligible_host_counts = {
+                model.model_id: eligible_host_count(model) for model in model_list
+            }
+        eligible_host_counts = topology_context.eligible_host_counts
         order = sorted(
             model_list,
             key=lambda item: (
@@ -713,7 +772,7 @@ class PlacementPlanner:
                     item,
                     forecast_by_model.get(item.model_id),
                 ),
-                eligible_host_count(item),
+                eligible_host_counts[item.model_id],
                 -item.maximum_memory_mb,
                 item.model_id,
             ),
@@ -742,27 +801,27 @@ class PlacementPlanner:
         # know that putting a tiny flexible model on the only large host can make a larger demanded
         # model impossible. The desired plan may move the flexible model first; reconciliation then
         # proves its replacement ready before draining the old residency.
-        future_eligible_nodes: dict[str, frozenset[str]] = {}
-        for candidate_model in model_list:
-            # Dormant catalog models still carry topology option value. A flexible LLM should use
-            # an equivalent general-purpose host instead of occupying the only ComfyUI/GPU host
-            # merely because the first media request has not crossed its evidence threshold yet.
-            # This does not reserve or idle capacity: zero-demand models are never placed. It only
-            # breaks otherwise-equivalent placement ties in favor of preserving uniquely capable
-            # hosts for demand that may arrive during the model's startup horizon.
-            future_eligible_nodes[candidate_model.model_id] = frozenset(
-                candidate_node.node_id
-                for candidate_node in node_list
-                if compatibility(
-                    candidate_node,
-                    candidate_model,
-                    for_new=requires_new_runtime(candidate_node, candidate_model),
+        # Dormant catalog models still carry topology option value. This does not reserve or idle
+        # capacity: zero-demand models are never placed. It only preserves uniquely capable hosts
+        # for demand that may arrive during the model's startup horizon.
+        if topology_context.future_eligible_nodes is None:
+            topology_context.future_eligible_nodes = {
+                candidate_model.model_id: frozenset(
+                    candidate_node.node_id
+                    for candidate_node in node_list
+                    if compatibility(
+                        candidate_node,
+                        candidate_model,
+                        for_new=requires_new_runtime(candidate_node, candidate_model),
+                    )
+                    is None
+                    and runtime_memory(candidate_node, candidate_model)
+                    <= placement_budget[candidate_node.node_id]
+                    and candidate_node.max_models != 0
                 )
-                is None
-                and runtime_memory(candidate_node, candidate_model)
-                <= placement_budget[candidate_node.node_id]
-                and candidate_node.max_models != 0
-            )
+                for candidate_model in model_list
+            }
+        future_eligible_nodes = topology_context.future_eligible_nodes
         scarce_host_claims: dict[tuple[str, str], tuple[str, ...]] = {}
         scarce_host_excess_claims: dict[tuple[str, str], int] = {}
         scarce_host_preservations: dict[tuple[str, str], tuple[str, ...]] = {}

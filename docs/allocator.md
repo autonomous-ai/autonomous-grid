@@ -161,6 +161,11 @@ lifecycle history remain live on every response.
 Fleet-wide topology option value is computed with host-to-model indexes and direct eligible-set
 intersections. This preserves the same constrained-host penalties without expanding every
 candidate/scarce-host/alternative-host triple on large 32–64 node planning passes.
+Counterfactual portfolio plans over the exact same timestamp, node objects, model profiles, and
+policy also share one bounded hard-topology context: compatibility, runtime footprint, future host
+sets, and post-pin eligible-host counts. A new heartbeat/profile object, control timestamp, or
+policy invalidates the whole context; demand-only alternatives reuse it because they cannot alter
+those hard fleet facts.
 
 Each bounded workload set reserves representation for its exploitation leader and the broadest
 cross-workload candidate; a fifth-ranked generalist can therefore remain discoverable when four
