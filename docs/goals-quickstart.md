@@ -486,6 +486,7 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 | Claude protocol drift | A (2 workers) -> B | Claude -> Codex | A exits cleanly without its native evaluator attachment while worker 2 holds a stale claim poll | Worker 2 declines the delivered retry without spending an attempt; A stays online without `native_goal`; B receives attempt 2 and accepted Git/transcript pins |
 | Codex protocol drift | A (4 workers) -> B | Codex -> Claude | A's schema passes but a required runtime method disappears while three sibling workers hold stale claim polls | All three delivered retries are declined without spending an attempt; A stays online without `native_goal`; B receives attempt 2 and accepted Git/transcript pins |
 | Crash-safe business action | A -> B | Codex -> Codex | API commits, then A's native harness crashes | One side effect; stable key; complete action evidence; passing proof |
+| Business result-window death | B -> C | Codex -> Codex | B is SIGKILLed after API commit, before the result event | One side effect; unmatched request reconciled by C's stable-key replay |
 | Image artifact | B polls; A executes | Claude rejected; Codex selected | Capability mismatch | PNG file and size |
 | Support reply | A polls; B -> C execute | Codex | B dies after API commit; first eval fails | `DONE.md`; JSON outcome; one API side effect |
 | Required child | A parent; B child; C parent | Codex -> Claude -> Codex | Parent moves while child runs | Child and parent files |

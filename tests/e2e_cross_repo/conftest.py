@@ -220,6 +220,12 @@ def business_api():
     """A process-external API with an idempotent write, as a local business service would expose."""
     state = {
         "reads": [], "write_requests": [], "writes_by_key": {}, "side_effects": [],
+        # The result-window E2E pauses the FIRST committed mutation before its HTTP response. That
+        # gives the driver a deterministic place to kill the provider after the side effect but
+        # before ToolExecutor can append goal.act.result. Ordinary scenarios leave this disabled.
+        "pause_after_commit": False,
+        "commit_reached": threading.Event(),
+        "release_response": threading.Event(),
     }
     lock = threading.Lock()
 
@@ -233,7 +239,12 @@ def business_api():
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(encoded)))
             self.end_headers()
-            self.wfile.write(encoded)
+            try:
+                self.wfile.write(encoded)
+            except (BrokenPipeError, ConnectionResetError):
+                # Expected when the result-window test kills the client process while this handler
+                # deliberately holds the response after committing the mutation.
+                pass
 
         def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler protocol name
             parsed = urlparse(self.path)
@@ -271,6 +282,10 @@ def business_api():
                 if not replayed:
                     state["writes_by_key"][key] = body
                     state["side_effects"].append(body)
+                pause_after_commit = state["pause_after_commit"] and not replayed
+            if pause_after_commit:
+                state["commit_reached"].set()
+                state["release_response"].wait(timeout=30)
             self.send_json(200, {
                 "reply_id": "R-1", "applied": not replayed, "replayed": replayed,
             })
@@ -283,6 +298,7 @@ def business_api():
     try:
         yield state
     finally:
+        state["release_response"].set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)

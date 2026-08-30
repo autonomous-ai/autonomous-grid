@@ -933,6 +933,79 @@ def test_committed_business_action_survives_immediate_native_checkpoint_handoff(
     assert _verify_evidence(evidence, min_execution_nodes=2) == []
 
 
+def test_machine_dies_between_business_commit_and_durable_result_event(
+        relay, owner_token, spawn_goal_provider, business_api, tmp_path):
+    """B is SIGKILLed in the narrow result window; C reconciles one side effect and the audit."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-business-result-window")['id']
+    H.seed_trunk(relay, owner_token, project_id)
+    origin = business_api["origin"]
+    business_api["pause_after_commit"] = True
+    node_b = spawn_goal_provider(
+        "B", scenario="business_result_window", disk_label="result-window-B",
+        tool_origins=origin)
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Send one support reply despite a machine dying in the result window",
+        done_when="DONE.md proves another node reconciled the committed reply",
+        model="fake-grid-model", token_budget=3_000,
+        tools=[{
+            "name": "send_reply", "mode": "act", "record": "full",
+            "input_schema": {"type": "object", "properties": {
+                "ticket_id": {"type": "string"}, "reply": {"type": "string"}},
+                "required": ["ticket_id", "reply"]},
+            "http": {"method": "POST", "url": f"{origin}/tickets/reply"},
+        }],
+        evals=[{
+            "type": "file", "name": "result-window reconciliation", "path": "DONE.md",
+            "max_bytes": 2_000, "contains": ["replayed the stable action key"],
+        }])
+
+    assert business_api["commit_reached"].wait(timeout=30), node_b.output()
+    rows = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(rows) == 1 and rows[0]["state"] == "running", rows
+    assert rows[0]["attempt"] == 1 and rows[0]["provider_id"] == node_b.node_id
+    assert len(business_api["side_effects"]) == 1
+    node_b.die()
+    business_api["release_response"].set()
+
+    node_c = spawn_goal_provider(
+        "C", scenario="business_result_window", disk_label="result-window-C",
+        tool_origins=origin)
+    complete = H.wait_for(
+        lambda: _completed_goal(relay, owner_token, goal["id"]), timeout=75)
+    assert complete, node_c.output()
+    rows = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(rows) == 1 and rows[0]["attempt"] == 2, rows
+    assert rows[0]["provider_id"] == node_c.node_id
+    assert len(business_api["write_requests"]) == 2
+    assert len({item["key"] for item in business_api["write_requests"]}) == 1
+    assert len(business_api["side_effects"]) == 1
+
+    destination = tmp_path / "business-result-window"
+    destination.mkdir()
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=rows[0]["branch"], commit=rows[0]["result_commit"], project_id=project_id)
+    assert "replayed the stable action key" in (destination / "DONE.md").read_text()
+
+    evidence = relay_client.get_goal_evidence(relay, owner_token, goal["id"])
+    requests = [item for item in evidence["attempt_events"]
+                if item["event"].get("type") == "goal.act.request"]
+    results = [item for item in evidence["attempt_events"]
+               if item["event"].get("type") == "goal.act.result"]
+    assert {(item["event"]["provider_node_id"], item["event"]["attempt"])
+            for item in requests} == {(node_b.node_id, 1), (node_c.node_id, 2)}
+    assert {(item["event"]["provider_node_id"], item["event"]["attempt"])
+            for item in results} == {(node_c.node_id, 2)}
+    assert {item["event"]["idempotency_key"] for item in requests + results} == {
+        business_api["write_requests"][0]["key"]}
+    _assert_transcript_chain(evidence, 1, min_nodes=2)
+
+
 def test_image_goal_waits_for_a_node_with_the_required_capability(
         relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
     """An online native-Goal harness is not enough: the exact capability must match."""

@@ -150,6 +150,28 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
         save_history(history)
         return "complete", "B safely reconciled A's committed action", 200
 
+    if scenario == "business_result_window":
+        if call_tool is None:
+            raise RuntimeError("business result-window scenario received no dynamic tool bridge")
+        arguments = {
+            "ticket_id": "T-42",
+            "reply": "Use the verified password-reset link and contact support if it expires.",
+        }
+        result = call_tool("send_reply", arguments)
+        envelope = json.loads(((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+        if not result.get("success"):
+            raise RuntimeError(f"business result-window action failed: {result!r}")
+        if node == "B":
+            # The real provider is SIGKILLed while call_tool waits for the response, so this return
+            # belongs only to the now-orphaned fake app-server and can never be pushed or reported.
+            return "complete", "B's orphan received the response after its provider died", 100
+        if node != "C" or not (envelope.get("body") or {}).get("replayed"):
+            raise RuntimeError(f"replacement did not reconcile the committed action: {result!r}")
+        (cwd / "DONE.md").write_text(
+            "# Reply reconciled\n\nNode C replayed the stable action key after node B died "
+            "between the business commit and Grid's durable result event.\n")
+        return "complete", "C reconciled B's unaudited committed action", 200
+
     if scenario == "business_tools":
         if call_tool is None:
             raise RuntimeError("business Goal received no dynamic tool bridge")
