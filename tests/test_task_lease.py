@@ -1532,6 +1532,18 @@ def test_the_event_ceiling_is_the_one_the_relay_actually_enforces():
         f"agent's output goes with it")
 
 
+def test_goal_evaluation_finishes_inside_the_terminal_report_timeout():
+    """The relay evaluates after this provider stops renewal, inside one result HTTP request."""
+    from remote import relay
+
+    evaluation_ceiling = _relay_constant(
+        "MAX_EVALUATION_SECONDS", module="goal_evals.py")
+    assert evaluation_ceiling <= relay._TASK_RESULT_TIMEOUT - 10, (
+        f"the relay can spend {evaluation_ceiling}s evaluating after the Goal agent exits, but "
+        f"the provider stops waiting after {relay._TASK_RESULT_TIMEOUT}s; leave ten seconds for "
+        "Git ref settlement, the fenced terminal transaction and the response")
+
+
 def test_the_heartbeat_carries_a_tree_snapshot_while_the_agent_works(renewals):
     """ADR 0032 D-f's tracer bullet: the workspace view rides the beat that already exists.
 
@@ -1798,8 +1810,12 @@ def _relay_module(name):
     is absent (`GRID_SRC_REPO` is the cross-repo E2E's override; this side has deliberately never
     needed one, because a developer without the worktree simply cannot check the duplicates).
     """
+    import os
     import pathlib
 
+    override = os.getenv("GRID_SRC_REPO")
+    if override:
+        return pathlib.Path(override) / "grid_cli" / "private_server" / name
     return pathlib.Path(
         "/Users/macbookpro/Projects/grid-src-feats/distributed-tasks"
         "/grid_cli/private_server") / name
