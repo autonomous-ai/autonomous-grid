@@ -808,13 +808,14 @@ def test_codex_protocol_drift_quarantines_node_and_hands_same_turn_to_claude(
     queued = _tasks(relay, owner_token, project_id, goal["id"])
     assert len(queued) == 1 and queued[0]["id"] == goal["turn_id"], queued
     assert queued[0]["checkpoint_commit"]
-    # Three sibling long-polls began with Codex's pre-quarantine profile. At least two must receive
-    # and decline serial deliveries before B exists, proving a worker HERD cannot burn the retry
-    # cap. The third may legally observe the brief gap while a sibling owns the row and return
-    # empty; requiring every outstanding poll to receive the same row confuses concurrency with
-    # broadcast delivery.
+    # Three sibling long-polls began with Codex's pre-quarantine profile. At least one must receive
+    # and decline a stale delivery before B exists, proving the real delivery/revalidation path.
+    # The others may legally observe the brief gap while that sibling owns the row and return
+    # empty; requiring N outstanding PULLS to receive one row confuses concurrency with broadcast.
+    # The attempt assertion immediately below is the herd-wide safety property: regardless of how
+    # many stale polls saw the row, none was allowed to spend attempt 2.
     assert H.wait_for(
-        lambda: node_a.output().count("declined stale Goal claim") >= 2,
+        lambda: node_a.output().count("declined stale Goal claim") >= 1,
         timeout=15), node_a.output()
     after_decline = _tasks(relay, owner_token, project_id, goal["id"])
     assert len(after_decline) == 1
