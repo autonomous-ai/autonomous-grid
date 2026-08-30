@@ -1533,7 +1533,7 @@ def test_the_event_ceiling_is_the_one_the_relay_actually_enforces():
 
 
 def test_goal_evaluation_finishes_inside_the_terminal_report_timeout():
-    """The relay evaluates after this provider stops renewal, inside one result HTTP request."""
+    """Evaluation fits inside both the provider wait and relay-owned settlement lease."""
     import ast
     import os
     import pathlib
@@ -1557,6 +1557,22 @@ def test_goal_evaluation_finishes_inside_the_terminal_report_timeout():
         f"the relay can spend {evaluation_ceiling}s evaluating after the Goal agent exits, but "
         f"the provider stops waiting after {relay._TASK_RESULT_TIMEOUT}s; leave ten seconds for "
         "Git ref settlement, the fenced terminal transaction and the response")
+
+    tasks_source = pathlib.Path(source_root) / "grid_cli" / "private_server" / "tasks.py"
+    assert tasks_source.is_file(), f"GRID_SRC_REPO has no private Goal task plane at {tasks_source}"
+    settlement_assignments = [
+        node for node in ast.parse(tasks_source.read_text()).body
+        if isinstance(node, ast.Assign) and any(
+            getattr(target, "id", None) == "GOAL_RESULT_SETTLEMENT_LEASE_SECONDS"
+            for target in node.targets)
+    ]
+    assert len(settlement_assignments) == 1
+    settlement_lease = _numeric(
+        settlement_assignments[0].value, "GOAL_RESULT_SETTLEMENT_LEASE_SECONDS")
+    assert settlement_lease >= relay._TASK_RESULT_TIMEOUT + 10, (
+        f"the provider can wait {relay._TASK_RESULT_TIMEOUT}s for terminal settlement, but the "
+        f"relay protects that work for only {settlement_lease}s; a short configured task TTL could "
+        "reclaim a valid Goal result before its response lands")
 
 
 def test_the_heartbeat_carries_a_tree_snapshot_while_the_agent_works(renewals):
