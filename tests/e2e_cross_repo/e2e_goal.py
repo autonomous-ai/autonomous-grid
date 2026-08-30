@@ -574,10 +574,20 @@ def test_four_nodes_cross_harness_eval_repair_resumes_claude_after_codex(
     failed = [item for item in status["last_eval"]["results"] if not item["passed"]]
     assert [item["name"] for item in failed] == ["click updates score"]
     assert "required literal content is absent" in failed[0]["evidence"]
+    # Terminal settlement is acknowledged before post-commit continuation preparation so a slow
+    # Git prepare cannot make the worker time out after its result already landed. The durable row
+    # may therefore be briefly `preparing`; require eventual queue publication, not an impossible
+    # same-response ordering, while still proving no provider spent the repair attempt.
+    def repair_turn_is_queued():
+        current = _tasks(relay, owner_token, project_id, conversation_id)
+        return bool(len(current) == 4
+                    and current[3]["state"] == "queued"
+                    and current[3]["attempt"] == 0)
+
+    assert H.wait_for(repair_turn_is_queued, timeout=30), _tasks(
+        relay, owner_token, project_id, conversation_id)
     rows = _tasks(relay, owner_token, project_id, conversation_id)
-    assert len(rows) == 4, rows
     assert rows[2]["state"] == "completed" and rows[2]["provider_id"] == node_c.node_id
-    assert rows[3]["state"] == "queued" and rows[3]["attempt"] == 0
 
     # D is a fourth node with a fresh disk and only Claude. It must restore B's opaque Claude
     # session across intervening Codex work, consume Grid's failed-eval handoff, and repair the tree.
