@@ -1247,10 +1247,15 @@ def get_goal_evidence(signaling_url: str, access_token: str, goal_id: str) -> di
 
 
 def control_goal(signaling_url: str, access_token: str, goal_id: str,
-                 action: str) -> dict[str, Any]:
-    return _task_oneshot(signaling_url, access_token, "POST",
-                         f"/relay/v1/goals/{quote(goal_id, safe='')}/{quote(action, safe='')}",
-                         missing_route_hint=_OLD_RELAY_NO_GOALS)
+                 action: str, *, token_budget: int | None = None) -> dict[str, Any]:
+    body = ({"token_budget": token_budget}
+            if action == "resume" and token_budget is not None else None)
+    kwargs: dict[str, Any] = {"missing_route_hint": _OLD_RELAY_NO_GOALS}
+    if body is not None:
+        kwargs["json"] = body
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/goals/{quote(goal_id, safe='')}/{quote(action, safe='')}", **kwargs)
 
 
 # Every project endpoint arrived together (ADR 0033 issue 10), so a relay missing one is missing

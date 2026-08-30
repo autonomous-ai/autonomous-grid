@@ -1548,7 +1548,9 @@ grid goal list [--all] [--grid <grid>] [--json]
 grid goal status <goal-id> [--grid <grid>] [--json]
 grid goal evidence <goal-id> [--verify] [--min-execution-nodes <n>] [--require-inference]
                    [--grid <grid>]
-grid goal pause|resume|cancel <goal-id> [--grid <grid>] [--json]
+grid goal pause <goal-id> [--grid <grid>] [--json]
+grid goal resume <goal-id> [--token-budget <tokens>] [--grid <grid>] [--json]
+grid goal cancel <goal-id> [--grid <grid>] [--json]
 ```
 
 **Remote-only and experimental.** A Goal is one measurable Codex objective continued across
@@ -1557,6 +1559,11 @@ limited. The Goal id is its conversation id. `list` omits ended Goals unless `--
 Creation automatically uses a unique request key and retries one transport failure safely. If the
 response remains uncertain, reuse the key printed in the error with `--idempotency-key`; a different
 request cannot reuse that key.
+
+`resume --token-budget` raises the cumulative cap of a `budget_limited` root Goal and continues its
+existing branch and native transcript. The value must be a positive whole number larger than the
+old cap and every consumed/reserved token. It cannot revive completed, failed or cancelled Goals,
+and child Goal budgets remain reserved and controlled by their parent.
 
 The computer running Codex and the computer serving `--model` need not be the same node. Agent state
 and project state move through the relay's Git refs at successful turn boundaries; a replacement

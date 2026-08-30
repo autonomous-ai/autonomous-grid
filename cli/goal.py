@@ -746,6 +746,9 @@ def cmd_goal(args: argparse.Namespace) -> int:
                   file=sys.stderr)
         return 0
     else:
-        goal = relay.control_goal(base, token, args.goal_id, args.goal_action)
+        goal = relay.control_goal(
+            base, token, args.goal_id, args.goal_action,
+            token_budget=(getattr(args, "token_budget", None)
+                          if args.goal_action == "resume" else None))
     _show(goal, args.json)
     return 0

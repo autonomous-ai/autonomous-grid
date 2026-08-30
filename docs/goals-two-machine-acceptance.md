@@ -219,7 +219,7 @@ uv run grid goal run --project <project-id> \
   --objective "Build a dependency-free browser game named Grid Courier. Work in durable stages. In the first native Goal slice, create the page, styling, core movement loop, PLAN.md, and HANDOFF.md containing A_ACCEPTED_CHECKPOINT; deliberately leave collision, scoring, lives, restart, persistence, tests, and final documentation unfinished so the native Goal remains active. In later slices, inspect the existing files and relay handoff before changing them; add B_RECONSTRUCTED_CHECKPOINT only after observing A_ACCEPTED_CHECKPOINT, then finish every remaining feature and nominate completion. Do not claim a machine identity from the prompt: Grid evidence is authoritative." \
   --done-when "The game is playable with keyboard and pointer controls, collision, score, lives, restart, persistent high score, responsive accessible styling, instructions, and browser-independent tests; every attached eval passes and HANDOFF.md contains both staged checkpoint markers." \
   --model <model> \
-  --token-budget 120000 \
+  --token-budget 10000000 \
   --agent auto \
   --evals docs/fixtures/two-machine-game-evals.json \
   --json

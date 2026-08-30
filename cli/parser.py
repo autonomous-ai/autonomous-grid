@@ -74,6 +74,17 @@ def _positive_task_count(raw: str) -> int:
     return count
 
 
+def _positive_token_budget(raw: str) -> int:
+    """A finite Goal budget must be a positive whole number."""
+    try:
+        budget = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError("token budget must be a positive whole number") from None
+    if budget <= 0:
+        raise argparse.ArgumentTypeError("token budget must be a positive whole number")
+    return budget
+
+
 def _positive_node_count(raw: str) -> int:
     try:
         count = int(raw)
@@ -1074,7 +1085,7 @@ def _add_goal(sub) -> None:
     run.add_argument("--objective", required=True, help="The outcome Codex should achieve.")
     run.add_argument("--done-when", required=True, help="One measurable completion condition.")
     run.add_argument("--model", required=True, help="Grid model used by Codex.")
-    run.add_argument("--token-budget", type=int, default=100_000,
+    run.add_argument("--token-budget", type=_positive_token_budget, default=100_000,
                      help="Maximum cumulative tokens (default 100000).")
     run.add_argument("--tools", default=None, metavar="FILE",
                      help="JSON file containing the observe/act HTTP capability manifest.")
@@ -1126,6 +1137,11 @@ def _add_goal(sub) -> None:
                               ("cancel", "End a Goal")):
         parser = actions.add_parser(action, help=help_text)
         parser.add_argument("goal_id")
+        if action == "resume":
+            parser.add_argument(
+                "--token-budget", type=_positive_token_budget, default=None, metavar="TOKENS",
+                help=("Raise the cumulative token budget while resuming; required to continue a "
+                      "budget-limited Goal."))
         parser.add_argument("--grid", default=None,
                             help="Grid to act on (default: active grid).")
         parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")

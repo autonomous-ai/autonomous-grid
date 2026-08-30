@@ -575,6 +575,8 @@ grid goal list
 grid goal status <goal-id>
 grid goal pause <goal-id>
 grid goal resume <goal-id>
+# If a local-model run used its estimate, continue the same Goal and history with a larger cap:
+grid goal resume <goal-id> --token-budget 10000000
 ```
 
 Goal creation is idempotent. The CLI retries a lost response with the same request key; if the
@@ -586,6 +588,13 @@ Goal turn is an ordinary leased task. The provider checks out the conversation b
 checkpoint from relay Git, runs Codex with model requests routed through Grid inference, then pushes
 both back. If that computer disappears, the lease expires and another Codex-capable provider
 reclaims the same task from the last completed checkpoint.
+
+Token budgets are cumulative safety rails, not billing limits or hard mid-request cancellation.
+A native slice may finish past its estimate before Grid records the accepted checkpoint. A
+`budget_limited` root Goal remains auditable and terminal until its owner explicitly resumes it
+with a larger total `--token-budget`; Grid then continues the same branch and native transcript.
+Completed, failed and cancelled Goals cannot be revived, and child allocations remain controlled
+by their parent Goal.
 
 Agent capacity and model capacity remain separate. If the requested model has no compatible live
 Grid route, the Goal stays queued at attempt 0 instead of launching an agent that can only fail.

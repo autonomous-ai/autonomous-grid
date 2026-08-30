@@ -129,6 +129,7 @@ grid goal status <goal-id>
 grid goal evidence <goal-id> --verify > goal-evidence.json
 grid goal pause <goal-id>         # current leased turn may finish; no next turn is queued
 grid goal resume <goal-id>
+grid goal resume <goal-id> --token-budget 10000000  # extend a budget-limited root Goal
 grid goal cancel <goal-id>        # ends the Goal and cancels queued/running work
 ```
 
@@ -139,10 +140,13 @@ queued/running descendants, including a child whose relay Git preparation was in
 
 Pause is an overlay, not a rollback. If the in-flight slice passes the final eval, fails terminally,
 or exhausts its budget after pause lands, Grid stores that underlying outcome while still showing
-`paused`. Resume reveals the stored terminal state and queues nothing; it cannot turn completed,
-failed, or budget-limited work back into an active Goal. If a paused parent reveals a terminal
-outcome, Grid cancels its still-live descendant turns rather than waking workers whose results can
-no longer be reconciled into that parent.
+`paused`. Plain resume reveals the stored terminal state and queues nothing. Completed, failed and
+cancelled Goals cannot be revived. A budget-limited root Goal is the intentional exception: resume
+it with a larger cumulative `--token-budget` and Grid queues the next turn from the same branch and
+native transcript. The new cap must exceed both the old cap and all consumed/reserved tokens;
+replaying the same successful extension is idempotent. Child allocations remain parent-managed.
+If a paused parent reveals another terminal outcome, Grid cancels its still-live descendant turns
+rather than waking workers whose results can no longer be reconciled into that parent.
 
 Repeated pause is idempotent and never overwrites that saved outcome. One deliberate hierarchical
 case remains useful: directly pausing a child already paused by its parent detaches it from the
@@ -268,7 +272,8 @@ child terminals, Grid releases the allocation and charges the child's actual usa
 for nested Goals that actual usage already includes all descendants. `grid goal status` reports
 the total actual usage plus any allocation still reserved for live children. If parent plus
 descendant usage reaches the cap, Grid can still fan in the finished branches, then ends the parent
-as `budget_limited` without scheduling another agent turn.
+as `budget_limited` without scheduling another agent turn. Budgets are enforced at accepted native
+slice boundaries, so one in-flight local-model slice can report more tokens than the prior cap.
 
 Harness capabilities are scheduled honestly:
 

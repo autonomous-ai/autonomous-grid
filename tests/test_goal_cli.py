@@ -27,6 +27,25 @@ def test_goal_run_parser_requires_a_measurable_condition_and_model():
     assert evidence.min_execution_nodes == 3
     assert evidence.require_inference is True
 
+    resumed = build_parser().parse_args([
+        "goal", "resume", "goal-1", "--token-budget", "10000000",
+    ])
+    assert resumed.goal_action == "resume"
+    assert resumed.token_budget == 10_000_000
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "many"])
+def test_goal_token_budget_must_be_a_positive_whole_number(value):
+    from cli.parser import build_parser
+
+    with pytest.raises(SystemExit) as stopped:
+        build_parser().parse_args([
+            "goal", "run", "project-1", "--objective", "Build it",
+            "--done-when", "Checks pass", "--model", "grid-model",
+            "--token-budget", value,
+        ])
+    assert stopped.value.code == 2
+
 
 def test_goal_run_help_calls_manifest_arguments_files(capsys):
     """Do not advertise inline JSON when the command intentionally reads a file path."""
@@ -188,6 +207,23 @@ def test_every_goal_read_and_control_explains_an_old_relay(monkeypatch):
                for _method, _path, hint in calls)
 
 
+def test_goal_resume_sends_budget_extension_without_changing_bodyless_controls(monkeypatch):
+    from remote import relay
+
+    calls = []
+    monkeypatch.setattr(
+        relay, "_task_oneshot",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {})
+
+    relay.control_goal("http://relay", "token", "goal-1", "pause")
+    relay.control_goal(
+        "http://relay", "token", "goal-1", "resume", token_budget=10_000_000)
+
+    assert "json" not in calls[0][1]
+    assert calls[1][1]["json"] == {"token_budget": 10_000_000}
+    assert all(call[1]["missing_route_hint"] == relay._OLD_RELAY_NO_GOALS for call in calls)
+
+
 @pytest.mark.parametrize("action", ["pause", "resume", "cancel"])
 def test_goal_control_uses_the_named_goal_and_action(monkeypatch, action):
     from cli import goal
@@ -195,11 +231,17 @@ def test_goal_control_uses_the_named_goal_and_action(monkeypatch, action):
 
     monkeypatch.setattr(goal, "_resolve", lambda _args: ("http://relay", "token", "grid"))
     seen = []
-    monkeypatch.setattr(relay, "control_goal", lambda *args: seen.append(args) or {
+    monkeypatch.setattr(relay, "control_goal", lambda *args, **kwargs: seen.append(
+        (args, kwargs)) or {
         "id": "goal-1", "status": action, "objective": "x", "done_when": "y"})
-    args = SimpleNamespace(goal_action=action, goal_id="goal-1", grid=None, json=True)
+    args = SimpleNamespace(
+        goal_action=action, goal_id="goal-1", grid=None, json=True,
+        token_budget=10_000_000 if action == "resume" else None)
     assert goal.cmd_goal(args) == 0
-    assert seen == [("http://relay", "token", "goal-1", action)]
+    assert seen == [(
+        ("http://relay", "token", "goal-1", action),
+        {"token_budget": 10_000_000 if action == "resume" else None},
+    )]
 
 
 def test_goal_tools_rejects_a_non_array_manifest(tmp_path):
