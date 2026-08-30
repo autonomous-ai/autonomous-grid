@@ -278,20 +278,6 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         turn.get("provider_node_id") for turn in turns
         if isinstance(turn, dict) and turn.get("provider_node_id")
     }
-    # A killed provider cannot appear as the terminal provider on the reclaimed row. The relay's
-    # `task.retry` event is the authority that it executed the prior attempt, so include it in the
-    # physical-node inventory; provider-authored attempt-start events are deliberately insufficient.
-    execution_nodes.update(
-        item["event"].get("previous_provider_id")
-        for item in attempt_events
-        if isinstance(item, dict) and isinstance(item.get("event"), dict)
-        and item["event"].get("type") == "task.retry"
-        and item["event"].get("previous_provider_id")
-    )
-    if len(execution_nodes) < min_execution_nodes:
-        failures.append(
-            f"Goal used {len(execution_nodes)} distinct execution node(s), fewer than required "
-            f"{min_execution_nodes}")
 
     first = turns[0] if isinstance(turns[0], dict) else {}
     if first.get("transcript_commit") is not None:
@@ -397,37 +383,73 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         attempt = turn.get("attempt")
         if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 1:
             continue
-        retry = [item for item in attempt_events if isinstance(item, dict)
-                 and item.get("turn_id") == turn.get("id")
-                 and isinstance(item.get("event"), dict)
-                 and item["event"].get("type") == "task.retry"
-                 and item["event"].get("attempt") == attempt - 1
-                 and item["event"].get("previous_provider_id")]
-        if not retry:
-            failures.append(
-                f"turn {index} attempt {attempt} has no authoritative retry event naming the "
-                "previous provider")
+        for prior_attempt in range(1, attempt):
+            retry = [item for item in attempt_events if isinstance(item, dict)
+                     and item.get("turn_id") == turn.get("id")
+                     and isinstance(item.get("event"), dict)
+                     and item["event"].get("type") == "task.retry"
+                     and item["event"].get("attempt") == prior_attempt
+                     and item["event"].get("previous_provider_id")]
+            if not retry:
+                failures.append(
+                    f"turn {index} attempt {attempt} has no authoritative retry event naming the "
+                    f"provider for prior attempt {prior_attempt}")
+            elif len(retry) != 1:
+                failures.append(
+                    f"turn {index} attempt {attempt} has {len(retry)} authoritative retry events "
+                    f"for prior attempt {prior_attempt}; expected exactly one")
     all_retries = [item for item in attempt_events if isinstance(item, dict)
                    and isinstance(item.get("event"), dict)
                    and item["event"].get("type") == "task.retry"]
+    verified_retry_nodes: set[str] = set()
     for retry in all_retries:
         event = retry["event"]
+        turn_id = retry.get("turn_id")
+        attempt = event.get("attempt")
+        previous_provider = event.get("previous_provider_id")
         previous_agent = event.get("previous_agent_kind")
+        valid = True
+        if turn_id not in turn_ids:
+            failures.append(f"retry event names unknown turn {turn_id!r}")
+            valid = False
+        if (not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0):
+            failures.append(f"turn {turn_id} retry has no valid prior attempt")
+            valid = False
+        if not isinstance(previous_provider, str) or not previous_provider:
+            failures.append(
+                f"turn {turn_id} retry attempt {attempt} has no previous provider identity")
+            valid = False
         if previous_agent not in ("codex", "claude"):
             failures.append(
-                f"turn {retry.get('turn_id')} retry attempt {event.get('attempt')} has no "
+                f"turn {turn_id} retry attempt {attempt} has no "
                 "relay-authored previous harness identity")
+            valid = False
         starts = [item["event"] for item in attempt_events if isinstance(item, dict)
-                  and item.get("turn_id") == retry.get("turn_id")
+                  and item.get("turn_id") == turn_id
                   and isinstance(item.get("event"), dict)
                   and item["event"].get("type") == "task.attempt_started"
-                  and item["event"].get("attempt") == event.get("attempt")]
-        for start in starts:
-            if (start.get("provider_id") != event.get("previous_provider_id")
-                    or start.get("agent_kind") != previous_agent):
-                failures.append(
-                    f"turn {retry.get('turn_id')} retry attempt {event.get('attempt')} "
-                    "disagrees with its relay-stamped attempt start identity")
+                  and item["event"].get("attempt") == attempt]
+        matching_starts = [
+            start for start in starts
+            if start.get("provider_id") == previous_provider
+            and start.get("agent_kind") == previous_agent
+        ]
+        if len(matching_starts) != 1 or len(starts) != 1:
+            failures.append(
+                f"turn {turn_id} retry attempt {attempt} has no unique matching relay-stamped "
+                "attempt start identity")
+            valid = False
+        if valid:
+            verified_retry_nodes.add(previous_provider)
+
+    # A killed provider cannot appear as the terminal provider on the reclaimed row. Count it only
+    # when the relay-authored retry and attempt-start records agree; either event alone is not
+    # sufficient proof that another physical worker executed the Goal.
+    execution_nodes.update(verified_retry_nodes)
+    if len(execution_nodes) < min_execution_nodes:
+        failures.append(
+            f"Goal used {len(execution_nodes)} distinct execution node(s), fewer than required "
+            f"{min_execution_nodes}")
     native_retries = [item for item in attempt_events if isinstance(item, dict)
                       and isinstance(item.get("event"), dict)
                       and item["event"].get("type") == "task.retry"

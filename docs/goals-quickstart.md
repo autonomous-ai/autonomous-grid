@@ -364,6 +364,7 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 
 | Goal | Execution | Harnesses | Injected failure | Independent eval |
 |---|---|---|---|---|
+| Root creation replay | Client -> relay -> queue | N/A before claim | First POST acknowledgement is replayed; changed body reuses key | One Goal id and one first turn; key conflict rejected |
 | Four-feature game | A -> B -> C | Codex -> Codex -> Codex | A dies in feature 2; B dies in 3–4 | HTML wiring, click/score behavior, styling and instructions |
 | Mixed game | A -> B -> C | Codex -> Claude -> Codex | A and B die mid-feature | HTML wiring, click/score behavior, styling and instructions |
 | Eval-repair game | A -> B -> C -> D | Codex -> Claude -> Codex -> Claude | A/B die; C nominates broken behavior | Failed C score plus passing D repair on exact commits |
@@ -392,7 +393,9 @@ to match the stored turn pins and proves both are Git-ancestral to that turn's f
 retry also retains the relay-selected `previous_agent_kind` beside `previous_provider_id`; the turn
 row can be reclaimed by a different harness, so its final `agent_kind` alone is not attempt history.
 Attempt-start events are stamped from the live claim row, overriding any provider-supplied node,
-attempt, or harness values before they enter training evidence.
+attempt, or harness values before they enter training evidence. The verifier requires exactly one
+retry for every prior attempt and counts a reclaimed machine only when that retry has one matching
+relay-stamped attempt-start identity; an orphan or duplicate retry cannot prove a handoff.
 
 Owner controls are ordered against checkpoint settlement, not treated as best-effort UI state. A
 pause that races an accepted nonterminal checkpoint keeps its exact pins but makes the queued retry

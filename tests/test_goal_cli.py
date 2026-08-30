@@ -321,6 +321,11 @@ def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
             "transcript_result_commit": transcript_result,
         }],
         "attempt_events": [{
+            "turn_id": "turn-1", "seq": 0, "event": {
+                "type": "task.attempt_started", "attempt": 1,
+                "provider_id": "node-A", "agent_kind": "codex",
+            },
+        }, {
             "turn_id": "turn-1", "seq": 1, "event": {
                 "type": "task.retry", "reason": "native_harness_failure", "attempt": 1,
                 "previous_provider_id": "node-A", "previous_agent_kind": "codex",
@@ -442,25 +447,46 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
     }
     assert any("no authoritative retry event" in item for item in _verify_evidence(record))
 
-    record["attempt_events"].append({
+    record["attempt_events"].extend([{
+        "turn_id": "turn-1",
+        "event": {"type": "task.attempt_started", "attempt": 1,
+                  "provider_id": "node-A", "agent_kind": "codex"},
+    }, {
         "turn_id": "turn-1",
         "event": {"type": "task.retry", "attempt": 1,
                   "previous_provider_id": "node-A", "previous_agent_kind": "codex",
                   "reason": "lease_expired"},
-    })
+    }])
     assert _verify_evidence(record) == []
     assert _verify_evidence(record, min_execution_nodes=2) == []
 
-    record["attempt_events"][0]["event"]["previous_agent_kind"] = None
+    record["attempt_events"][1]["event"]["previous_agent_kind"] = None
     assert any("no relay-authored previous harness identity" in item
                for item in _verify_evidence(record))
-    record["attempt_events"][0]["event"]["previous_agent_kind"] = "codex"
+    record["attempt_events"][1]["event"]["previous_agent_kind"] = "codex"
 
-    # A provider-authored start marker or a retry naming the eventual winner cannot fabricate a
-    # second physical worker for the strict gate.
-    record["attempt_events"][0]["event"]["previous_provider_id"] = "node-B"
+    start = record["attempt_events"].pop(0)
+    failures = _verify_evidence(record, min_execution_nodes=2)
+    assert any("no unique matching relay-stamped attempt start" in item for item in failures)
+    assert any("fewer than required 2" in item for item in failures)
+    record["attempt_events"].insert(0, start)
+
+    # A retry naming the eventual winner cannot fabricate a second physical worker for the strict
+    # gate, and no longer agrees with the relay-stamped attempt-start identity either.
+    record["attempt_events"][1]["event"]["previous_provider_id"] = "node-B"
     assert any("fewer than required 2" in item
                for item in _verify_evidence(record, min_execution_nodes=2))
+    record["attempt_events"][1]["event"]["previous_provider_id"] = "node-A"
+
+    record["turns"][0]["attempt"] = 3
+    assert any("prior attempt 2" in item for item in _verify_evidence(record))
+    record["turns"][0]["attempt"] = 2
+
+    duplicate = {
+        "turn_id": "turn-1", "event": dict(record["attempt_events"][1]["event"]),
+    }
+    record["attempt_events"].append(duplicate)
+    assert any("2 authoritative retry events" in item for item in _verify_evidence(record))
 
 
 def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
@@ -478,6 +504,10 @@ def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
             "transcript_result_commit": "a" * 40,
         }],
         "attempt_events": [
+            {"turn_id": "turn-1", "event": {
+                "type": "task.attempt_started", "attempt": 1,
+                "provider_id": "node-B", "agent_kind": "codex",
+            }},
             {"turn_id": "turn-1", "event": {
                 "type": "task.retry", "attempt": 1, "previous_provider_id": "node-B",
                 "previous_agent_kind": "codex",

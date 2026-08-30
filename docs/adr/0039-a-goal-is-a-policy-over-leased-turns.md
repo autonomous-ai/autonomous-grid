@@ -310,7 +310,9 @@ while a detected post-spawn native-harness failure publishes coherent worktree a
 and immediately requeues the same turn for another machine.
 Release evidence includes relay-computed ancestry from every accepted retry checkpoint to the
 turn's final worktree and transcript outputs; offline verification binds those checks back to the
-exact retry event and latest checkpoint columns.
+exact retry event and latest checkpoint columns. Every prior attempt requires exactly one retry, and
+a reclaimed node counts toward the physical-node gate only when the retry's node, harness and
+attempt match one unique relay-stamped attempt-start event.
 It must also include Codex A -> Claude B -> Codex C -> Claude D where C's completion nomination
 fails an independent commit-pinned check and D resumes B's native Claude session, consumes the
 relay-authored failure evidence, repairs the worktree, and passes a fresh evaluation. This proves
