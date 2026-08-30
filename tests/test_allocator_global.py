@@ -1370,6 +1370,12 @@ def test_allocator_models_validate_impossible_values():
         PlannerPolicy(predictive_artifact_replacement_min_gain=0.99)
     with pytest.raises(ValueError, match="predictive_artifact_replacement_min_gain"):
         PlannerPolicy(predictive_artifact_replacement_min_gain=math.inf)
+    with pytest.raises(ValueError, match="predictive_artifact_replacement_max_victims"):
+        PlannerPolicy(predictive_artifact_replacement_max_victims=0)
+    with pytest.raises(ValueError, match="predictive_artifact_replacement_max_victims"):
+        PlannerPolicy(predictive_artifact_replacement_max_victims=9)
+    with pytest.raises(ValueError, match="predictive_artifact_replacement_max_victims"):
+        PlannerPolicy(predictive_artifact_replacement_max_victims=True)
     with pytest.raises(ValueError, match="non-negative"):
         PlannerPolicy(max_predictive_lookahead_seconds=-1)
     with pytest.raises(ValueError, match="predictive_growth_limit"):
@@ -6408,6 +6414,165 @@ def test_predictive_cache_replacement_obeys_age_gain_and_demand_hysteresis():
         now=1_000,
     )
     assert protected.artifact_evictions == ()
+
+
+def test_fragmented_disk_replacement_proves_the_complete_victim_group():
+    baseline = model("baseline", min_replicas=1, max_replicas=1)
+
+    def cached_profile(model_id: str, sha_character: str) -> ModelProfile:
+        return model(
+            model_id,
+            min_replicas=0,
+            max_replicas=1,
+            load_seconds=80,
+            artifact_sha256=sha_character * 64,
+            artifact_source=f"hf://example/models/{model_id}.gguf",
+            artifact_size_mb=3_000,
+        )
+
+    alpha = cached_profile("alpha-cache", "a")
+    bravo = cached_profile("bravo-cache", "b")
+    incoming = model(
+        "incoming-large",
+        min_replicas=0,
+        max_replicas=1,
+        load_seconds=120,
+        artifact_sha256="c" * 64,
+        artifact_source="hf://example/models/incoming-large.gguf",
+        artifact_size_mb=7_000,
+    )
+    machine = node(
+        "fragmented-cache-host",
+        8_000,
+        residencies=(
+            ready("baseline", 8_000),
+            ModelResidency(
+                alpha.model_id,
+                alpha.memory_mb,
+                ResidencyState.CACHED,
+                loaded_at=100,
+                artifact_sha256=alpha.artifact_sha256,
+                predictive_cache=True,
+            ),
+            ModelResidency(
+                bravo.model_id,
+                bravo.memory_mb,
+                ResidencyState.CACHED,
+                loaded_at=100,
+                artifact_sha256=bravo.artifact_sha256,
+                predictive_cache=True,
+            ),
+        ),
+        max_models=1,
+        disk_capacity_mb=20_000,
+        disk_available_mb=1_000,
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+        now=1_000,
+    )
+
+    def prediction(profile: ModelProfile, concurrency: float) -> DemandForecast:
+        return DemandForecast(
+            profile.model_id,
+            requests_per_minute=8,
+            offered_concurrency=concurrency,
+            confidence=0.9,
+            correlated_requests_per_minute=8,
+            correlation_confidence=0.9,
+            correlation_sources=("workflow:media",),
+            sample_count=20,
+            updated_at=1_000,
+        )
+
+    policy = PlannerPolicy(
+        memory_headroom_fraction=0,
+        predictive_artifact_disk_reserve_mb=0,
+        predictive_artifact_ttl_seconds=10_000,
+        predictive_artifact_replacement_min_age_seconds=300,
+        predictive_artifact_replacement_min_gain=2,
+        predictive_artifact_replacement_max_victims=2,
+        max_predictive_artifact_evictions=2,
+    )
+    planner = PlacementPlanner(policy)
+    replacement = planner.plan(
+        (machine,),
+        (baseline, alpha, bravo, incoming),
+        (prediction(incoming, 2),),
+        now=1_000,
+    )
+
+    # The 7 GB incoming artifact has only 1 GB free. Neither 3 GB victim is sufficient alone;
+    # both are emitted only after the planner proves the aggregate replacement is valuable.
+    assert replacement.artifact_prefetches == ()
+    assert replacement.artifact_evictions == (
+        ArtifactEviction(machine.node_id, alpha.model_id, incoming.model_id),
+        ArtifactEviction(machine.node_id, bravo.model_id, incoming.model_id),
+    )
+    actions = Reconciler(
+        ReconcilePolicy(max_concurrent_mutations=2, max_mutations_per_node=2)
+    ).reconcile(
+        replacement,
+        (machine,),
+        (baseline, alpha, bravo, incoming),
+        mode=AllocatorMode.AUTOMATIC,
+        now=1_000,
+    ).executable_actions
+    assert [
+        (action.kind, action.model_id) for action in actions
+    ] == [
+        (ActionKind.EVICT, alpha.model_id),
+        (ActionKind.EVICT, bravo.model_id),
+    ]
+
+    sequential = PlacementPlanner(
+        replace(policy, max_predictive_artifact_evictions=1)
+    ).plan(
+        (machine,),
+        (baseline, alpha, bravo, incoming),
+        (prediction(incoming, 2),),
+        now=1_000,
+    )
+    assert sequential.artifact_evictions == (
+        ArtifactEviction(machine.node_id, alpha.model_id, incoming.model_id),
+    )
+
+    no_partial_proof = PlacementPlanner(
+        replace(policy, predictive_artifact_replacement_max_victims=1)
+    ).plan(
+        (machine,),
+        (baseline, alpha, bravo, incoming),
+        (prediction(incoming, 2),),
+        now=1_000,
+    )
+    assert no_partial_proof.artifact_evictions == ()
+
+    valuable_incumbents = planner.plan(
+        (machine,),
+        (baseline, alpha, bravo, incoming),
+        (
+            prediction(alpha, 2),
+            prediction(bravo, 2),
+            prediction(incoming, 2),
+        ),
+        now=1_000,
+    )
+    assert valuable_incumbents.artifact_evictions == ()
+
+    reclaimed = replace(
+        machine,
+        residencies=(ready("baseline", 8_000),),
+        disk_available_mb=7_000,
+        last_heartbeat=1_001,
+    )
+    after_heartbeat = planner.plan(
+        (reclaimed,),
+        (baseline, alpha, bravo, incoming),
+        (prediction(incoming, 2),),
+        now=1_001,
+    )
+    assert after_heartbeat.artifact_evictions == ()
+    assert after_heartbeat.artifact_prefetches == (
+        ArtifactPrefetch(machine.node_id, incoming.model_id),
+    )
 
 
 @pytest.mark.parametrize(

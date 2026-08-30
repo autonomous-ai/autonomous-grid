@@ -181,6 +181,95 @@ def test_replacement_eviction_inherits_its_beneficiary_delivery_priority():
     ] == ["z-replacement", "a-routine"]
 
 
+def test_one_unsafe_victim_withdraws_the_complete_cache_replacement_group():
+    controller = AllocatorController(mode=AllocatorMode.AUTOMATIC)
+    alpha = profile("alpha-victim", artifact_sha256="a" * 64)
+    bravo = profile("bravo-victim", artifact_sha256="b" * 64)
+    beneficiary = profile("beneficiary", artifact_sha256="c" * 64)
+    for item in (alpha, bravo, beneficiary):
+        controller.put_profile(item)
+    machine = NodeSnapshot(
+        "shared",
+        32_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        residencies=(
+            ModelResidency(
+                alpha.model_id,
+                alpha.memory_mb,
+                ResidencyState.CACHED,
+                loaded_at=1,
+                artifact_sha256=alpha.artifact_sha256,
+                predictive_cache=True,
+            ),
+            ModelResidency(
+                bravo.model_id,
+                bravo.memory_mb,
+                ResidencyState.CACHED,
+                loaded_at=1,
+                artifact_sha256=bravo.artifact_sha256,
+                predictive_cache=True,
+            ),
+        ),
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+        last_heartbeat=10,
+    )
+    controller._last_plan = PlacementPlan(
+        generation="old-group",
+        created_at=9,
+        artifact_evictions=(
+            ArtifactEviction("shared", alpha.model_id, beneficiary.model_id),
+            ArtifactEviction("shared", bravo.model_id, beneficiary.model_id),
+        ),
+    )
+
+    def eviction_action(action_id: str, victim: ModelProfile) -> MutationAction:
+        return MutationAction(
+            action_id,
+            ActionKind.EVICT,
+            "shared",
+            victim.model_id,
+            victim.memory_mb,
+            "replace predictive cache",
+            "old-group",
+            9,
+            artifact_sha256=victim.artifact_sha256,
+        )
+
+    alpha_action = eviction_action("evict-alpha", alpha)
+    bravo_action = eviction_action("evict-bravo", bravo)
+    controller._commands = {
+        alpha_action.action_id: alpha_action,
+        bravo_action.action_id: bravo_action,
+    }
+    # Alpha has fallen out of the new proof while Bravo alone still appears valid. The old pair is
+    # one aggregate capacity proof, so retaining Bravo would be an unsafe partial continuation.
+    current = PlacementPlan(
+        generation="new-group",
+        created_at=10,
+        artifact_evictions=(
+            ArtifactEviction("shared", bravo.model_id, beneficiary.model_id),
+        ),
+    )
+
+    blocked = controller._cancel_stale_commands(
+        current,
+        10,
+        (machine,),
+        controller.profiles,
+    )
+
+    assert blocked == {alpha.model_id, bravo.model_id}
+    assert controller._commands == {}
+    cancelled = {
+        record.action_id: record
+        for record in controller.history
+        if record.status == MutationStatus.CANCELLED
+    }
+    assert set(cancelled) == {"evict-alpha", "evict-bravo"}
+    assert "replacement group became unsafe" in cancelled["evict-bravo"].message
+
+
 def node(
     *,
     cached: bool = False,

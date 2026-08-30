@@ -1038,6 +1038,12 @@ default), must not have less total expected startup value, and the victim must h
 and inexact revisions are never replacement candidates. Replacement is a two-generation
 transition: Grid evicts the exact victim first, waits for a heartbeat proving disk was reclaimed,
 then plans the incoming prefetch. The planner never credits intended deletion as free space.
+When fragmented free space requires several smaller victims, Grid searches a bounded union of the
+lowest-value and largest mature predictive artifacts (up to three victims by default). It proves
+the incoming model beats the complete group's lost value and aggregate value density before
+issuing even the first eviction. The ordinary mutation budget may execute that proven group over
+several heartbeats; if demand changes, the remaining directives are replanned rather than blindly
+continued.
 
 `--oracle` adds a bounded exhaustive benchmark for at most four machines, nine models, and 240
 minutes. It replays the exact observed request trace with perfect future knowledge, exhaustively

@@ -58,6 +58,7 @@ class PlannerPolicy:
     max_predictive_artifact_evictions: int = 1
     predictive_artifact_replacement_min_age_seconds: float = 900.0
     predictive_artifact_replacement_min_gain: float = 2.0
+    predictive_artifact_replacement_max_victims: int = 3
 
     def __post_init__(self) -> None:
         if not 0 <= self.memory_headroom_fraction < 1:
@@ -132,6 +133,14 @@ class PlannerPolicy:
                 "predictive_artifact_replacement_min_gain must be finite and at least 1"
             )
         if (
+            isinstance(self.predictive_artifact_replacement_max_victims, bool)
+            or not isinstance(self.predictive_artifact_replacement_max_victims, int)
+            or not 1 <= self.predictive_artifact_replacement_max_victims <= 8
+        ):
+            raise ValueError(
+                "predictive_artifact_replacement_max_victims must be in [1, 8]"
+            )
+        if (
             not math.isfinite(self.latency_pressure_limit)
             or not math.isfinite(self.error_pressure_limit)
             or self.latency_pressure_limit < 1
@@ -143,6 +152,7 @@ class PlannerPolicy:
 
 
 _MAX_REPACK_SEARCH_STATES = 10_000
+_MAX_PREDICTIVE_REPLACEMENT_CANDIDATES = 16
 _MAX_REPACK_DEPTH = 64
 # A ready-residency preference is intentionally strong, but it must not strand a demanded model
 # whose only capable host is occupied by a flexible model that can move elsewhere. This penalty is
@@ -2611,7 +2621,16 @@ class PlacementPlanner:
             item.model_id for item in artifact_prefetches
         }
         replacement_opportunities: list[
-            tuple[float, float, float, str, str, str]
+            tuple[
+                float,
+                float,
+                int,
+                int,
+                float,
+                str,
+                tuple[str, ...],
+                str,
+            ]
         ] = []
         if (
             self.policy.max_predictive_artifact_prefetches
@@ -2634,6 +2653,18 @@ class PlacementPlanner:
                         incoming.artifact_size_mb
                         + self.policy.predictive_artifact_disk_reserve_mb
                     )
+                    disk_shortfall = required_disk - remaining_disk
+                    if disk_shortfall <= 0:
+                        continue
+                    incoming_density, incoming_value = predictive_artifact_value(
+                        incoming,
+                        node,
+                    )
+                    if incoming_value <= 0:
+                        continue
+                    eligible_victims: list[
+                        tuple[float, float, int, float, str]
+                    ] = []
                     for residency in node.residencies:
                         victim = profile_by_id.get(residency.model_id)
                         pair = (node.node_id, residency.model_id)
@@ -2651,66 +2682,157 @@ class PlacementPlanner:
                             or residency.pinned
                             or not victim.matches_artifact(residency)
                             or pair in assignment_pairs
+                            or victim.model_id in prefetched_model_ids
                             or demand_urgency_by_model.get(victim.model_id, 0) > 1
                             or age
                             < self.policy.predictive_artifact_replacement_min_age_seconds
-                            or required_disk
-                            > remaining_disk + victim.artifact_size_mb
                         ):
                             continue
-                        incoming_density, incoming_value = predictive_artifact_value(
-                            incoming,
-                            node,
-                        )
                         victim_density, victim_value = predictive_artifact_value(
                             victim,
                             node,
                         )
-                        if (
-                            incoming_value <= 0
-                            or incoming_value < victim_value
-                            or incoming_density
-                            < victim_density
-                            * self.policy.predictive_artifact_replacement_min_gain
-                        ):
-                            continue
-                        replacement_opportunities.append(
+                        eligible_victims.append(
                             (
-                                -(incoming_density - victim_density),
-                                -incoming_value,
-                                -age,
-                                node.node_id,
+                                victim_density,
+                                victim_value,
+                                victim.artifact_size_mb,
+                                age,
                                 victim.model_id,
-                                incoming.model_id,
                             )
                         )
 
+                    # Keep the combinatorial cover search bounded while retaining both kinds of
+                    # useful candidate: the cheapest predictions to lose and the largest artifacts
+                    # that can actually close a fragmented-disk shortfall. The union is stable and
+                    # capped before enumerating groups of at most three victims by default.
+                    half_limit = _MAX_PREDICTIVE_REPLACEMENT_CANDIDATES // 2
+                    bounded_by_id: dict[
+                        str,
+                        tuple[float, float, int, float, str],
+                    ] = {}
+                    for candidate in sorted(
+                        eligible_victims,
+                        key=lambda item: (
+                            item[0],
+                            item[1],
+                            -item[2],
+                            -item[3],
+                            item[4],
+                        ),
+                    )[:half_limit]:
+                        bounded_by_id[candidate[4]] = candidate
+                    for candidate in sorted(
+                        eligible_victims,
+                        key=lambda item: (
+                            -item[2],
+                            item[0],
+                            item[1],
+                            -item[3],
+                            item[4],
+                        ),
+                    )[:half_limit]:
+                        bounded_by_id[candidate[4]] = candidate
+                    bounded_victims = tuple(
+                        bounded_by_id[model_id]
+                        for model_id in sorted(bounded_by_id)
+                    )
+                    max_group_size = min(
+                        len(bounded_victims),
+                        self.policy.predictive_artifact_replacement_max_victims,
+                    )
+                    best_node_replacement: tuple[
+                        float,
+                        float,
+                        int,
+                        int,
+                        float,
+                        str,
+                        tuple[str, ...],
+                        str,
+                    ] | None = None
+                    for group_size in range(1, max_group_size + 1):
+                        for group in combinations(bounded_victims, group_size):
+                            reclaimed_mb = sum(item[2] for item in group)
+                            if reclaimed_mb < disk_shortfall:
+                                continue
+                            lost_value = sum(item[1] for item in group)
+                            victim_density = lost_value / max(1, reclaimed_mb)
+                            if (
+                                incoming_value < lost_value
+                                or incoming_density
+                                < victim_density
+                                * self.policy.predictive_artifact_replacement_min_gain
+                            ):
+                                continue
+                            ordered_victims = tuple(
+                                item[4]
+                                for item in sorted(
+                                    group,
+                                    key=lambda item: (
+                                        item[0],
+                                        item[1],
+                                        -item[2],
+                                        -item[3],
+                                        item[4],
+                                    ),
+                                )
+                            )
+                            opportunity = (
+                                -(incoming_value - lost_value),
+                                -(incoming_density - victim_density),
+                                reclaimed_mb - disk_shortfall,
+                                group_size,
+                                -min(item[3] for item in group),
+                                node.node_id,
+                                ordered_victims,
+                                incoming.model_id,
+                            )
+                            if (
+                                best_node_replacement is None
+                                or opportunity < best_node_replacement
+                            ):
+                                best_node_replacement = opportunity
+                    if best_node_replacement is not None:
+                        replacement_opportunities.append(best_node_replacement)
+
         artifact_evictions: list[ArtifactEviction] = []
         replacement_victims: set[tuple[str, str]] = set()
+        replacement_victim_model_ids: set[str] = set()
         replacement_beneficiaries: set[str] = set()
-        replacement_limit = min(
-            self.policy.max_predictive_artifact_evictions,
-            self.policy.max_predictive_artifact_prefetches,
-        )
+        replacement_limit = self.policy.max_predictive_artifact_evictions
         for (
-            _negative_gain,
-            _negative_value,
-            _negative_age,
+            _negative_net_value,
+            _negative_density_gain,
+            _excess_reclaimed_mb,
+            _group_size,
+            _negative_min_age,
             node_id,
-            victim_model_id,
+            victim_model_ids,
             incoming_model_id,
         ) in sorted(replacement_opportunities):
-            pair = (node_id, victim_model_id)
             if (
                 len(artifact_evictions) >= replacement_limit
-                or pair in replacement_victims
                 or incoming_model_id in replacement_beneficiaries
+                or incoming_model_id in replacement_victim_model_ids
+                or len(replacement_beneficiaries)
+                >= self.policy.max_predictive_artifact_prefetches
+                or any(
+                    (node_id, victim_model_id) in replacement_victims
+                    or victim_model_id in replacement_beneficiaries
+                    for victim_model_id in victim_model_ids
+                )
             ):
                 continue
-            artifact_evictions.append(
-                ArtifactEviction(node_id, victim_model_id, incoming_model_id)
-            )
-            replacement_victims.add(pair)
+            for victim_model_id in victim_model_ids:
+                if len(artifact_evictions) >= replacement_limit:
+                    break
+                pair = (node_id, victim_model_id)
+                artifact_evictions.append(
+                    ArtifactEviction(node_id, victim_model_id, incoming_model_id)
+                )
+                replacement_victims.add(pair)
+                replacement_victim_model_ids.add(victim_model_id)
             replacement_beneficiaries.add(incoming_model_id)
 
         # A speculative artifact that was never warmed must not consume disk forever. Only exact

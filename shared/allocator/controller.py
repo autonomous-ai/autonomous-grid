@@ -2088,6 +2088,15 @@ class AllocatorController:
             self._commands.values(),
             now=now,
         )
+        prior_eviction_group_by_pair = {
+            (item.node_id, item.model_id): (item.node_id, item.for_model_id)
+            for item in (
+                self._last_plan.artifact_evictions
+                if self._last_plan is not None
+                else ()
+            )
+            if item.for_model_id
+        }
         stale_messages: dict[str, str] = {}
         for action_id, action in list(self._commands.items()):
             if action_id in self._restored_command_ids:
@@ -2160,15 +2169,34 @@ class AllocatorController:
         unsafe_destructive_models.update(
             action.model_id for action in self._withdrawn_destructive.values()
         )
+        unsafe_replacement_groups = {
+            prior_eviction_group_by_pair[(action.node_id, action.model_id)]
+            for action_id, action in self._commands.items()
+            if action_id in stale_messages
+            and action.kind == ActionKind.EVICT
+            and (action.node_id, action.model_id) in prior_eviction_group_by_pair
+        }
         for action_id, action in self._commands.items():
+            replacement_group = prior_eviction_group_by_pair.get(
+                (action.node_id, action.model_id)
+            )
             if (
-                action.kind not in _DESTRUCTIVE_ACTION_KINDS
-                or action.model_id not in unsafe_destructive_models
+                (
+                    action.kind not in _DESTRUCTIVE_ACTION_KINDS
+                    or action.model_id not in unsafe_destructive_models
+                )
+                and replacement_group not in unsafe_replacement_groups
             ):
                 continue
+            unsafe_destructive_models.add(action.model_id)
             stale_messages.setdefault(
                 action_id,
-                "another command in the same destructive batch became unsafe",
+                (
+                    "another predictive-cache eviction in the same replacement "
+                    "group became unsafe"
+                    if replacement_group in unsafe_replacement_groups
+                    else "another command in the same destructive batch became unsafe"
+                ),
             )
 
         for action_id, message in stale_messages.items():
