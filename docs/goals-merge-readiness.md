@@ -7,8 +7,8 @@ The detailed physical artifacts are indexed in
 
 ## Tested code revisions
 
-- Public worker/CLI: `9f6cc5f42e36f19557e25d3593c8bdbe9a1c0fd2`
-- Private relay: `38ca1eb4180069342dec213a9759f92b30710f82`
+- Public worker/CLI: `e160e7f1e8d915104dce0e7f5e6256d634056c2c`
+- Private relay: `b55d78b588f15abec8196db134604a529a5a9ae3`
 - Both `grid-goal-distributed` code revisions were clean and pushed when these gates completed.
   The public working tree contained only the documentation changes recorded by the following
   documentation-only commit; it changes no runtime or test code.
@@ -18,8 +18,9 @@ The detailed physical artifacts are indexed in
 | Gate | Result | What it proves |
 |---|---:|---|
 | Full public suite | 3,342 passed, 55 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
-| Private runbook release bundle | 137 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, retention, dead-branch pruning, inference attribution, and capability matching |
+| Private runbook release bundle | 141 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, retention, dead-branch pruning, inference attribution, and capability matching |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
+| Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
 | Cross-repository distributed matrix | 17 passed | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 
@@ -30,11 +31,18 @@ run uninterrupted against the exact revisions above. The evaluator audit also pr
   ref, and only lease-fenced run ids can be accepted with the terminal transition;
 - file and JSON checks reject symlinks, Git links, protected paths, ambiguous/non-finite/deep JSON,
   malformed Unicode, oversized inputs, and damaged cached evidence;
-- all checks in a nomination share a 45-second deadline inside the worker's 60-second result timeout,
-  and one infrastructure failure prevents additional evaluator subprocesses from multiplying it;
+- all checks in a nomination share a 45-second evaluator deadline, and result-ref resolution,
+  transcript resolution, evaluation and WIP advancement share one 50-second aggregate deadline
+  inside the worker's 60-second result timeout. A Git error cannot be read as an absent ref, and
+  one infrastructure failure prevents additional evaluator subprocesses from multiplying it;
 - after the native child exits and renewal stops, an exact-claim-fenced 70-second settlement lease
   protects relay-owned Git/eval work from both lease reclaim and the run-deadline sweep. It never
   shortens the normal 120-second lease, and the final terminal write repeats the claim fence;
+- terminal acknowledgment is sent before idempotent continuation/fan-in preparation; periodic
+  promotion and Goal reconciliation are the durable crash backstop for that post-response work;
+- model registration, removal, role recovery, quota serving transitions and engine-health
+  heartbeats invalidate Goal matching immediately, so recovery wakes the untouched attempt-zero
+  row without waiting for a polling-cache expiry;
 - remote Goal budgets and native counters are exact-JSON integers bounded so the maximum permitted
   eight-way, depth-three hierarchy cannot overflow signed database arithmetic. Goal budget, usage,
   time and child-accounting columns are `BIGINT` on PostgreSQL, and the startup migration widens

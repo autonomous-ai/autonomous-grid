@@ -82,9 +82,10 @@ inference router would reject afterward.
 This readiness check does not pin the task to the model-serving machine or reserve an inference
 slot. Capacity, requester-specific trust/allowance, and a provider disappearing after claim remain
 request-time facts handled by the inference router. Readiness is cached for at most one second so a
-polling fleet does not scan the entire model registry on every half-second task poll; a router
-demotion or recovery invalidates it immediately, while heartbeat changes converge within that
-one-second ceiling.
+polling fleet does not scan the entire model registry on every half-second task poll. Model
+registration/removal, provider-role recovery, router demotion/recovery, quota serving transitions,
+and unhealthy-model heartbeat changes invalidate it immediately; unrelated GPU/load telemetry does
+not churn the cache.
 
 `grid goal status` prints `waiting for compatible Grid inference` while this gate is holding the
 queued turn, or names the ready harnesses. The human `list` view labels the former
@@ -220,15 +221,19 @@ parsing is bounded by depth and value count. Duplicate object keys and unpaired 
 are rejected as ambiguous data. Invalid JSON is a measured failure the next Goal turn can repair;
 Git/read failures remain blocking evaluator infrastructure errors.
 
-All definitions in one completion nomination share a 45-second wall-clock evaluator deadline. The
-Goal worker has already stopped lease renewal at this point and its terminal-report request waits 60
-seconds, so the remaining headroom covers ref settlement, the lease-fenced database transaction and
-the response. At authenticated result ingress, the relay extends that exact claim's lease and run
-deadline to at least 70 seconds without shortening a longer configured lease; a short task TTL
-therefore cannot reclaim valid work while relay-owned Git/eval settlement is still running. One
-evaluator infrastructure error records blocked audit rows for the remaining
-definitions without starting more Git subprocesses; a single wedged repository therefore cannot
-multiply its timeout by every check in the manifest.
+All definitions in one completion nomination share a 45-second wall-clock evaluator deadline.
+Result-ref resolution, transcript-ref resolution, evaluation, and conversation-branch advancement
+also share one 50-second aggregate deadline; each stage spends what remains instead of starting a
+fresh Git timeout. The Goal worker has already stopped lease renewal and its terminal-report request
+waits 60 seconds, leaving ten seconds for the fenced transaction and response. At authenticated
+result ingress, the relay extends that exact claim's lease and run deadline to at least 70 seconds
+without shortening a longer configured lease; a short task TTL therefore cannot reclaim valid work
+while relay-owned settlement is running. Git failure is distinct from an absent ref and leaves the
+turn running instead of settling a false empty result. One evaluator infrastructure error records
+blocked audit rows for the remaining definitions without starting more Git subprocesses; a single
+wedged repository therefore cannot multiply its timeout by every check in the manifest. After the
+terminal transaction commits, Grid sends the result response before idempotent continuation and
+child fan-in preparation; periodic reconciliation recovers that post-response work after a crash.
 
 Each definition is immutable, and its hash includes the evaluator-semantics version. Every score is
 stored with that definition hash, its turn, evaluator node, and exact Git commit. The guarded lease
