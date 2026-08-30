@@ -116,7 +116,9 @@ def test_claude_goal_uses_native_command_and_loopback_grid_model(tmp_path, monke
         "goal": {"objective": "Build four features", "done_when": "all checks pass",
                  "model": "grid-model", "turns_completed": 2, "tokens_used": 100,
                  "time_used_seconds": 20, "token_budget": 115},
-    }, inference=task_codex.GridInference("https://grid.example/relay/v1", "GRID-SECRET"))
+    }, inference=task_codex.GridInference(
+        "https://grid.example/relay/v1", "GRID-SECRET",
+        claim_id="claim-generation-secret"))
 
     assert captured["prompt"].startswith("/goal Build four features")
     assert "Grid handoff for this distributed turn:" in captured["prompt"]
@@ -129,6 +131,7 @@ def test_claude_goal_uses_native_command_and_loopback_grid_model(tmp_path, monke
     assert captured["env"]["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
     assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] != "GRID-SECRET"
     assert "GRID-SECRET" not in repr(captured)
+    assert "claim-generation-secret" not in repr(captured)
 
 
 def test_claude_goal_resume_does_not_reset_native_goal(tmp_path, monkeypatch):

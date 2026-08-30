@@ -133,6 +133,9 @@ _REPORT_BACKOFF_SECONDS = 2.0
 # is a 422 that refuses the entire terminal report — so an auxiliary diagnostic could cost a task
 # every one of its attempts. Same reasoning as `task_events.MAX_EVENT_BYTES`.
 _MAX_SESSION_RESET_REASON_CHARS = 2_000
+# LOCKSTEP with grid-src's private_server/task_claim.py. This is a credential-sized opaque
+# generation, not unbounded task metadata.
+_MAX_CLAIM_ID_BYTES = 200
 
 # How many unresolved paths the failure SENTENCE names before it stops listing them. A merge across
 # a large rename conflicts in hundreds of files, and this string travels into the task's `error`
@@ -394,6 +397,15 @@ def _claim_supported_now(job: dict[str, Any]) -> bool:
         capabilities = profile.get("capabilities")
         return isinstance(capabilities, list) and needed <= set(capabilities)
     return False
+
+
+def _goal_claim_is_fenced(job: dict[str, Any]) -> bool:
+    """Whether a delivered native Goal has the exact generation needed on every mutation plane."""
+    if not isinstance(job.get("goal"), dict):
+        return True
+    claim_id = job.get("claim_id")
+    return (isinstance(claim_id, str) and bool(claim_id)
+            and len(claim_id.encode("utf-8")) <= _MAX_CLAIM_ID_BYTES)
 
 
 def _decline_stale_goal_claim(state: Any, job: dict[str, Any]) -> None:
@@ -1301,6 +1313,16 @@ def task_loop(state: Any, capacity: Any = None) -> None:
             continue
 
         agent_claims_suspended = False
+        if not _goal_claim_is_fenced(job):
+            # Grid Goal has no released node-only protocol to preserve. Starting here would run a
+            # native agent whose lease, events, Git, inference, tools, checkpoint and result are all
+            # guaranteed to be refused by the relay. Leave the unannounced delivery for bounded
+            # lease recovery; it has no valid generation with which a safe decline can be fenced.
+            _warn(
+                "refusing a delivered Grid Goal with a missing or malformed claim generation; "
+                "no checkout or native agent will start, and the untouched lease will expire for "
+                "distributed recovery")
+            continue
         if not _claim_supported_now(job):
             # The long-poll that returned this job may have been waiting with a capability snapshot
             # from before another worker quarantined the exact harness revision. Recheck BEFORE

@@ -27652,7 +27652,12 @@ def _task_loop_state(claims):
         token=lambda: "AT",
         refresh=lambda stale_token=None: False,
     )
-    queue = list(claims)
+    # Every native Goal returned by the matching relay carries an opaque generation. Individual
+    # malformed-payload tests bypass this helper so they can exercise the fail-closed boundary.
+    queue = [({**item, "claim_id": "claim-generation-test"}
+              if isinstance(item, dict) and isinstance(item.get("goal"), dict)
+              and "claim_id" not in item else item)
+             for item in claims]
 
     def fake_claim(_state):
         if queue:
@@ -28374,6 +28379,7 @@ def test_post_spawn_goal_harness_failure_is_left_for_another_machine(monkeypatch
 
     assert attached and reports == []
     assert handoffs == [{
+        "claim_id": "claim-generation-test",
         "reason": "app-server protocol disconnected", "result_commit": None,
         "transcript_result_commit": None, "session_id": None,
         "session_reset_reason": None,
@@ -28592,6 +28598,44 @@ def test_goal_claim_revalidation_is_backward_compatible_with_missing_requirement
     assert tasks._claim_supported_now({
         "agent_kind": "codex", "goal": {"objective": "continue"},
     }) is False
+
+
+@pytest.mark.parametrize("claim_id", [None, "", 7, "x" * 201, "é" * 101])
+def test_unfenced_goal_claim_never_starts_checkout_or_native_agent(
+        monkeypatch, capsys, claim_id):
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=threading.Event(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    job = {
+        "task_id": "T1", "attempt": 1, "claim_id": claim_id,
+        "agent_kind": "codex", "goal": {"objective": "continue"},
+    }
+    claims = iter([job, None])
+
+    def next_claim(_state):
+        value = next(claims)
+        if value is None:
+            state.tasks_stop.set()
+        return value
+
+    monkeypatch.setattr(tasks, "claim_once", next_claim)
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: ({
+        "kind": "codex", "capabilities": ["native_goal"],
+    },))
+    monkeypatch.setattr(
+        tasks, "_run_and_report",
+        lambda *_args: pytest.fail("an unfenced Goal reached checkout/native execution"))
+    monkeypatch.setattr(
+        tasks, "_decline_stale_goal_claim",
+        lambda *_args: pytest.fail("a malformed generation was sent back as a valid decline"))
+
+    tasks.task_loop(state)
+
+    assert "missing or malformed claim generation" in capsys.readouterr().err
 
 
 def test_goal_claim_decline_refreshes_an_expired_token_exactly_once(monkeypatch):

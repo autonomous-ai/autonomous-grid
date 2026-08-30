@@ -257,6 +257,7 @@ def test_unknown_native_goal_status_is_retryable_protocol_drift():
 
 def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch):
     events = []
+    spawned = {}
     monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
     monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
     rollout = (tmp_path / task_codex.AGENT_DIR / task_codex.HOME_DIR
@@ -264,11 +265,17 @@ def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch)
     rollout.parent.mkdir(parents=True)
     rollout.write_text("{}\n")
     process = _FakeProcess(_messages(rollout))
+
+    def spawn(argv, env, cwd):
+        spawned.update(argv=argv, env=env, cwd=cwd)
+        return process
+
     result = task_codex.run_slice(
-        _job(), tmp_path, inference=task_codex.GridInference("https://grid.test", "secret"),
+        _job(), tmp_path, inference=task_codex.GridInference(
+            "https://grid.test", "secret", claim_id="claim-generation-secret"),
         executable="/fake/codex", timeout=30,
         publish=lambda event, **fields: events.append((event, fields)),
-        process_factory=lambda argv, env, cwd: process)
+        process_factory=spawn)
 
     assert result.status == "complete"
     assert result.thread_id == "thread-portable"
@@ -288,6 +295,8 @@ def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch)
     assert any(row.get("method") == "thread/goal/set"
                and row["params"].get("status") == "paused" for row in sent)
     assert "secret" not in process.stdin.getvalue()
+    assert "claim-generation-secret" not in repr(spawned)
+    assert "claim-generation-secret" not in process.stdin.getvalue()
     assert events[-1][0] == "goal.slice.completed"
 
 
