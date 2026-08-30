@@ -56,6 +56,7 @@ interactive JSON-RPC fixture then proves those declared methods during execution
 | Scenario | Nodes and harnesses | Failure or constraint | Proof |
 |---|---|---|---|
 | Root create replay | Client -> relay twice | First acknowledgement may be lost | Same member key returns one Goal and one turn; changed body conflicts |
+| Same-node claim ABA | A claim 1 -> A claim 2 | An old process retains the same reusable node credential | Missing/old generations fail on lease, events, retry, result, inference and Git; claim 2 stays live with no false eval/evidence |
 | Model arrival | A Codex polls; inference-only C joins | Requested route does not exist yet | Same row remains attempt 0, then A claims attempt 1 when C advertises it |
 | Quota recovery | A Codex polls; inference-only C heartbeats | Route exists but its subscription seat reports `serving: false` | No attempt/evidence during withdrawal; same row wakes on C's healthy heartbeat |
 | Four-feature game | A Codex -> B Codex -> C Codex | A and B are killed mid-turn | Same rows are reclaimed; commit-pinned wiring/click/score/style evals pass |

@@ -109,6 +109,22 @@ def test_it_renews_while_the_child_is_alive(renewals):
     assert {task_id for _token, task_id in renewals} == {"t-1"}
 
 
+def test_a_goal_renews_only_its_exact_claim_generation(monkeypatch):
+    from remote import task_lease
+
+    seen = []
+
+    def renew(_url, _token, _task_id, **kwargs):
+        seen.append(kwargs)
+
+    monkeypatch.setattr(task_lease.relay, "renew_task_lease", renew)
+    renewer = task_lease.LeaseRenewer(
+        _FakeState(), "t-1", interval=60, claim_id="claim-generation-7")
+
+    assert renewer._renew_once() is True
+    assert seen == [{"claim_id": "claim-generation-7"}]
+
+
 def test_it_stops_the_moment_the_child_exits(renewals):
     """The criterion: a task whose agent process dies while the provider stays online loses its
     lease, so the relay can hand the work to someone else.

@@ -16,12 +16,14 @@ class InferenceProxy:
 
     def __init__(self, upstream_base: str, upstream_token: str | Callable[[], str], *,
                  refresh_token: Callable[[str], bool] | None = None,
-                 turn_id: str | None = None, conversation_id: str | None = None):
+                 turn_id: str | None = None, conversation_id: str | None = None,
+                 claim_id: str | None = None):
         self.upstream_base = upstream_base.rstrip("/")
         self.upstream_token = upstream_token
         self.refresh_token = refresh_token
         self.turn_id = turn_id
         self.conversation_id = conversation_id
+        self.claim_id = claim_id
         self.child_token = secrets.token_urlsafe(32)
         owner = self
 
@@ -141,6 +143,8 @@ class InferenceProxy:
             headers["X-Request-Id"] = self.turn_id
         if self.conversation_id:
             headers["X-Grid-Conversation"] = self.conversation_id
+        if self.claim_id:
+            headers["X-Grid-Task-Claim"] = self.claim_id
         return headers
 
     @staticmethod

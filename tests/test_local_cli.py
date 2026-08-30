@@ -13889,6 +13889,56 @@ def test_checkpoint_task_retry_posts_both_distributed_pins(monkeypatch):
     assert answer["state"] == "queued"
 
 
+def test_goal_mutation_requests_carry_the_exact_claim_generation(monkeypatch):
+    """One opaque generation fences every non-Git provider write plane."""
+    from remote import relay
+
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.path, request.headers.get("X-Grid-Task-Claim")))
+        return httpx.Response(200, json={})
+
+    _mock_serve_engine(monkeypatch, handler)
+    claim = "claim-generation-7"
+    relay.report_task_result(
+        "https://relay.example", "AT", "T1", state="completed", output="ok", error=None,
+        claim_id=claim)
+    relay.checkpoint_task_retry(
+        "https://relay.example", "AT", "T1", reason="handoff", claim_id=claim)
+    relay.renew_task_lease(
+        "https://relay.example", "AT", "T1", claim_id=claim)
+    relay.publish_task_events(
+        "https://relay.example", "AT", "T1", [{"type": "task.output"}], claim_id=claim)
+
+    assert seen == [
+        ("/relay/v1/tasks/T1/result", claim),
+        ("/relay/v1/tasks/T1/retry", claim),
+        ("/relay/v1/tasks/T1/lease", claim),
+        ("/relay/v1/tasks/T1/events", claim),
+    ]
+
+
+def test_goal_event_publisher_forwards_the_claim_generation(monkeypatch):
+    from remote import task_events
+
+    seen = []
+
+    def publish(_url, _token, _task_id, events, **kwargs):
+        seen.append((events, kwargs))
+        return {}
+
+    monkeypatch.setattr(task_events.relay, "publish_task_events", publish)
+    publisher = task_events.TaskEventPublisher(
+        _publisher_state(), "T1", claim_id="claim-generation-7")
+    publisher.publish("task.output", text="working")
+    publisher.flush()
+
+    assert seen == [([{"type": "task.output", "text": "working"}], {
+        "claim_id": "claim-generation-7",
+    })]
+
+
 def test_report_task_result_raises_on_failure(monkeypatch):
     from remote import relay
 

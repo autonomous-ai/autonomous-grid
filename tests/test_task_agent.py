@@ -2182,6 +2182,18 @@ def test_the_git_remote_is_built_for_this_tasks_own_project(monkeypatch):
     assert reported["state"] == "completed", reported
 
 
+def test_the_git_remote_is_fenced_to_this_exact_claim_generation():
+    from remote import tasks
+
+    remote = tasks._git_remote(_FakeState(), {
+        "task_id": "T-42", "project_id": "proj-1", "input_commit": "c" * 40,
+        "claim_id": "claim-generation-7",
+    })
+
+    assert remote is not None
+    assert remote.claim_id == "claim-generation-7"
+
+
 class _NullPublisher:
     def publish(self, *_a, **_k):
         return True

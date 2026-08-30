@@ -240,13 +240,15 @@ def report_once(serve_state: Any, task_id: str, *, state: str, output: str | Non
                 goal_status: str | None = None,
                 goal_turns_completed: int | None = None,
                 goal_tokens_used: int | None = None,
-                goal_time_used_seconds: int | None = None) -> None:
+                goal_time_used_seconds: int | None = None,
+                claim_id: str | None = None) -> None:
     """Report a terminal result; on 401 refresh the token and retry exactly once.
 
     The serve state is named `serve_state` here only because `state` is the wire's name for the
     task's terminal state, and the wire vocabulary wins on a function whose whole job is to send it.
     """
     token = serve_state.token()
+    claim = ({"claim_id": claim_id} if claim_id else {})
     try:
         relay.report_task_result(
             serve_state.signaling_url, token, task_id,
@@ -255,7 +257,7 @@ def report_once(serve_state: Any, task_id: str, *, state: str, output: str | Non
             transcript_result_commit=transcript_result_commit,
             goal_status=goal_status, goal_turns_completed=goal_turns_completed,
             goal_tokens_used=goal_tokens_used,
-            goal_time_used_seconds=goal_time_used_seconds)
+            goal_time_used_seconds=goal_time_used_seconds, **claim)
     except relay.RelayUnauthorized:
         if not serve_state.refresh(stale_token=token):
             raise
@@ -266,10 +268,12 @@ def report_once(serve_state: Any, task_id: str, *, state: str, output: str | Non
             transcript_result_commit=transcript_result_commit,
             goal_status=goal_status, goal_turns_completed=goal_turns_completed,
             goal_tokens_used=goal_tokens_used,
-            goal_time_used_seconds=goal_time_used_seconds)
+            goal_time_used_seconds=goal_time_used_seconds, **claim)
 
 
-def checkpoint_retry_once(serve_state: Any, task_id: str, **checkpoint: Any) -> dict[str, Any]:
+def checkpoint_retry_once(serve_state: Any, task_id: str, *,
+                          claim_id: str | None = None,
+                          **checkpoint: Any) -> dict[str, Any]:
     """Hand off a native Goal checkpoint; refresh an expired provider token exactly once.
 
     Goal slices can outlive an access token. Losing coherent partial work merely because the token
@@ -278,14 +282,16 @@ def checkpoint_retry_once(serve_state: Any, task_id: str, **checkpoint: Any) -> 
     one-refresh rule; checkpoint settlement must not be the lone stale-token gap.
     """
     token = serve_state.token()
+    claim = ({"claim_id": claim_id} if claim_id else {})
     try:
         return relay.checkpoint_task_retry(
-            serve_state.signaling_url, token, task_id, **checkpoint)
+            serve_state.signaling_url, token, task_id, **claim, **checkpoint)
     except relay.RelayUnauthorized:
         if not serve_state.refresh(stale_token=token):
             raise
         return relay.checkpoint_task_retry(
-            serve_state.signaling_url, serve_state.token(), task_id, **checkpoint)
+            serve_state.signaling_url, serve_state.token(), task_id,
+            **claim, **checkpoint)
 
 
 def decline_claim_once(serve_state: Any, task_id: str, *, attempt: int,
@@ -884,6 +890,7 @@ def run_task(job: dict[str, Any],
             return failed(
                 f"the task names input commit {input_commit} but no git remote was wired")
         try:
+            claim = ({"claim_id": remote.claim_id} if remote.claim_id else {})
             task_repo.materialize(
                 workspace, url=remote.url, token=remote.token,
                 branch=str(job.get("branch") or ""), input_commit=str(input_commit),
@@ -907,7 +914,7 @@ def run_task(job: dict[str, Any],
                 # A first Goal turn has no pin, but its retry must still discard any Codex DB/WAL
                 # files left by a dead attempt on this provider. Ordinary Claude tasks retain the
                 # old no-pin compatibility behaviour in `materialize`.
-                reset_agent_state=(agent_kind == "codex"))
+                reset_agent_state=(agent_kind == "codex"), **claim)
         except task_repo.InputFetchError as exc:
             # BEFORE the blanket handler below, and that order is the whole change (ADR 0033 issue
             # 16a, criterion 4). The fetch is the one step whose failure is about this attempt
@@ -1024,11 +1031,13 @@ def run_task(job: dict[str, Any],
             author=task_repo.identity_or_default(
                 job.get("author_name"), job.get("author_email")),
             workspace=workspace)
+        claim = ({"claim_id": inference.claim_id} if inference.claim_id else {})
         proxy = task_codex_proxy.InferenceProxy(
             inference.base_url, inference.current_token,
             refresh_token=inference.refresh_token,
             turn_id=str(job.get("task_id") or "") or None,
-            conversation_id=str(job.get("conversation_id") or "") or None)
+            conversation_id=str(job.get("conversation_id") or "") or None,
+            **claim)
         # Map every Claude tier to the Goal's explicit Grid model. In particular `/goal` evaluates
         # with the configured small/fast model; leaving that alias untouched would send only the
         # actor through Grid while its native evaluator tried an Anthropic account on this node.
@@ -1459,7 +1468,11 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
     # whose own ceiling (`task_repo._GIT_NETWORK_TIMEOUT_SECONDS`) far outruns the 120s lease TTL,
     # and closed in the `finally` below so a supervisor that moved on cannot still be vouching for a
     # child it no longer has.
-    renewer = _lease_renewer(state, task_id, on_beat=_tree_beat(job, publisher))
+    claim_id = str(job.get("claim_id") or "") or None
+    renewer_options: dict[str, Any] = {"on_beat": _tree_beat(job, publisher)}
+    if claim_id:
+        renewer_options["claim_id"] = claim_id
+    renewer = _lease_renewer(state, task_id, **renewer_options)
     try:
         run_kwargs: dict[str, Any] = {
             "remote": remote,
@@ -1469,9 +1482,13 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
         # Ordinary Claude tasks keep their established call contract. Native Goal turns of either
         # harness use a loopback credential boundary and route their model calls through Grid.
         if str(job.get("agent_kind") or "claude") == "codex" or isinstance(job.get("goal"), dict):
+            inference_options: dict[str, Any] = {}
+            if claim_id:
+                inference_options["claim_id"] = claim_id
             run_kwargs["inference"] = task_codex.GridInference(
                 state.signaling_url, state.token,
-                lambda stale: state.refresh(stale_token=stale))
+                lambda stale: state.refresh(stale_token=stale),
+                **inference_options)
         outcome = run_task(job, publisher.publish, **run_kwargs)
         is_goal = isinstance(job.get("goal"), dict)
         retry_goal_failure = (is_goal and outcome.state == "failed"
@@ -1504,6 +1521,7 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
                 try:
                     retry_answer = checkpoint_retry_once(
                         state, task_id,
+                        claim_id=claim_id,
                         reason=reason,
                         result_commit=outcome.result_commit,
                         transcript_result_commit=outcome.transcript_result_commit,
@@ -1615,6 +1633,8 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
                 "session_id": outcome.session_id, "result_commit": outcome.result_commit,
                 "session_reset_reason": outcome.session_reset_reason,
             }
+            if claim_id:
+                report_kwargs["claim_id"] = claim_id
             # Additive rolling upgrade: an older relay ignores this key, while a worker that
             # produced no transcript keeps the exact pre-feature report shape.
             if outcome.transcript_result_commit:
@@ -1672,6 +1692,7 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
 
 
 def _lease_renewer(state: Any, task_id: str, *,
+                   claim_id: str | None = None,
                    on_beat: Callable[[], None] | None = None) -> Any:
     """This attempt's lease renewer, already started. Never raises.
 
@@ -1683,7 +1704,10 @@ def _lease_renewer(state: Any, task_id: str, *,
     try:
         from . import task_lease
 
-        renewer = task_lease.LeaseRenewer(state, task_id, on_beat=on_beat)
+        options: dict[str, Any] = {"on_beat": on_beat}
+        if claim_id:
+            options["claim_id"] = claim_id
+        renewer = task_lease.LeaseRenewer(state, task_id, **options)
         renewer.start()
         return renewer
     except (Exception, SystemExit) as exc:
@@ -1758,7 +1782,8 @@ def _git_remote(state: Any, job: dict[str, Any]) -> task_repo.GitRemote | None:
     if not job.get("input_commit") or not project_id:
         return None
     return task_repo.GitRemote(
-        url=relay.git_remote_url(state.signaling_url, project_id), token=state.token())
+        url=relay.git_remote_url(state.signaling_url, project_id), token=state.token(),
+        claim_id=str(job.get("claim_id") or "") or None)
 
 
 def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
@@ -1813,9 +1838,10 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         # codebase's word for that is "do not report success and let it be retried", exactly as a
         # failed result push already behaves. A terminal failure would spend the whole turn on a
         # transient network fault.
+        claim = ({"claim_id": remote.claim_id} if remote.claim_id else {})
         transcript_result_commit = task_repo.push_transcript(
             workspace, url=remote.url, token=remote.token,
-            ref=task_repo.transcript_ref(conversation_id))
+            ref=task_repo.transcript_ref(conversation_id), **claim)
         pushed = task_repo.commit_and_push(
             workspace, url=remote.url, token=remote.token,
             branch=str(job.get("branch") or ""),
@@ -1828,7 +1854,7 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
             # Neither key present is the pre-0033 `grid <grid@invalid>`, which is exactly what an
             # older relay produces, so this is free to roll out in either direction.
             author=task_repo.identity_or_default(
-                job.get("author_name"), job.get("author_email")))
+                job.get("author_name"), job.get("author_email")), **claim)
     except (Exception, SystemExit) as exc:
         # SCRUBBED like every other message that leaves this process: it is built from git's own
         # stderr, and it travels into the durable event log the requesting user reads back.
@@ -1915,7 +1941,9 @@ def _publisher_for(state: Any, task_id: str, job: dict[str, Any]) -> Any:
     """
     from .task_events import TaskEventPublisher
 
-    publisher = TaskEventPublisher(state, task_id)
+    claim_id = str(job.get("claim_id") or "") or None
+    publisher = (TaskEventPublisher(state, task_id, claim_id=claim_id)
+                 if claim_id else TaskEventPublisher(state, task_id))
     try:
         is_goal = isinstance(job.get("goal"), dict)
         accepted = False

@@ -101,6 +101,93 @@ def test_root_goal_create_replay_returns_one_durable_identity(relay, owner_token
         relay_client.control_goal(relay, owner_token, first["id"], "cancel")
 
 
+def test_same_node_reclaim_rejects_the_old_process_on_every_goal_plane(
+        relay, owner_token, provider_nodes, advertise_goal_models):
+    """A→A is still a handoff: a reusable node identity is not a lease generation."""
+    import httpx
+    from remote import relay as relay_client
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-goal-same-node-aba-fence")["id"]
+    H.seed_trunk(relay, owner_token, project_id)
+    node_id, node_token = provider_nodes["A"]
+    assert advertise_goal_models("A", "fake-grid-model") == node_id
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Prove a stale process cannot mutate its replacement's Goal attempt",
+        done_when="SAFE.md exists", model="fake-grid-model", token_budget=1_000,
+        evals=[{"type": "file", "name": "safe handoff", "path": "SAFE.md"}])
+    profile = ({"kind": "codex", "capabilities": ["native_goal"]},)
+
+    try:
+        old = relay_client.claim_task(
+            relay, node_token, agent_kinds=("codex",), agent_profiles=profile, timeout=5)
+        assert old and old["task_id"] == goal["turn_id"], old
+        declined = relay_client.decline_task_claim(
+            relay, node_token, old["task_id"],
+            attempt=old["attempt"], claim_id=old["claim_id"])
+        assert declined["state"] == "queued"
+        current = relay_client.claim_task(
+            relay, node_token, agent_kinds=("codex",), agent_profiles=profile, timeout=5)
+        assert current and current["task_id"] == old["task_id"], current
+        assert current["attempt"] == old["attempt"]
+        assert current["claim_id"] != old["claim_id"]
+
+        auth = {"Authorization": f"Bearer {node_token}"}
+        stale = {**auth, "X-Grid-Task-Claim": old["claim_id"]}
+        with httpx.Client(base_url=relay, timeout=10) as client:
+            missing_responses = [
+                client.post(f"/relay/v1/tasks/{old['task_id']}/lease", headers=auth),
+                client.post(
+                    f"/relay/v1/tasks/{old['task_id']}/events", headers=auth,
+                    json={"events": [{"type": "task.output", "text": "unfenced"}]}),
+                client.post(
+                    f"/relay/v1/tasks/{old['task_id']}/retry", headers=auth,
+                    json={"reason": "unfenced worker"}),
+                client.post(
+                    f"/relay/v1/tasks/{old['task_id']}/result", headers=auth,
+                    json={"state": "failed", "output": None, "error": "unfenced"}),
+            ]
+            assert [response.status_code for response in missing_responses] == [403] * 4
+            assert all(response.json()["detail"]["code"] == "claim_required"
+                       for response in missing_responses)
+
+            stale_responses = [
+                client.post(f"/relay/v1/tasks/{old['task_id']}/lease", headers=stale),
+                client.post(
+                    f"/relay/v1/tasks/{old['task_id']}/events", headers=stale,
+                    json={"events": [{"type": "task.output", "text": "stale"}]}),
+                client.post(
+                    f"/relay/v1/tasks/{old['task_id']}/retry", headers=stale,
+                    json={"reason": "stale worker"}),
+                client.post(
+                    f"/relay/v1/tasks/{old['task_id']}/result", headers=stale,
+                    json={"state": "failed", "output": None, "error": "stale"}),
+                client.post(
+                    "/relay/v1/responses", headers={
+                        **stale, "X-Request-Id": old["task_id"],
+                        "X-Grid-Conversation": goal["id"],
+                    }, json={"model": "fake-grid-model", "input": "stale inference"}),
+            ]
+            assert [response.status_code for response in stale_responses] == [403] * 5
+            assert client.get(
+                f"/relay/v1/git/{project_id}/info/refs",
+                headers=stale, params={"service": "git-upload-pack"}).status_code == 404
+
+        # The old process altered nothing and the replacement generation still owns the lease.
+        relay_client.renew_task_lease(
+            relay, node_token, current["task_id"], claim_id=current["claim_id"])
+        rows = _tasks(relay, owner_token, project_id, goal["id"])
+        assert len(rows) == 1 and rows[0]["state"] == "running", rows
+        assert rows[0]["provider_id"] == node_id
+        evidence = relay_client.get_goal_evidence(relay, owner_token, goal["id"])
+        assert not [item for item in evidence["attempt_events"]
+                    if item["event"].get("text") in ("unfenced", "stale")]
+        assert evidence["eval_runs"] == []
+    finally:
+        relay_client.control_goal(relay, owner_token, goal["id"], "cancel")
+
+
 def test_goal_waits_at_attempt_zero_until_separate_inference_node_adds_model(
         relay, owner_token, spawn_goal_provider, advertise_goal_models):
     """A live agent machine is insufficient until the Grid can serve the Goal's model."""

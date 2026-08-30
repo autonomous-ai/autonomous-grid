@@ -77,7 +77,7 @@ def test_goal_inference_proxy_attributes_requests_to_durable_turn_and_conversati
     Handler.headers["Content-Type"] = "application/json"
     proxy = task_codex_proxy.InferenceProxy(
         "https://grid.test/relay/v1", "grid-secret",
-        turn_id="turn-1", conversation_id="goal-1")
+        turn_id="turn-1", conversation_id="goal-1", claim_id="claim-generation-7")
     try:
         headers = proxy._upstream_headers(Handler())
     finally:
@@ -86,6 +86,7 @@ def test_goal_inference_proxy_attributes_requests_to_durable_turn_and_conversati
     assert headers["Authorization"] == "Bearer grid-secret"
     assert headers["X-Request-Id"] == "turn-1"
     assert headers["X-Grid-Conversation"] == "goal-1"
+    assert headers["X-Grid-Task-Claim"] == "claim-generation-7"
 
 
 def test_goal_inference_proxy_refreshes_expired_node_token_once():

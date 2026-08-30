@@ -43,6 +43,8 @@ _REGISTER_TIMEOUT = 15.0
 # (`task_claim_timeout_seconds`, 30s) or the client gives up first and every idle cycle looks like a
 # transport error — the same 30-vs-35 relationship `POLL_TIMEOUT` has with `poll_timeout_seconds`.
 TASK_CLAIM_TIMEOUT = 35.0
+# Opaque generation returned with every claim and required on every native Goal mutation.
+TASK_CLAIM_HEADER = "X-Grid-Task-Claim"
 # Reporting a terminal result is small and bounded, but it is the LAST word on work that has already
 # been done: losing it means the task is retried from scratch. Generous on purpose.
 _TASK_RESULT_TIMEOUT = 60.0
@@ -382,6 +384,7 @@ def report_task_result(
     goal_turns_completed: int | None = None,
     goal_tokens_used: int | None = None,
     goal_time_used_seconds: int | None = None,
+    claim_id: str | None = None,
 ) -> None:
     """Report a task's terminal outcome (``POST /relay/v1/tasks/{id}/result``).
 
@@ -427,6 +430,7 @@ def report_task_result(
                 # The id came off the wire and is being interpolated into a path.
                 f"/relay/v1/tasks/{quote(task_id, safe='')}/result",
                 json=body,
+                headers=({TASK_CLAIM_HEADER: claim_id} if claim_id else None),
             )
     except httpx.HTTPError as exc:
         raise RelayError(f"report_task_result transport error: {exc}") from None
@@ -443,6 +447,7 @@ def checkpoint_task_retry(
     transcript_result_commit: str | None = None,
     session_id: str | None = None,
     session_reset_reason: str | None = None,
+    claim_id: str | None = None,
 ) -> dict[str, Any]:
     """Relinquish a failed native Goal attempt after publishing a coherent checkpoint.
 
@@ -464,6 +469,7 @@ def checkpoint_task_retry(
             resp = client.post(
                 f"/relay/v1/tasks/{quote(task_id, safe='')}/retry",
                 json=body,
+                headers=({TASK_CLAIM_HEADER: claim_id} if claim_id else None),
             )
     except httpx.HTTPError as exc:
         raise RelayError(f"checkpoint_task_retry transport error: {exc}") from None
@@ -521,7 +527,8 @@ def git_remote_url(signaling_url: str, project_id: str) -> str:
     return f"{signaling_url.rstrip('/')}/relay/v1/git/{quote(project_id, safe='')}"
 
 
-def renew_task_lease(signaling_url: str, access_token: str, task_id: str) -> None:
+def renew_task_lease(signaling_url: str, access_token: str, task_id: str, *,
+                     claim_id: str | None = None) -> None:
     """Push this task's lease out (``POST /relay/v1/tasks/{id}/lease``).
 
     The relay renews on the LEASE alone — `state='running'` and this node recorded as the holder —
@@ -545,7 +552,8 @@ def renew_task_lease(signaling_url: str, access_token: str, task_id: str) -> Non
         with _client(signaling_url, access_token, timeout=_TASK_EVENT_TIMEOUT) as client:
             resp = client.post(
                 # The id came off the wire and is being interpolated into a path.
-                f"/relay/v1/tasks/{quote(task_id, safe='')}/lease")
+                f"/relay/v1/tasks/{quote(task_id, safe='')}/lease",
+                headers=({TASK_CLAIM_HEADER: claim_id} if claim_id else None))
     except httpx.HTTPError as exc:
         raise RelayError(f"renew_task_lease transport error: {exc}") from None
     # The body carries the new expiry, and nothing here reads it: this side already knows its own
@@ -564,6 +572,8 @@ def publish_task_events(
     access_token: str,
     task_id: str,
     events: list[dict[str, Any]],
+    *,
+    claim_id: str | None = None,
 ) -> dict[str, Any]:
     """Append a BATCH of progress events to a task's log (``POST /relay/v1/tasks/{id}/events``).
 
@@ -584,6 +594,7 @@ def publish_task_events(
                 # The id came off the wire and is being interpolated into a path.
                 f"/relay/v1/tasks/{quote(task_id, safe='')}/events",
                 json={"events": events},
+                headers=({TASK_CLAIM_HEADER: claim_id} if claim_id else None),
             )
     except httpx.HTTPError as exc:
         raise RelayError(f"publish_task_events transport error: {exc}") from None

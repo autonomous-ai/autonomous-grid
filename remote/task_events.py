@@ -67,9 +67,10 @@ def _warn(message: str) -> None:
 class TaskEventPublisher:
     """Buffered, best-effort publisher for one task's log. Never raises."""
 
-    def __init__(self, state: Any, task_id: str) -> None:
+    def __init__(self, state: Any, task_id: str, *, claim_id: str | None = None) -> None:
         self._state = state
         self._task_id = task_id
+        self._claim_id = claim_id
         self._buffer: list[dict[str, Any]] = []
         self._last_flush = time.monotonic()
         # Latched by a verdict (403/404/422, or a 401 we cannot refresh past). Once set, this
@@ -159,13 +160,17 @@ class TaskEventPublisher:
 
     def _send(self, batch: list[dict[str, Any]]) -> None:
         token = self._state.token()
+        claim = ({"claim_id": self._claim_id} if self._claim_id else {})
         try:
-            relay.publish_task_events(self._state.signaling_url, token, self._task_id, batch)
+            relay.publish_task_events(
+                self._state.signaling_url, token, self._task_id, batch,
+                **claim)
         except relay.RelayUnauthorized:
             if not self._state.refresh(stale_token=token):
                 raise
             relay.publish_task_events(
-                self._state.signaling_url, self._state.token(), self._task_id, batch)
+                self._state.signaling_url, self._state.token(), self._task_id, batch,
+                **claim)
 
     def _stop(self, message: str) -> None:
         self._stopped = True

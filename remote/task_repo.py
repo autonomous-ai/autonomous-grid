@@ -134,6 +134,7 @@ class GitRemote:
 
     url: str
     token: str
+    claim_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -322,7 +323,8 @@ GIT_SAFETY_CONFIG: tuple[tuple[str, str], ...] = (
 )
 
 
-def _env(token: str | None = None, author: GitIdentity | None = None) -> dict[str, str]:
+def _env(token: str | None = None, author: GitIdentity | None = None, *,
+         claim_id: str | None = None) -> dict[str, str]:
     """The environment every git child gets.
 
     **Author and committer are different people, and that is the point** (ADR 0033 D-m). The author
@@ -361,17 +363,22 @@ def _env(token: str | None = None, author: GitIdentity | None = None) -> dict[st
         "GIT_COMMITTER_EMAIL": DEFAULT_IDENTITY.email,
     }
     if token:
+        entries = [("http.extraHeader", f"Authorization: Bearer {token}")]
+        if claim_id:
+            entries.append(("http.extraHeader", f"X-Grid-Task-Claim: {claim_id}"))
+        entries.append(("http.followRedirects", "false"))
         env.update({
-            "GIT_CONFIG_COUNT": "2",
-            "GIT_CONFIG_KEY_0": "http.extraHeader",
-            "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
-            "GIT_CONFIG_KEY_1": "http.followRedirects",
-            "GIT_CONFIG_VALUE_1": "false",
+            "GIT_CONFIG_COUNT": str(len(entries)),
+            **{f"GIT_CONFIG_KEY_{index}": key
+               for index, (key, _value) in enumerate(entries)},
+            **{f"GIT_CONFIG_VALUE_{index}": value
+               for index, (_key, value) in enumerate(entries)},
         })
     return env
 
 
 def _run(workspace: Path, *args: str, token: str | None = None,
+         claim_id: str | None = None,
          timeout: float = _GIT_TIMEOUT_SECONDS,
          author: GitIdentity | None = None,
          index: Path | None = None) -> str:
@@ -390,7 +397,7 @@ def _run(workspace: Path, *args: str, token: str | None = None,
     safety: list[str] = []
     for key, value in GIT_SAFETY_CONFIG:
         safety += ["-c", f"{key}={value}"]
-    env = _env(token, author)
+    env = _env(token, author, claim_id=claim_id)
     if index is not None:
         env["GIT_INDEX_FILE"] = str(index)
     try:
@@ -455,7 +462,8 @@ def _ensure_repo(workspace: Path) -> None:
 def materialize(workspace: Path, *, url: str, token: str, branch: str,
                 input_commit: str, merge_ref: str = "",
                 transcript_ref: str = "", transcript_commit: str = "",
-                reset_agent_state: bool = False) -> None:
+                reset_agent_state: bool = False,
+                claim_id: str | None = None) -> None:
     """Bring `workspace` to exactly `input_commit` on `branch`. Raises `CheckoutError` on any failure.
 
     Raising rather than returning a status is deliberate: the ONLY safe response to input that did
@@ -528,13 +536,13 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
         # recovery fails before the agent starts.
         _run(store, "fetch", "--quiet", "--update-head-ok", url,
              f"+refs/heads/{branch}:refs/heads/{branch}",
-             token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+             token=token, claim_id=claim_id, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
         if merge_ref:
             # Its own invocation rather than a second refspec on the one above: a relay that has
             # collected this ref early answers with a failure naming the ref, and combining them
             # would lose the input fetch's success to the merge ref's failure.
             _run(store, "fetch", "--quiet", url, f"+{merge_ref}:{merge_ref}",
-                 token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+                 token=token, claim_id=claim_id, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
         if transcript_commit:
             # THE CONVERSATION (ADR 0034 D-j, issue 39), and only when the relay pinned one. An
             # unpinned turn fetches nothing: either the conversation has no transcript yet, or the
@@ -552,7 +560,7 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
             # distinguishable, because "the relay says a transcript exists and I could not get it"
             # must NOT become a silent fresh session.
             _run(store, "fetch", "--quiet", url, f"+{transcript_ref}:{transcript_ref}",
-                 token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+                 token=token, claim_id=claim_id, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
 
         # This conversation's working tree, cut from the store the fetch just filled. Cheap on every
         # turn after the first — the worktree is already there and this is a probe.
@@ -650,7 +658,8 @@ def _split(output: str) -> list[str]:
 
 
 def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
-                    message: str, author: GitIdentity | None = None) -> Pushed:
+                    message: str, author: GitIdentity | None = None,
+                    claim_id: str | None = None) -> Pushed:
     """Commit whatever the agent left and push `branch`. Returns the result commit and what the
     agent left unresolved.
 
@@ -747,7 +756,7 @@ def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
         # The refspec is spelled out rather than pushed as `HEAD`: the relay authorizes the exact
         # ref name it is handed, and a detached or re-pointed HEAD would name something else.
         _run(workspace, "push", "--quiet", url, f"refs/heads/{branch}:refs/heads/{branch}",
-             token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+             token=token, claim_id=claim_id, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
     except CheckoutError as exc:
         raise PushError(f"could not push {branch}: {exc}") from None
     return Pushed(commit=commit, unresolved=unresolved, unchecked=unchecked)
@@ -770,7 +779,8 @@ def transcript_ref(conversation_id: str) -> str:
     return f"{TRANSCRIPT_PREFIX}{conversation_id}" if conversation_id else ""
 
 
-def push_transcript(workspace: Path, *, url: str, token: str, ref: str) -> str | None:
+def push_transcript(workspace: Path, *, url: str, token: str, ref: str,
+                    claim_id: str | None = None) -> str | None:
     """Publish this conversation's transcript to its side ref (ADR 0034 D-j, issue 39).
 
     Answers the commit pushed, or `None` when the agent produced no transcript at all — a turn whose
@@ -827,7 +837,7 @@ def push_transcript(workspace: Path, *, url: str, token: str, ref: str) -> str |
     if url:
         try:
             _run(workspace, "fetch", "--quiet", url, f"+{ref}:{ref}",
-                 token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+                 token=token, claim_id=claim_id, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
         except CheckoutError:
             pass
 
@@ -893,7 +903,7 @@ def push_transcript(workspace: Path, *, url: str, token: str, ref: str) -> str |
 
     try:
         _run(workspace, "push", "--quiet", url, f"{commit}:{ref}",
-             token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+             token=token, claim_id=claim_id, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
     except CheckoutError as exc:
         raise PushError(f"could not push the conversation's transcript to {ref}: {exc}") from None
     return commit

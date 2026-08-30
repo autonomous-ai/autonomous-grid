@@ -151,6 +151,7 @@ class GridInference:
     base_url: str
     token: str | Callable[[], str]
     refresh: Callable[[str], bool] | None = None
+    claim_id: str | None = None
 
     def current_token(self) -> str:
         return str(self.token() if callable(self.token) else self.token)
@@ -744,11 +745,13 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
                          scope=conversation_id,
                          turn_scope=f"{conversation_id}:{turns_before + 1}")
 
+    claim = ({"claim_id": inference.claim_id} if inference.claim_id else {})
     proxy = InferenceProxy(
         inference.base_url.rstrip("/") + "/relay/v1", inference.current_token,
         refresh_token=inference.refresh_token,
         turn_id=str(job.get("task_id") or "") or None,
-        conversation_id=str(job.get("conversation_id") or "") or None)
+        conversation_id=str(job.get("conversation_id") or "") or None,
+        **claim)
     proxy.start()
     process: ProcessLike | None = None
     started = time.monotonic()
