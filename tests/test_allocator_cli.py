@@ -154,6 +154,13 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
                 "reason": "selected capacity is loading or warming",
             }
         ],
+        "portfolio_projections": [
+            {
+                "workload": "video",
+                "demand_correlation_sources": ["image"],
+                "demand_correlation_confidence": 6 / 7,
+            }
+        ],
     }
     calls = []
 
@@ -171,6 +178,7 @@ def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys
     assert "exploration slot  general" in output
     assert "workload video" in output
     assert "starting via video-model · 0/1 ready" in output
+    assert "learned workflow image → video · 86% confidence" in output
     assert "why              selected capacity is loading or warming" in output
     assert "secret-token" not in output
     assert calls[0][2]["headers"] == {}

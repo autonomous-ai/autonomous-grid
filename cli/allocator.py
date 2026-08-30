@@ -98,15 +98,32 @@ def cmd_allocator_status(args: argparse.Namespace) -> int:
                     str(item) for item in portfolio_policy["exploration_models"]
                 )
             )
+    projection_by_workload = {
+        str(row.get("workload") or ""): row
+        for row in payload.get("portfolio_projections") or []
+        if isinstance(row, dict)
+    }
     for admission in payload.get("portfolio_admissions") or []:
+        workload = str(admission.get("workload") or "unknown")
         model_id = admission.get("model_id") or "no-model"
         ready = int(admission.get("ready_replicas") or 0)
         desired = int(admission.get("desired_replicas") or 0)
         print(
-            f"  workload {admission.get('workload') or 'unknown':<10} "
+            f"  workload {workload:<10} "
             f"{admission.get('state') or 'unknown'} via {model_id} · "
             f"{ready}/{desired} ready"
         )
+        projection = projection_by_workload.get(workload) or {}
+        sequence_sources = projection.get("demand_correlation_sources") or ()
+        if sequence_sources:
+            confidence = 100.0 * float(
+                projection.get("demand_correlation_confidence") or 0.0
+            )
+            print(
+                "    proactive         learned workflow "
+                + ", ".join(str(item) for item in sequence_sources)
+                + f" → {workload} · {confidence:.0f}% confidence"
+            )
         if admission.get("state") != "ready" and admission.get("reason"):
             print(f"    why              {admission['reason']}")
     if payload.get("last_error"):

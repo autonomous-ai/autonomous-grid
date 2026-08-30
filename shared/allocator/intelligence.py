@@ -7,9 +7,11 @@ portfolio-planning evidence; they are not request-routing decisions.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Iterable, Mapping
 
@@ -44,6 +46,12 @@ _OUTCOME_FULL_CONFIDENCE_REQUESTS = 20.0
 _QUALITY_FULL_CONFIDENCE_SAMPLES = 8.0
 _MAX_EXPLORATION_BONUS = 0.06
 _SPARE_CAPACITY_EVIDENCE_CONCURRENCY = 1.0
+_MAX_WORKFLOW_STATES = 512
+_MAX_WORKFLOW_TRANSITIONS = 4_096
+_WORKFLOW_SEQUENCE_WINDOW_SECONDS = 3_600.0
+_WORKFLOW_SEQUENCE_MAX_GAP_SECONDS = 15 * 60.0
+_WORKFLOW_SEQUENCE_MIN_TRANSITIONS = 5
+_WORKFLOW_SEQUENCE_CONFIDENCE = 0.70
 _KEYWORDS = {
     "coding": frozenset(
         {
@@ -241,6 +249,11 @@ class WorkloadIntelligence:
         self.demand = DemandTracker()
         self.unbound_demand = DemandTracker()
         self._outcomes: dict[tuple[str, str, str], ModelWorkloadOutcome] = {}
+        # Only SHA-256 digests of bounded, caller-supplied affinity keys are retained. The compact
+        # state proves that the same workflow actually moved from one workload to another; fleet-
+        # wide coincidence is deliberately insufficient evidence for proactive model movement.
+        self._workflow_states: dict[str, tuple[str, float]] = {}
+        self._workflow_transitions: list[tuple[float, str, str]] = []
 
     @property
     def outcomes(self) -> tuple[ModelWorkloadOutcome, ...]:
@@ -259,9 +272,23 @@ class WorkloadIntelligence:
         error: bool = False,
         output_units: int = 0,
         quality: float | None = None,
+        workflow_key: str = "",
         timestamp: float | None = None,
     ) -> None:
         observed_at = time.time() if timestamp is None else float(timestamp)
+        workflow_digest = ""
+        if workflow_key:
+            if not isinstance(workflow_key, str) or not workflow_key.isprintable():
+                raise ValueError("workflow_key must be a bounded printable string")
+            try:
+                encoded_workflow_key = workflow_key.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError(
+                    "workflow_key must be a bounded printable string"
+                ) from exc
+            if len(encoded_workflow_key) > 512:
+                raise ValueError("workflow_key must be a bounded printable string")
+            workflow_digest = hashlib.sha256(encoded_workflow_key).hexdigest()
         measured_latency = (
             float(service_seconds) * 1_000.0
             if latency_ms is None
@@ -284,6 +311,12 @@ class WorkloadIntelligence:
                 errors=int(error),
                 timestamp=observed_at,
             )
+            if workflow_digest:
+                self._observe_workflow(
+                    workflow_digest,
+                    features.workload,
+                    timestamp=observed_at,
+                )
         if served_model:
             self._observe_outcome(
                 served_model,
@@ -337,6 +370,8 @@ class WorkloadIntelligence:
         self.demand.clear()
         self.unbound_demand.clear()
         self._outcomes.clear()
+        self._workflow_states.clear()
+        self._workflow_transitions.clear()
 
     def observe_model_evaluation(
         self,
@@ -399,8 +434,12 @@ class WorkloadIntelligence:
         workload_keys = tuple(
             sorted((self.unbound_demand.to_dict().get("models") or {}).keys())
         )
+        workload_forecasts = self._portfolio_workload_forecasts(
+            workload_keys,
+            now=now,
+        )
         for workload in workload_keys:
-            forecast = self.unbound_demand.forecast(workload, now=now)
+            forecast = workload_forecasts[workload]
             if forecast.requests_per_minute <= 0:
                 continue
             candidates = [
@@ -484,7 +523,13 @@ class WorkloadIntelligence:
                 observed_requests_per_minute=0.0,
                 correlated_requests_per_minute=forecast.requests_per_minute,
                 correlation_confidence=forecast.confidence,
-                correlation_sources=(f"workload:{workload}",),
+                correlation_sources=(
+                    f"workload:{workload}",
+                    *(
+                        f"workload-predictor:{source}"
+                        for source in forecast.correlation_sources
+                    ),
+                ),
                 # One long image/video request is enough to justify trying a model on genuinely
                 # spare capacity, but not enough to infer the entire scale-out target. The first
                 # canary's real request/outcome evidence removes this cap on the next plan.
@@ -507,8 +552,12 @@ class WorkloadIntelligence:
         rows: list[dict[str, Any]] = []
         profile_list = tuple(profiles)
         keys = tuple(sorted((self.unbound_demand.to_dict().get("models") or {}).keys()))
+        workload_forecasts = self._portfolio_workload_forecasts(
+            keys,
+            now=timestamp,
+        )
         for workload in keys:
-            forecast = self.unbound_demand.forecast(workload, now=timestamp)
+            forecast = workload_forecasts[workload]
             configured_candidates = [
                 profile
                 for profile in profile_list
@@ -599,6 +648,8 @@ class WorkloadIntelligence:
                     "offered_concurrency": forecast.offered_concurrency,
                     "samples": forecast.sample_count,
                     "confidence": forecast.confidence,
+                    "demand_correlation_sources": forecast.correlation_sources,
+                    "demand_correlation_confidence": forecast.correlation_confidence,
                     "successful_outcome_evidence": max(
                         0.0,
                         chosen_evidence["effective_requests"]
@@ -647,6 +698,26 @@ class WorkloadIntelligence:
             ),
             "demand": self.demand.to_dict(),
             "unbound_demand": self.unbound_demand.to_dict(),
+            "workflow_sequences": {
+                "states": [
+                    {
+                        "key_sha256": key,
+                        "workload": workload,
+                        "last_seen_at": last_seen_at,
+                    }
+                    for key, (workload, last_seen_at) in sorted(
+                        self._workflow_states.items()
+                    )
+                ],
+                "transitions": [
+                    {
+                        "timestamp": timestamp,
+                        "source": source,
+                        "target": target,
+                    }
+                    for timestamp, source, target in self._workflow_transitions
+                ],
+            },
             "outcomes": [asdict(item) for item in self.outcomes],
         }
 
@@ -666,6 +737,42 @@ class WorkloadIntelligence:
             result.unbound_demand = DemandTracker.from_dict(
                 dict(value["unbound_demand"])
             )
+        sequence_state = value.get("workflow_sequences") or {}
+        if not isinstance(sequence_state, Mapping):
+            raise ValueError("workflow sequence state must be an object")
+        for row in sequence_state.get("states") or ():
+            if not isinstance(row, Mapping):
+                raise ValueError("workflow sequence state contains an invalid row")
+            key = str(row.get("key_sha256") or "")
+            workload = str(row.get("workload") or "")
+            last_seen_at = float(row.get("last_seen_at") or 0.0)
+            if (
+                len(key) != 64
+                or any(character not in "0123456789abcdef" for character in key)
+                or workload not in KNOWN_WORKLOADS
+                or not math.isfinite(last_seen_at)
+                or last_seen_at < 0
+                or len(result._workflow_states) >= _MAX_WORKFLOW_STATES
+                or key in result._workflow_states
+            ):
+                raise ValueError("workflow sequence state contains invalid data")
+            result._workflow_states[key] = (workload, last_seen_at)
+        for row in sequence_state.get("transitions") or ():
+            if not isinstance(row, Mapping):
+                raise ValueError("workflow sequence transition contains an invalid row")
+            timestamp = float(row.get("timestamp") or 0.0)
+            source = str(row.get("source") or "")
+            target = str(row.get("target") or "")
+            if (
+                not math.isfinite(timestamp)
+                or timestamp < 0
+                or source not in KNOWN_WORKLOADS
+                or target not in KNOWN_WORKLOADS
+                or source == target
+                or len(result._workflow_transitions) >= _MAX_WORKFLOW_TRANSITIONS
+            ):
+                raise ValueError("workflow sequence transition contains invalid data")
+            result._workflow_transitions.append((timestamp, source, target))
         for row in value.get("outcomes") or ():
             fields = dict(row)
             # Legacy records shared one timestamp between service and quality. Retain their service
@@ -689,6 +796,118 @@ class WorkloadIntelligence:
             result._outcomes[
                 (outcome.model_id, outcome.workload, outcome.artifact_sha256)
             ] = outcome
+        return result
+
+    def _observe_workflow(
+        self,
+        key_sha256: str,
+        workload: str,
+        *,
+        timestamp: float,
+    ) -> None:
+        prior = self._workflow_states.get(key_sha256)
+        if prior is not None:
+            source, last_seen_at = prior
+            # Completion callbacks can arrive out of order. Older or simultaneous requests are
+            # useful aggregate demand but cannot establish which workload came next, and must not
+            # move the per-workflow cursor backwards.
+            if timestamp <= last_seen_at:
+                return
+            gap = timestamp - last_seen_at
+            if (
+                source != workload
+                and 0 < gap <= _WORKFLOW_SEQUENCE_MAX_GAP_SECONDS
+            ):
+                self._workflow_transitions.append((timestamp, source, workload))
+        elif len(self._workflow_states) >= _MAX_WORKFLOW_STATES:
+            oldest = min(
+                self._workflow_states,
+                key=lambda item: (self._workflow_states[item][1], item),
+            )
+            self._workflow_states.pop(oldest, None)
+        self._workflow_states[key_sha256] = (workload, timestamp)
+        cutoff = timestamp - _WORKFLOW_SEQUENCE_WINDOW_SECONDS
+        self._workflow_transitions = [
+            item for item in self._workflow_transitions if item[0] >= cutoff
+        ][-_MAX_WORKFLOW_TRANSITIONS:]
+        stale_keys = [
+            item
+            for item, (_, last_seen_at) in self._workflow_states.items()
+            if last_seen_at < cutoff
+        ]
+        for stale_key in stale_keys:
+            self._workflow_states.pop(stale_key, None)
+
+    def _workflow_sequence_edges(
+        self,
+        *,
+        now: float,
+    ) -> dict[tuple[str, str], float]:
+        cutoff = now - _WORKFLOW_SEQUENCE_WINDOW_SECONDS
+        transitions = [
+            item
+            for item in self._workflow_transitions
+            if cutoff <= item[0] <= now + self.unbound_demand.max_future_skew_seconds
+        ]
+        departures = Counter(source for _, source, _ in transitions)
+        edges = Counter((source, target) for _, source, target in transitions)
+        active_sources = {
+            workload
+            for workload, last_seen_at in self._workflow_states.values()
+            if -self.unbound_demand.max_future_skew_seconds
+            <= now - last_seen_at
+            <= self.unbound_demand.bucket_seconds
+        }
+        admitted: dict[tuple[str, str], float] = {}
+        for edge, count in edges.items():
+            source, _ = edge
+            if source not in active_sources or count < _WORKFLOW_SEQUENCE_MIN_TRANSITIONS:
+                continue
+            confidence = (count + 1) / (departures[source] + 2)
+            if confidence >= _WORKFLOW_SEQUENCE_CONFIDENCE:
+                admitted[edge] = confidence
+        return admitted
+
+    def _portfolio_workload_forecasts(
+        self,
+        workload_keys: tuple[str, ...],
+        *,
+        now: float,
+    ) -> dict[str, DemandForecast]:
+        independent = {
+            workload: self.unbound_demand.forecast(workload, now=now)
+            for workload in workload_keys
+        }
+        sequence_edges = self._workflow_sequence_edges(now=now)
+        if not sequence_edges:
+            return independent
+        inferred = {
+            forecast.model_id: forecast
+            for forecast in self.unbound_demand.forecasts(
+                workload_keys,
+                now=now,
+                sequential_only=True,
+                sequence_edges=sequence_edges,
+            )
+        }
+        result = dict(independent)
+        for workload, forecast in inferred.items():
+            base = independent[workload]
+            if not forecast.correlation_sources or forecast.requests_per_minute <= base.requests_per_minute:
+                continue
+            result[workload] = replace(
+                base,
+                requests_per_minute=forecast.requests_per_minute,
+                offered_concurrency=max(
+                    base.offered_concurrency,
+                    forecast.offered_concurrency,
+                ),
+                confidence=max(base.confidence, forecast.confidence),
+                updated_at=max(base.updated_at, forecast.updated_at),
+                correlated_requests_per_minute=forecast.correlated_requests_per_minute,
+                correlation_confidence=forecast.correlation_confidence,
+                correlation_sources=forecast.correlation_sources,
+            )
         return result
 
     def _observe_outcome(

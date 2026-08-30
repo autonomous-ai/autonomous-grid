@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from shared.allocator.demand import DemandTracker
 from shared.allocator.intelligence import (
     RequestFeatures,
     WorkloadIntelligence,
@@ -26,6 +27,27 @@ def profile(
         min_residency_seconds=0,
         workload_scores=scores,
         artifact_sha256=artifact_sha256,
+    )
+
+
+def observe_workflow(
+    intelligence: WorkloadIntelligence,
+    workload: str,
+    timestamp: float,
+    *,
+    workflow_key: str = "campaign-session",
+    service_seconds: float | None = None,
+) -> None:
+    intelligence.observe(
+        RequestFeatures(f"{workload}/request", "auto", workload),
+        portfolio_unbound=True,
+        service_seconds=(
+            service_seconds
+            if service_seconds is not None
+            else (45 if workload == "video" else 20)
+        ),
+        workflow_key=workflow_key,
+        timestamp=timestamp,
     )
 
 
@@ -244,6 +266,218 @@ def test_successful_canary_response_lifts_weak_workload_scale_out_cap():
 
     assert projected[0].sample_count == 2
     assert projected[0].canary_only is False
+
+
+def test_portfolio_prewarms_a_workload_from_a_mature_directional_sequence():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=3)
+    intelligence.unbound_demand = DemandTracker(
+        bucket_seconds=10,
+        window_seconds=1_000,
+        ewma_alpha=1,
+        confidence_samples=1,
+    )
+    for image_timestamp in (1, 21, 41, 61, 81):
+        observe_workflow(intelligence, "image", image_timestamp)
+        observe_workflow(intelligence, "video", image_timestamp + 10)
+    observe_workflow(intelligence, "image", 101)
+    candidates = (
+        profile("image-model", 2_000, ("image", 1.0)),
+        profile("video-model", 2_000, ("video", 1.0)),
+    )
+
+    independent = intelligence.unbound_demand.forecast("video", now=101)
+    projected = {
+        forecast.model_id: forecast
+        for forecast in intelligence.portfolio_forecasts(candidates, (), now=101)
+    }
+    projection_rows = {
+        row["workload"]: row
+        for row in intelligence.projections(candidates, now=101)
+    }
+
+    assert independent.requests_per_minute == 0
+    assert projected["video-model"].requests_per_minute > 0
+    assert projected["video-model"].observed_requests_per_minute == 0
+    assert projected["video-model"].correlation_sources == (
+        "workload-predictor:image",
+        "workload:video",
+    )
+    assert projection_rows["video"]["demand_correlation_sources"] == ("image",)
+    assert projection_rows["video"]["demand_correlation_confidence"] == pytest.approx(
+        6 / 7
+    )
+    serialized = intelligence.to_dict()
+    assert "campaign-session" not in repr(serialized)
+    restored = WorkloadIntelligence.from_dict(serialized)
+    assert {
+        forecast.model_id for forecast in restored.portfolio_forecasts(candidates, (), now=101)
+    } == {"image-model", "video-model"}
+
+
+def test_portfolio_does_not_predict_a_workload_from_two_directional_examples():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=3)
+    intelligence.unbound_demand = DemandTracker(
+        bucket_seconds=10,
+        window_seconds=1_000,
+        ewma_alpha=1,
+        confidence_samples=1,
+    )
+    for image_timestamp in (1, 21):
+        observe_workflow(intelligence, "image", image_timestamp)
+        observe_workflow(intelligence, "video", image_timestamp + 10)
+    observe_workflow(intelligence, "image", 41)
+
+    projected = intelligence.portfolio_forecasts(
+        (
+            profile("image-model", 2_000, ("image", 1.0)),
+            profile("video-model", 2_000, ("video", 1.0)),
+        ),
+        (),
+        now=41,
+    )
+
+    assert [forecast.model_id for forecast in projected] == ["image-model"]
+
+
+def test_portfolio_does_not_promote_four_perfect_but_immature_transitions():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=3)
+    intelligence.unbound_demand = DemandTracker(
+        bucket_seconds=10,
+        window_seconds=1_000,
+        ewma_alpha=1,
+        confidence_samples=1,
+    )
+    for image_timestamp in (1, 21, 41, 61):
+        observe_workflow(intelligence, "image", image_timestamp)
+        observe_workflow(intelligence, "video", image_timestamp + 10)
+    observe_workflow(intelligence, "image", 81)
+
+    projected = intelligence.portfolio_forecasts(
+        (
+            profile("image-model", 2_000, ("image", 1.0)),
+            profile("video-model", 2_000, ("video", 1.0)),
+        ),
+        (),
+        now=81,
+    )
+
+    assert [forecast.model_id for forecast in projected] == ["image-model"]
+
+
+def test_portfolio_shrinks_a_barely_passing_sequence_below_the_action_threshold():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=3)
+    intelligence.unbound_demand = DemandTracker(
+        bucket_seconds=10,
+        window_seconds=1_000,
+        ewma_alpha=1,
+        confidence_samples=1,
+    )
+    for image_timestamp in (1, 21, 41, 61, 81):
+        observe_workflow(intelligence, "image", image_timestamp)
+        observe_workflow(intelligence, "video", image_timestamp + 10)
+    # Two observed departures to another target leave image→video at 5/7 (> 0.70). A
+    # small-sample posterior is less certain and must not move a model yet.
+    observe_workflow(intelligence, "image", 101)
+    observe_workflow(intelligence, "research", 111)
+    observe_workflow(intelligence, "image", 121)
+    observe_workflow(intelligence, "research", 131)
+    observe_workflow(intelligence, "image", 141)
+
+    projected = intelligence.portfolio_forecasts(
+        (
+            profile("image-model", 2_000, ("image", 1.0)),
+            profile("video-model", 2_000, ("video", 1.0)),
+        ),
+        (),
+        now=141,
+    )
+
+    assert [forecast.model_id for forecast in projected] == ["image-model"]
+
+
+def test_portfolio_does_not_infer_workflow_from_unrelated_users_in_adjacent_buckets():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=3)
+    intelligence.unbound_demand = DemandTracker(
+        bucket_seconds=10,
+        window_seconds=1_000,
+        ewma_alpha=1,
+        confidence_samples=1,
+    )
+    for image_timestamp in (1, 21, 41, 61, 81):
+        observe_workflow(
+            intelligence,
+            "image",
+            image_timestamp,
+            workflow_key="image-team",
+        )
+        observe_workflow(
+            intelligence,
+            "video",
+            image_timestamp + 10,
+            workflow_key="video-team",
+        )
+    observe_workflow(intelligence, "image", 101, workflow_key="image-team")
+
+    projected = intelligence.portfolio_forecasts(
+        (
+            profile("image-model", 2_000, ("image", 1.0)),
+            profile("video-model", 2_000, ("video", 1.0)),
+        ),
+        (),
+        now=101,
+    )
+
+    assert [forecast.model_id for forecast in projected] == ["image-model"]
+
+
+def test_portfolio_does_not_treat_mature_coactivity_as_a_directional_transition():
+    intelligence = WorkloadIntelligence(portfolio_min_samples=3)
+    intelligence.unbound_demand = DemandTracker(
+        bucket_seconds=10,
+        window_seconds=1_000,
+        ewma_alpha=1,
+        confidence_samples=1,
+    )
+    for timestamp in (1, 21, 41, 61):
+        observe_workflow(intelligence, "image", timestamp)
+        observe_workflow(intelligence, "video", timestamp)
+    observe_workflow(intelligence, "image", 81)
+
+    projected = intelligence.portfolio_forecasts(
+        (
+            profile("image-model", 2_000, ("image", 1.0)),
+            profile("video-model", 2_000, ("video", 1.0)),
+        ),
+        (),
+        now=81,
+    )
+
+    assert [forecast.model_id for forecast in projected] == ["image-model"]
+
+
+def test_workflow_cursor_ignores_out_of_order_and_simultaneous_completions():
+    intelligence = WorkloadIntelligence()
+    observe_workflow(intelligence, "image", 100)
+    observe_workflow(intelligence, "video", 90)
+    observe_workflow(intelligence, "research", 100)
+
+    sequence_state = intelligence.to_dict()["workflow_sequences"]
+
+    assert [row["workload"] for row in sequence_state["states"]] == ["image"]
+    assert sequence_state["transitions"] == []
+
+
+def test_invalid_workflow_key_does_not_partially_record_demand():
+    intelligence = WorkloadIntelligence()
+
+    with pytest.raises(ValueError, match="workflow_key"):
+        observe_workflow(intelligence, "image", 100, workflow_key="bad\nkey")
+
+    assert intelligence.unbound_demand.to_dict()["models"] == {}
+    assert intelligence.to_dict()["workflow_sequences"] == {
+        "states": [],
+        "transitions": [],
+    }
 
 
 def test_portfolio_device_time_evidence_configuration_round_trips_and_validates():

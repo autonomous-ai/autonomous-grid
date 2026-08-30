@@ -579,6 +579,9 @@ the allocator combines them with observed workload demand, compatibility, resour
 time, and measured outcomes. They do not route an individual request. With several active workload
 classes, allocator status also shows the jointly optimized workload-to-model map, how many distinct
 models it selected, and the one uncertainty-driven model—if any—using the fleet exploration slot.
+Clients may reuse an opaque `X-Grid-Affinity-Key` across an iterative workflow. After repeated
+same-session workload transitions, status explains proactive prewarming as `learned workflow A →
+B` with confidence; adjacent traffic from different users is not treated as a workflow.
 
 `grid allocator node start` joins this computer as managed capacity and starts a detached local
 protection loop. `drain`, `pause`, and `quarantine` are durable local overrides that outrank global

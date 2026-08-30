@@ -921,15 +921,23 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         _require_allocator_control(app, request)
         features = replace(features, is_evaluation=True)
 
+    affinity_digest = _affinity_digest(request.headers.get("x-grid-affinity-key"))
+    workflow_key = affinity_digest.hex() if affinity_digest is not None else ""
     engine = _choose_engine(
         app,
         model,
         requested_output_tokens=_requested_output_tokens(body),
-        affinity_digest=_affinity_digest(request.headers.get("x-grid-affinity-key")),
+        affinity_digest=affinity_digest,
     )
     if not engine:
         _observe_allocator_request(
-            app, model, started_at, features=features, error=True, queue_depth=1
+            app,
+            model,
+            started_at,
+            features=features,
+            workflow_key=workflow_key,
+            error=True,
+            queue_depth=1,
         )
         return _openai_error(
             503, f"No active local engine for model {model!r}", "engine_unavailable"
@@ -976,6 +984,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
                 features=features,
                 served_model=model,
                 served_artifact_sha256=served_artifact_sha256,
+                workflow_key=workflow_key,
                 error=True,
             )
             return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
@@ -1016,6 +1025,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
                     features=features,
                     served_model=model,
                     served_artifact_sha256=served_artifact_sha256,
+                    workflow_key=workflow_key,
                     error=(
                         stream_transport_error
                         or _allocator_capacity_error(engine_response.status_code)
@@ -1061,6 +1071,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
             features=features,
             served_model=model,
             served_artifact_sha256=served_artifact_sha256,
+            workflow_key=workflow_key,
             error=True,
         )
         return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
@@ -1077,6 +1088,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         features=features,
         served_model=model,
         served_artifact_sha256=served_artifact_sha256,
+        workflow_key=workflow_key,
         error=_allocator_capacity_error(engine_response.status_code),
         output_units=_completion_tokens(engine_response),
     )
@@ -1376,11 +1388,13 @@ async def _proxy_media(
 
     # media=True: only engines that actually advertise a media URL are candidates, so a text-only
     # or stale registration of the same model can never win the pick and 503 a healthy grid.
+    affinity_digest = _affinity_digest(request.headers.get("x-grid-affinity-key"))
+    workflow_key = affinity_digest.hex() if affinity_digest is not None else ""
     engine = _choose_engine(
         app,
         model,
         media=True,
-        affinity_digest=_affinity_digest(request.headers.get("x-grid-affinity-key")),
+        affinity_digest=affinity_digest,
     )
 
     if not engine:
@@ -1389,6 +1403,7 @@ async def _proxy_media(
             model,
             started_at,
             features=features,
+            workflow_key=workflow_key,
             error=True,
             queue_depth=1,
         )
@@ -1430,6 +1445,7 @@ async def _proxy_media(
             features=features,
             served_model=model,
             served_artifact_sha256=served_artifact_sha256,
+            workflow_key=workflow_key,
             error=True,
         )
         return _openai_error(502, f"Engine media request failed: {exc}", "engine_error")
@@ -1459,6 +1475,7 @@ async def _proxy_media(
                 features=features,
                 served_model=model,
                 served_artifact_sha256=served_artifact_sha256,
+                workflow_key=workflow_key,
                 error=(
                     stream_transport_error
                     or _allocator_capacity_error(engine_response.status_code)
@@ -3115,6 +3132,7 @@ def _observe_allocator_request(
     features: RequestFeatures | None = None,
     served_model: str = "",
     served_artifact_sha256: str = "",
+    workflow_key: str = "",
     error: bool,
     queue_depth: int = 0,
     output_units: int = 0,
@@ -3136,6 +3154,7 @@ def _observe_allocator_request(
             queue_depth=queue_depth,
             error=error,
             output_units=output_units,
+            workflow_key=workflow_key,
         )
         if recorded:
             _mark_allocator_dirty(app)

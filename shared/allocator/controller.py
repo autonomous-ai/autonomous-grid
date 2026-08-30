@@ -312,6 +312,7 @@ class AllocatorController:
         error: bool = False,
         output_units: int = 0,
         quality: float | None = None,
+        workflow_key: str = "",
         timestamp: float | None = None,
     ) -> bool:
         """Observe one completed request independently of any router implementation.
@@ -362,6 +363,7 @@ class AllocatorController:
                 error=error,
                 output_units=output_units,
                 quality=quality,
+                workflow_key=workflow_key,
                 timestamp=timestamp,
             )
         return True
@@ -2983,6 +2985,16 @@ def _portfolio_admissions(
                 }
             ),
         }
+        correlation_sources = tuple(
+            str(item)
+            for item in projection.get("demand_correlation_sources") or ()
+            if str(item)
+        )
+        if correlation_sources:
+            base["demand_correlation_sources"] = correlation_sources
+            base["demand_correlation_confidence"] = float(
+                projection.get("demand_correlation_confidence") or 0.0
+            )
         if not model_id:
             blocked_candidate = next(
                 (

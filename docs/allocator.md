@@ -54,6 +54,17 @@ inactive specialist receive a bounded canary without creating a loaded-only feed
 The model that happened to serve an automatic request contributes outcome evidence, but the router's
 fallback choice never becomes direct demand for that model.
 
+If an iterative client supplies `X-Grid-Affinity-Key`, the same already-hashed session signal also
+lets the allocator learn real cross-workload sequences. Five repeated transitions from one
+workload to the same next workload are required, and the confidence calculation includes every
+observed departure from the source. For example, repeated image→video campaign sessions can warm a
+ComfyUI video model while the next image request is still running. Adjacent image and video traffic
+from unrelated users is not sequence evidence and cannot move a model. The raw affinity key is
+never retained; workflow cursors and transitions contain only a double-hashed key, are capped at
+512 active workflows and 4,096 transitions, and expire after one hour. Out-of-order or simultaneous
+completion callbacks update aggregate demand but cannot establish ordering. `grid allocator
+status` labels these proactive decisions with the learned workload edge and its confidence.
+
 Portfolio admission normally requires three observations, preventing a cheap one-off request from
 churning a large model into memory. Device-time evidence can cross the gate earlier: at least 1.5
 offered-concurrency units—arrival rate multiplied by measured service time, plus queued work—is
@@ -174,13 +185,15 @@ demand headroom and reacts to queue, latency, and error pressure while respectin
 and maximum bounds. Rising demand is also projected across the fastest eligible next replica's
 artifact-locality-aware load-plus-warm path, confidence-weighted and capped to a five-minute/2×
 horizon, so slow cold starts begin before the queue arrives without letting one noisy slope cause a
-fleet-wide load spike. Negative trends never accelerate scale-down. The tracker also learns mature
-groups of models that repeatedly become
-active in the same time buckets and directional pairs that repeatedly activate one bucket apart.
-Current demand for one group member can prewarm a quiet peer; a current workflow stage can likewise
-prewarm its historically next model. Both use a confidence-weighted historical rate ratio, require
-at least three supporting buckets and a 0.70 association/transition threshold, and exclude incomplete
-future buckets from transition failures. Inferred demand is capped at twice the target's observed
+fleet-wide load spike. Negative trends never accelerate scale-down. The model-demand tracker also
+learns mature groups of configured models that repeatedly become active in the same time buckets
+and directional model pairs that repeatedly activate one bucket apart. Current demand for one
+group member can prewarm a quiet peer. These model-level signals use a confidence-weighted
+historical rate ratio, require at least three supporting buckets and a 0.70
+association/transition threshold, and exclude incomplete future buckets from transition failures.
+Cross-workload portfolio anticipation uses the stricter affinity-bound sequence proof described
+above; aggregate timing across unrelated users is never enough. Inferred demand is capped at twice
+the target's observed
 peak, takes the maximum rather than sum across at most 32 current sources, and never propagates
 transitively. Old target-local queue, latency, and error evidence is not refreshed by an association.
 Only configured, non-retiring model IDs create demand series, so the permissionless inference
@@ -317,7 +330,10 @@ favor high token throughput. Grid never inspects or stores prompt content for th
 Clients with multi-turn or iterative workloads may send an opaque `X-Grid-Affinity-Key` header.
 Grid immediately hashes a printable key of at most 256 UTF-8 bytes and uses rendezvous hashing to
 keep that model's requests on the same near-equivalent engine, preserving runtime KV/prompt caches
-without a centralized session map. The raw key is neither retained nor forwarded upstream. Host
+without a centralized session map. For automatic model requests, the allocator also double-hashes
+this value and uses only repeated within-session workload transitions as proactive portfolio
+evidence; the router still makes no provisioning decision. The raw key is neither retained nor
+forwarded upstream. Host
 protection and admission remain hard gates, and affinity considers only the best protection class
 and routes whose estimated completion time is within 20% of the best available route. Adding or
 removing an otherwise equivalent engine therefore remaps only the sessions assigned to the changed

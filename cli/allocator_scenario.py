@@ -157,6 +157,17 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
         )
         if full_timeline or row.get("portfolio_changed"):
             for admission in row.get("portfolio_admissions") or ():
+                sequence_sources = admission.get("demand_correlation_sources") or ()
+                if sequence_sources:
+                    confidence = 100.0 * float(
+                        admission.get("demand_correlation_confidence") or 0.0
+                    )
+                    print(
+                        "      proactive: learned workflow "
+                        + ", ".join(str(item) for item in sequence_sources)
+                        + f" → {admission.get('workload') or 'unknown'} · "
+                        f"{confidence:.0f}% confidence"
+                    )
                 if admission.get("state") == "ready":
                     continue
                 print(

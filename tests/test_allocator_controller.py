@@ -9,6 +9,7 @@ import pytest
 
 from shared import jsonio
 from shared.allocator.controller import AllocatorController
+from shared.allocator.demand import DemandTracker
 from shared.allocator.intelligence import RequestFeatures
 from shared.allocator.models import (
     ActionKind,
@@ -151,6 +152,99 @@ def test_router_fallback_preserves_workload_demand_without_pinning_router_choice
         "coding"
     }
     assert controller.intelligence.outcomes[0].model_id == "general"
+
+
+def test_controller_prewarms_the_next_model_only_from_a_real_user_workflow():
+    def configured_controller(*, workflow_key: str) -> AllocatorController:
+        controller = AllocatorController()
+        controller.intelligence.unbound_demand = DemandTracker(
+            bucket_seconds=60,
+            window_seconds=3_600,
+            ewma_alpha=1,
+            confidence_samples=1,
+        )
+        for model_id, workload, service_seconds in (
+            ("image-model", "image", 20),
+            ("video-model", "video", 45),
+        ):
+            controller.put_profile(
+                ModelProfile(
+                    model_id,
+                    8_000,
+                    runtimes=("comfyui",),
+                    backends=("cuda",),
+                    min_replicas=0,
+                    max_replicas=1,
+                    replica_concurrency=1,
+                    expected_service_seconds=service_seconds,
+                    min_residency_seconds=0,
+                    scale_down_cooldown_seconds=0,
+                    workload_scores=((workload, 1.0),),
+                )
+            )
+        for image_timestamp in (1, 121, 241, 361, 481):
+            controller.observe_lifecycle(
+                RequestFeatures("images/generations", "auto", "image"),
+                service_seconds=20,
+                workflow_key=workflow_key,
+                timestamp=image_timestamp,
+            )
+            controller.observe_lifecycle(
+                RequestFeatures("videos/generations", "auto", "video"),
+                service_seconds=45,
+                workflow_key=workflow_key,
+                timestamp=image_timestamp + 60,
+            )
+        controller.observe_lifecycle(
+            RequestFeatures("images/generations", "auto", "image"),
+            service_seconds=20,
+            workflow_key=workflow_key,
+            timestamp=601,
+        )
+        return controller
+
+    nodes = tuple(
+        NodeSnapshot(
+            f"gpu-{index}",
+            24_000,
+            runtimes=("comfyui",),
+            backends=("cuda",),
+            cached_models=("image-model", "video-model"),
+            max_models=1,
+            last_heartbeat=601,
+        )
+        for index in range(2)
+    )
+    learned = configured_controller(workflow_key="campaign-session")
+    aggregate_only = configured_controller(workflow_key="")
+
+    learned.tick(nodes, now=601)
+    aggregate_only.tick(nodes, now=601)
+    learned_status = learned.status(nodes, now=601)
+    independent_status = aggregate_only.status(nodes, now=601)
+
+    learned_forecasts = {
+        row["model_id"]: row for row in learned_status["forecasts"]
+    }
+    assert learned_forecasts["video-model"]["correlation_sources"] == (
+        "workload-predictor:image",
+        "workload:video",
+    )
+    video_admission = next(
+        row
+        for row in learned_status["portfolio_admissions"]
+        if row["workload"] == "video"
+    )
+    assert video_admission["demand_correlation_sources"] == ("image",)
+    assert video_admission["demand_correlation_confidence"] == pytest.approx(6 / 7)
+    assert learned_status["plan"]["desired_replicas"] == {
+        "image-model": 1,
+        "video-model": 1,
+    }
+    assert independent_status["plan"]["desired_replicas"] == {
+        "image-model": 1,
+        "video-model": 0,
+    }
 
 
 def test_explicit_named_request_does_not_become_portfolio_demand():

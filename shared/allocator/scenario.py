@@ -468,6 +468,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     error=not served_model,
                     output_units=128 if features.workload not in {"image", "video"} else 1,
                     quality=(max(0.0, min(1.0, capability * 0.95)) if served_model else None),
+                    workflow_key=persona.user_id,
                     timestamp=now + rng.random() * 30.0,
                 )
             request_counts[features.workload] += count

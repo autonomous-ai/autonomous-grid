@@ -277,6 +277,23 @@ def test_unconfigured_model_names_create_only_bounded_workload_demand(tmp_path):
     assert set(workload_models) == {"general"}
 
 
+def test_affinity_session_feeds_hashed_workflow_evidence_without_retaining_the_key(
+    tmp_path,
+):
+    app, client, _ = _app(tmp_path)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"X-Grid-Affinity-Key": "private-campaign-session"},
+        json={"model": "auto", "messages": []},
+    )
+
+    assert response.status_code == 503
+    state = app.state.allocator.intelligence.to_dict()
+    assert len(state["workflow_sequences"]["states"]) == 1
+    assert "private-campaign-session" not in repr(state)
+
+
 def test_authenticated_evaluation_records_quality_without_creating_demand(tmp_path):
     app, client, _ = _app(tmp_path)
     assert client.put(

@@ -12,12 +12,13 @@ import statistics
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, replace
-from typing import Any
+from typing import Any, Mapping
 
 from shared.allocator.models import SCHEMA_VERSION, DemandForecast
 
 _LATENCY_HISTOGRAM_BINS = 160
 _LATENCY_BUCKETS_PER_OCTAVE = 8
+_SEQUENTIAL_MIN_TRANSITIONS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,13 +299,42 @@ class DemandTracker:
         model_ids: list[str] | tuple[str, ...] | None = None,
         *,
         now: float | None = None,
+        sequential_only: bool = False,
+        sequence_edges: Mapping[tuple[str, str], float] | None = None,
     ) -> tuple[DemandForecast, ...]:
+        if not isinstance(sequential_only, bool):
+            raise ValueError("sequential_only must be a boolean")
+        validated_edges: dict[tuple[str, str], float] | None = None
+        if sequence_edges is not None:
+            if not sequential_only:
+                raise ValueError("sequence_edges require sequential_only=True")
+            validated_edges = {}
+            for edge, confidence in sequence_edges.items():
+                if (
+                    not isinstance(edge, tuple)
+                    or len(edge) != 2
+                    or not all(isinstance(item, str) and item for item in edge)
+                    or edge[0] == edge[1]
+                ):
+                    raise ValueError("sequence_edges contain an invalid workload pair")
+                try:
+                    confidence = float(confidence)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError("sequence edge confidence must be in (0, 1]") from exc
+                if not math.isfinite(confidence) or not 0 < confidence <= 1:
+                    raise ValueError("sequence edge confidence must be in (0, 1]")
+                validated_edges[edge] = confidence
         requested_now = time.time() if now is None else float(now)
         if not math.isfinite(requested_now) or requested_now < 0:
             raise ValueError("now must be finite and non-negative")
         ids = sorted(self._samples if model_ids is None else set(model_ids))
         base = tuple(self.forecast(model_id, now=requested_now) for model_id in ids)
-        return self._apply_correlated_demand(base, now=requested_now)
+        return self._apply_correlated_demand(
+            base,
+            now=requested_now,
+            sequential_only=sequential_only,
+            sequence_edges=validated_edges,
+        )
 
     def clear(self, model_id: str | None = None) -> None:
         if model_id is None:
@@ -444,6 +474,8 @@ class DemandTracker:
         forecasts: tuple[DemandForecast, ...],
         *,
         now: float,
+        sequential_only: bool = False,
+        sequence_edges: Mapping[tuple[str, str], float] | None = None,
     ) -> tuple[DemandForecast, ...]:
         """Lift quiet peers of a mature coactive group or directional model sequence.
 
@@ -497,37 +529,71 @@ class DemandTracker:
             for source in recent_sources:
                 if source.model_id == target.model_id or source.confidence <= 0:
                     continue
+                admitted_sequence_confidence = (
+                    sequence_edges.get((source.model_id, target.model_id))
+                    if sequence_edges is not None
+                    else None
+                )
+                if sequential_only and sequence_edges is not None and admitted_sequence_confidence is None:
+                    continue
                 source_rates = rates_by_model[source.model_id]
                 source_buckets = set(source_rates)
                 evidence: list[tuple[float, list[float]]] = []
-                coactive = target_buckets.intersection(source_buckets)
-                if len(coactive) >= self.correlation_min_buckets:
-                    association = len(coactive) / math.sqrt(
-                        len(target_buckets) * len(source_buckets)
-                    )
-                    if association >= self.correlation_threshold:
-                        evidence.append(
-                            (
-                                association,
-                                [
-                                    target_rates[index] / source_rates[index]
-                                    for index in coactive
-                                    if source_rates[index] > 0
-                                ],
-                            )
+                if not sequential_only:
+                    coactive = target_buckets.intersection(source_buckets)
+                    if len(coactive) >= self.correlation_min_buckets:
+                        association = len(coactive) / math.sqrt(
+                            len(target_buckets) * len(source_buckets)
                         )
+                        if association >= self.correlation_threshold:
+                            evidence.append(
+                                (
+                                    association,
+                                    [
+                                        target_rates[index] / source_rates[index]
+                                        for index in coactive
+                                        if source_rates[index] > 0
+                                    ],
+                                )
+                            )
 
                 # A source in the current bucket predicts a target in the next bucket using only
                 # older, fully observable transitions. The current and immediately prior source
                 # buckets are not counted as failures while their target buckets are incomplete.
+                # A transition begins only when the target is absent from the source bucket;
+                # otherwise sustained coactivity would manufacture a directional workflow edge.
                 completed_sources = [
-                    index for index in source_buckets if index + 1 < current_bucket
+                    index
+                    for index in source_buckets
+                    if index + 1 < current_bucket and index not in target_buckets
                 ]
                 transitioned = [
                     index for index in completed_sources if index + 1 in target_buckets
                 ]
-                if len(transitioned) >= self.correlation_min_buckets:
-                    transition_confidence = len(transitioned) / len(completed_sources)
+                # Directional edges are searched across every workload pair, so a short busy
+                # trace will inevitably contain a few accidental 3/3 transitions. Require five
+                # completed successes for sequence-only portfolio anticipation, then shrink the
+                # observed conditional rate toward an uninformative prior. This still learns a
+                # repeated user workflow quickly while a handful of coincidences or one-off phase
+                # changes cannot move models during scarce capacity or an outage.
+                minimum_transitions = max(
+                    self.correlation_min_buckets,
+                    (
+                        _SEQUENTIAL_MIN_TRANSITIONS
+                        if sequential_only and sequence_edges is None
+                        else 0
+                    ),
+                )
+                if len(transitioned) >= minimum_transitions:
+                    transition_confidence = (
+                        admitted_sequence_confidence
+                        if admitted_sequence_confidence is not None
+                        else (
+                            (len(transitioned) + 1) / (len(completed_sources) + 2)
+                            if sequential_only
+                            else len(transitioned) / len(completed_sources)
+                        )
+                    )
                     if transition_confidence >= self.correlation_threshold:
                         evidence.append(
                             (
