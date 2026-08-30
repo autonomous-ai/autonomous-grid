@@ -1553,7 +1553,6 @@ def _send_real_unresolved_workload(
     endpoint: str,
     workload: str,
     *,
-    token: str,
     max_tokens: int,
     timeout: float,
 ) -> tuple[_RealChatResult, ...]:
@@ -1570,7 +1569,6 @@ def _send_real_unresolved_workload(
             ),
             max_tokens=max_tokens,
             timeout=timeout,
-            tenant_attestation_secret=token,
         )
         for index in range(12)
     )
@@ -1713,7 +1711,6 @@ def _cmd_test_adaptive_workday(
             _send_real_unresolved_workload(
                 endpoint,
                 workload,
-                token=token,
                 max_tokens=args.max_tokens,
                 timeout=args.timeout,
             )
@@ -1753,7 +1750,6 @@ def _cmd_test_adaptive_workday(
                 max_tokens=args.max_tokens,
                 timeout=args.timeout,
                 retries=3,
-                tenant_attestation_secret=token,
             )
             for workload, model in selected.items()
         )
@@ -1798,7 +1794,6 @@ def _cmd_test_adaptive_workday(
             max_tokens=args.max_tokens,
             timeout=args.timeout,
             retries=3,
-            tenant_attestation_secret=token,
         )
         _require_real_chat((surge_seed,), label="general-demand seed")
         _put_test_profile(
@@ -1826,7 +1821,6 @@ def _cmd_test_adaptive_workday(
             requests=max(args.requests, text_machines * 4),
             max_tokens=args.max_tokens,
             timeout=args.timeout,
-            tenant_attestation_secret=token,
         )
         _require_real_chat(surge_results, label="general-demand surge")
         scaled = _wait_for_placement(
@@ -1847,7 +1841,17 @@ def _cmd_test_adaptive_workday(
             f"median {statistics.median(item.elapsed_seconds for item in surge_results):.3f}s.\n"
         )
 
-        print("[4/5] Afternoon shift: general surge ends; non-coding work remains")
+        shifted_workloads = tuple(
+            workload for workload in workloads if workload != "coding"
+        )[:2] or (workloads[-1],)
+        print(
+            "[4/5] Afternoon shift: general surge ends; "
+            + (
+                "non-coding work remains"
+                if "coding" not in shifted_workloads
+                else "coding work remains"
+            )
+        )
         _put_test_profile(
             client,
             headers,
@@ -1865,9 +1869,6 @@ def _cmd_test_adaptive_workday(
             timeout=args.timeout,
             initial=scaled,
         )
-        shifted_workloads = tuple(
-            workload for workload in workloads if workload != "coding"
-        )[:2] or (workloads[-1],)
         expected_shift_models = {
             workload_models[workload] for workload in shifted_workloads
         }
@@ -1899,7 +1900,6 @@ def _cmd_test_adaptive_workday(
             _send_real_unresolved_workload(
                 endpoint,
                 workload,
-                token=token,
                 max_tokens=args.max_tokens,
                 timeout=args.timeout,
             )
@@ -1958,15 +1958,20 @@ def _cmd_test_adaptive_workday(
                 max_tokens=args.max_tokens,
                 timeout=args.timeout,
                 retries=3,
-                tenant_attestation_secret=token,
             )
             for workload, model in shifted.items()
         )
         _require_real_chat(afternoon_proofs, label="shifted afternoon portfolio")
-        print(
-            "  Coding capacity stayed off because no fresh coding demand remained; "
-            "the shared non-coding model was loaded once and served real responses.\n"
-        )
+        if "coding" not in shifted:
+            print(
+                "  Coding capacity stayed off because no fresh coding demand remained; "
+                "the shared non-coding model was loaded once and served real responses.\n"
+            )
+        else:
+            print(
+                "  Fresh coding demand reloaded the coding model once; it served a real "
+                "response on the capable host.\n"
+            )
 
         print("[5/5] Demand cools: converge back to the one-replica idle floor")
         for candidate in expected_shift_models:

@@ -12,6 +12,7 @@ from cli.logical_test import (
     _print_status,
     _real_chat_request,
     _real_users,
+    _send_real_unresolved_workload,
     _wait_for_competition_choice,
     workload_model_binding,
 )
@@ -310,6 +311,38 @@ def test_real_client_retries_only_transient_capacity_responses(monkeypatch):
     assert result.attempts == 3
     assert result.response_id == "real-id"
     assert result.elapsed_seconds == pytest.approx(0.7)
+
+
+def test_unresolved_workload_uses_the_real_request_helper_contract(monkeypatch):
+    calls = []
+
+    def request(endpoint, user, *, max_tokens, timeout):
+        calls.append((endpoint, user, max_tokens, timeout))
+        return _RealChatResult(
+            user_id=user.user_id,
+            role=user.role,
+            model=user.model,
+            status_code=503,
+            elapsed_seconds=0.01,
+            response_id="",
+            completion_tokens=0,
+            text="",
+            error="not ready",
+        )
+
+    monkeypatch.setattr("cli.logical_test._real_chat_request", request)
+
+    results = _send_real_unresolved_workload(
+        "http://127.0.0.1:1",
+        "coding",
+        max_tokens=8,
+        timeout=1,
+    )
+
+    assert len(results) == 12
+    assert len(calls) == 12
+    assert {item[1].model for item in calls} == {"auto"}
+    assert {item[1].role for item in calls} == {"coding"}
 
 
 def test_live_replica_count_includes_transitions_but_not_cached_weights():
