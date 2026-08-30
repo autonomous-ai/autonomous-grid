@@ -178,6 +178,20 @@ def _target_home(path: Path):
             os.environ["GRID_HOME"] = previous
 
 
+def _join_argv(args: argparse.Namespace, *, endpoint: str, model: str) -> list[str]:
+    """Build one explicit provider role; inference-only must not advertise agent capacity."""
+    argv = [
+        "join", args.target_grid, "--at", endpoint, "-m", model,
+        "--respawn", "--name", args.name,
+    ]
+    if not getattr(args, "inference_only", False):
+        argv.extend([
+            "--tasks", "--max-tasks", str(args.max_tasks),
+            "--tasks-root", str(Path(args.tasks_root).expanduser().resolve()),
+        ])
+    return argv
+
+
 def run(args: argparse.Namespace) -> int:
     if not 0 <= args.port <= 65535:
         raise SystemExit("--port must be between 0 and 65535")
@@ -188,7 +202,6 @@ def run(args: argparse.Namespace) -> int:
     target_home = Path(args.target_home).expanduser().resolve()
     if not (target_home / "credentials.toml").is_file():
         raise SystemExit(f"Target lab GRID_HOME is not configured: {target_home}")
-    tasks_root = Path(args.tasks_root).expanduser().resolve()
     from cli import main as grid_main
 
     # A bridge endpoint exists only for this process's lifetime. A prior Ctrl-C or crash can leave
@@ -204,11 +217,7 @@ def run(args: argparse.Namespace) -> int:
     joined = False
     try:
         with _target_home(target_home):
-            result = grid_main([
-                "join", args.target_grid, "--at", bridge.base_url, "-m", model,
-                "--tasks", "--respawn", "--name", args.name,
-                "--max-tasks", str(args.max_tasks), "--tasks-root", str(tasks_root),
-            ])
+            result = grid_main(_join_argv(args, endpoint=bridge.base_url, model=model))
         if result != 0:
             return int(result)
         joined = True
@@ -243,6 +252,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--name", default="grid-goal-relay-host")
     result.add_argument("--tasks-root", default="/private/tmp/grid-goal-physical/work-relay-host")
     result.add_argument("--max-tasks", type=int, default=1)
+    result.add_argument("--inference-only", action="store_true",
+                        help="Advertise the bridged model without claiming agent tasks")
     result.add_argument("--port", type=int, default=0,
                         help="Loopback bridge port (default: choose a free port)")
     return result

@@ -87,10 +87,25 @@ def test_bridge_replaces_stale_provider_and_unregisters_on_normal_exit(tmp_path,
     result = bridge.run(SimpleNamespace(
         source_grid="source", target_grid="goal-physical", target_home=str(target_home),
         model="Exact-Model", name="relay-host", tasks_root=str(tmp_path / "tasks"),
-        max_tasks=1, port=0))
+        max_tasks=1, inference_only=False, port=0))
 
     assert result == 0
     assert calls[0] == ["leave", "goal-physical"]
     assert calls[1][:2] == ["join", "goal-physical"]
+    assert "--tasks" in calls[1]
     assert calls[2] == ["leave", "goal-physical"]
     assert stopped == [True]
+
+
+def test_inference_only_bridge_never_advertises_task_capacity(tmp_path):
+    args = SimpleNamespace(
+        target_grid="goal-physical", name="relay-host", inference_only=True,
+        max_tasks=99, tasks_root=str(tmp_path / "must-not-be-used"))
+
+    argv = bridge._join_argv(
+        args, endpoint="http://127.0.0.1:12345/v1", model="Exact-Model")
+
+    assert argv == [
+        "join", "goal-physical", "--at", "http://127.0.0.1:12345/v1",
+        "-m", "Exact-Model", "--respawn", "--name", "relay-host",
+    ]
