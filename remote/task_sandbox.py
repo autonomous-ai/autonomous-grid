@@ -28,6 +28,7 @@ import json
 import os
 import socket
 import sys
+import threading
 from pathlib import Path
 
 from shared import paths
@@ -329,7 +330,11 @@ def _prove_the_sandbox_can_bind_its_sockets() -> None:
     # operator error worth reporting, not one to paper over. It also made both of this function's
     # first tests pass for the wrong reason: each was really failing on `mkdir`, so removing the
     # check they claimed to cover left them green (mutation-checked, twice).
-    probe = base / f"grid-sandbox-{os.getpid()}.sock"
+    # `preflight` runs independently in every task worker. A PID-only name makes concurrent
+    # workers bind the same pathname: one succeeds while the others see EADDRINUSE, withdraw their
+    # native harness profile, and may retire task serving on a healthy node. The thread id is local,
+    # non-secret, and keeps the probe within the headroom reserved above on supported platforms.
+    probe = base / f".g{os.getpid():x}{threading.get_ident():x}"
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.bind(str(probe))
