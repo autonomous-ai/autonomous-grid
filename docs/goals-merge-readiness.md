@@ -8,7 +8,7 @@ The detailed physical artifacts are indexed in
 ## Tested code revisions
 
 - Public worker/CLI: `7d06ebfca1d8bfbef7e43a82cd235db2e30ed6e0`
-- Private relay: `79c9b26b5e04bcdd36197f72155928dbef30353d`
+- Private relay: `973a150aa224935c4a8fffe53e84dfbb1b8649f3`
 - Both `grid-goal-distributed` code revisions were clean and pushed when these gates completed.
   The public working tree contained only the documentation changes recorded by the following
   documentation-only commit; it changes no runtime or test code.
@@ -18,7 +18,7 @@ The detailed physical artifacts are indexed in
 | Gate | Result | What it proves |
 |---|---:|---|
 | Full public suite | 3,344 passed, 57 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
-| Private runbook release bundle | 155 passed | Goal creation, claims, retries, pause/cancel and duplicate-settlement races, budgets, subgoals, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, Git ref idempotency, and recovery from a relay death during continuation preparation |
+| Private runbook release bundle | 156 passed | Goal creation, claims, retries, pause/cancel and duplicate-settlement races, budgets, subgoals, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, Git ref idempotency, and recovery from a relay death during continuation preparation |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
@@ -52,7 +52,9 @@ run uninterrupted against the exact revisions above. The evaluator audit also pr
 - simultaneous terminal retries for one claim are coalesced before Git and evaluator work. The
   winner writes one accepted eval row and terminal event; the delayed duplicate receives the
   ordinary already-terminal `404`. A losing Git compare-and-swap is idempotent only when a strict
-  re-read proves the exact requested commit landed, never merely an ancestor or divergent ref;
+  re-read proves the exact requested commit landed, never merely an ancestor or divergent ref. If
+  the first HTTP request is cancelled mid-eval, its lock is forgotten and an already-waiting
+  duplicate settles the same claim without spending a retry;
 - model registration, removal, role recovery, quota serving transitions and engine-health
   heartbeats invalidate Goal matching immediately, so recovery wakes the untouched attempt-zero
   row without waiting for a polling-cache expiry;
@@ -89,7 +91,7 @@ final child validation/schema/yield fixes. The candidate removes the runtime-dep
 assumption: the event encoder now explicitly refuses excessive nesting, and its complete 59-test
 suite passes. The unrelated three domain fixtures remain historical baseline failures rather than a
 Goal release gate. The 684-test sweep ran at private revision `2bd0479`; later Goal-specific
-hardening is validated by the exact 155-test private release bundle and complete 18-scenario
+hardening is validated by the exact 156-test private release bundle and complete 18-scenario
 cross-repository matrix above.
 Other stale legacy tests on current `main` also independently fail against current contracts, such as
 constructing `AccountRow(node_id=...)` after the model moved to `user_id`. The dedicated Goal suite,
