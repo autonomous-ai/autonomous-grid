@@ -716,3 +716,16 @@ def test_goal_evidence_verify_checks_hierarchical_token_accounting():
     assert any("settled child charges" in failure for failure in _verify_evidence(record))
     record["relationships"]["children"][0]["tokens_charged"] = None
     assert any("terminal child" in failure for failure in _verify_evidence(record))
+
+    record["relationships"]["children"][0]["tokens_charged"] = 400
+    record["attempt_events"] = [{
+        "turn_id": "turn-1", "event": {"type": "task.event.corrupt"},
+    }]
+    assert any("attempt event" in failure and "corrupt" in failure
+               for failure in _verify_evidence(record))
+    record["attempt_events"] = []
+    record["eval_runs"] = [{
+        "id": "run-corrupt", "evidence": {"_corrupt": True},
+    }]
+    assert any("evaluation run run-corrupt" in failure
+               for failure in _verify_evidence(record))

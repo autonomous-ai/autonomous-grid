@@ -251,6 +251,11 @@ attempt identity matters because a reclaimed turn keeps the same turn id while C
 may be replaced by Claude on another. Failed requests remain useful failure evidence, but only
 `completed` requests can prove that a turn actually executed through Grid inference.
 
+Malformed stored event or evaluator JSON never makes the whole evidence export unavailable. Grid
+exports an explicit corruption marker so an operator can inspect the surviving trajectory, while
+`grid goal evidence --verify` rejects the record. Damaged evidence therefore remains auditable but
+cannot become release proof or training data.
+
 Inference attribution is relay-enforced, not trusted from agent headers. If `X-Request-Id` names a
 Goal turn, the request must come from that turn's current leased node, carry the matching
 `X-Grid-Conversation`, and request the Goal's model. The relay checks once at ingress and again while

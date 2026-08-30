@@ -212,6 +212,10 @@ never complete commit B. Evaluation jobs use leases and may be retried, but thei
 later turn cannot inherit the earlier attempt's acceptance state merely because it reached the same
 commit. The guarded provider-lease transaction marks a verdict authoritative. Rejected attempts
 remain audit evidence with `accepted=false` and cannot change Goal state or enter training outcomes.
+Malformed stored task-event or evaluator-evidence JSON is exported as an explicit corruption marker
+instead of failing or silently omitting the evidence response. Offline verification rejects every
+such marker, preserving inspectability without admitting damaged records as release or training
+evidence.
 
 If native completion is nominated and evaluation fails, the Goal stays active. The next turn gets
 the failed checks and evidence as a relay-authored handoff block. In the synchronous file-eval slice,

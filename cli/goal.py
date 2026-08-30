@@ -176,6 +176,10 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
 
     attempt_events = (record.get("attempt_events")
                       if isinstance(record.get("attempt_events"), list) else [])
+    for index, item in enumerate(attempt_events, 1):
+        if (isinstance(item, dict) and isinstance(item.get("event"), dict)
+                and item["event"].get("type") == "task.event.corrupt"):
+            failures.append(f"attempt event {index} contains corrupt stored evidence")
 
     # Tool events are durable training evidence, so their worker/attempt boundary must be explicit
     # and relay-authenticated. Sequence order cannot recover that boundary after a dead provider's
@@ -323,6 +327,11 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
 
     evals = goal.get("evals") if isinstance(goal.get("evals"), list) else []
     runs = record.get("eval_runs") if isinstance(record.get("eval_runs"), list) else []
+    for run in runs:
+        if (isinstance(run, dict) and isinstance(run.get("evidence"), dict)
+                and run["evidence"].get("_corrupt") is True):
+            failures.append(
+                f"evaluation run {run.get('id') or '?'} contains corrupt stored evidence")
     inference = record.get("inference") if isinstance(record.get("inference"), list) else []
     requested_model = goal.get("model")
     routed_model = (isinstance(requested_model, str)
