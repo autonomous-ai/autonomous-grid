@@ -39160,7 +39160,64 @@ def test_join_help_says_this_provider_can_serve_tasks(capsys):
     text = joins[0][1].format_help()
 
     assert "--tasks" in text, "`grid join --help` still says nothing about task serving"
+    assert "--tasks-only" in text, "agent-only nodes are not discoverable from `grid join --help`"
     assert "--tasks-root" in text and "--max-tasks" in text
+
+
+def test_tasks_only_joins_agent_capacity_without_detecting_or_advertising_a_model(
+        monkeypatch, tmp_path, capsys):
+    """Agent execution is a Grid resource of its own, not an accidental side effect of hosting a
+    model. A company laptop may run Codex while inference lands on a different company machine."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.delenv("GRID_TASKS", raising=False)
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+    monkeypatch.setattr(
+        cli.provider, "_detect",
+        lambda *_args, **_kwargs: pytest.fail("task-only join tried to detect an inference engine"))
+    root = tmp_path / "agent-work"
+
+    assert cli.main(["join", "--tasks-only", "--tasks-root", str(root),
+                     "--name", "agent-a"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == [] and record["engines"] == [] and not record["media"]
+    assert record["tasks"] is True
+    assert _the_child_would_claim_tasks(spawned)
+    out = capsys.readouterr().out
+    assert "task-only agent worker" in out and "models=" not in out
+
+
+def test_tasks_only_preflight_failure_starts_no_useless_empty_provider(
+        monkeypatch, tmp_path):
+    """Inference joins fail task preflight open; task-only has nothing useful left and fails closed."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(
+        task_agent, "preflight_before_serving", _raise(RuntimeError("Codex is unavailable")))
+
+    with pytest.raises(SystemExit, match="task-only.*Codex is unavailable"):
+        cli.main(["join", "--tasks-only", "--tasks-root", str(tmp_path / "agent-work")])
+
+    assert "cmd" not in spawned
+    assert cli.provider._read_records("n1") == {}
+
+
+@pytest.mark.parametrize("engine_args", [
+    ["--serve", "m"],
+    ["--at", "http://engine.test/v1", "-m", "m"],
+    ["--api", "codex-cli"],
+    ["--media"],
+])
+def test_tasks_only_refuses_inference_selectors(monkeypatch, tmp_path, engine_args):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit, match="does not advertise inference"):
+        cli.main(["join", "--tasks-only", *engine_args])
 
 
 def test_tasks_flag_alone_starts_a_provider_that_claims_tasks(monkeypatch, tmp_path):
@@ -39301,6 +39358,7 @@ def test_tasks_flag_runs_the_preflight(monkeypatch, tmp_path, capsys):
 
 @pytest.mark.parametrize("flag, extra", [
     ("--tasks", []),
+    ("--tasks-only", []),
     ("--max-tasks", ["4"]),
     ("--tasks-root", ["/Users/Shared/x"]),
 ])

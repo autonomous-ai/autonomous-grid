@@ -358,6 +358,10 @@ def _add_engines(sub) -> None:
     remote_only.add_argument("--tasks", action="store_true", default=None,
                              help="Also claim distributed tasks for this grid, spending this box's "
                                   "own Claude subscription (remote only). Off unless you ask.")
+    remote_only.add_argument(
+        "--tasks-only", action="store_true", default=None,
+        help="Join this box as an agent worker without advertising an inference model (remote "
+             "only). Implies --tasks; model inference comes from other Grid nodes.")
     remote_only.add_argument("--max-tasks", type=_positive_task_count, default=None, metavar="N",
                              help="How many tasks this provider runs at once (default 1). "
                                   "Wins over GRID_MAX_TASKS.")

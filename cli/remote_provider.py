@@ -158,7 +158,7 @@ class _TaskServing(NamedTuple):
 
 
 def _task_env_from_flags(args: argparse.Namespace) -> dict[str, str]:
-    """What `--tasks`/`--max-tasks`/`--tasks-root` change in the serve child's environment.
+    """What task flags change in the serve child's environment.
 
     The flags SET the environment the child is handed rather than moving the reading into the run
     record, and that is deliberate — `task_opt_in.serving_enabled`'s docstring records why the
@@ -172,7 +172,7 @@ def _task_env_from_flags(args: argparse.Namespace) -> dict[str, str]:
     from remote import task_agent, task_opt_in
 
     overrides: dict[str, str] = {}
-    if getattr(args, "tasks", None):
+    if getattr(args, "tasks", None) or getattr(args, "tasks_only", None):
         overrides[task_opt_in.SERVING_ENV] = "1"
     count = getattr(args, "max_tasks", None)
     if count is not None:
@@ -320,6 +320,9 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     from . import provider, remote_grid
 
     _reject_local_only_flags(args)
+    tasks_only = bool(getattr(args, "tasks_only", False))
+    if tasks_only:
+        _reject_tasks_only_conflicts(args)
     if getattr(args, "api", None) is not None:  # `--api ""` must error, not fall through to hardware
         _reject_api_conflicts(args)
     if args.serve and args.models:
@@ -365,13 +368,15 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     respawn = bool(getattr(args, "respawn", False))  # never no-op, never SIGHUP — always stop-and-start
     key_rotated = False  # a `join --api` that stored a NEW key must reach a live identity via respawn
     deferred_target_error: SystemExit | None = None
-    if getattr(args, "api", None) is not None:
+    if tasks_only:
+        specs, media_detected = [], False
+    elif getattr(args, "api", None) is not None:
         specs, key_rotated = _resolve_api_targets(args, network_id)
         media_detected = False
     else:
         specs, media_detected, deferred_target_error = _resolve_or_defer(args, respawn=respawn)
     media = bool(getattr(args, "media", False)) or media_detected
-    if not specs and not media and deferred_target_error is None:
+    if not specs and not media and deferred_target_error is None and not tasks_only:
         # engines detected and the operator declined, or nothing to serve
         print("Nothing joined.")
         return 0
@@ -386,8 +391,13 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # get rather than the one this shell happens to export (issue 61).
     task_flags = _task_env_from_flags(args)
     with _as_the_child_will_see_it(task_flags):
-        task_serving = _decide_task_serving(may_make_the_root=bool(getattr(args, "tasks", None)))
+        task_serving = _decide_task_serving(
+            may_make_the_root=bool(getattr(args, "tasks", None) or tasks_only))
     if task_serving.problem:
+        if tasks_only:
+            raise SystemExit(
+                f"Cannot join as a task-only agent worker: {task_serving.problem}\n"
+                "Fix that problem and run the same command again; no Grid node was started.")
         print(
             f"Task serving is off for this join: {task_serving.problem}\n"
             f"Inference is unaffected. Fix that and re-run `grid join --respawn` to claim tasks.",
@@ -521,7 +531,11 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
 
     appended = bool(live)
     verb = "Appended to" if appended else "Joining"
-    print(f"{verb} {label} (pid={record['pid']}) — {'re-serving' if appended else 'serving'} the union via the relay.")
+    if tasks_only and not record["engines"] and not media:
+        print(f"{verb} {label} (pid={record['pid']}) — task-only agent worker via the relay.")
+    else:
+        print(f"{verb} {label} (pid={record['pid']}) — "
+              f"{'re-serving' if appended else 'serving'} the union via the relay.")
     if len(record["engines"]) > 1:
         print(f"engines={len(record['engines'])} (serving the union under one identity)")
     elif record["endpoint_url"]:
@@ -559,6 +573,20 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
             for line in provider.chat_hints(advertised[0], provider.serves_vision(args)):
                 print(line)
     return 0
+
+
+def _reject_tasks_only_conflicts(args: argparse.Namespace) -> None:
+    """A task-only node carries agent capacity and deliberately no model capacity."""
+    conflicts = (
+        ("at", "--at"), ("serve", "--serve"), ("models", "-m/--model"),
+        ("api", "--api"), ("media", "--media"), ("bundles", "--bundle"),
+        ("kind", "--kind"), ("all", "--all"), ("advertise_as", "--advertise-as"),
+    )
+    used = [flag for attr, flag in conflicts if getattr(args, attr, None)]
+    if used:
+        raise SystemExit(
+            "--tasks-only does not advertise inference and cannot combine with "
+            f"{', '.join(used)}. Use --tasks (without --tasks-only) to serve both.")
 
 
 def _resolve_api_targets(

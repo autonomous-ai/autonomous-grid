@@ -47,6 +47,7 @@ _REMOTE_ONLY_JOIN_FLAGS = (
     # `None`, `--tasks` included: the predicate below is `is not None`, so a `store_true` flag
     # defaulting to False would refuse every LOCAL join.
     ("tasks", "--tasks"),
+    ("tasks_only", "--tasks-only"),
     ("max_tasks", "--max-tasks"),
     ("tasks_root", "--tasks-root"),
 )
@@ -1236,5 +1237,4 @@ def _record_alive(grid_id: str, engine_id: str) -> bool:
     reaper — made this refuse a re-join of an engine that had already died."""
     record = run_records.read_records(grid_id).get(engine_id)
     return bool(record and run_records.record_alive(record))
-
 
