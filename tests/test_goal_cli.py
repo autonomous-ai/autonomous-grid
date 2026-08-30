@@ -782,6 +782,22 @@ def test_goal_status_shows_budget_blocker_and_distributed_children(capsys):
     assert "child child-1 conflicts with the parent in app.py" in output
 
 
+def test_goal_status_explains_model_wait_and_ready_harnesses(capsys):
+    from cli.goal import _show
+
+    base = {
+        "id": "goal-model", "status": "active", "objective": "Build it",
+        "done_when": "checks pass", "model": "grid-coder", "agents": ["claude", "codex"],
+    }
+    _show({**base, "model_readiness": {"state": "waiting", "agents": []}}, False)
+    waiting = capsys.readouterr().out
+    assert "model      grid-coder · waiting for compatible Grid inference" in waiting
+
+    _show({**base, "model_readiness": {"state": "ready", "agents": ["codex"]}}, False)
+    ready = capsys.readouterr().out
+    assert "model      grid-coder · ready via codex" in ready
+
+
 def test_goal_evidence_verify_checks_hierarchical_token_accounting():
     from cli.goal import _verify_evidence
 

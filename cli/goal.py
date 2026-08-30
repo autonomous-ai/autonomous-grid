@@ -54,6 +54,16 @@ def _show(goal: dict, as_json: bool) -> None:
     print(f"{goal.get('id')} [{goal.get('status')}]")
     print(f"  objective  {goal.get('objective')}")
     print(f"  done when  {goal.get('done_when')}")
+    model = goal.get("model")
+    readiness = (goal.get("model_readiness")
+                 if isinstance(goal.get("model_readiness"), dict) else {})
+    model_suffix = ""
+    if readiness.get("state") == "waiting":
+        model_suffix = " · waiting for compatible Grid inference"
+    elif readiness.get("state") == "ready" and readiness.get("agents"):
+        model_suffix = f" · ready via {', '.join(readiness['agents'])}"
+    if model:
+        print(f"  model      {model}{model_suffix}")
     print(f"  progress   {goal.get('turns_completed', 0)} turns · "
           f"{goal.get('tokens_used', 0)} tokens")
     if goal.get("token_budget") is not None:
@@ -585,7 +595,10 @@ def cmd_goal(args: argparse.Namespace) -> int:
             print("No active Goals." if not args.all else "No Goal history.")
         else:
             for goal in rows:
-                print(f"  {goal.get('status')!s:<15} {goal.get('id')}  {goal.get('objective')}")
+                waiting = (isinstance(goal.get("model_readiness"), dict)
+                           and goal["model_readiness"].get("state") == "waiting")
+                status = "waiting-model" if waiting else goal.get("status")
+                print(f"  {status!s:<15} {goal.get('id')}  {goal.get('objective')}")
         return 0
     if args.goal_action == "status":
         goal = relay.get_goal(base, token, args.goal_id)

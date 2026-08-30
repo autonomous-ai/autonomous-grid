@@ -45,11 +45,20 @@ becomes claimable shortly after a matching inference node joins or recovers. Mix
 apply this per harness: an allowed Claude worker cannot claim a Responses-only model, while an
 allowed Codex worker can, and the choice can change on a later turn as Grid routes change. `auto`
 and effort-mode Goals likewise wait until the router is enabled and has a compatible live pool.
+Valid Fixed/Dynamic effort plans encoded in the model string wait until every explicitly pinned
+model is present in the compatible auto-routing pool; Grid never starts a partial pin that the
+inference router would reject afterward.
 
 This readiness check does not pin the task to the model-serving machine or reserve an inference
 slot. Load, trust, quotas, and a provider disappearing after claim remain request-time facts handled
 by the inference router. Readiness is cached for at most one second so a polling fleet does not scan
 the entire model registry on every half-second task poll.
+
+`grid goal status` prints `waiting for compatible Grid inference` while this gate is holding the
+queued turn, or names the ready harnesses. The human `list` view labels the former
+`waiting-model`; JSON responses carry `model_readiness: {state, agents}`. This is dynamic routing
+diagnosis, not a new durable Goal status, so the Goal itself remains `active` and its attempt stays
+zero.
 
 The native agent receives only a short-lived loopback proxy token, never the provider's Grid
 credential. The proxy reads the provider's current node token for every model request. If that token

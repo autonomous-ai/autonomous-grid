@@ -1569,6 +1569,11 @@ waits the same way when routing is disabled or its compatible pool is empty. Thi
 gate, not an inference reservation: request-time load, trust, quotas, and later node loss still
 belong to the inference router.
 
+While an active queued turn is held by that gate, `status` reports the compatible harnesses or a
+model-wait explanation, and the human `list` view shows `waiting-model`. JSON includes
+`model_readiness.state` (`ready` or `waiting`) and `model_readiness.agents`; the durable Goal status
+remains `active`, because model availability is live Grid state rather than a terminal outcome.
+
 See [Distributed Goals](goals-quickstart.md) for provider setup, HTTP observe/act tools, lifecycle
 semantics and the three-node handoff test.
 
