@@ -8,25 +8,27 @@ The detailed physical artifacts are indexed in
 ## Tested code revisions
 
 - Public worker/CLI: `7d06ebfca1d8bfbef7e43a82cd235db2e30ed6e0`
-- Private relay: `973a150aa224935c4a8fffe53e84dfbb1b8649f3`
-- Both `grid-goal-distributed` code revisions were clean and pushed when these gates completed.
-  The public working tree contained only the documentation changes recorded by the following
-  documentation-only commit; it changes no runtime or test code.
+- Public acceptance harness: `b5e0783101791f3ae696c246f69544d71f0faf2e`
+- Private relay: `8d18961aacaefb8a539f8bcb8fbe50908a03026e`
+- Both `grid-goal-distributed` branch heads were clean and pushed when these gates completed. The
+  commits after the public worker/CLI revision change only tests and evidence documentation, not
+  shipped worker behavior.
 
 ## Software gates
 
 | Gate | Result | What it proves |
 |---|---:|---|
 | Full public suite | 3,344 passed, 57 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
-| Private runbook release bundle | 156 passed | Goal creation, claims, retries, pause/cancel and duplicate-settlement races, budgets, subgoals, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, Git ref idempotency, and recovery from a relay death during continuation preparation |
+| Private runbook release bundle | 158 passed | Goal creation, claims, retries, pause/cancel and duplicate-settlement races, budgets, subgoals and inherited tool authority, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, Git ref idempotency, and recovery from a relay death during continuation preparation |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
 | Cross-repository distributed matrix | 18 passed | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 
-The full public suite, private runbook bundle, migration suite, and 18-scenario matrix were each
-run uninterrupted against the exact revisions above. The evaluator audit also proves that:
+The full public suite ran against the exact public runtime revision; the private runbook bundle and
+18-scenario matrix ran uninterrupted against the private and public-harness revisions above. The
+evaluator audit also proves that:
 
 - completion checks read the relay-resolved immutable result commit rather than a provider-supplied
   ref, and only lease-fenced run ids can be accepted with the terminal transition;
@@ -62,7 +64,10 @@ run uninterrupted against the exact revisions above. The evaluator audit also pr
   eight-way, depth-three hierarchy cannot overflow signed database arithmetic. Goal budget, usage,
   time and child-accounting columns are `BIGINT` on PostgreSQL, and the startup migration widens
   pre-release `INTEGER` columns idempotently. Ten-million-token local-model Goals remain well inside
-  that bound.
+  that bound;
+- a subgoal inherits the parent's exact canonical observe/act manifest. A child request cannot
+  smuggle a new API origin or mutation tool into its stored policy or claim payload, while the
+  parent-only `subgoals` scheduling capability is not needlessly required by the child.
 
 The final 18-scenario matrix was run in one uninterrupted invocation against both candidate
 revisions. It includes:
@@ -83,6 +88,10 @@ revisions. It includes:
 - required and optional distributed subgoals with independent fan-in;
 - model and quota outages that preserve attempt zero until inference is ready.
 
+The matrix harness also treats an atomically replaced workspace as a transient polling miss and
+cancels every Goal created by a failed scenario during teardown. One assertion failure therefore
+cannot leak queued work into the next scenario and create a misleading cascade of cross-test claims.
+
 The historical repository-wide private sweep is not used as a false green gate. The broader 20-file
 compatibility sweep passed 684 tests and failed four: three domain-claim fixtures received `204`
 instead of `200`, and one Python JSON-depth fixture expected a 5,000-level body to parse but the
@@ -91,7 +100,7 @@ final child validation/schema/yield fixes. The candidate removes the runtime-dep
 assumption: the event encoder now explicitly refuses excessive nesting, and its complete 59-test
 suite passes. The unrelated three domain fixtures remain historical baseline failures rather than a
 Goal release gate. The 684-test sweep ran at private revision `2bd0479`; later Goal-specific
-hardening is validated by the exact 156-test private release bundle and complete 18-scenario
+hardening is validated by the exact 158-test private release bundle and complete 18-scenario
 cross-repository matrix above.
 Other stale legacy tests on current `main` also independently fail against current contracts, such as
 constructing `AccountRow(node_id=...)` after the model moved to `user_id`. The dedicated Goal suite,
