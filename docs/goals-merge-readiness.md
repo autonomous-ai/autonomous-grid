@@ -7,8 +7,8 @@ The detailed physical artifacts are indexed in
 
 ## Tested code revisions
 
-- Public worker/CLI: `51c010d8f29837a98ac0bc7bd88e112f0247e3bb`
-- Private relay: `7d268e66b48435ed8249622c8ca086f2122b425b`
+- Public worker/CLI: `7d06ebfca1d8bfbef7e43a82cd235db2e30ed6e0`
+- Private relay: `c256e564cda6c0936641ec59782359ee4b678632`
 - Both `grid-goal-distributed` code revisions were clean and pushed when these gates completed.
   The public working tree contained only the documentation changes recorded by the following
   documentation-only commit; it changes no runtime or test code.
@@ -17,8 +17,8 @@ The detailed physical artifacts are indexed in
 
 | Gate | Result | What it proves |
 |---|---:|---|
-| Full public suite | 3,342 passed, 57 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
-| Private runbook release bundle | 142 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, retention, dead-branch pruning, inference attribution, capability matching, and recovery from a relay death during continuation preparation |
+| Full public suite | 3,344 passed, 57 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
+| Private runbook release bundle | 146 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, and recovery from a relay death during continuation preparation |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
@@ -32,6 +32,10 @@ run uninterrupted against the exact revisions above. The evaluator audit also pr
   ref, and only lease-fenced run ids can be accepted with the terminal transition;
 - file and JSON checks reject symlinks, Git links, protected paths, ambiguous/non-finite/deep JSON,
   malformed Unicode, oversized inputs, and damaged cached evidence;
+- when valid verbose evidence exceeds its storage ceiling, Grid retains every immutable definition
+  identity and check verdict while omitting previews; it never turns an accepted label or failed
+  repair metric into a generic overflow marker. Lone-surrogate infrastructure text is escaped as
+  audit JSON instead of causing a second evaluator failure;
 - all checks in a nomination share a 45-second evaluator deadline, and result-ref resolution,
   transcript resolution, evaluation and WIP advancement share one 50-second aggregate deadline
   inside the worker's 60-second result timeout. A Git error cannot be read as an absent ref, and

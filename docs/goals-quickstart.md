@@ -400,6 +400,11 @@ Malformed stored event or evaluator JSON never makes the whole evidence export u
 exports an explicit corruption marker so an operator can inspect the surviving trajectory, while
 `grid goal evidence --verify` rejects the record. Damaged evidence therefore remains auditable but
 cannot become release proof or training data.
+Valid but verbose evidence is compacted structurally, not replaced by a generic overflow marker.
+Every failed definition id survives so Codex or Claude receives its exact immutable repair contract;
+every oversized accepted run retains the ordered check verdict vector while omitting bulky previews.
+If even that bounded proof cannot fit after a future schema change, completion fails closed rather
+than accepting a score whose evidence disappeared.
 If a completion retry encounters a damaged cached evaluator verdict, the relay atomically
 downgrades it to an unaccepted infrastructure error and blocks the Goal instead of returning 500 or
 re-blessing a stale passing label. Parseable cached evidence is also rejected when its immutable
