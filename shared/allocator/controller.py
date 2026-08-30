@@ -987,6 +987,12 @@ class AllocatorController:
                     "max_evaluations": _MAX_JOINT_PORTFOLIO_EVALUATIONS,
                     "max_exploration_models": _MAX_JOINT_EXPLORATION_MODELS,
                     "max_preemption_models": _MAX_JOINT_PREEMPTION_MODELS,
+                    "minimum_evidence_samples": (
+                        self.intelligence.portfolio_min_samples
+                    ),
+                    "minimum_evidence_offered_concurrency": (
+                        self.intelligence.portfolio_min_offered_concurrency
+                    ),
                 },
                 "portfolio_placement_hints": [
                     selection_hints[model_id]
@@ -1147,7 +1153,10 @@ class AllocatorController:
         active_rows = [
             row
             for row in projections
-            if int(row.get("samples") or 0) >= intelligence.portfolio_min_samples
+            if intelligence.portfolio_evidence_ready(
+                int(row.get("samples") or 0),
+                float(row.get("offered_concurrency") or 0.0),
+            )
             and float(row.get("requests_per_minute") or 0.0) > 0
             and any(candidate.get("selectable") for candidate in row.get("candidates") or ())
         ]
@@ -2429,7 +2438,10 @@ def _portfolio_selection_hints(
     active_workloads = {
         str(row.get("workload") or "")
         for row in projections
-        if int(row.get("samples") or 0) >= intelligence.portfolio_min_samples
+        if intelligence.portfolio_evidence_ready(
+            int(row.get("samples") or 0),
+            float(row.get("offered_concurrency") or 0.0),
+        )
         and float(row.get("requests_per_minute") or 0.0) > 0
     }
     preferred_selection = {

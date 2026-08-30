@@ -213,10 +213,30 @@ class ModelWorkloadOutcome:
 class WorkloadIntelligence:
     """Learns workload pressure and model outcomes without retaining content."""
 
-    def __init__(self, *, portfolio_min_samples: int = 3) -> None:
-        if portfolio_min_samples < 1:
+    def __init__(
+        self,
+        *,
+        portfolio_min_samples: int = 3,
+        portfolio_min_offered_concurrency: float = 1.5,
+    ) -> None:
+        if (
+            isinstance(portfolio_min_samples, bool)
+            or not isinstance(portfolio_min_samples, int)
+            or portfolio_min_samples < 1
+        ):
             raise ValueError("portfolio_min_samples must be positive")
+        if (
+            isinstance(portfolio_min_offered_concurrency, bool)
+            or not math.isfinite(portfolio_min_offered_concurrency)
+            or portfolio_min_offered_concurrency <= 0
+        ):
+            raise ValueError(
+                "portfolio_min_offered_concurrency must be finite and positive"
+            )
         self.portfolio_min_samples = int(portfolio_min_samples)
+        self.portfolio_min_offered_concurrency = float(
+            portfolio_min_offered_concurrency
+        )
         self.demand = DemandTracker()
         self.unbound_demand = DemandTracker()
         self._outcomes: dict[tuple[str, str, str], ModelWorkloadOutcome] = {}
@@ -281,6 +301,18 @@ class WorkloadIntelligence:
         timestamp = time.time() if now is None else float(now)
         keys = tuple(sorted((self.demand.to_dict().get("models") or {}).keys()))
         return tuple(self.demand.forecast(key, now=timestamp) for key in keys)
+
+    def portfolio_evidence_ready(
+        self,
+        sample_count: int,
+        offered_concurrency: float,
+    ) -> bool:
+        """Admit repeated cheap work or one replica-equivalent of device pressure."""
+
+        return bool(
+            sample_count >= self.portfolio_min_samples
+            or offered_concurrency >= self.portfolio_min_offered_concurrency
+        )
 
     def clear(self) -> None:
         """Clear learned demand and outcomes for a repeatable development simulation."""
@@ -352,10 +384,10 @@ class WorkloadIntelligence:
         )
         for workload in workload_keys:
             forecast = self.unbound_demand.forecast(workload, now=now)
-            if (
-                forecast.sample_count < self.portfolio_min_samples
-                or forecast.requests_per_minute <= 0
-            ):
+            if not self.portfolio_evidence_ready(
+                forecast.sample_count,
+                forecast.offered_concurrency,
+            ) or forecast.requests_per_minute <= 0:
                 continue
             candidates = [
                 profile
@@ -557,6 +589,9 @@ class WorkloadIntelligence:
         return {
             "schema_version": SCHEMA_VERSION,
             "portfolio_min_samples": self.portfolio_min_samples,
+            "portfolio_min_offered_concurrency": (
+                self.portfolio_min_offered_concurrency
+            ),
             "demand": self.demand.to_dict(),
             "unbound_demand": self.unbound_demand.to_dict(),
             "outcomes": [asdict(item) for item in self.outcomes],
@@ -566,7 +601,12 @@ class WorkloadIntelligence:
     def from_dict(cls, value: Mapping[str, Any]) -> WorkloadIntelligence:
         if int(value.get("schema_version", 0)) != SCHEMA_VERSION:
             raise ValueError("unsupported workload intelligence schema")
-        result = cls(portfolio_min_samples=int(value.get("portfolio_min_samples") or 3))
+        result = cls(
+            portfolio_min_samples=int(value.get("portfolio_min_samples") or 3),
+            portfolio_min_offered_concurrency=float(
+                value.get("portfolio_min_offered_concurrency", 1.5)
+            ),
+        )
         if value.get("demand"):
             result.demand = DemandTracker.from_dict(dict(value["demand"]))
         if value.get("unbound_demand"):

@@ -102,6 +102,60 @@ def test_aggregate_unbound_demand_creates_one_non_destructive_portfolio_projecti
     assert projected[0].error_rate == 0
 
 
+def test_long_sparse_job_crosses_device_time_evidence_gate_before_cheap_call():
+    intelligence = WorkloadIntelligence(
+        portfolio_min_samples=3,
+        portfolio_min_offered_concurrency=1.5,
+    )
+    intelligence.observe(
+        RequestFeatures("videos/generations", "auto", "video"),
+        portfolio_unbound=True,
+        service_seconds=60,
+        queue_depth=1,
+        timestamp=100,
+    )
+    intelligence.observe(
+        RequestFeatures("chat/completions", "auto", "coding"),
+        portfolio_unbound=True,
+        service_seconds=1,
+        queue_depth=1,
+        timestamp=100,
+    )
+
+    projected = intelligence.portfolio_forecasts(
+        (
+            profile("video-model", 2_000, ("video", 1.0)),
+            profile("code-model", 2_000, ("coding", 1.0)),
+        ),
+        (),
+        now=100,
+    )
+
+    assert [forecast.model_id for forecast in projected] == ["video-model"]
+    assert projected[0].sample_count == 1
+    assert projected[0].offered_concurrency == pytest.approx(2.0)
+
+
+def test_portfolio_device_time_evidence_configuration_round_trips_and_validates():
+    intelligence = WorkloadIntelligence(
+        portfolio_min_samples=4,
+        portfolio_min_offered_concurrency=0.75,
+    )
+
+    restored = WorkloadIntelligence.from_dict(intelligence.to_dict())
+
+    assert restored.portfolio_min_samples == 4
+    assert restored.portfolio_min_offered_concurrency == 0.75
+    legacy = intelligence.to_dict()
+    legacy.pop("portfolio_min_offered_concurrency")
+    assert WorkloadIntelligence.from_dict(
+        legacy
+    ).portfolio_min_offered_concurrency == 1.5
+    for invalid in (True, 0, -1, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="offered_concurrency"):
+            WorkloadIntelligence(portfolio_min_offered_concurrency=invalid)
+
+
 def test_direct_and_portfolio_pressure_merge_without_erasing_direct_lineage():
     intelligence = WorkloadIntelligence(portfolio_min_samples=1)
     intelligence.observe(

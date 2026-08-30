@@ -54,6 +54,13 @@ inactive specialist receive a bounded canary without creating a loaded-only feed
 The model that happened to serve an automatic request contributes outcome evidence, but the router's
 fallback choice never becomes direct demand for that model.
 
+Portfolio admission normally requires three observations, preventing a cheap one-off request from
+churning a large model into memory. Device-time evidence can cross the gate earlier: at least 1.5
+offered-concurrency units—arrival rate multiplied by measured service time, plus queued work—is
+already enough pressure to justify one candidate. A queued minute-long video job can therefore
+start its model immediately, while one short text request remains below the gate. Both thresholds
+are persisted and reported by allocator status.
+
 Measured model/workload outcomes use confidence that reaches full weight after twenty fresh
 requests; separately labeled quality reaches full weight after eight fresh evaluations. Both decay
 with independent seven-day half-lives: a fresh latency-only request cannot revive stale quality.

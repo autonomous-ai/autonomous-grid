@@ -499,6 +499,77 @@ def test_joint_portfolio_spends_bounded_search_on_highest_device_time(monkeypatc
     }
 
 
+def test_controller_admits_one_queued_long_job_but_not_one_cheap_call():
+    controller = AllocatorController()
+    controller.put_profile(
+        ModelProfile(
+            "video-model",
+            8_000,
+            runtimes=("comfyui",),
+            backends=("mps",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("video", 1.0),),
+        )
+    )
+    controller.put_profile(
+        ModelProfile(
+            "code-model",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("coding", 1.0),),
+        )
+    )
+    controller.observe_lifecycle(
+        RequestFeatures("videos/generations", "auto", "video"),
+        service_seconds=60,
+        queue_depth=1,
+        timestamp=100,
+    )
+    controller.observe_lifecycle(
+        RequestFeatures("chat/completions", "auto", "coding"),
+        service_seconds=1,
+        queue_depth=1,
+        timestamp=100,
+    )
+    machines = (
+        NodeSnapshot(
+            "media",
+            16_000,
+            runtimes=("comfyui",),
+            backends=("mps",),
+            max_models=1,
+            last_heartbeat=100,
+        ),
+        NodeSnapshot(
+            "text",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            last_heartbeat=100,
+        ),
+    )
+
+    controller.tick(machines, now=100)
+    status = controller.status(machines, now=100)
+
+    assert controller.last_plan is not None
+    assert {item.model_id for item in controller.last_plan.assignments} == {
+        "video-model"
+    }
+    assert status["portfolio_policy"]["minimum_evidence_samples"] == 3
+    assert (
+        status["portfolio_policy"]["minimum_evidence_offered_concurrency"]
+        == 1.5
+    )
+
+
 def test_portfolio_admission_distinguishes_infeasible_workload():
     controller = AllocatorController()
     controller.put_profile(
