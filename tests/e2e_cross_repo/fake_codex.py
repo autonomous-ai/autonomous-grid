@@ -371,7 +371,7 @@ target.addEventListener('click', () => {
         if node != "C" or history != expected:
             raise RuntimeError(f"C did not receive A+B's exact checkpoint: {history!r}")
         assert not (cwd / "partial-feature-34.tmp").exists(), "B's uncommitted file crossed nodes"
-        (cwd / "style.css").write_text("""body{font:18px system-ui;background:#111827;color:#f9fafb;text-align:center}main{margin:12vh auto;max-width:32rem}button{padding:1rem 2rem;border:0;border-radius:999px;background:#34d399;font-weight:700;cursor:pointer;transition:transform .15s} 
+        (cwd / "style.css").write_text("""body{font:18px system-ui;background:#111827;color:#f9fafb;text-align:center}main{margin:12vh auto;max-width:32rem}button{padding:1rem 2rem;border:0;border-radius:999px;background:#34d399;font-weight:700;cursor:pointer;transition:transform .15s}
 """)
         (cwd / "README.md").write_text("""# Grid Click
 
