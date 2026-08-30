@@ -45,6 +45,14 @@ suite and every existing suite for files changed by Goal were therefore run expl
 audit, an actual compatibility regression in inference dispatch was found, fixed, and covered before
 the gates above were repeated.
 
+## Merge and rollout order
+
+Merge and deploy the private relay first, then merge the public worker/CLI. Existing workers omit
+Goal harness profiles and therefore cannot claim Codex Goal rows from the upgraded relay. The public
+CLI also detects an older relay that lacks Goal routes and explains the version mismatch instead of
+silently treating an ordinary task as a Goal. This order keeps ordinary tasks compatible throughout
+the rollout and avoids publishing a Goal command whose control plane has not been deployed yet.
+
 ## Physical evidence completed
 
 Goal `76b79310-8f03-4737-bcc6-df1128946846` completed on disposable Grid `goal-physical`:
