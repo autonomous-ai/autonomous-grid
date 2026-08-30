@@ -587,6 +587,11 @@ checkpoint from relay Git, runs Codex with model requests routed through Grid in
 both back. If that computer disappears, the lease expires and another Codex-capable provider
 reclaims the same task from the last completed checkpoint.
 
+Agent capacity and model capacity remain separate. If the requested model has no compatible live
+Grid route, the Goal stays queued at attempt 0 instead of launching an agent that can only fail.
+When an inference node serving that model returns, any compatible task node can claim the untouched
+turn. For mixed Codex/Claude Goals, Grid also checks the model dialect before choosing the harness.
+
 Completed work and Codex history cross machines. Uncommitted work from a computer that disappears
 mid-turn does not. `grid goal list` shows active Goals; completed Goals remain available through
 `grid goal list --all` for audit and future training data.

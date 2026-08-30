@@ -80,6 +80,25 @@ This is deliberately separate from powering off A: an abruptly lost machine cann
 that the relay never accepted. After abrupt loss, replacement workers must ignore unacknowledged
 partial pushes and resume only the prior accepted checkpoint.
 
+## Model-outage and harness-dialect scenario
+
+Run this separately to prove task capacity never substitutes for inference readiness:
+
+1. Stop every inference route for a unique test model, but leave A and B polling for Goal tasks.
+   Create a Goal using that model and record its first turn row.
+2. Wait longer than one claim-cache interval. Confirm neither task node launches a harness and the
+   same turn remains `queued`, unassigned, at `attempt: 0`; there must be no retry or attempt-start
+   evidence.
+3. Start the model on an inference-only node C with a tool-capable Responses route. Confirm task
+   node A claims the untouched row as Codex attempt 1 even though C, not A, serves inference.
+4. For a second Goal allowing Claude then Codex, expose the model only on Responses. Confirm Grid
+   skips the first policy entry and chooses Codex. Complete one nonterminal turn.
+5. Move the model to a tool-capable Messages/chat route, withdraw Responses, and let task node B
+   claim the next turn. Confirm the selected harness is now Claude and no failed harness attempt was
+   needed to make that choice.
+6. Repeat the initial outage with model `auto` while routing is disabled. Confirm attempt 0 is
+   preserved, then enable routing and confirm the first claim is attempt 1.
+
 ## Required evidence
 
 Save and verify the relay-authored JSON artifact with:

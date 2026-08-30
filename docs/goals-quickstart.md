@@ -33,9 +33,23 @@ An empty, unsupported, or unavailable-only policy fails closed: the node retires
 without contacting the queue, while Grid inference remains online. Its local log names the policy
 problem; restart task serving after correcting it.
 
-The Goal's `--model` must name a model available through the Grid Responses API. Codex itself runs
-on the provider; its model requests go back through Grid, so the machine executing the agent and the
-machine serving the model may be different computers.
+The Goal's `--model` must name a tool-capable model available through the Grid endpoint used by an
+allowed harness: Responses for Codex, or the translated Messages/chat path for Claude Code. Codex
+or Claude runs on the task provider; its model requests go back through Grid, so the machine
+executing the agent and the machine serving the model may be different computers.
+
+Model absence is a queue condition, not an agent failure. If no live, healthy route can serve the
+requested model and harness dialect, Grid leaves the Goal's turn queued with `attempt: 0`; it does
+not launch a native agent, manufacture a retry, or consume the Goal's attempt budget. The same row
+becomes claimable shortly after a matching inference node joins or recovers. Mixed-harness Goals
+apply this per harness: an allowed Claude worker cannot claim a Responses-only model, while an
+allowed Codex worker can, and the choice can change on a later turn as Grid routes change. `auto`
+and effort-mode Goals likewise wait until the router is enabled and has a compatible live pool.
+
+This readiness check does not pin the task to the model-serving machine or reserve an inference
+slot. Load, trust, quotas, and a provider disappearing after claim remain request-time facts handled
+by the inference router. Readiness is cached for at most one second so a polling fleet does not scan
+the entire model registry on every half-second task poll.
 
 The native agent receives only a short-lived loopback proxy token, never the provider's Grid
 credential. The proxy reads the provider's current node token for every model request. If that token
@@ -397,6 +411,7 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 | Goal | Execution | Harnesses | Injected failure | Independent eval |
 |---|---|---|---|---|
 | Root creation replay | Client -> relay -> queue | N/A before claim | First POST acknowledgement is replayed; changed body reuses key | One Goal id and one first turn; key conflict rejected |
+| Model arrival | A polls; inference-only C joins | Codex on A | Requested model is absent for several polls | Same row stays at attempt 0; `READY.md`; first and only claim is attempt 1 |
 | Four-feature game | A -> B -> C | Codex -> Codex -> Codex | A dies in feature 2; B dies in 3–4 | HTML wiring, click/score behavior, styling and instructions |
 | Mixed game | A -> B -> C | Codex -> Claude -> Codex | A and B die mid-feature | HTML wiring, click/score behavior, styling and instructions |
 | Eval-repair game | A -> B -> C -> D | Codex -> Claude -> Codex -> Claude | A/B die; C nominates broken behavior | Failed C score plus passing D repair on exact commits |
@@ -407,8 +422,12 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 | Required child | A parent; B child; C parent | Codex -> Claude -> Codex | Parent moves while child runs | Child and parent files |
 | Optional child | A parent; B child; C parent | Codex | Child fails | Parent file; child failure retained |
 
-Every scenario uses `fake-grid-model` so the test measures Grid's queue, agent harness, tool,
-Git/checkpoint and eval protocols deterministically rather than model quality. The support-reply
+Every agent-running scenario except Model arrival uses `fake-grid-model` (the required child uses
+`fake-grid-child-model`) so the test measures Grid's queue, agent harness, tool, Git/checkpoint and
+eval protocols deterministically rather than model quality. Model arrival deliberately asks for
+`late-grid-model`: A polls while no node serves it, then inference-only C advertises it. The test
+requires no attempt-start or retry evidence before that advertisement and exactly one attempt on A
+afterward. The support-reply
 scenario additionally proves an unauthorized but otherwise healthy node spends zero attempts, the
 authorized successor restores Codex's dynamic tools, and all three writes (the failed attempt, its
 lease retry, and the eval-repair turn) carry one identical idempotency key while the API performs

@@ -55,6 +55,16 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
     scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
     mixed = scenario in ("mixed", "mixed_eval_repair")
 
+    if scenario == "model_readiness":
+        if node != "A" or history:
+            raise RuntimeError(
+                f"model-readiness Goal reached the wrong worker: {node}, {history!r}")
+        (cwd / "READY.md").write_text(
+            "# Ready\n\nThe task node started only after a separate Grid inference route appeared.\n")
+        history.append({"node": "A", "model_readiness": True})
+        save_history(history)
+        return "complete", "A completed the first attempt after model recovery", 100
+
     if scenario == "graceful_crash":
         if node == "A" and not history:
             (cwd / "index.html").write_text(

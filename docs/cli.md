@@ -1562,6 +1562,13 @@ The computer running Codex and the computer serving `--model` need not be the sa
 and project state move through the relay's Git refs at successful turn boundaries; a replacement
 provider cannot recover uncommitted work from a node that disappeared mid-turn.
 
+A Goal turn is claimable only while the Grid has a live, healthy, tool-capable route for the model
+and the selected harness dialect (Responses for Codex, Messages/chat for Claude Code). Otherwise it
+stays queued without incrementing `attempt`; model recovery makes that same row claimable. `auto`
+waits the same way when routing is disabled or its compatible pool is empty. This is a readiness
+gate, not an inference reservation: request-time load, trust, quotas, and later node loss still
+belong to the inference router.
+
 See [Distributed Goals](goals-quickstart.md) for provider setup, HTTP observe/act tools, lifecycle
 semantics and the three-node handoff test.
 

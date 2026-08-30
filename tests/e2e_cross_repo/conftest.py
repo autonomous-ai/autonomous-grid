@@ -26,6 +26,27 @@ import _harness as H
 sys.path.insert(0, str(H.GRID_REPO))
 
 _HERE = Path(__file__).resolve().parent
+_BASE_GOAL_MODELS = ("fake-grid-model", "fake-grid-child-model")
+
+
+def _advertise_goal_models(relay: str, token: str, node_id: str,
+                           models: tuple[str, ...] | list[str]) -> None:
+    """Give the real relay endpoint-aware fake routes used by native Goal protocol tests."""
+    from remote import relay as relay_client
+
+    capabilities = {
+        "schema_version": 1,
+        "models": {
+            model: {
+                "endpoints": ["chat/completions", "messages", "responses"],
+                "input_modalities": ["text"], "output_modalities": ["text"],
+                "features": {"tools": True},
+            }
+            for model in models
+        },
+    }
+    relay_client.register_node(
+        relay, token, node_id, models=list(models), capabilities=capabilities, role="provider")
 
 
 @pytest.fixture(scope="session")
@@ -110,6 +131,18 @@ def provider_nodes(relay, owner_token):
             assert created.status_code == 200, created.text
             nodes[label] = (created.json()["node_id"], H.token(f"provider-{label}", created.json()["node_id"]))
     return nodes
+
+
+@pytest.fixture
+def advertise_goal_models(relay, provider_nodes):
+    """Advertise inference on a node without starting its task/agent process."""
+    def advertise(label: str, *models: str) -> str:
+        node_id, node_token = provider_nodes[label]
+        combined = tuple(dict.fromkeys((*_BASE_GOAL_MODELS, *models)))
+        _advertise_goal_models(relay, node_token, node_id, combined)
+        return node_id
+
+    return advertise
 
 
 @pytest.fixture(scope="session")
@@ -254,6 +287,10 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
                claude_capabilities: str = "", tool_origins: str = "",
                one_task: bool = False):
         node_id, node_token = provider_nodes[label]
+        # This process emulates only the task/agent plane.  The separate registration emulates a
+        # compatible Grid inference route and refreshes its heartbeat before each scenario; the
+        # model-readiness scheduler must not infer model capacity merely from a task poller.
+        _advertise_goal_models(relay, node_token, node_id, _BASE_GOAL_MODELS)
         env = {
             **os.environ,
             "PATH": (f"{fake_codex_bin}{os.pathsep}{fake_agent_bin}{os.pathsep}"
