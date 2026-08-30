@@ -265,6 +265,7 @@ def test_goal_waits_at_attempt_zero_until_separate_inference_node_adds_model(
     assert starts[0]["attempt"] == 1 and starts[0]["provider_id"] == node_a.node_id
     assert not [item for item in evidence["attempt_events"]
                 if item["event"].get("type") == "task.retry"]
+    assert "could not set up lease renewal" not in node_a.output()
 
 
 def test_goal_waits_at_attempt_zero_while_advertised_inference_quota_is_exhausted(

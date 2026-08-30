@@ -58,8 +58,12 @@ def main() -> int:
     renew_seconds = float(os.environ["GRID_RENEW_SECONDS"])
 
     class _ScaledRenewer(task_lease.LeaseRenewer):
-        def __init__(self, state, task_id, *, interval=None, on_beat=None):
-            super().__init__(state, task_id, interval=renew_seconds, on_beat=on_beat)
+        def __init__(self, state, task_id, *, interval=None, claim_id=None, on_beat=None):
+            # Forward the opaque generation as well as scaling time. Dropping it makes every Goal
+            # renewal fail construction after claim fencing was introduced; short scenarios can
+            # still finish inside one lease and produce a dangerously green-looking matrix.
+            super().__init__(
+                state, task_id, interval=renew_seconds, claim_id=claim_id, on_beat=on_beat)
 
     task_lease.LeaseRenewer = _ScaledRenewer
     task_lease.RENEW_INTERVAL_SECONDS = renew_seconds
