@@ -911,3 +911,76 @@ def test_goal_evidence_verify_checks_hierarchical_token_accounting():
     }]
     assert any("evaluation run run-corrupt" in failure
                for failure in _verify_evidence(record))
+
+
+def test_goal_evidence_verifier_is_total_over_json_shaped_corruption():
+    """A saved/exported artifact may be damaged; verification must reject, never traceback."""
+    from copy import deepcopy
+
+    from cli.goal import _verify_evidence
+
+    record = {
+        "schema_version": 1,
+        "goal": {"id": "goal-1", "status": "complete", "model": "grid-model", "evals": []},
+        "relationships": {"parent_goal_id": None, "children": []},
+        "trajectory": {
+            "transcript_pruned": False, "pruned_turn_branches": [],
+            "worktree_chain": [], "retry_checkpoint_chain": [],
+        },
+        "turns": [{
+            "id": "turn-1", "attempt": 1, "state": "completed", "agent_kind": "codex",
+            "provider_node_id": "node-A", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [{
+            "turn_id": "turn-1", "seq": 1, "event": {
+                "type": "task.attempt_started", "attempt": 1,
+                "provider_id": "node-A", "agent_kind": "codex",
+            },
+        }],
+        "inference": [{
+            "turn_id": "turn-1", "model": "grid-model", "provider_node_id": "gpu-A",
+            "state": "completed", "goal_attempt": 1,
+            "goal_executor_node_id": "node-A", "goal_agent_kind": "codex", "requests": 1,
+        }],
+        "eval_runs": [],
+        "export": {
+            "paginated": True, "pages": 1, "total_turns": 1, "snapshot": "a" * 64,
+        },
+    }
+    assert _verify_evidence(record) == []
+    paths = [
+        ("schema_version",), ("goal",), ("relationships",), ("trajectory",), ("turns",),
+        ("attempt_events",), ("inference",), ("eval_runs",), ("export",),
+        ("goal", "status"), ("goal", "model"), ("goal", "evals"),
+        ("relationships", "children"),
+        ("trajectory", "pruned_turn_branches"), ("trajectory", "worktree_chain"),
+        ("trajectory", "retry_checkpoint_chain"),
+        ("turns", 0), ("turns", 0, "id"), ("turns", 0, "attempt"),
+        ("turns", 0, "state"), ("turns", 0, "agent_kind"),
+        ("turns", 0, "provider_node_id"), ("turns", 0, "input_commit"),
+        ("turns", 0, "result_commit"), ("turns", 0, "transcript_commit"),
+        ("turns", 0, "transcript_result_commit"),
+        ("attempt_events", 0), ("attempt_events", 0, "turn_id"),
+        ("attempt_events", 0, "seq"), ("attempt_events", 0, "event"),
+        ("attempt_events", 0, "event", "type"),
+        ("inference", 0), ("inference", 0, "turn_id"),
+        ("inference", 0, "goal_attempt"), ("inference", 0, "goal_executor_node_id"),
+        ("inference", 0, "goal_agent_kind"), ("inference", 0, "requests"),
+        ("export", "pages"), ("export", "total_turns"), ("export", "snapshot"),
+    ]
+    replacements = [None, True, False, 0, -1, "", [], {}, [[]], {"x": []}]
+
+    for path in paths:
+        for replacement in replacements:
+            damaged = deepcopy(record)
+            parent = damaged
+            for component in path[:-1]:
+                parent = parent[component]
+            parent[path[-1]] = replacement
+            try:
+                failures = _verify_evidence(damaged)
+            except Exception as exc:  # pragma: no cover - the assertion reports the exact mutation
+                pytest.fail(f"verifier raised {exc!r} for {path}={replacement!r}")
+            assert isinstance(failures, list)

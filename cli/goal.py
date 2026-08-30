@@ -245,6 +245,9 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             continue
         event = item["event"]
         event_type = event.get("type")
+        if not isinstance(event_type, str):
+            failures.append(f"attempt event {index} has no valid event type")
+            continue
         if event_type not in tool_types:
             continue
         turn_id = item.get("turn_id")
