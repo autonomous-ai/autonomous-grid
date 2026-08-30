@@ -233,7 +233,10 @@ turn running instead of settling a false empty result. One evaluator infrastruct
 blocked audit rows for the remaining definitions without starting more Git subprocesses; a single
 wedged repository therefore cannot multiply its timeout by every check in the manifest. After the
 terminal transaction commits, Grid sends the result response before idempotent continuation and
-child fan-in preparation; periodic reconciliation recovers that post-response work after a crash.
+child fan-in preparation. Periodic reconciliation recovers that post-response work after a crash;
+a bounded stale-prepare sweep also catches a relay death after the continuation row was inserted
+but before its Git input became claimable. Cleanup writes the failed state and one terminal event
+atomically, then reconciliation creates exactly one replacement turn.
 
 Each definition is immutable, and its hash includes the evaluator-semantics version. Every score is
 stored with that definition hash, its turn, evaluator node, and exact Git commit. The guarded lease

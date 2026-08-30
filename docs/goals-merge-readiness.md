@@ -8,7 +8,7 @@ The detailed physical artifacts are indexed in
 ## Tested code revisions
 
 - Public worker/CLI: `e160e7f1e8d915104dce0e7f5e6256d634056c2c`
-- Private relay: `b55d78b588f15abec8196db134604a529a5a9ae3`
+- Private relay: `5fbecb5c3ee1ce2941d946c6e7733e3fe6f63ebc`
 - Both `grid-goal-distributed` code revisions were clean and pushed when these gates completed.
   The public working tree contained only the documentation changes recorded by the following
   documentation-only commit; it changes no runtime or test code.
@@ -18,9 +18,10 @@ The detailed physical artifacts are indexed in
 | Gate | Result | What it proves |
 |---|---:|---|
 | Full public suite | 3,342 passed, 55 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
-| Private runbook release bundle | 141 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, retention, dead-branch pruning, inference attribution, and capability matching |
+| Private runbook release bundle | 142 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, retention, dead-branch pruning, inference attribution, capability matching, and recovery from a relay death during continuation preparation |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
+| Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
 | Cross-repository distributed matrix | 17 passed | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 
@@ -39,7 +40,10 @@ run uninterrupted against the exact revisions above. The evaluator audit also pr
   protects relay-owned Git/eval work from both lease reclaim and the run-deadline sweep. It never
   shortens the normal 120-second lease, and the final terminal write repeats the claim fence;
 - terminal acknowledgment is sent before idempotent continuation/fan-in preparation; periodic
-  promotion and Goal reconciliation are the durable crash backstop for that post-response work;
+  promotion and Goal reconciliation are the durable crash backstop for that post-response work.
+  A globally bounded stale-prepare sweep also recovers the narrower crash window after the next
+  turn is inserted but before its Git input reaches `queued`: it atomically fails the abandoned
+  row, records and publishes one terminal event, and lets reconciliation create one replacement;
 - model registration, removal, role recovery, quota serving transitions and engine-health
   heartbeats invalidate Goal matching immediately, so recovery wakes the untouched attempt-zero
   row without waiting for a polling-cache expiry;
@@ -67,12 +71,14 @@ revisions. It includes:
 
 The historical repository-wide private sweep is not used as a false green gate. The broader 20-file
 compatibility sweep passed 684 tests and failed four: three domain-claim fixtures received `204`
-instead of `200`,
-and one Python JSON-depth fixture expected a 5,000-level body to parse but the installed decoder
-returned `400`. All four fail identically on private revision `7f16213`, before the final child
-validation/schema/yield fixes; none touches the Goal changes between that revision and the candidate.
-The 684-test sweep ran at private revision `2bd0479`; later Goal-specific hardening was validated by
-the exact 136-test private release bundle and complete 17-scenario cross-repository matrix above.
+instead of `200`, and one Python JSON-depth fixture expected a 5,000-level body to parse but the
+installed decoder returned `400`. All four reproduced on private revision `7f16213`, before the
+final child validation/schema/yield fixes. The candidate removes the runtime-dependent JSON
+assumption: the event encoder now explicitly refuses excessive nesting, and its complete 59-test
+suite passes. The unrelated three domain fixtures remain historical baseline failures rather than a
+Goal release gate. The 684-test sweep ran at private revision `2bd0479`; later Goal-specific
+hardening is validated by the exact 142-test private release bundle and complete 17-scenario
+cross-repository matrix above.
 Other stale legacy tests on current `main` also independently fail against current contracts, such as
 constructing `AccountRow(node_id=...)` after the model moved to `user_id`. The dedicated Goal suite,
 the complete public suite, and the real cross-repository seam were therefore retained as the release
