@@ -8,7 +8,7 @@ The detailed physical artifacts are indexed in
 ## Tested code revisions
 
 - Public worker/CLI: `7d06ebfca1d8bfbef7e43a82cd235db2e30ed6e0`
-- Private relay: `c256e564cda6c0936641ec59782359ee4b678632`
+- Private relay: `3b23b8b781a7ee2623def3eecec31af76202dd5d`
 - Both `grid-goal-distributed` code revisions were clean and pushed when these gates completed.
   The public working tree contained only the documentation changes recorded by the following
   documentation-only commit; it changes no runtime or test code.
@@ -18,7 +18,7 @@ The detailed physical artifacts are indexed in
 | Gate | Result | What it proves |
 |---|---:|---|
 | Full public suite | 3,344 passed, 57 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
-| Private runbook release bundle | 146 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, and recovery from a relay death during continuation preparation |
+| Private runbook release bundle | 148 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, and recovery from a relay death during continuation preparation |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
@@ -34,8 +34,9 @@ run uninterrupted against the exact revisions above. The evaluator audit also pr
   malformed Unicode, oversized inputs, and damaged cached evidence;
 - when valid verbose evidence exceeds its storage ceiling, Grid retains every immutable definition
   identity and check verdict while omitting previews; it never turns an accepted label or failed
-  repair metric into a generic overflow marker. Lone-surrogate infrastructure text is escaped as
-  audit JSON instead of causing a second evaluator failure;
+  repair metric into a generic overflow marker. Malformed lone-surrogate infrastructure text is
+  replaced before either direct error-column or JSON storage, so it cannot cause a second evaluator
+  failure or poison a later UTF-8 API response;
 - all checks in a nomination share a 45-second evaluator deadline, and result-ref resolution,
   transcript resolution, evaluation and WIP advancement share one 50-second aggregate deadline
   inside the worker's 60-second result timeout. A Git error cannot be read as an absent ref, and
@@ -84,7 +85,7 @@ final child validation/schema/yield fixes. The candidate removes the runtime-dep
 assumption: the event encoder now explicitly refuses excessive nesting, and its complete 59-test
 suite passes. The unrelated three domain fixtures remain historical baseline failures rather than a
 Goal release gate. The 684-test sweep ran at private revision `2bd0479`; later Goal-specific
-hardening is validated by the exact 142-test private release bundle and complete 18-scenario
+hardening is validated by the exact 148-test private release bundle and complete 18-scenario
 cross-repository matrix above.
 Other stale legacy tests on current `main` also independently fail against current contracts, such as
 constructing `AccountRow(node_id=...)` after the model moved to `user_id`. The dedicated Goal suite,
