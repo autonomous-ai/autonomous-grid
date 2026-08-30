@@ -859,14 +859,23 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
         # Grid may reduce the parent's remaining native budget after terminal children replace
         # their allocations with actual cumulative usage. Refresh the cap on every resumed slice;
         # setting it only at thread creation would let the old native cap overspend the hierarchy.
+        native_objective = (
+            f"{goal['objective'].strip()}\n\nDone when: {goal['done_when'].strip()}")
+        continuation = job.get("prompt")
+        if turns_before and isinstance(continuation, str) and continuation.strip():
+            # Native Codex Goal owns the loop and stop decision, but Grid owns distributed
+            # continuation context: independent eval failures, child fan-in and bounded prior-turn
+            # summaries live on the relay-authored task prompt. Merely reactivating the stored
+            # native objective drops that information, causing every replacement machine to repeat
+            # the same false completion. Updating the native objective is the Goal API's durable,
+            # portable way to make the next native turn see Grid's evidence; retrying the same
+            # leased turn writes the same value and is therefore idempotent.
+            native_objective += "\n\nGrid continuation context:\n" + continuation.strip()
         set_goal: dict[str, Any] = {
             "threadId": thread_id, "status": "active",
             "tokenBudget": goal.get("token_budget"),
+            "objective": native_objective,
         }
-        if turns_before == 0:
-            set_goal.update({
-                "objective": f"{goal['objective'].strip()}\n\nDone when: {goal['done_when'].strip()}",
-            })
         rpc.wait(rpc.send("thread/goal/set", set_goal))
         completed = rpc.wait_completed()
         if rpc.pause_id is not None:

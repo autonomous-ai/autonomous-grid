@@ -439,7 +439,8 @@ def test_mid_slice_crash_still_publishes_a_portable_codex_thread_pointer(tmp_pat
     }
 
 
-def test_resumed_native_goal_receives_grid_reduced_hierarchical_budget(tmp_path, monkeypatch):
+def test_resumed_native_goal_receives_grid_budget_and_continuation_evidence(
+        tmp_path, monkeypatch):
     monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
     monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
     rollout = (tmp_path / task_codex.AGENT_DIR / task_codex.HOME_DIR
@@ -456,6 +457,9 @@ def test_resumed_native_goal_receives_grid_reduced_hierarchical_budget(tmp_path,
     job = _job()
     job["goal"] = {**job["goal"], "turns_completed": 1, "tokens_used": 500,
                    "time_used_seconds": 5, "token_budget": 7_500}
+    job["prompt"] = (
+        "Continue working toward the active Goal.\n\n"
+        "Grid's independent evaluation did not pass:\n- README: required file is absent")
 
     task_codex.run_slice(
         job, tmp_path, inference=task_codex.GridInference("https://grid.test", "secret"),
@@ -467,7 +471,11 @@ def test_resumed_native_goal_receives_grid_reduced_hierarchical_budget(tmp_path,
                  and row.get("params", {}).get("status") == "active"]
     assert len(activated) == 1
     assert activated[0]["params"]["tokenBudget"] == 7_500
-    assert "objective" not in activated[0]["params"]
+    objective = activated[0]["params"]["objective"]
+    assert objective.startswith(
+        "Build the game\n\nDone when: all four features and tests pass")
+    assert "Grid continuation context:" in objective
+    assert "README: required file is absent" in objective
 
 
 def test_copied_codex_checkpoint_rebases_rollout_to_the_new_worker(tmp_path):
