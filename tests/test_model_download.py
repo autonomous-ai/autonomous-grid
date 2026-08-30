@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from shared.models import download
 
@@ -63,3 +64,29 @@ def test_server_ignoring_range_restarts_partial_instead_of_appending(monkeypatch
     assert download.download("repo/model", "model.bin", out=target) == target
     assert target.read_bytes() == b"abcdef"
     assert calls == [{"Range": "bytes=3-"}]
+
+
+def test_download_refuses_declared_or_streamed_bytes_above_operator_bound(
+    monkeypatch,
+    tmp_path,
+):
+    target = tmp_path / "model.bin"
+    monkeypatch.setattr(
+        download.httpx,
+        "stream",
+        lambda *_args, **_kwargs: _Stream(
+            status=200,
+            chunks=(b"abcdef",),
+            content_length=6,
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="above the configured 5 byte limit"):
+        download.download(
+            "repo/model",
+            "model.bin",
+            out=target,
+            max_bytes=5,
+        )
+
+    assert not target.exists()

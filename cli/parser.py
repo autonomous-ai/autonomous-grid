@@ -427,6 +427,22 @@ def _add_allocator(sub) -> None:
         help="Require this immutable GGUF SHA-256 on managed replicas.",
     )
     set_model.add_argument(
+        "--artifact-source",
+        default="",
+        metavar="URI",
+        help=(
+            "Authenticated immutable source for autonomous loading; managed llama.cpp accepts "
+            "an exact hf://owner/repo/path.gguf URI."
+        ),
+    )
+    set_model.add_argument(
+        "--artifact-size-mb",
+        type=int,
+        default=0,
+        metavar="MB",
+        help="Maximum transfer size and required free disk for autonomous loading.",
+    )
+    set_model.add_argument(
         "--runtime-memory-mb",
         action="append",
         default=[],

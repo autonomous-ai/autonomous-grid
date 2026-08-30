@@ -146,12 +146,12 @@ for the control-loop boundary.
 
 The global loop consumes:
 
-- model profiles: memory, optional immutable artifact SHA-256, runtime/backend compatibility,
-  replica bounds, priority, data tier, placement tags, failure-domain goal, co-location ceiling,
-  pins, and cooldowns;
+- model profiles: memory, optional immutable artifact SHA-256, authenticated artifact source and
+  transfer-size ceiling, runtime/backend compatibility, replica bounds, priority, data tier,
+  placement tags, failure-domain goal, co-location ceiling, pins, and cooldowns;
 - host snapshots: usable memory, reserve, runtime/backend, lifecycle state, policy tags, cached and
-  resident models, concurrency, queue, measured throughput and latency, memory bandwidth, compute,
-  heartbeat age, and actuator ownership;
+  resident models, free/total artifact disk, concurrency, queue, measured throughput and latency,
+  memory bandwidth, compute, heartbeat age, and actuator ownership;
 - short-horizon demand: request rate, offered concurrency, queue depth, p95 latency, errors, and
   trend.
 
@@ -216,6 +216,10 @@ the value of measured performance and hardware speed by a bounded factor (at mos
 hot demand can therefore amortize a materially faster cold host, while a light workload still
 prefers cached weights. This affects new placement only; it does not manufacture a migration after
 the desired replica set is already healthy.
+An uncached candidate must also fit its declared artifact-size ceiling in the node's authenticated
+free-disk observation. Cached weights do not pay that disk cost again. The node refreshes disk
+immediately before `load`, so a placement that became stale fails locally instead of filling the
+filesystem; the next heartbeat lets the controller select another eligible host.
 Placement also computes each desired model's future-compatible host set without pretending that
 live memory is already free. A flexible small model is penalized on a host needed by a more
 constrained model when it has another valid destination. A newly loaded incumbent remains sticky
@@ -527,13 +531,16 @@ the runtime is authoritatively `ready` again and a new UNLOAD when it is `draini
 models cycle out and back in without a prior successful receipt imposing a false 120-second delay;
 failed destructive actions remain backoff-protected.
 
-For now, `load` is deliberately verification-only: the requested model ID must already name a GGUF
-in Grid's model store. Run `grid pull <model>` before enabling automatic placement. The actuator
-does not infer a mutable download source from a display name. When a profile declares
-`artifact_sha256`, `load` and `warm` hash the exact cached file before process launch. A residency
-reports the digest it proved; a same-named residency with a missing or different digest does not
-satisfy placement. Grid warms a matching replica elsewhere before draining the old version, and
-refuses an unsafe in-place replacement when no peer can preserve availability.
+`load` never infers a mutable download source from a display name. It verifies an existing GGUF, or
+the authenticated profile may provide all three autonomous-transfer fields: an exact
+`hf://owner/repo/path.gguf` source, an immutable SHA-256, and a maximum artifact size. The llama.cpp
+adapter downloads under an artifact-addressed staging name, resumes bounded partial transfers,
+rejects streams above the size ceiling, hashes the complete file, and atomically publishes it only
+after verification. A wrong digest never replaces the prior cache. When a profile declares
+`artifact_sha256`, both `load` and `warm` hash the exact cached file before process launch. A
+residency reports the digest it proved; a same-named residency with a missing or different digest
+does not satisfy placement. Grid warms a matching replica elsewhere before draining the old
+version, and refuses an unsafe in-place replacement when no peer can preserve availability.
 
 ## Local wire contract
 
@@ -679,8 +686,8 @@ receipt time so node clock skew cannot bypass minimum-residency or scale-down co
 
 ### CLI workflow
 
-Start the local grid, cache the exact GGUF filename the managed runtime will serve, and join each
-computer that should offer managed capacity:
+Start the local grid and join each computer that should offer managed capacity. Pre-pulling remains
+supported and avoids cold network transfer:
 
 ```bash
 grid up
@@ -696,6 +703,8 @@ budget for one replica, not the file's compressed size:
 grid allocator model set <model.gguf> \
   --memory-mb 12000 \
   --artifact-sha256 <64-hex-digest> \
+  --artifact-source hf://owner/repo/path/to/model.gguf \
+  --artifact-size-mb 9000 \
   --workload-score coding=1 \
   --workload-score research=.8 \
   --max-colocated-models 1 \
@@ -711,7 +720,10 @@ capability hints in `(0, 1]` for portfolio planning; they do not route an indivi
 tier, target utilization, expected service time, latency SLO, priority, load/warm estimates,
 residency and scale-down cooldowns are explicit flags.
 `--artifact-sha256` is optional but recommended for managed production GGUFs; it is canonicalized
-to lowercase and becomes part of command, retry, and readiness identity.
+to lowercase and becomes part of command, retry, and readiness identity. `--artifact-source`
+enables autonomous fetch and therefore requires both the digest and `--artifact-size-mb`; sources
+without all three fields are rejected. The source URI is operator configuration, not a place for
+embedded credentials.
 `--max-colocated-models` is also optional (`0` means unlimited). The value counts the candidate
 itself, so `1` requests exclusive serving for an interference-sensitive model. The constraint is
 reciprocal: Grid will neither place that model beside another live/planned model nor later place a
@@ -746,9 +758,10 @@ grid allocator status --json
 grid allocator mode automatic
 ```
 
-`recommend` is the default. Before selecting `automatic`, pre-pull the exact profiled GGUF on every
-eligible managed node; an uncached `load` fails safely and enters backoff rather than downloading
-unapproved weights.
+`recommend` is the default. Before selecting `automatic`, either pre-pull the exact profiled GGUF on
+eligible managed nodes or configure its exact source, digest, and size ceiling. An uncached model
+without an approved source fails safely and enters backoff rather than downloading inferred
+weights.
 
 `status` shows host lifecycle and capacity, model count, pending mutations, withdrawn destructive
 commands, unmet constraints, the dirty/processed/success/safety revisions, and any persistent-state
@@ -1072,18 +1085,20 @@ The design follows several primary systems results while preserving Grid's alloc
   permission to start, drain, or stop them. Local auto-discovery publishes the detected runtime;
   when pointing at an engine explicitly, use `grid join --at <url> -m <model> --kind vllm` (or the
   corresponding kind) so runtime-constrained profiles can use the inventory.
-- The llama.cpp `load` action verifies an already cached GGUF; it does not download one. Artifact
-  distribution remains an explicit `grid pull` operation.
+- Managed llama.cpp can autonomously fetch an exact, size-bounded, SHA-256-pinned Hugging Face GGUF.
+  ComfyUI bundles and externally owned vLLM artifacts still require their runtime-specific install
+  paths; the generic action fields are present, but those lifecycle adapters are not yet claimed.
 - Capacity is refreshed by the node as stable physical capacity plus dynamic non-Grid reserve.
   Device count and per-device VRAM are preserved, and profiles may fail closed with
   `min_gpu_count` and `min_gpu_memory_mb` constraints. This covers basic tensor-parallel
-  feasibility but does not yet model GPU interconnect bandwidth, heterogeneous sharding, NUMA
-  boundaries, disk budgets, or transfer-bandwidth bottlenecks.
+  feasibility and artifact disk admission but does not yet model GPU interconnect bandwidth,
+  heterogeneous sharding, NUMA boundaries, cache eviction, or transfer-bandwidth bottlenecks.
 - Model profiles accept a portable `memory_mb` fallback plus runtime-specific
   `runtime_memory_mb` estimates, so llama.cpp/Metal and vLLM/CUDA placements account for their
   distinct footprints. If a node advertises several matching runtimes, the planner conservatively
   uses the largest matching estimate. Managed GGUF profiles can additionally require an immutable
-  SHA-256; remote artifact distribution and source-revision resolution remain operator-managed.
+  SHA-256 and operator-authorized exact artifact source; source-revision resolution remains
+  operator-managed rather than silently following mutable repository state.
 - The planner is a transparent deterministic heuristic, not an optimal mixed-integer solver. It
   prioritizes predictable safety and understandable decisions over a mathematically minimal cost.
 - Inter-model interference is controlled through the per-profile `max_colocated_models` ceiling and

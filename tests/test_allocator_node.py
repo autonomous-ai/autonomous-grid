@@ -2161,6 +2161,7 @@ def test_resource_collector_can_partition_one_machine_into_failure_domains():
             "backend": "metal",
             "machine": {"platform": "macos-arm64"},
             "memory": {"total_gb": 8, "available_gb": 7},
+            "disk": {"total_gb": 512, "free_gb": 123},
             "failure_domain": "logical-node-3",
             "mem_bandwidth_gbps": 400,
             "compute_gflops": 27_132,
@@ -2174,6 +2175,8 @@ def test_resource_collector_can_partition_one_machine_into_failure_domains():
     assert advertised["host_priority"] == 2
     assert advertised["gpu_count"] == 1
     assert advertised["gpu_memory_mb"] == [advertised["capacity_mb"]]
+    assert advertised["disk_capacity_mb"] == 512 * 1024
+    assert advertised["disk_available_mb"] == 123 * 1024
 
 
 def test_node_rejects_warm_when_local_capacity_drops_after_global_plan(
@@ -2209,6 +2212,69 @@ def test_node_rejects_warm_when_local_capacity_drops_after_global_plan(
         assert any(
             item["status"] == "failed"
             and "local capacity changed before warm" in item["message"]
+            for item in history
+        )
+
+
+def test_node_rejects_load_when_disk_drops_after_global_plan(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(
+        grid_id="grid",
+        grid_name="test",
+        allocator_control_token="secret",
+        allocator_interval_seconds=3_600,
+    )
+    headers = {"X-Grid-Allocator-Token": "secret"}
+    with TestClient(app) as client:
+        app.state.allocator.state_path = tmp_path / "controller.json"
+        assert client.put(
+            "/allocator/models/qwen.gguf",
+            headers=headers,
+            json={
+                **model_profile(),
+                "artifact_sha256": "a" * 64,
+                "artifact_source": "hf://owner/repo/qwen.gguf",
+                "artifact_size_mb": 4_000,
+            },
+        ).status_code == 200
+        assert client.put(
+            "/allocator/mode",
+            headers=headers,
+            json={"mode": "automatic"},
+        ).status_code == 200
+
+        def disk_resources():
+            return {
+                **resources(),
+                "disk": {"total_gb": 100, "free_gb": 10},
+            }
+
+        agent, managed, backend, _ = make_agent(
+            tmp_path,
+            client,
+            resource_info_collector=disk_resources,
+        )
+        backend.cached.clear()
+        original_post = agent._post_control
+
+        def post_then_observe_disk_drop(*, deadline=None):
+            payload, sent = original_post(deadline=deadline)
+            if ((payload.get("allocator") or {}).get("commands") or ()):
+                assert agent._resources is not None
+                agent._resources["disk_available_mb"] = 1_000
+            return payload, sent
+
+        monkeypatch.setattr(agent, "_post_control", post_then_observe_disk_drop)
+        agent.heartbeat_once()
+
+        assert managed.wait_idle(1)
+        assert managed.residencies == ()
+        history = client.get("/allocator/status").json()["history"]
+        assert any(
+            item["status"] == "failed"
+            and "local disk changed before load" in item["message"]
             for item in history
         )
 

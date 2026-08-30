@@ -21,6 +21,7 @@ SCHEMA_VERSION = 1
 MAX_MEMORY_MB = 1_000_000_000
 MAX_COUNTER = 1_000_000_000
 MAX_ID_LENGTH = 1_024
+MAX_SOURCE_LENGTH = 4_096
 SHA256_HEX_LENGTH = 64
 
 
@@ -217,6 +218,8 @@ class NodeSnapshot:
     compute_gflops: float = 0.0
     gpu_count: int = 0
     gpu_memory_mb: tuple[int, ...] = ()
+    disk_capacity_mb: int | None = None
+    disk_available_mb: int | None = None
     host_priority: int = 0
     last_heartbeat: float = 0.0
     mutation_cooldown_until: float = 0.0
@@ -237,6 +240,20 @@ class NodeSnapshot:
             raise ValueError("reserved_mb cannot exceed capacity_mb")
         if self.max_models is not None and not 0 <= self.max_models <= MAX_COUNTER:
             raise ValueError("max_models must be non-negative or None")
+        for name in ("disk_capacity_mb", "disk_available_mb"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= MAX_MEMORY_MB
+            ):
+                raise ValueError(f"{name} must be a non-negative integer or None")
+        if (
+            self.disk_capacity_mb is not None
+            and self.disk_available_mb is not None
+            and self.disk_available_mb > self.disk_capacity_mb
+        ):
+            raise ValueError("disk_available_mb cannot exceed disk_capacity_mb")
         if any(
             not 0 <= value <= MAX_COUNTER
             for value in (self.active_requests, self.max_concurrency, self.queue_depth)
@@ -409,6 +426,12 @@ class ModelProfile:
     min_gpu_count: int = 0
     min_gpu_memory_mb: int = 0
     artifact_sha256: str = ""
+    # An authenticated operator may provide an immutable, runtime-specific artifact source. The
+    # first managed adapter accepts exact ``hf://owner/repo/path.gguf`` URIs. Other runtimes can
+    # add adapters without teaching the placement controller their download protocol.
+    artifact_source: str = ""
+    # Upper bound for an autonomous transfer and the controller's disk-admission estimate.
+    artifact_size_mb: int = 0
     max_colocated_models: int = 0
     colocation_excludes: tuple[str, ...] = ()
     # Allocator portfolio suitability by workload. These are planning priors, not router ranks.
@@ -484,6 +507,12 @@ class ModelProfile:
         ):
             raise ValueError(f"min_gpu_memory_mb must be in [0, {MAX_MEMORY_MB}]")
         if (
+            isinstance(self.artifact_size_mb, bool)
+            or not isinstance(self.artifact_size_mb, int)
+            or not 0 <= self.artifact_size_mb <= MAX_MEMORY_MB
+        ):
+            raise ValueError(f"artifact_size_mb must be in [0, {MAX_MEMORY_MB}]")
+        if (
             isinstance(self.max_colocated_models, bool)
             or not isinstance(self.max_colocated_models, int)
             or not 0 <= self.max_colocated_models <= MAX_COUNTER
@@ -528,6 +557,18 @@ class ModelProfile:
             "artifact_sha256",
             canonical_sha256(self.artifact_sha256),
         )
+        source = str(self.artifact_source or "").strip()
+        if len(source) > MAX_SOURCE_LENGTH or any(
+            character in source for character in "\r\n\0"
+        ):
+            raise ValueError("artifact_source is invalid")
+        if source and "://" not in source:
+            raise ValueError("artifact_source must be an absolute runtime-specific URI")
+        if source and (not self.artifact_sha256 or not self.artifact_size_mb):
+            raise ValueError(
+                "artifact_source requires artifact_sha256 and artifact_size_mb"
+            )
+        object.__setattr__(self, "artifact_source", source)
 
     def to_dict(self) -> dict[str, Any]:
         return {**asdict(self), "schema_version": SCHEMA_VERSION}
@@ -773,6 +814,8 @@ class MutationAction:
     dependencies: tuple[str, ...] = ()
     executable: bool = False
     artifact_sha256: str = ""
+    artifact_source: str = ""
+    artifact_size_mb: int = 0
     controller_term: int = 0
     controller_id: str = ""
     controller_lease_expires_at: float = 0.0
@@ -817,6 +860,24 @@ class MutationAction:
             "artifact_sha256",
             canonical_sha256(self.artifact_sha256),
         )
+        source = str(self.artifact_source or "").strip()
+        if len(source) > MAX_SOURCE_LENGTH or any(
+            character in source for character in "\r\n\0"
+        ):
+            raise ValueError("artifact_source is invalid")
+        if source and "://" not in source:
+            raise ValueError("artifact_source must be an absolute runtime-specific URI")
+        if (
+            isinstance(self.artifact_size_mb, bool)
+            or not isinstance(self.artifact_size_mb, int)
+            or not 0 <= self.artifact_size_mb <= MAX_MEMORY_MB
+        ):
+            raise ValueError(f"artifact_size_mb must be in [0, {MAX_MEMORY_MB}]")
+        if source and (not self.artifact_sha256 or not self.artifact_size_mb):
+            raise ValueError(
+                "artifact_source requires artifact_sha256 and artifact_size_mb"
+            )
+        object.__setattr__(self, "artifact_source", source)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the versioned command envelope sent to a managed node."""

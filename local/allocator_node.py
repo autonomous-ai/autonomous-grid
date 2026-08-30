@@ -255,6 +255,26 @@ class AllocatorNodeAgent:
                         )
                         began = True
                         continue
+                if command.kind == ActionKind.LOAD and command.artifact_size_mb:
+                    available_disk_mb = self.resources.get("disk_available_mb")
+                    if (
+                        not isinstance(available_disk_mb, int)
+                        or available_disk_mb < command.artifact_size_mb
+                    ):
+                        available_text = (
+                            "unknown"
+                            if not isinstance(available_disk_mb, int)
+                            else str(available_disk_mb)
+                        )
+                        self.runtime.reject(
+                            command,
+                            "local disk changed before load: "
+                            f"requires {command.artifact_size_mb} MB, "
+                            f"available {available_text} MB",
+                            authority_ttl_seconds=remaining_authority_ttl(),
+                        )
+                        began = True
+                        continue
                 began = (
                     self.runtime.begin(
                         command,
@@ -1345,6 +1365,7 @@ def _allocator_resources(
     backend = str(info.get("backend") or "cpu")
     machine = info.get("machine") if isinstance(info.get("machine"), Mapping) else {}
     memory = info.get("memory") if isinstance(info.get("memory"), Mapping) else {}
+    disk = info.get("disk") if isinstance(info.get("disk"), Mapping) else {}
     platform = str(machine.get("platform") or "unknown")
     failure_domain = str(
         info.get("failure_domain")
@@ -1425,6 +1446,16 @@ def _allocator_resources(
         # This field is a local admission fence. The controller independently derives capacity from
         # capacity-reserved-residencies and ignores this convenience value.
         "available_mb": available_mb,
+        "disk_capacity_mb": (
+            int(_nonnegative_number(disk.get("total_gb")) * 1024)
+            if disk.get("total_gb") is not None
+            else None
+        ),
+        "disk_available_mb": (
+            int(_nonnegative_number(disk.get("free_gb")) * 1024)
+            if disk.get("free_gb") is not None
+            else None
+        ),
         "runtimes": ["llama.cpp"],
         "backends": [backend],
         "gpu_count": gpu_count,

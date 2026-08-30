@@ -851,6 +851,7 @@ def _build_catalog(count: int, machines: int) -> tuple[CatalogModel, ...]:
         if variant:
             model_id = f"{model_id}-v{variant + 1}"
         memory_mb = int(source["memory_mb"]) + variant * 2_000
+        artifact_size_mb = int(source["artifact_mb"]) + variant * 1_000
         profile = ModelProfile(
             model_id=model_id,
             memory_mb=memory_mb,
@@ -870,6 +871,7 @@ def _build_catalog(count: int, machines: int) -> tuple[CatalogModel, ...]:
             min_residency_seconds=60,
             scale_down_cooldown_seconds=120,
             min_failure_domains=1,
+            artifact_size_mb=artifact_size_mb,
             max_colocated_models=1,
             workload_scores=tuple(source["scores"]),
         )
@@ -877,7 +879,7 @@ def _build_catalog(count: int, machines: int) -> tuple[CatalogModel, ...]:
             CatalogModel(
                 profile=profile,
                 job=str(source["job"]),
-                artifact_size_mb=int(source["artifact_mb"]) + variant * 1_000,
+                artifact_size_mb=artifact_size_mb,
             )
         )
     return tuple(rows)
@@ -933,6 +935,8 @@ def _build_machines(
             compute_gflops=6_000.0 + index * 2_000.0,
             gpu_count=int(source["gpu_count"]),
             gpu_memory_mb=tuple(source["gpu_memory"]),
+            disk_capacity_mb=int(source["disk_total"]),
+            disk_available_mb=remaining_disk,
             last_heartbeat=1_000_000.0,
         )
         result.append(
@@ -1184,6 +1188,7 @@ def _refresh_disk_admission(
     return tuple(
         replace(
             node,
+            disk_available_mb=disk_available[node.node_id],
             allowed_models=tuple(
                 item.profile.model_id
                 for item in catalog

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import threading
 import time
 from dataclasses import asdict, replace
@@ -45,12 +46,25 @@ class FakeBackend:
         self.unowned: set[int] = set()
         self.raise_after_spawn = False
         self.cancelled = False
+        self.fetches: list[tuple[str, str, str, int]] = []
 
     def cached_models(self) -> tuple[str, ...]:
         return tuple(sorted(self.cached))
 
     def artifact_sha256(self, model_id: str) -> str:
         return self.artifacts[model_id]
+
+    def fetch_artifact(
+        self,
+        model_id: str,
+        source: str,
+        expected_sha256: str,
+        max_size_mb: int,
+    ) -> str:
+        self.fetches.append((model_id, source, expected_sha256, max_size_mb))
+        self.cached.add(model_id)
+        self.artifacts[model_id] = expected_sha256
+        return expected_sha256
 
     def start(self, model_id: str, port: int) -> RuntimeHandle:
         if self.start_gate is not None:
@@ -130,6 +144,8 @@ def action(
     generation: str = "0000000000100-plan",
     dependencies: tuple[str, ...] = (),
     artifact_sha256: str = "",
+    artifact_source: str = "",
+    artifact_size_mb: int = 0,
     controller_term: int = 0,
     controller_id: str = "",
     controller_lease_expires_at: float = 0.0,
@@ -146,6 +162,8 @@ def action(
         dependencies=dependencies,
         executable=True,
         artifact_sha256=artifact_sha256,
+        artifact_source=artifact_source,
+        artifact_size_mb=artifact_size_mb,
         controller_term=controller_term,
         controller_id=controller_id,
         controller_lease_expires_at=controller_lease_expires_at,
@@ -362,6 +380,102 @@ def test_uncached_load_fails_without_downloading_and_tracks_failure(tmp_path):
     assert residency.state == ResidencyState.FAILED
     assert residency.load_failures == 1
     assert "not cached" in managed.acknowledgements()[0]["message"]
+
+
+def test_uncached_load_fetches_only_an_operator_bounded_immutable_artifact(tmp_path):
+    backend = FakeBackend(cached=())
+    managed = runtime(tmp_path, backend=backend)
+    command = action(
+        ActionKind.LOAD,
+        artifact_sha256="b" * 64,
+        artifact_source="hf://owner/repo/qwen.gguf",
+        artifact_size_mb=512,
+    )
+
+    managed.begin(command)
+    wait(managed)
+
+    assert receipt_status(managed, command.action_id) == MutationStatus.SUCCEEDED
+    assert backend.fetches == [
+        ("qwen.gguf", "hf://owner/repo/qwen.gguf", "b" * 64, 512)
+    ]
+    assert managed.residencies[0].state == ResidencyState.CACHED
+    assert managed.residencies[0].artifact_sha256 == "b" * 64
+
+
+def test_llama_backend_fetch_stages_verifies_and_atomically_publishes(
+    tmp_path,
+    monkeypatch,
+):
+    from shared.models import download
+
+    payload = b"verified tiny gguf fixture"
+    digest = hashlib.sha256(payload).hexdigest()
+    target = tmp_path / "model.gguf"
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(download, "local_path", lambda _model_id: target)
+    monkeypatch.setattr(
+        runtime_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=10 * 1024 * 1024),
+    )
+
+    def fake_download(repo, filename, *, out, max_bytes, **_kwargs):
+        observed.update(repo=repo, filename=filename, out=out, max_bytes=max_bytes)
+        out.write_bytes(payload)
+        return out
+
+    monkeypatch.setattr(download, "download", fake_download)
+    backend = LlamaCppBackend()
+
+    assert backend.fetch_artifact(
+        "model.gguf",
+        "hf://owner/repo/subdir/model.gguf",
+        digest,
+        1,
+    ) == digest
+    assert target.read_bytes() == payload
+    assert observed == {
+        "repo": "owner/repo",
+        "filename": "subdir/model.gguf",
+        "out": tmp_path / f".model.gguf.{digest[:16]}.allocator.tmp",
+        "max_bytes": 1024 * 1024,
+    }
+
+
+def test_llama_backend_fetch_never_replaces_cache_with_wrong_digest(
+    tmp_path,
+    monkeypatch,
+):
+    from shared.models import download
+
+    target = tmp_path / "model.gguf"
+    target.write_bytes(b"old cache")
+    expected = hashlib.sha256(b"expected").hexdigest()
+    monkeypatch.setattr(download, "local_path", lambda _model_id: target)
+    monkeypatch.setattr(
+        runtime_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=10 * 1024 * 1024),
+    )
+
+    def fake_download(_repo, _filename, *, out, **_kwargs):
+        out.write_bytes(b"tampered")
+        return out
+
+    monkeypatch.setattr(download, "download", fake_download)
+
+    with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
+        LlamaCppBackend().fetch_artifact(
+            "model.gguf",
+            "hf://owner/repo/model.gguf",
+            expected,
+            1,
+        )
+
+    assert target.read_bytes() == b"old cache"
+    assert not list(tmp_path.glob("*.allocator.tmp"))
 
 
 def test_reject_persists_an_idempotent_failed_receipt_without_launching(tmp_path):

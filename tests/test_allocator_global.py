@@ -375,6 +375,43 @@ def test_artifact_sha256_is_canonical_validated_and_round_trips():
         ModelPerformance("qwen", artifact_sha256="not-a-digest")
 
 
+def test_autonomous_artifact_source_requires_immutable_identity_and_size_bound():
+    with pytest.raises(ValueError, match="requires artifact_sha256"):
+        model(artifact_source="hf://owner/repo/qwen.gguf")
+    with pytest.raises(ValueError, match="requires artifact_sha256"):
+        model(
+            artifact_source="hf://owner/repo/qwen.gguf",
+            artifact_size_mb=4_000,
+        )
+
+    profile = model(
+        artifact_sha256="A" * 64,
+        artifact_source="hf://owner/repo/qwen.gguf",
+        artifact_size_mb=4_000,
+    )
+    restored = ModelProfile.from_dict(profile.to_dict())
+
+    assert restored.artifact_sha256 == "a" * 64
+    assert restored.artifact_source == "hf://owner/repo/qwen.gguf"
+    assert restored.artifact_size_mb == 4_000
+
+
+def test_node_disk_telemetry_validates_and_round_trips():
+    snapshot = node(
+        "disk-node",
+        disk_capacity_mb=100_000,
+        disk_available_mb=25_000,
+    )
+
+    assert NodeSnapshot.from_dict(snapshot.to_dict()) == snapshot
+    with pytest.raises(ValueError, match="cannot exceed"):
+        node(
+            "invalid-disk",
+            disk_capacity_mb=10,
+            disk_available_mb=11,
+        )
+
+
 @pytest.mark.parametrize("digest", ["short", "g" * 64, 1, True])
 def test_artifact_sha256_rejects_invalid_values(digest):
     with pytest.raises(ValueError, match="SHA-256"):
@@ -4378,6 +4415,73 @@ def test_reconciler_proposes_load_then_dependent_warm():
     assert [item.kind for item in result.actions] == [ActionKind.LOAD, ActionKind.WARM]
     assert result.actions[1].dependencies == (result.actions[0].action_id,)
     assert not any(item.executable for item in result.actions)
+
+
+def test_reconciler_carries_bounded_immutable_source_only_on_load():
+    machine = node("n", disk_capacity_mb=10_000, disk_available_mb=8_000)
+    profile = model(
+        artifact_sha256="a" * 64,
+        artifact_source="hf://owner/repo/qwen.gguf",
+        artifact_size_mb=4_000,
+    )
+    plan = PlacementPlanner().plan([machine], [profile], now=10)
+
+    result = Reconciler().reconcile(plan, [machine], [profile], now=10)
+
+    load, warm = result.actions
+    assert load.kind == ActionKind.LOAD
+    assert load.artifact_source == "hf://owner/repo/qwen.gguf"
+    assert load.artifact_size_mb == 4_000
+    assert warm.kind == ActionKind.WARM
+    assert warm.artifact_source == ""
+    assert warm.artifact_size_mb == 0
+
+
+def test_planner_rejects_cold_host_without_artifact_disk_and_uses_fitting_peer():
+    too_full = node(
+        "a-full",
+        disk_capacity_mb=100_000,
+        disk_available_mb=3_999,
+    )
+    fitting = node(
+        "z-fitting",
+        disk_capacity_mb=100_000,
+        disk_available_mb=4_000,
+    )
+    profile = model(
+        artifact_sha256="a" * 64,
+        artifact_source="hf://owner/repo/qwen.gguf",
+        artifact_size_mb=4_000,
+    )
+
+    plan = PlacementPlanner().plan([too_full, fitting], [profile], now=10)
+
+    assert plan.nodes_for("qwen") == ("z-fitting",)
+
+
+def test_cached_artifact_remains_eligible_when_free_disk_is_below_artifact_size():
+    digest = "a" * 64
+    cached = ModelResidency(
+        "qwen",
+        8_000,
+        state=ResidencyState.CACHED,
+        artifact_sha256=digest,
+    )
+    machine = node(
+        "cached",
+        residencies=(cached,),
+        disk_capacity_mb=100_000,
+        disk_available_mb=1,
+    )
+    profile = model(
+        artifact_sha256=digest,
+        artifact_source="hf://owner/repo/qwen.gguf",
+        artifact_size_mb=4_000,
+    )
+
+    assert PlacementPlanner().plan([machine], [profile], now=10).nodes_for("qwen") == (
+        "cached",
+    )
 
 
 def test_reconciler_skips_download_when_weights_are_cached():

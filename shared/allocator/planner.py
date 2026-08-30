@@ -2658,6 +2658,17 @@ def _ineligible_reason(
     )
     if for_new and not artifact_cached and "load" not in node.actuator_capabilities:
         return "node cannot load uncached model weights"
+    if (
+        for_new
+        and not artifact_cached
+        and model.artifact_size_mb
+        and node.disk_available_mb is not None
+        and model.artifact_size_mb > node.disk_available_mb
+    ):
+        return (
+            f"requires {model.artifact_size_mb} MB artifact disk, "
+            f"only {node.disk_available_mb} MB available"
+        )
     return None
 
 

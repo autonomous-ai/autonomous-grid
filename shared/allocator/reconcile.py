@@ -790,6 +790,8 @@ class Reconciler:
                     dependencies=proposal.dependencies,
                     executable=True,
                     artifact_sha256=proposal.artifact_sha256,
+                    artifact_source=proposal.artifact_source,
+                    artifact_size_mb=proposal.artifact_size_mb,
                 )
                 budget -= 1
                 scheduled_by_node[proposal.node_id] = scheduled_by_node.get(proposal.node_id, 0) + 1
@@ -909,6 +911,8 @@ class Reconciler:
             dependencies=dependencies,
             executable=mode == AllocatorMode.AUTOMATIC,
             artifact_sha256=artifact_sha256,
+            artifact_source=(profile.artifact_source if kind == ActionKind.LOAD else ""),
+            artifact_size_mb=(profile.artifact_size_mb if kind == ActionKind.LOAD else 0),
         )
 
     def _history_blocked_until(

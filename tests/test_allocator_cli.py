@@ -209,6 +209,10 @@ def test_model_set_sends_validated_profile_and_secret_header(monkeypatch, capsys
             "finance",
             "--artifact-sha256",
             "A" * 64,
+            "--artifact-source",
+            "hf://owner/repo/qwen.gguf",
+            "--artifact-size-mb",
+            "4096",
             "--max-colocated-models",
             "1",
             "--colocation-exclude",
@@ -223,6 +227,8 @@ def test_model_set_sends_validated_profile_and_secret_header(monkeypatch, capsys
     assert captured["json"]["replica_concurrency"] == 8
     assert captured["json"]["required_tags"] == ("finance",)
     assert captured["json"]["artifact_sha256"] == "a" * 64
+    assert captured["json"]["artifact_source"] == "hf://owner/repo/qwen.gguf"
+    assert captured["json"]["artifact_size_mb"] == 4096
     assert captured["json"]["max_colocated_models"] == 1
     assert captured["json"]["colocation_excludes"] == ("image.gguf",)
     assert "secret-token" not in capsys.readouterr().out

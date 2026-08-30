@@ -119,9 +119,11 @@ def cmd_allocator_status(args: argparse.Namespace) -> int:
             for item in node.get("residencies") or []
             if item.get("state") == "ready"
         ]
+        disk = node.get("disk_available_mb")
+        disk_text = f" · {disk} MB disk free" if isinstance(disk, int) else ""
         print(
             f"  {node.get('node_id')}  {node.get('state')}  "
-            f"{node.get('capacity_mb', 0)} MB  {','.join(ready) or '-'}"
+            f"{node.get('capacity_mb', 0)} MB{disk_text}  {','.join(ready) or '-'}"
         )
     return 0
 
@@ -173,6 +175,8 @@ def cmd_allocator_model_set(args: argparse.Namespace) -> int:
             min_gpu_count=args.min_gpu_count,
             min_gpu_memory_mb=args.min_gpu_memory_mb,
             artifact_sha256=args.artifact_sha256,
+            artifact_source=args.artifact_source,
+            artifact_size_mb=args.artifact_size_mb,
             max_colocated_models=args.max_colocated_models,
             colocation_excludes=tuple(args.colocation_excludes),
         )

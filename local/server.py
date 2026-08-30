@@ -2821,6 +2821,12 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                         ),
                     ),
                     gpu_memory_mb=gpu_memory_mb,
+                    disk_capacity_mb=_optional_nonnegative_int(
+                        resources.get("disk_capacity_mb")
+                    ),
+                    disk_available_mb=_optional_nonnegative_int(
+                        resources.get("disk_available_mb")
+                    ),
                     host_priority=_first_nonnegative_int(
                         allocator.get("host_priority")
                     ),
@@ -3033,6 +3039,24 @@ def _merge_allocator_hosts(
                 gpu_memory_mb=max(
                     (member.gpu_memory_mb for member in members),
                     key=lambda values: (len(values), sum(values), values),
+                ),
+                disk_capacity_mb=max(
+                    (
+                        member.disk_capacity_mb
+                        for member in members
+                        if member.disk_capacity_mb is not None
+                    ),
+                    default=None,
+                ),
+                # Every record describes the same physical filesystem. Use the most conservative
+                # fresh observation instead of adding repeated child telemetry.
+                disk_available_mb=min(
+                    (
+                        member.disk_available_mb
+                        for member in members
+                        if member.disk_available_mb is not None
+                    ),
+                    default=None,
                 ),
                 host_priority=max(member.host_priority for member in members),
                 last_heartbeat=max(member.last_heartbeat for member in members),

@@ -137,9 +137,24 @@ def find_projector(repo: str, timeout: float = 15.0) -> str | None:
     return None
 
 
-def download(repo: str, quantized_file: str, *, out: Path | None = None, on_progress=None) -> Path:
+def download(
+    repo: str,
+    quantized_file: str,
+    *,
+    out: Path | None = None,
+    on_progress=None,
+    max_bytes: int | None = None,
+) -> Path:
+    if max_bytes is not None and (
+        isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0
+    ):
+        raise ValueError("max_bytes must be a positive integer or None")
     target = out or local_path(quantized_file)
     if target.is_file():
+        if max_bytes is not None and target.stat().st_size > max_bytes:
+            raise SystemExit(
+                f"Downloaded artifact exceeds the configured {max_bytes} byte limit."
+            )
         # `grid pull` must be safe to run twice — re-running it to double check a name, or
         # because a script always calls it before `grid join`, must not re-download a multi-
         # gigabyte file that is already sitting right there. Only a `.part` (a download that
@@ -150,6 +165,10 @@ def download(repo: str, quantized_file: str, *, out: Path | None = None, on_prog
     url = hf_url(repo, quantized_file)
 
     have = part.stat().st_size if part.exists() else 0
+    if max_bytes is not None and have > max_bytes:
+        raise SystemExit(
+            f"Partial download already exceeds the configured {max_bytes} byte limit."
+        )
     try:
         last_error: httpx.TransportError | None = None
         for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
@@ -180,10 +199,20 @@ def download(repo: str, quantized_file: str, *, out: Path | None = None, on_prog
                         mode = "ab" if have else "wb"
                     remaining = int(resp.headers.get("Content-Length") or 0)
                     total = have + remaining if remaining else 0
+                    if max_bytes is not None and total > max_bytes:
+                        raise SystemExit(
+                            f"Artifact is {total} bytes, above the configured "
+                            f"{max_bytes} byte limit."
+                        )
                     with part.open(mode) as fh:
                         for chunk in resp.iter_bytes(CHUNK):
                             if not chunk:
                                 continue
+                            if max_bytes is not None and have + len(chunk) > max_bytes:
+                                raise SystemExit(
+                                    "Artifact stream exceeded the configured "
+                                    f"{max_bytes} byte limit."
+                                )
                             fh.write(chunk)
                             have += len(chunk)
                             if on_progress:

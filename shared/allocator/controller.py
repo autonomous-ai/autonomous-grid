@@ -2882,6 +2882,8 @@ def _action_from_dict(value: dict[str, Any]) -> MutationAction:
         dependencies=tuple(value.get("dependencies") or ()),
         executable=bool(value.get("executable", False)),
         artifact_sha256=value.get("artifact_sha256") or "",
+        artifact_source=str(value.get("artifact_source") or ""),
+        artifact_size_mb=int(value.get("artifact_size_mb") or 0),
         controller_term=int(value.get("controller_term") or 0),
         controller_id=str(value.get("controller_id") or ""),
         controller_lease_expires_at=float(

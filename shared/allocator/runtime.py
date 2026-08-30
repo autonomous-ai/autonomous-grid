@@ -5,9 +5,9 @@ actuator that makes one host converge on those commands.  It persists every tran
 after side effects, executes at most one mutation at a time, and treats a local host-protection
 decision as a higher-priority admission gate.
 
-The first runtime backend is llama.cpp.  ``load`` currently means "verify that the GGUF is already
-in Grid's model store"; downloading is intentionally not inferred from a model name.  That keeps
-automatic mode from fetching mutable or unverified artifacts behind an administrator's back.
+The first runtime backend is llama.cpp. ``load`` verifies an existing GGUF or fetches one only when
+an authenticated profile supplies an exact source, immutable SHA-256, and bounded artifact size.
+Automatic mode never infers a mutable download from a model name.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import math
 import os
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import ssl
@@ -31,6 +32,7 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -276,6 +278,14 @@ class ModelRuntimeBackend(Protocol):
 
     def artifact_sha256(self, model_id: str) -> str: ...
 
+    def fetch_artifact(
+        self,
+        model_id: str,
+        source: str,
+        expected_sha256: str,
+        max_size_mb: int,
+    ) -> str: ...
+
     def start(self, model_id: str, port: int) -> RuntimeHandle: ...
 
     def start_with_callback(
@@ -445,6 +455,88 @@ class LlamaCppBackend:
             while len(self._artifact_digests) > 64:
                 self._artifact_digests.pop(next(iter(self._artifact_digests)))
         return value
+
+    def fetch_artifact(
+        self,
+        model_id: str,
+        source: str,
+        expected_sha256: str,
+        max_size_mb: int,
+    ) -> str:
+        """Fetch one exact GGUF into the shared model store and atomically publish it.
+
+        The controller supplies both an immutable digest and a byte ceiling. Downloads land under
+        an artifact-addressed staging name, so an interruption can resume without exposing partial
+        weights as cache inventory. A stale same-named cache entry is replaced only after the new
+        bytes pass both bounds and digest verification.
+        """
+
+        digest = canonical_sha256(expected_sha256, "expected artifact SHA-256")
+        if not digest or max_size_mb <= 0:
+            raise RuntimeError("autonomous artifact fetch requires a digest and size bound")
+        if Path(model_id).name != model_id or not model_id.lower().endswith(".gguf"):
+            raise RuntimeError(
+                "managed llama.cpp artifact ids must be plain .gguf filenames"
+            )
+        repo, filename = _parse_hugging_face_artifact_source(source)
+        from shared.models import download
+
+        target = download.local_path(model_id)
+        maximum_bytes = max_size_mb * 1024 * 1024
+        existing = _sha256_file(target) if target.is_file() else ""
+        if existing == digest:
+            return digest
+        # ``.tmp`` keeps a completed-but-not-yet-published staging file out of Grid's ordinary
+        # model inventory; ``download`` adds its own ``.part`` suffix while the transfer runs.
+        staging = target.with_name(f".{target.name}.{digest[:16]}.allocator.tmp")
+        partial = staging.with_suffix(staging.suffix + ".part")
+        staged_bytes = (
+            staging.stat().st_size
+            if staging.is_file()
+            else partial.stat().st_size
+            if partial.is_file()
+            else 0
+        )
+        remaining_bound = max(0, maximum_bytes - staged_bytes)
+        available = shutil.disk_usage(target.parent).free
+        if available < remaining_bound:
+            raise RuntimeError(
+                f"insufficient disk for {model_id!r}: requires up to "
+                f"{math.ceil(remaining_bound / (1024 * 1024))} MB more, "
+                f"{available // (1024 * 1024)} MB free"
+            )
+        try:
+            downloaded = download.download(
+                repo,
+                filename,
+                out=staging,
+                max_bytes=maximum_bytes,
+            )
+        except SystemExit as exc:
+            raise RuntimeError(str(exc)) from None
+        size = downloaded.stat().st_size
+        if size > maximum_bytes:
+            downloaded.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"downloaded artifact exceeds the configured {max_size_mb} MB bound"
+            )
+        actual = _sha256_file(downloaded)
+        if actual != digest:
+            downloaded.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"downloaded artifact SHA-256 mismatch for {model_id!r}: "
+                f"expected {digest}, found {actual}"
+            )
+        os.replace(downloaded, target)
+        if os.name != "nt":
+            directory_fd = os.open(target.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        with self._artifact_lock:
+            self._artifact_digests.clear()
+        return digest
 
     def start(self, model_id: str, port: int) -> RuntimeHandle:
         return self._start(model_id, port, on_spawn=None)
@@ -1774,11 +1866,6 @@ class ManagedModelRuntime:
             )
 
     def _load(self, action: MutationAction) -> None:
-        if action.model_id not in self.backend.cached_models():
-            raise RuntimeError(
-                f"model weights are not cached: {action.model_id!r}; pull an immutable GGUF first"
-            )
-        verified_artifact = self._verify_action_artifact(action)
         with self._lock:
             current = self._residencies.get(action.model_id)
             if (
@@ -1801,6 +1888,34 @@ class ManagedModelRuntime:
                 ResidencyState.DRAINING,
             ):
                 return
+        cached = action.model_id in self.backend.cached_models()
+        if cached and action.artifact_sha256:
+            cached = self.backend.artifact_sha256(action.model_id) == action.artifact_sha256
+        if not cached:
+            fetcher = getattr(self.backend, "fetch_artifact", None)
+            if not action.artifact_source:
+                raise RuntimeError(
+                    f"model weights are not cached: {action.model_id!r}; "
+                    "pull an immutable GGUF or configure artifact_source"
+                )
+            if not callable(fetcher):
+                raise RuntimeError("runtime backend cannot fetch the configured artifact source")
+            fetched = canonical_sha256(
+                fetcher(
+                    action.model_id,
+                    action.artifact_source,
+                    action.artifact_sha256,
+                    action.artifact_size_mb,
+                ),
+                "fetched artifact SHA-256",
+            )
+            if fetched != action.artifact_sha256:
+                raise RuntimeError("runtime backend did not prove the requested artifact")
+            if action.model_id not in self.backend.cached_models():
+                raise RuntimeError("runtime backend fetched no visible cache artifact")
+        verified_artifact = self._verify_action_artifact(action)
+        with self._lock:
+            current = self._residencies.get(action.model_id)
             self._residencies[action.model_id] = ManagedResidency(
                 model_id=action.model_id,
                 memory_mb=action.memory_mb,
@@ -2565,6 +2680,43 @@ def _cached_model_path(model_id: str) -> Path | None:
         (Path(item.path) for item in model_store.list_all() if item.name == model_id),
         None,
     )
+
+
+def _parse_hugging_face_artifact_source(source: str) -> tuple[str, str]:
+    parsed = urlsplit(str(source or ""))
+    if (
+        parsed.scheme != "hf"
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError(
+            "managed llama.cpp artifact_source must be hf://owner/repo/path.gguf"
+        )
+    parts = [unquote(item) for item in parsed.path.split("/") if item]
+    if len(parts) < 2:
+        raise RuntimeError(
+            "managed llama.cpp artifact_source must be hf://owner/repo/path.gguf"
+        )
+    if any(item in (".", "..") or "\0" in item for item in parts):
+        raise RuntimeError("artifact_source contains an unsafe path component")
+    filename = "/".join(parts[1:])
+    if not filename.lower().endswith(".gguf"):
+        raise RuntimeError("managed llama.cpp artifact_source must name an exact .gguf")
+    return f"{parsed.netloc}/{parts[0]}", filename
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as artifact:
+            for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise RuntimeError(f"could not hash artifact {path.name!r}: {exc}") from exc
+    return digest.hexdigest()
 
 
 def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
