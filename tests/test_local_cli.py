@@ -28496,7 +28496,7 @@ def test_task_loop_declines_stale_goal_claim_before_attempt_start(monkeypatch, c
     )
     job = {
         "task_id": "T1", "attempt": 2,
-        "lease_expires_at": "2030-01-01T00:00:00+00:00",
+        "claim_id": "claim-generation-2",
         "agent_kind": "codex", "goal": {
             "objective": "continue", "required_capabilities": ["image_generation"],
         },
@@ -28524,7 +28524,7 @@ def test_task_loop_declines_stale_goal_claim_before_attempt_start(monkeypatch, c
     tasks.task_loop(state)
 
     assert declined == [("T1", {
-        "attempt": 2, "lease_expires_at": "2030-01-01T00:00:00+00:00",
+        "attempt": 2, "claim_id": "claim-generation-2",
     })]
     assert "without spending retry budget" in capsys.readouterr().err
 
@@ -28564,7 +28564,7 @@ def test_goal_claim_decline_refreshes_an_expired_token_exactly_once(monkeypatch)
 
     monkeypatch.setattr(tasks.relay, "decline_task_claim", decline)
     answer = tasks.decline_claim_once(
-        state, "T1", attempt=1, lease_expires_at="2030-01-01T00:00:00+00:00")
+        state, "T1", attempt=1, claim_id="claim-generation-1")
 
     assert answer == {"state": "queued", "attempt": 0}
     assert refreshes == ["expired"]

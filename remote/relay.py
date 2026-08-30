@@ -481,20 +481,21 @@ def decline_task_claim(
     task_id: str,
     *,
     attempt: int,
-    lease_expires_at: str,
+    claim_id: str,
 ) -> dict[str, Any]:
     """Return a delivered-but-unstarted Goal claim without spending an attempt.
 
-    ``attempt`` plus ``lease_expires_at`` identifies the exact claim generation. Attempts can be
-    reused after a successful decline, so the attempt number alone would let a delayed duplicate
-    revoke a newer claim by the same node. The relay accepts this only before its durable
+    ``claim_id`` identifies the exact random claim generation. Attempts can be reused after a
+    successful decline, and a wall-clock lease expiry is not guaranteed unique, so neither can
+    safely fence a delayed duplicate from revoking a newer claim by the same node. The relay accepts
+    this only before its durable
     ``task.attempt_started`` fence; after that, native harness failures use ``/retry`` instead.
     """
     try:
         with _client(signaling_url, access_token, timeout=_TASK_EVENT_TIMEOUT) as client:
             resp = client.post(
                 f"/relay/v1/tasks/{quote(task_id, safe='')}/decline",
-                json={"attempt": attempt, "lease_expires_at": lease_expires_at},
+                json={"attempt": attempt, "claim_id": claim_id},
             )
     except httpx.HTTPError as exc:
         raise RelayError(f"decline_task_claim transport error: {exc}") from None

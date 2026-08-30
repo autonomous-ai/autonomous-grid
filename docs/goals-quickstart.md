@@ -49,7 +49,7 @@ can still claim ordinary tasks, and replacing or repairing it automatically reru
 Capability admission is rechecked after claim delivery and before Grid records
 `task.attempt_started`. This matters when one node runs several task workers: a second long-poll may
 still hold the capability snapshot from just before its sibling quarantined Codex or Claude. Grid
-declines that exact delivered lease, identified by attempt plus lease expiry, and the relay returns
+declines that exact delivered lease, identified by an opaque random claim id, and the relay returns
 the turn to the queue with its attempt counter restored. No checkout, native process, model request,
 tool call, or business action starts. A delayed duplicate cannot revoke a newer lease, and a decline
 is refused once attempt-start exists; failures after that fence use the ordinary checkpoint/retry

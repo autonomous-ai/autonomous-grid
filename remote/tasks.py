@@ -289,19 +289,19 @@ def checkpoint_retry_once(serve_state: Any, task_id: str, **checkpoint: Any) -> 
 
 
 def decline_claim_once(serve_state: Any, task_id: str, *, attempt: int,
-                       lease_expires_at: str) -> dict[str, Any]:
+                       claim_id: str) -> dict[str, Any]:
     """Return one unstarted stale Goal claim; refresh a rotated credential exactly once."""
     token = serve_state.token()
     try:
         return relay.decline_task_claim(
             serve_state.signaling_url, token, task_id,
-            attempt=attempt, lease_expires_at=lease_expires_at)
+            attempt=attempt, claim_id=claim_id)
     except relay.RelayUnauthorized:
         if not serve_state.refresh(stale_token=token):
             raise
         return relay.decline_task_claim(
             serve_state.signaling_url, serve_state.token(), task_id,
-            attempt=attempt, lease_expires_at=lease_expires_at)
+            attempt=attempt, claim_id=claim_id)
 
 
 def _agent_kinds() -> tuple[str, ...]:
@@ -394,10 +394,10 @@ def _decline_stale_goal_claim(state: Any, job: dict[str, Any]) -> None:
     """Best-effort safe release of a claim that must never reach its native harness."""
     task_id = job.get("task_id")
     attempt = job.get("attempt")
-    lease_expires_at = job.get("lease_expires_at")
+    claim_id = job.get("claim_id")
     if (not isinstance(task_id, str) or not task_id
             or not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1
-            or not isinstance(lease_expires_at, str) or not lease_expires_at):
+            or not isinstance(claim_id, str) or not claim_id):
         _warn(
             "a delivered Goal claim no longer matches this node's live harness capabilities, but "
             "its relay payload lacks the claim identity needed for an immediate safe decline; no "
@@ -405,7 +405,7 @@ def _decline_stale_goal_claim(state: Any, job: dict[str, Any]) -> None:
         return
     try:
         decline_claim_once(
-            state, task_id, attempt=attempt, lease_expires_at=lease_expires_at)
+            state, task_id, attempt=attempt, claim_id=claim_id)
         _warn(
             f"declined stale Goal claim {task_id} attempt {attempt} before attempt-start; the "
             "relay returned it to the distributed queue without spending retry budget")
