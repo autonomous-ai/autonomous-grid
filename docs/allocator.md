@@ -295,9 +295,12 @@ hot demand can therefore amortize a materially faster cold host, while a light w
 prefers cached weights. This affects new placement only; it does not manufacture a migration after
 the desired replica set is already healthy.
 An uncached candidate must also fit its declared artifact-size ceiling in the node's authenticated
-free-disk observation. Cached weights do not pay that disk cost again. The node refreshes disk
-immediately before `load`, so a placement that became stale fails locally instead of filling the
-filesystem; the next heartbeat lets the controller select another eligible host.
+free-disk observation. The planner reserves those bytes cumulatively across every uncached desired
+model on a multi-model host; several artifacts that fit independently cannot overcommit the same
+free-space reading. Exact cached weights do not pay that disk cost again, and predictive transfers
+start from the post-assignment disk ledger rather than racing demanded loads for space. The node
+refreshes disk immediately before `load`, so a placement that became stale fails locally instead of
+filling the filesystem; the next heartbeat lets the controller select another eligible host.
 Placement also computes each desired model's future-compatible host set without pretending that
 live memory is already free. A flexible small model is penalized on a host needed by a more
 constrained model when it has another valid destination. A newly loaded incumbent remains sticky

@@ -142,8 +142,11 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
                 ),
                 min_residency_seconds=0,
                 scale_down_cooldown_seconds=0,
+                artifact_sha256=f"{model_index + 1:064x}",
+                artifact_source=f"test://artifacts/{model_id}",
+                artifact_size_mb=rng.choice((1_000, 2_000, 4_000, 6_000)),
             )
-            for model_id in model_ids
+            for model_index, model_id in enumerate(model_ids)
         )
         nodes: list[NodeSnapshot] = []
         for index in range(rng.randint(1, 7)):
@@ -171,8 +174,10 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
                         loaded_at=1,
                         last_used_at=1,
                         managed=rng.random() < 0.8,
+                        artifact_sha256=profile.artifact_sha256,
                     )
                 )
+            disk_capacity = rng.choice((8_000, 12_000, 20_000, 40_000))
             nodes.append(
                 NodeSnapshot(
                     node_id=f"scenario-{scenario}-node-{index}",
@@ -191,6 +196,8 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
                     failure_domain=f"rack-{index % 3}",
                     max_models=rng.choice((None, 1, 2, 4)),
                     residencies=tuple(residencies),
+                    disk_capacity_mb=disk_capacity,
+                    disk_available_mb=rng.randint(0, disk_capacity),
                     manually_managed=rng.random() < 0.1,
                     last_heartbeat=100,
                 )
@@ -252,6 +259,7 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
         incremental_by_node = {node.node_id: 0 for node in nodes}
         desired_memory_by_node = {node.node_id: 0 for node in nodes}
         added_slots_by_node = {node.node_id: 0 for node in nodes}
+        desired_artifact_disk_by_node = {node.node_id: 0 for node in nodes}
         for assignment in plan.assignments:
             node = node_by_id[assignment.node_id]
             profile = profile_by_id[assignment.model_id]
@@ -285,6 +293,31 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
                     0,
                     assignment.memory_mb - residency.memory_mb,
                 )
+            artifact_cached = bool(
+                residency
+                and profile.matches_artifact(residency)
+                and (
+                    residency.state
+                    in (
+                        ResidencyState.LOADING,
+                        ResidencyState.WARMING,
+                        ResidencyState.READY,
+                    )
+                    or (
+                        residency.managed
+                        and residency.state
+                        in (
+                            ResidencyState.CACHED,
+                            ResidencyState.DRAINING,
+                            ResidencyState.FAILED,
+                        )
+                    )
+                )
+            )
+            if not artifact_cached:
+                desired_artifact_disk_by_node[node.node_id] += (
+                    profile.artifact_size_mb
+                )
 
         for node in nodes:
             placement_budget = node.capacity_mb - node.reserved_mb
@@ -304,6 +337,11 @@ def test_seeded_heterogeneous_fleets_preserve_planner_safety_invariants():
                 and (residency.state != ResidencyState.FAILED or residency.managed)
             )
             assert incremental_by_node[node.node_id] <= max(0, budget - live_memory)
+            if node.disk_available_mb is not None:
+                assert (
+                    desired_artifact_disk_by_node[node.node_id]
+                    <= node.disk_available_mb
+                )
             if node.max_models is not None:
                 live_slots = sum(
                     residency.state != ResidencyState.CACHED

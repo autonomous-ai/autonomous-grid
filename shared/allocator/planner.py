@@ -185,6 +185,7 @@ class _PlanTopologyContext:
     compatibility: dict[tuple[str, str, bool], str | None] = field(default_factory=dict)
     runtime_requirements: dict[tuple[str, str], bool] = field(default_factory=dict)
     runtime_memory: dict[tuple[str, str], int] = field(default_factory=dict)
+    artifact_disk: dict[tuple[str, str], int] = field(default_factory=dict)
     future_eligible_nodes: dict[str, frozenset[str]] | None = None
     eligible_host_counts: dict[str, int] | None = None
     startup_horizons: dict[
@@ -604,6 +605,9 @@ class PlacementPlanner:
         desired_memory: dict[str, int] = {node.node_id: 0 for node in node_list}
         occupied_models: dict[str, int] = {node.node_id: 0 for node in node_list}
         desired_model_slots: dict[str, int] = {node.node_id: 0 for node in node_list}
+        disk_remaining: dict[str, int | None] = {
+            node.node_id: node.disk_available_mb for node in node_list
+        }
         assignments: list[PlacementAssignment] = []
         assigned_pairs: set[tuple[str, str]] = set()
         assigned_domains: dict[str, set[str]] = {}
@@ -650,11 +654,12 @@ class PlacementPlanner:
         compatibility_cache = topology_context.compatibility
         runtime_requirement_cache = topology_context.runtime_requirements
         runtime_memory_cache = topology_context.runtime_memory
+        artifact_disk_cache = topology_context.artifact_disk
         colocation_policy_active = any(
             profile.max_colocated_models or profile.colocation_excludes
             for profile in model_list
         )
-        fit_cache: dict[tuple[str, str, int, int, int, int], bool] = {}
+        fit_cache: dict[tuple[str, str, int, int, int, int, int], bool] = {}
 
         def requires_new_runtime(node: NodeSnapshot, model: ModelProfile) -> bool:
             key = (node.node_id, model.model_id)
@@ -688,11 +693,23 @@ class PlacementPlanner:
                 )
             return compatibility_cache[key]
 
+        def artifact_disk_cost(node: NodeSnapshot, model: ModelProfile) -> int:
+            key = (node.node_id, model.model_id)
+            if key not in artifact_disk_cache:
+                artifact_disk_cache[key] = _artifact_load_disk_mb(node, model)
+            return artifact_disk_cache[key]
+
         def fits_node(node: NodeSnapshot, model: ModelProfile) -> bool:
             model_memory_mb = runtime_memory(node, model)
             if (
                 desired_memory[node.node_id] + model_memory_mb
                 > placement_budget[node.node_id]
+            ):
+                return False
+            remaining_disk = disk_remaining[node.node_id]
+            if (
+                remaining_disk is not None
+                and artifact_disk_cost(node, model) > remaining_disk
             ):
                 return False
             if colocation_policy_active:
@@ -712,6 +729,7 @@ class PlacementPlanner:
                 desired_memory[node.node_id],
                 occupied_models[node.node_id],
                 desired_model_slots[node.node_id],
+                -1 if disk_remaining[node.node_id] is None else disk_remaining[node.node_id],
             )
             if key not in fit_cache:
                 fit_cache[key] = _fits(
@@ -793,6 +811,8 @@ class PlacementPlanner:
                     occupied_models,
                     desired_model_slots,
                     desired_memory,
+                    disk_remaining,
+                    artifact_disk_cost(node, model),
                 )
                 pinned_successes_by_model[model.model_id] += 1
 
@@ -935,6 +955,7 @@ class PlacementPlanner:
             dict[str, int],
             dict[str, int],
             dict[str, int],
+            dict[str, int | None],
         ]:
             return (
                 list(assignments),
@@ -944,6 +965,7 @@ class PlacementPlanner:
                 dict(occupied_models),
                 dict(desired_model_slots),
                 dict(desired_memory),
+                dict(disk_remaining),
             )
 
         def restore_placement_state(
@@ -955,6 +977,7 @@ class PlacementPlanner:
                 dict[str, int],
                 dict[str, int],
                 dict[str, int],
+                dict[str, int | None],
             ],
         ) -> None:
             (
@@ -965,6 +988,7 @@ class PlacementPlanner:
                 saved_occupied,
                 saved_slots,
                 saved_desired_memory,
+                saved_disk_remaining,
             ) = state
             assignments[:] = saved_assignments
             assigned_pairs.clear()
@@ -979,6 +1003,8 @@ class PlacementPlanner:
             desired_model_slots.update(saved_slots)
             desired_memory.clear()
             desired_memory.update(saved_desired_memory)
+            disk_remaining.clear()
+            disk_remaining.update(saved_disk_remaining)
 
         candidate_score_cache: dict[
             tuple[str, str, int, bool, bool],
@@ -1057,6 +1083,12 @@ class PlacementPlanner:
             desired_model_slots[assignment.node_id] -= 1
             if _adds_model_slot(residency):
                 occupied_models[assignment.node_id] -= 1
+            remaining_disk = disk_remaining[assignment.node_id]
+            if remaining_disk is not None:
+                disk_remaining[assignment.node_id] = remaining_disk + artifact_disk_cost(
+                    assignment_node,
+                    profile_by_id[assignment.model_id],
+                )
             assigned_domains[assignment.model_id] = {
                 node_by_id[item.node_id].failure_domain or item.node_id
                 for item in assignments
@@ -1277,6 +1309,8 @@ class PlacementPlanner:
                     occupied_models,
                     desired_model_slots,
                     desired_memory,
+                    disk_remaining,
+                    artifact_disk_cost(selected_node, placement_model),
                 )
                 if place_pending_replicas(
                     remaining,
@@ -1407,6 +1441,8 @@ class PlacementPlanner:
                             occupied_models,
                             desired_model_slots,
                             desired_memory,
+                            disk_remaining,
+                            artifact_disk_cost(target_node, placement_model),
                         )
                         pending = (*displaced, *remaining)
                         if place_pending_replicas(
@@ -1478,6 +1514,8 @@ class PlacementPlanner:
                         occupied_models,
                         desired_model_slots,
                         desired_memory,
+                        disk_remaining,
+                        artifact_disk_cost(node, model),
                     )
                     return True
             candidates: list[tuple[float, str, NodeSnapshot, tuple[str, ...]]] = []
@@ -1557,6 +1595,8 @@ class PlacementPlanner:
                 occupied_models,
                 desired_model_slots,
                 desired_memory,
+                disk_remaining,
+                artifact_disk_cost(node, model),
             )
             return True
 
@@ -1690,6 +1730,8 @@ class PlacementPlanner:
                     occupied_models,
                     desired_model_slots,
                     desired_memory,
+                    disk_remaining,
+                    artifact_disk_cost(node, model),
                 )
                 placed += 1
 
@@ -1876,6 +1918,8 @@ class PlacementPlanner:
                         occupied_models,
                         desired_model_slots,
                         desired_memory,
+                        disk_remaining,
+                        artifact_disk_cost(selected, model),
                     )
                     placed += 1
 
@@ -2018,6 +2062,7 @@ class PlacementPlanner:
                     capacity,
                     occupied_models,
                     desired_model_slots,
+                    disk_remaining,
                     profile_by_id,
                     demand_urgency_by_model,
                     desired_by_model,
@@ -2334,9 +2379,9 @@ class PlacementPlanner:
             (item.node_id, item.model_id) for item in assignments
         }
         placed_by_model = Counter(item.model_id for item in assignments)
-        prefetch_disk_remaining = {
-            node.node_id: node.disk_available_mb for node in node_list
-        }
+        # Begin after every uncached desired assignment has reserved its artifact bytes. A
+        # speculative transfer must not race a real load for the same free-disk observation.
+        prefetch_disk_remaining = dict(disk_remaining)
         artifact_prefetches: list[ArtifactPrefetch] = []
         predictive_models = sorted(
             (
@@ -3042,19 +3087,7 @@ def _ineligible_reason(
         return "node has a forbidden tag"
     if for_new and (node.manually_managed or "warm" not in node.actuator_capabilities):
         return "node cannot be actuated"
-    artifact_cached = (
-        not model.artifact_sha256 and model.model_id in node.cached_models
-    ) or bool(
-        residency
-        and residency.managed
-        and residency.state
-        in (
-            ResidencyState.CACHED,
-            ResidencyState.DRAINING,
-            ResidencyState.FAILED,
-        )
-        and model.matches_artifact(residency)
-    )
+    artifact_cached = _artifact_cached_residency(node, model, residency)
     if for_new and not artifact_cached and "load" not in node.actuator_capabilities:
         return "node cannot load uncached model weights"
     if (
@@ -3069,6 +3102,45 @@ def _ineligible_reason(
             f"only {node.disk_available_mb} MB available"
         )
     return None
+
+
+def _artifact_cached_residency(
+    node: NodeSnapshot,
+    model: ModelProfile,
+    residency: ModelResidency | None,
+) -> bool:
+    return (
+        not model.artifact_sha256 and model.model_id in node.cached_models
+    ) or bool(
+        residency
+        and residency.managed
+        and residency.state
+        in (
+            ResidencyState.CACHED,
+            ResidencyState.DRAINING,
+            ResidencyState.FAILED,
+        )
+        and model.matches_artifact(residency)
+    )
+
+
+def _artifact_load_disk_mb(node: NodeSnapshot, model: ModelProfile) -> int:
+    """Additional artifact bytes a new desired residency must reserve on this node."""
+
+    # This fact is cached once per topology pair by the main planner. Read the immutable tuple
+    # directly so adding disk accounting does not add another public residency lookup to every
+    # fairness round; the ordinary compatibility/runtime caches own those lookups already.
+    residency = next(
+        (item for item in node.residencies if item.model_id == model.model_id),
+        None,
+    )
+    if not _requires_new_runtime(residency, model):
+        return 0
+    return (
+        0
+        if _artifact_cached_residency(node, model, residency)
+        else model.artifact_size_mb
+    )
 
 
 def _hard_residency_policy_violation(
@@ -3168,6 +3240,7 @@ def _priority_preemption_candidates(
     capacity: Mapping[str, int],
     occupied_models: Mapping[str, int],
     desired_model_slots: Mapping[str, int],
+    disk_remaining: Mapping[str, int | None],
     profile_by_id: Mapping[str, ModelProfile],
     demand_urgency_by_model: Mapping[str, int],
     desired_by_model: Mapping[str, int],
@@ -3285,6 +3358,17 @@ def _priority_preemption_candidates(
                 )
             )
         )
+        projected_disk = disk_remaining[node.node_id]
+        if projected_disk is not None:
+            projected_disk += sum(
+                _artifact_load_disk_mb(
+                    node,
+                    profile_by_id[item.model_id],
+                )
+                for item in displaced_assignments
+            )
+            if _artifact_load_disk_mb(node, beneficiary) > projected_disk:
+                continue
         for assignment in displaced_assignments:
             simulated_assignments.remove(assignment)
             assignment_residency = node.residency(assignment.model_id)
@@ -3402,6 +3486,7 @@ def _stage_priority_preemption(
     capacity: dict[str, int],
     occupied_models: dict[str, int],
     desired_model_slots: dict[str, int],
+    disk_remaining: dict[str, int | None],
     profile_by_id: Mapping[str, ModelProfile],
     demand_urgency_by_model: Mapping[str, int],
     desired_by_model: Mapping[str, int],
@@ -3435,6 +3520,7 @@ def _stage_priority_preemption(
             capacity,
             occupied_models,
             desired_model_slots,
+            disk_remaining,
             profile_by_id,
             demand_urgency_by_model,
             desired_by_model,
@@ -3484,6 +3570,15 @@ def _stage_priority_preemption(
             occupied_models[selected_node.node_id] = max(
                 0,
                 occupied_models[selected_node.node_id] - 1,
+            )
+        remaining_disk = disk_remaining[selected_node.node_id]
+        if remaining_disk is not None:
+            disk_remaining[selected_node.node_id] = (
+                remaining_disk
+                + _artifact_load_disk_mb(
+                    selected_node,
+                    profile_by_id[assignment.model_id],
+                )
             )
         assigned_domains[assignment.model_id] = {
             node.failure_domain or node.node_id
@@ -3851,6 +3946,8 @@ def _place(
     occupied_models: dict[str, int],
     desired_model_slots: dict[str, int],
     desired_memory: dict[str, int],
+    disk_remaining: dict[str, int | None],
+    artifact_disk_mb: int,
 ) -> None:
     assignments.append(assignment)
     assigned_pairs.add((assignment.model_id, assignment.node_id))
@@ -3859,6 +3956,9 @@ def _place(
     capacity[node.node_id] -= _incremental_memory_mb(residency, assignment.memory_mb)
     desired_memory[node.node_id] += assignment.memory_mb
     desired_model_slots[node.node_id] += 1
+    remaining_disk = disk_remaining[node.node_id]
+    if remaining_disk is not None:
+        disk_remaining[node.node_id] = remaining_disk - artifact_disk_mb
     if _adds_model_slot(residency):
         occupied_models[node.node_id] += 1
 

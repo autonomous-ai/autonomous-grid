@@ -4693,6 +4693,83 @@ def test_planner_rejects_cold_host_without_artifact_disk_and_uses_fitting_peer()
     assert plan.nodes_for("qwen") == ("z-fitting",)
 
 
+def test_planner_reserves_artifact_disk_cumulatively_across_desired_models():
+    machine = node(
+        "shared",
+        capacity_mb=32_000,
+        max_models=2,
+        disk_capacity_mb=100_000,
+        disk_available_mb=6_000,
+    )
+    profiles = (
+        model(
+            "alpha",
+            artifact_sha256="a" * 64,
+            artifact_source="hf://owner/repo/alpha.gguf",
+            artifact_size_mb=4_000,
+        ),
+        model(
+            "beta",
+            artifact_sha256="b" * 64,
+            artifact_source="hf://owner/repo/beta.gguf",
+            artifact_size_mb=4_000,
+        ),
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        profiles,
+        now=10,
+    )
+
+    assert len(plan.assignments) == 1
+    assert sum(
+        next(item.artifact_size_mb for item in profiles if item.model_id == assignment.model_id)
+        for assignment in plan.assignments
+    ) <= machine.disk_available_mb
+    assert sum(item.missing_replicas for item in plan.unsatisfied) == 1
+
+
+def test_exact_cached_artifact_consumes_no_new_cumulative_disk_reservation():
+    alpha = model(
+        "alpha",
+        artifact_sha256="a" * 64,
+        artifact_source="hf://owner/repo/alpha.gguf",
+        artifact_size_mb=4_000,
+    )
+    beta = model(
+        "beta",
+        artifact_sha256="b" * 64,
+        artifact_source="hf://owner/repo/beta.gguf",
+        artifact_size_mb=4_000,
+    )
+    machine = node(
+        "shared",
+        capacity_mb=32_000,
+        max_models=2,
+        residencies=(
+            ModelResidency(
+                "alpha",
+                8_000,
+                ResidencyState.CACHED,
+                artifact_sha256=alpha.artifact_sha256,
+            ),
+        ),
+        disk_capacity_mb=100_000,
+        disk_available_mb=4_000,
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        (alpha, beta),
+        now=10,
+    )
+
+    assert plan.nodes_for("alpha") == ("shared",)
+    assert plan.nodes_for("beta") == ("shared",)
+    assert plan.unsatisfied == ()
+
+
 def test_cached_artifact_remains_eligible_when_free_disk_is_below_artifact_size():
     digest = "a" * 64
     cached = ModelResidency(
@@ -5711,6 +5788,62 @@ def test_correlation_only_demand_prefetches_exact_artifact_without_eviction():
     assert disk_bounded.artifact_prefetches == (
         ArtifactPrefetch("scarce", "higher-pressure"),
     )
+
+
+def test_predictive_prefetch_reserves_disk_after_uncached_desired_loads():
+    baseline = model(
+        "baseline",
+        min_replicas=1,
+        max_replicas=1,
+        artifact_sha256="a" * 64,
+        artifact_source="hf://example/models/baseline.gguf",
+        artifact_size_mb=4_000,
+    )
+    predicted = model(
+        "predicted",
+        min_replicas=0,
+        max_replicas=1,
+        artifact_sha256="b" * 64,
+        artifact_source="hf://example/models/predicted.gguf",
+        artifact_size_mb=4_000,
+    )
+    forecast = DemandForecast(
+        "predicted",
+        requests_per_minute=6,
+        offered_concurrency=1,
+        confidence=0.9,
+        correlated_requests_per_minute=6,
+        correlation_confidence=0.9,
+        correlation_sources=("workload-predictor:image",),
+        sample_count=10,
+        updated_at=10,
+    )
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    constrained = node(
+        "media",
+        max_models=1,
+        disk_capacity_mb=100_000,
+        disk_available_mb=16_000,
+    )
+
+    plan = planner.plan(
+        (constrained,),
+        (baseline, predicted),
+        (forecast,),
+        now=10,
+    )
+
+    assert plan.nodes_for("baseline") == ("media",)
+    assert plan.nodes_for("predicted") == ()
+    assert plan.artifact_prefetches == ()
+
+    roomier = planner.plan(
+        (replace(constrained, disk_available_mb=20_000),),
+        (baseline, predicted),
+        (forecast,),
+        now=10,
+    )
+    assert roomier.artifact_prefetches == (ArtifactPrefetch("media", "predicted"),)
 
 
 def test_queued_preemption_drain_is_revalidated_against_beneficiary_cache():
