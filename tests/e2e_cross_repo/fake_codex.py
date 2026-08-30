@@ -401,8 +401,8 @@ def main() -> int:
         # string values, while the interactive fake below proves their actual runtime behavior.
         methods = [
             "initialize", "initialized", "thread/start", "thread/resume", "thread/goal/set",
-            "thread/goal/get", "thread/tokenUsage/updated", "turn/started", "turn/completed",
-            "item/tool/call",
+            "thread/goal/get", "thread/tokenUsage/updated", "turn/started", "turn/steer",
+            "turn/completed", "item/tool/call",
         ]
         (output / "codex_app_server_protocol.schemas.json").write_text(
             json.dumps({"methods": methods}, separators=(",", ":")) + "\n")
@@ -426,8 +426,17 @@ def main() -> int:
                 raise RuntimeError("Grid closed before answering the subgoal tool call")
             response = json.loads(response_line)
             # Grid pauses native continuation as soon as it sees turn/started. A tool request can
-            # make that client request arrive before the tool response; service it without losing
-            # the in-flight call.
+            # make that client request arrive before the tool response; fenced steering can arrive
+            # in the same window on resumed turns. Service both without losing the in-flight call.
+            if response.get("method") == "turn/steer":
+                expected = response.get("params", {}).get("expectedTurnId")
+                inputs = response.get("params", {}).get("input")
+                if not isinstance(expected, str) or not expected or not isinstance(inputs, list):
+                    emit({"id": response["id"], "error": {
+                        "code": -32602, "message": "invalid turn/steer parameters"}})
+                else:
+                    reply(response, {})
+                continue
             if (response.get("method") == "thread/goal/set"
                     and response.get("params", {}).get("status") == "paused"):
                 early_pause = True
@@ -470,6 +479,17 @@ def main() -> int:
             checkpoint = json.loads(supplied.read_text().splitlines()[0])
             dynamic_tools = checkpoint.get("dynamic_tools") or []
             reply(request, {"thread": {"id": thread_id, "path": str(supplied)}})
+        elif method == "turn/steer":
+            # Grid fences continuation evidence to the exact native turn. The deterministic
+            # scenario itself already derives its next action from durable worktree/history, but
+            # the fake must still implement the production acknowledgement contract.
+            expected = request.get("params", {}).get("expectedTurnId")
+            inputs = request.get("params", {}).get("input")
+            if not isinstance(expected, str) or not expected or not isinstance(inputs, list):
+                emit({"id": request["id"], "error": {
+                    "code": -32602, "message": "invalid turn/steer parameters"}})
+                continue
+            reply(request, {})
         elif method == "thread/goal/set":
             desired = request.get("params", {}).get("status")
             # Either terminal verdict wins the runner's pause request, as it does in native Goal
