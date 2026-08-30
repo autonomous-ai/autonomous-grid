@@ -163,9 +163,10 @@ intersections. This preserves the same constrained-host penalties without expand
 candidate/scarce-host/alternative-host triple on large 32–64 node planning passes.
 Counterfactual portfolio plans over the exact same timestamp, node objects, model profiles, and
 policy also share one bounded hard-topology context: compatibility, runtime footprint, future host
-sets, and post-pin eligible-host counts. A new heartbeat/profile object, control timestamp, or
-policy invalidates the whole context; demand-only alternatives reuse it because they cannot alter
-those hard fleet facts.
+sets, post-pin eligible-host counts, and fastest startup paths. Startup paths are additionally keyed
+by the complete validated learned warm/load timing maps. A new heartbeat/profile object, control
+timestamp, policy, or timing map invalidates the affected context; demand-only alternatives reuse
+it because they cannot alter those fleet facts.
 
 Each bounded workload set reserves representation for its exploitation leader and the broadest
 cross-workload candidate; a fifth-ranked generalist can therefore remain discoverable when four

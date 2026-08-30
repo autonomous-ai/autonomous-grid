@@ -3283,6 +3283,41 @@ def test_counterfactual_plans_reuse_only_the_exact_fleet_topology(monkeypatch):
     assert compatibility_calls - after_heartbeat > repeated_calls
 
 
+def test_counterfactual_plans_reuse_startup_horizons_until_timing_changes(monkeypatch):
+    machines = tuple(node(f"n{index}", 16_000) for index in range(4))
+    profiles = tuple(
+        model(f"model-{index}", 8_000, min_replicas=0, max_replicas=2)
+        for index in range(3)
+    )
+    planner = PlacementPlanner()
+    original = planner_module._next_replica_startup_seconds
+    startup_calls = 0
+
+    def counted_startup(*args, **kwargs):
+        nonlocal startup_calls
+        startup_calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        planner_module,
+        "_next_replica_startup_seconds",
+        counted_startup,
+    )
+    planner.plan(machines, profiles, now=10)
+    assert startup_calls == len(profiles)
+
+    planner.plan(machines, profiles, now=10)
+    assert startup_calls == len(profiles)
+
+    planner.plan(
+        machines,
+        profiles,
+        now=10,
+        startup_seconds={("n0", "model-0"): 1.0},
+    )
+    assert startup_calls == len(profiles) * 2
+
+
 def test_independent_preemption_wave_scans_the_fleet_once(monkeypatch):
     machines = tuple(
         node(

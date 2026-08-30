@@ -108,6 +108,7 @@ _SCARCE_HOST_OPPORTUNITY_PENALTY = 200_000.0
 # traffic, hardware, and fit; this guard prevents marginal score noise from causing churn.
 _PROACTIVE_REPACK_SCORE_MARGIN = 500.0
 _MAX_PORTFOLIO_PREEMPTION_PATHS = 16
+_PairSeconds = tuple[tuple[tuple[str, str], float], ...]
 
 
 @dataclass(slots=True)
@@ -164,6 +165,9 @@ class _PlanTopologyContext:
     runtime_memory: dict[tuple[str, str], int] = field(default_factory=dict)
     future_eligible_nodes: dict[str, frozenset[str]] | None = None
     eligible_host_counts: dict[str, int] | None = None
+    startup_horizons: dict[
+        tuple[_PairSeconds, _PairSeconds], dict[str, float]
+    ] = field(default_factory=dict)
 
     def matches(
         self,
@@ -551,6 +555,14 @@ class PlacementPlanner:
         forecast_by_model = {item.model_id: item for item in forecast_list}
         startup_by_pair = _validated_startup_seconds(startup_seconds)
         load_by_pair = _validated_load_seconds(load_seconds)
+        startup_horizon_key = (
+            tuple(sorted(startup_by_pair.items())),
+            tuple(sorted(load_by_pair.items())),
+        )
+        startup_horizons = topology_context.startup_horizons.setdefault(
+            startup_horizon_key,
+            {},
+        )
         capacity = {}
         placement_budget: dict[str, int] = {}
         for node in node_list:
@@ -589,6 +601,18 @@ class PlacementPlanner:
                     )
                     occupied_models[node.node_id] += 1
 
+        def startup_horizon(model: ModelProfile) -> float:
+            if model.model_id not in startup_horizons:
+                startup_horizons[model.model_id] = _next_replica_startup_seconds(
+                    model,
+                    node_list,
+                    startup_by_pair,
+                    load_by_pair,
+                    now=timestamp,
+                    policy=self.policy,
+                )
+            return startup_horizons[model.model_id]
+
         desired_by_model = {
             model.model_id: desired_replica_count(
                 model,
@@ -596,14 +620,7 @@ class PlacementPlanner:
                 nodes=node_list,
                 now=timestamp,
                 policy=self.policy,
-                startup_horizon_seconds=_next_replica_startup_seconds(
-                    model,
-                    node_list,
-                    startup_by_pair,
-                    load_by_pair,
-                    now=timestamp,
-                    policy=self.policy,
-                ),
+                startup_horizon_seconds=startup_horizon(model),
             )
             for model in model_list
         }
