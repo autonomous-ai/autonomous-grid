@@ -159,6 +159,29 @@ def test_goal_inference_proxy_attributes_requests_to_durable_turn_and_conversati
     assert headers["X-Grid-Task-Claim"] == "claim-generation-7"
 
 
+def test_grid_inference_builds_one_canonical_relay_api_root():
+    assert task_codex.GridInference("https://grid.test", "secret").relay_base_url == (
+        "https://grid.test/relay/v1")
+    assert task_codex.GridInference("https://grid.test/relay/v1/", "secret").relay_base_url == (
+        "https://grid.test/relay/v1")
+
+
+def test_goal_inference_proxy_rewrites_claude_alias_to_exact_grid_model():
+    proxy = task_codex_proxy.InferenceProxy(
+        "https://grid.test/relay/v1", "grid-secret", upstream_model="Qwen3.6-35B-A3B")
+    messages = json.dumps({"model": "sonnet", "messages": [{"role": "user", "content": "hi"}]})
+    try:
+        rewritten = json.loads(proxy._upstream_body("messages", messages.encode()))
+        responses = proxy._upstream_body(
+            "responses", b'{"model":"codex-alias","input":"hi"}')
+    finally:
+        proxy.server.server_close()
+
+    assert rewritten["model"] == "Qwen3.6-35B-A3B"
+    assert rewritten["messages"] == [{"role": "user", "content": "hi"}]
+    assert responses == b'{"model":"codex-alias","input":"hi"}'
+
+
 def test_goal_inference_proxy_refreshes_expired_node_token_once():
     seen_tokens = []
     live = {"token": "expired-node-token"}
@@ -210,6 +233,7 @@ def test_goal_inference_proxy_refreshes_expired_node_token_once():
     assert response.json() == {"ok": True}
     assert seen_tokens == ["Bearer expired-node-token", "Bearer fresh-node-token"]
     assert refreshes == ["expired-node-token"]
+    assert proxy.last_failure is None
 
 
 def test_codex_goal_capability_requires_a_measured_native_goal_version(monkeypatch):

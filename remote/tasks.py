@@ -24,6 +24,7 @@ import os
 import queue
 import re
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -981,11 +982,23 @@ def run_task(job: dict[str, Any],
     # commit has been materialized. Fatal if it fails — an agent spawned without the link writes its
     # transcript outside the repository, so the conversation is silently lost from that task on.
     try:
-        task_agent.link_transcript(workspace, member_key)
+        transcript_directory = task_agent.link_transcript(workspace, member_key)
     except (Exception, SystemExit) as exc:
         return failed(f"could not prepare the agent's transcript directory: {exc}")
 
     resume = task_agent.resumable_session(workspace, job.get("resume_session_id"), member_key)
+    transcript_start_bytes = 0
+    if resume.session_id:
+        try:
+            resumed_transcript = task_agent.session_transcript_path(
+                transcript_directory, resume.session_id)
+            info = resumed_transcript.stat(follow_symlinks=False)
+            if stat.S_ISREG(info.st_mode):
+                transcript_start_bytes = info.st_size
+        except (OSError, ValueError):
+            # ``resumable_session`` already made the start/no-start decision. Recovery below will
+            # fail closed if the transcript changes between that check and the child exit.
+            transcript_start_bytes = 0
     if resume.session_id:
         _publish_safely(sink, "task.session_resumed", session_id=resume.session_id)
     elif resume.reason:
@@ -1045,21 +1058,27 @@ def run_task(job: dict[str, Any],
             workspace=workspace)
         claim = ({"claim_id": inference.claim_id} if inference.claim_id else {})
         proxy = task_codex_proxy.InferenceProxy(
-            inference.base_url, inference.current_token,
+            inference.relay_base_url, inference.current_token,
             refresh_token=inference.refresh_token,
             turn_id=str(job.get("task_id") or "") or None,
             conversation_id=str(job.get("conversation_id") or "") or None,
+            upstream_model=model.strip(),
             **claim)
-        # Map every Claude tier to the Goal's explicit Grid model. In particular `/goal` evaluates
-        # with the configured small/fast model; leaving that alias untouched would send only the
-        # actor through Grid while its native evaluator tried an Anthropic account on this node.
+        # Claude rejects arbitrary company-local model ids before making an HTTP request. Keep its
+        # selectors on one current native id; the credential proxy above rewrites every Messages
+        # body to the exact immutable Grid model, including /goal's small/fast evaluator
+        # attachment. Do not pin a dated id here: Claude Code rejects retired ids locally before
+        # the request can reach that rewrite boundary.
         child_env.update({
             "ANTHROPIC_BASE_URL": proxy.anthropic_base_url,
             "ANTHROPIC_AUTH_TOKEN": proxy.child_token,
-            "ANTHROPIC_MODEL": model.strip(),
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model.strip(),
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": model.strip(),
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": model.strip(),
+            # The SDK environment path does not expand CLI aliases such as ``sonnet``. All four
+            # selectors deliberately use the same current accepted id because no Anthropic model
+            # is actually called; the loopback proxy replaces it with the Goal's Grid model.
+            "ANTHROPIC_MODEL": "claude-fable-5",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-fable-5",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-fable-5",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-fable-5",
         })
         child_env.pop("ANTHROPIC_API_KEY", None)
         started = time.monotonic()
@@ -1076,8 +1095,10 @@ def run_task(job: dict[str, Any],
         except subprocess.TimeoutExpired:
             return failed(f"Claude Goal slice timed out after {timeout:.0f}s", retryable=True)
         except _ChildFailed as exc:
+            proxy_detail = f" ({proxy.last_failure})" if proxy.last_failure else ""
             return failed(
-                f"Claude Goal exited {exc.returncode}: {exc.stderr[-500:].strip()}",
+                f"Claude Goal exited {exc.returncode}: {exc.stderr[-500:].strip()}"
+                f"{proxy_detail}",
                 retryable=True,
             )
         except (Exception, SystemExit) as exc:
@@ -1086,6 +1107,18 @@ def run_task(job: dict[str, Any],
             try:
                 proxy.stop()
             except (Exception, SystemExit):
+                pass
+        if not translator.goal_evaluated and translator.session_id:
+            try:
+                transcript_path = task_agent.session_transcript_path(
+                    transcript_directory, translator.session_id)
+                for event, fields in translator.recover_goal_status(
+                        transcript_path, after_bytes=transcript_start_bytes):
+                    _publish_safely(sink, event, **fields)
+            except (OSError, ValueError):
+                # Preserve the established protocol-drift verdict below. The native transcript is
+                # agent-writable and may vanish or become unsafe; it is never a reason to trust a
+                # completion Grid did not actually read.
                 pass
         if translator.goal_protocol_error:
             reason = translator.goal_protocol_error

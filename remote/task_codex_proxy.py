@@ -17,14 +17,24 @@ class InferenceProxy:
     def __init__(self, upstream_base: str, upstream_token: str | Callable[[], str], *,
                  refresh_token: Callable[[str], bool] | None = None,
                  turn_id: str | None = None, conversation_id: str | None = None,
-                 claim_id: str | None = None):
+                 claim_id: str | None = None, upstream_model: str | None = None):
         self.upstream_base = upstream_base.rstrip("/")
         self.upstream_token = upstream_token
         self.refresh_token = refresh_token
         self.turn_id = turn_id
         self.conversation_id = conversation_id
         self.claim_id = claim_id
+        # Claude Code validates its local model selector against Anthropic's known model names
+        # before sending a request. A Grid model may be Qwen, Gemma, or any company-local name, so
+        # the child uses a native Claude alias and this credential boundary substitutes the exact
+        # immutable Goal model only on the upstream Messages request.
+        self.upstream_model = upstream_model
         self.child_token = secrets.token_urlsafe(32)
+        # Claude Code collapses many gateway failures into "selected model may not exist". Keep a
+        # secret-free server-side reason so the durable Goal retry event says whether the boundary
+        # rejected auth, routing, or the upstream request. Never retain a response body here.
+        self.last_failure: str | None = None
+        self._failure_lock = threading.Lock()
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -58,8 +68,10 @@ class InferenceProxy:
         self.thread.join(timeout=5)
 
     def _forward(self, handler: BaseHTTPRequestHandler) -> None:
+        self._set_failure(None)
         supplied = handler.headers.get("Authorization", "").removeprefix("Bearer ")
         if not secrets.compare_digest(supplied, self.child_token):
+            self._set_failure("the native harness did not present its loopback Goal token")
             self._error(handler, 401, "invalid Goal inference token")
             return
         path = handler.path.split("?", 1)[0]
@@ -70,18 +82,27 @@ class InferenceProxy:
         }
         destination = destinations.get(path)
         if destination is None:
+            self._set_failure(f"the native harness requested unsupported path {path!r}")
             self._error(handler, 404, "Goal proxy only serves /responses and /v1/messages")
             return
         try:
             length = int(handler.headers.get("Content-Length", "0"))
         except ValueError:
+            self._set_failure("the native harness sent an invalid Content-Length")
             self._error(handler, 400, "invalid Content-Length")
             return
         if not 1 <= length <= 32 * 1024 * 1024:
+            self._set_failure("the native harness request body was outside the 1-byte-to-32-MiB limit")
             self._error(handler, 413, "request body must be between 1 byte and 32 MiB")
             return
 
         body = handler.rfile.read(length)
+        try:
+            body = self._upstream_body(destination, body)
+        except (TypeError, ValueError, UnicodeDecodeError):
+            self._set_failure("the native harness sent an invalid JSON inference body")
+            self._error(handler, 400, "invalid Goal inference request body")
+            return
         started = False
         try:
             with httpx.Client(timeout=httpx.Timeout(30.0, read=None)) as client:
@@ -99,6 +120,10 @@ class InferenceProxy:
                         if (response.status_code == 401 and attempt == 0
                                 and self._refresh_upstream_token(token)):
                             continue
+                        if response.status_code >= 400:
+                            self._set_failure(
+                                f"Grid inference returned HTTP {response.status_code} "
+                                f"for /{destination}")
                         handler.send_response(response.status_code)
                         for name in ("content-type", "cache-control", "openai-processing-ms"):
                             if response.headers.get(name):
@@ -111,6 +136,8 @@ class InferenceProxy:
                             handler.wfile.flush()
                         break
         except (httpx.HTTPError, OSError) as exc:
+            self._set_failure(
+                f"Grid inference transport failed for /{destination}: {type(exc).__name__}")
             if not started:
                 try:
                     self._error(handler, 502, f"Grid inference proxy failed: {exc}")
@@ -119,9 +146,23 @@ class InferenceProxy:
         finally:
             handler.close_connection = True
 
+    def _set_failure(self, reason: str | None) -> None:
+        with self._failure_lock:
+            self.last_failure = reason
+
     def _current_upstream_token(self) -> str:
         token = self.upstream_token() if callable(self.upstream_token) else self.upstream_token
         return str(token)
+
+    def _upstream_body(self, destination: str, body: bytes) -> bytes:
+        """Map Claude's recognized local alias to the relay's exact Grid model."""
+        if destination != "messages" or self.upstream_model is None:
+            return body
+        value = json.loads(body)
+        if not isinstance(value, dict):
+            raise ValueError("Messages request must be an object")
+        value["model"] = self.upstream_model
+        return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
     def _refresh_upstream_token(self, stale_token: str) -> bool:
         if self.refresh_token is None:

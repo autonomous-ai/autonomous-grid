@@ -178,6 +178,12 @@ class GridInference:
     refresh: Callable[[str], bool] | None = None
     claim_id: str | None = None
 
+    @property
+    def relay_base_url(self) -> str:
+        """Canonical inference API root shared by every native Goal harness."""
+        base = self.base_url.rstrip("/")
+        return base if base.endswith("/relay/v1") else base + "/relay/v1"
+
     def current_token(self) -> str:
         return str(self.token() if callable(self.token) else self.token)
 
@@ -848,7 +854,7 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
 
     claim = ({"claim_id": inference.claim_id} if inference.claim_id else {})
     proxy = InferenceProxy(
-        inference.base_url.rstrip("/") + "/relay/v1", inference.current_token,
+        inference.relay_base_url, inference.current_token,
         refresh_token=inference.refresh_token,
         turn_id=str(job.get("task_id") or "") or None,
         conversation_id=str(job.get("conversation_id") or "") or None,

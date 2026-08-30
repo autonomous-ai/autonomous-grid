@@ -60,6 +60,38 @@ def test_goal_stream_rejects_a_contradictory_terminal_attachment():
     assert "both met and impossible" in str(translated.goal_protocol_error)
 
 
+def test_goal_stream_recovers_only_the_attachment_appended_by_this_native_run(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(_attachment(met=True, reason="an older slice completed"))
+    previous_size = transcript.stat().st_size
+    with transcript.open("a") as handle:
+        handle.write(json.dumps({"type": "assistant", "message": {"content": []}}) + "\n")
+        handle.write(_attachment(
+            met=False, reason="the current slice still has work", iterations=2, tokens=19))
+
+    translated = task_stream.GoalStreamTranslator()
+    events = translated.recover_goal_status(transcript, after_bytes=previous_size)
+
+    assert [name for name, _fields in events] == ["goal.claude.evaluated"]
+    assert translated.goal_evaluated and not translated.goal_met
+    assert translated.goal_reason == "the current slice still has work"
+    assert translated.goal_iterations == 2 and translated.goal_tokens == 19
+
+    no_new_status = task_stream.GoalStreamTranslator()
+    no_new_status.recover_goal_status(transcript, after_bytes=transcript.stat().st_size)
+    assert not no_new_status.goal_evaluated
+
+
+def test_goal_stream_never_follows_an_agent_replaced_transcript_symlink(tmp_path):
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text(_attachment(met=True, reason="must not be trusted"))
+    transcript = tmp_path / "session.jsonl"
+    transcript.symlink_to(outside)
+
+    with pytest.raises(OSError):
+        task_stream.GoalStreamTranslator().recover_goal_status(transcript)
+
+
 def test_child_is_interrupted_only_after_an_unmet_native_evaluation():
     translator = task_stream.GoalStreamTranslator()
     program = "\n".join((
@@ -82,7 +114,13 @@ def test_claude_goal_uses_native_command_and_loopback_grid_model(tmp_path, monke
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "tasks"))
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "/fake/claude")
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
-    monkeypatch.setattr(task_agent, "link_transcript", lambda *_args: tmp_path / "transcript")
+    transcript_directory = tmp_path / "transcript"
+
+    def link_transcript(*_args):
+        transcript_directory.mkdir()
+        return transcript_directory
+
+    monkeypatch.setattr(task_agent, "link_transcript", link_transcript)
     monkeypatch.setattr(task_agent, "resumable_session", lambda *_args: task_agent.ResumeDecision())
     monkeypatch.setattr(task_agent, "child_env", lambda **_kwargs: {
         "PATH": os.environ["PATH"],
@@ -108,13 +146,18 @@ def test_claude_goal_uses_native_command_and_loopback_grid_model(tmp_path, monke
         translator.feed(json.dumps({
             "type": "assistant", "message": {"usage": {"input_tokens": 10, "output_tokens": 5},
                 "content": [{"type": "text", "text": "implemented feature one"}]}}) + "\n")
-        translator.feed(_attachment(met=False, reason="three features remain"))
-        assert kwargs["stop_when"]()
-        return 130, ""
+        # Claude Code 2.1.251 persists the terminal attachment without always emitting it on
+        # stream-json stdout. The runner must recover this authoritative native checkpoint.
+        (transcript_directory / "claude-session-1.jsonl").write_text(
+            _attachment(met=False, reason="three features remain", tokens=15))
+        assert not kwargs["stop_when"]()
+        return 0, ""
 
     monkeypatch.setattr(task_agent, "agent_argv", argv)
     monkeypatch.setattr(tasks, "_run_child", run_child)
-    monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(
+        tasks.task_codex_proxy.InferenceProxy, "start",
+        lambda proxy: captured.__setitem__("proxy_upstream", proxy.upstream_base))
     monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "stop", lambda self: None)
 
     outcome = tasks.run_task({
@@ -135,8 +178,12 @@ def test_claude_goal_uses_native_command_and_loopback_grid_model(tmp_path, monke
     assert outcome.session_id == "claude-session-1"
     assert outcome.goal_turns_completed == 3 and outcome.goal_tokens_used == 115
     assert outcome.output == "implemented feature one"
-    assert captured["env"]["ANTHROPIC_MODEL"] == "grid-model"
+    assert captured["env"]["ANTHROPIC_MODEL"] == "claude-fable-5"
+    assert captured["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-fable-5"
+    assert captured["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-fable-5"
+    assert captured["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "claude-fable-5"
     assert captured["env"]["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
+    assert captured["proxy_upstream"] == "https://grid.example/relay/v1"
     assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] != "GRID-SECRET"
     assert {name for name in captured["env"] if name.startswith("ANTHROPIC_")} == {
         "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
@@ -201,7 +248,11 @@ def test_post_spawn_claude_harness_failures_are_retryable(tmp_path, monkeypatch,
     monkeypatch.setattr(task_agent, "resumable_session", lambda *_args: task_agent.ResumeDecision())
     monkeypatch.setattr(task_agent, "child_env", lambda **_kwargs: {"PATH": os.environ["PATH"]})
     monkeypatch.setattr(task_agent, "agent_argv", lambda *_args, **_kwargs: ["/fake/claude"])
-    monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "start", lambda self: None)
+    def start_proxy(proxy):
+        if failure == "exit":
+            proxy.last_failure = "Grid inference returned HTTP 422 for /messages"
+
+    monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "start", start_proxy)
     monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "stop", lambda self: None)
 
     def run_child(_argv, **_kwargs):
@@ -219,6 +270,8 @@ def test_post_spawn_claude_harness_failures_are_retryable(tmp_path, monkeypatch,
     }, inference=task_codex.GridInference("https://grid.example/relay/v1", "secret"))
 
     assert outcome.state == "failed" and outcome.retryable is True
+    if failure == "exit":
+        assert "Grid inference returned HTTP 422 for /messages" in str(outcome.error)
 
 
 def test_missing_claude_goal_attachment_quarantines_only_that_binary_revision(

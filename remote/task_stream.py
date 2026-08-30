@@ -21,7 +21,9 @@ to lose the run. Everything unrecognised is ignored rather than guessed at, whic
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -37,6 +39,7 @@ Event = tuple[str, dict[str, Any]]
 # not merely 4 for UTF-8.
 MAX_TEXT_CHARS = MAX_EVENT_BYTES // 6 - 200
 TRUNCATION_MARKER = "… [truncated]"
+_GOAL_TRANSCRIPT_RECOVERY_BYTES = 2 * 1024 * 1024
 
 
 # Credential shapes that must never survive into a published event. The provider's own credential is
@@ -358,6 +361,56 @@ class GoalStreamTranslator(StreamTranslator):
             "tokens": self.goal_tokens,
             "protocol_error": self.goal_protocol_error,
         })]
+
+    def recover_goal_status(self, path: "os.PathLike[str]", *, after_bytes: int = 0) -> list[Event]:
+        """Recover attachments Claude persisted but omitted from ``stream-json`` stdout.
+
+        Claude Code 2.1.251 writes the terminal ``goal_status`` attachment to its native JSONL but
+        does not always emit that record in print-mode stdout. Only bytes appended by this run are
+        eligible on resume, so an older successful attachment can never complete a later slice.
+        The scan is tail-bounded and opens without following symlinks because the transcript lives
+        in an agent-writable worktree.
+        """
+        if self.goal_evaluated:
+            return []
+        try:
+            offset = max(0, int(after_bytes))
+        except (TypeError, ValueError, OverflowError):
+            offset = 0
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("Claude transcript is not a regular file")
+            start = max(offset, info.st_size - _GOAL_TRANSCRIPT_RECOVERY_BYTES)
+            os.lseek(fd, start, os.SEEK_SET)
+            chunks: list[bytes] = []
+            remaining = _GOAL_TRANSCRIPT_RECOVERY_BYTES
+            while remaining:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+        finally:
+            os.close(fd)
+        if start > offset:
+            _partial, _separator, payload = payload.partition(b"\n")
+
+        events: list[Event] = []
+        for raw in payload.splitlines():
+            try:
+                record = json.loads(raw)
+            except (ValueError, RecursionError, UnicodeDecodeError):
+                continue
+            if not isinstance(record, dict) or record.get("type") != "attachment":
+                continue
+            attachment = record.get("attachment")
+            if isinstance(attachment, dict) and attachment.get("type") == "goal_status":
+                events.extend(self._goal_status(attachment))
+        return _redacted(events)
 
 
 # The keys a tool uses to name the thing it is acting on, in the order they are preferred. Only

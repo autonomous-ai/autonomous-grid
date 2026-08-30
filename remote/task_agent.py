@@ -481,6 +481,13 @@ def transcript_dir(workspace: Path, member_key: str) -> Path:
             / _safe_segment("member key", member_key))
 
 
+def session_transcript_path(directory: Path, session_id: str) -> Path:
+    """A validated native Claude transcript path inside Grid's linked directory."""
+    if not isinstance(session_id, str) or not _SAFE_SESSION_ID.match(session_id):
+        raise ValueError(f"Claude returned unsafe session id {session_id!r}")
+    return directory / f"{session_id}.jsonl"
+
+
 def link_transcript(workspace: Path, member_key: str) -> Path:
     """Point Claude Code's per-cwd transcript folder at the workspace, and return the target.
 
@@ -576,7 +583,7 @@ def resumable_session(workspace: Path, requested: str | None, member_key: str) -
         # `workspace_for` applies to a project id, for the same reason: `..` and separators resolve.
         return ResumeDecision(reason=f"the relay named session {requested!r}, which is not a safe id")
 
-    path = transcript_dir(workspace, member_key) / f"{requested}.jsonl"
+    path = session_transcript_path(transcript_dir(workspace, member_key), requested)
     if path.is_symlink():
         # Nothing legitimate plants one: the transcript is written by the agent through our own
         # symlink, and a checkout cannot create one (`core.symlinks=false`). Following it would read
