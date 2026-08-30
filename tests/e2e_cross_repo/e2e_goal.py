@@ -771,7 +771,13 @@ def test_parent_codex_spawns_claude_child_then_codex_fans_it_in(
     assert (destination / "README.md").is_file()
     assert (destination / "FINAL.md").is_file()
     evidence = relay_client.get_goal_evidence(relay, owner_token, parent["id"])
-    assert evidence["relationships"]["children"][0]["id"] == child_id
+    relation = evidence["relationships"]["children"][0]
+    assert relation["id"] == child_id
+    assert relation["tokens_charged"] == child_done["tokens_used"]
+    assert complete["child_tokens_reserved"] == 0
+    assert complete["descendant_tokens_used"] == child_done["tokens_used"]
+    assert (complete["tokens_used"]
+            == complete["own_tokens_used"] + complete["descendant_tokens_used"])
     assert all(run["passed"] for run in evidence["eval_runs"])
     request = next(item["event"] for item in evidence["attempt_events"]
                    if item["event"].get("type") == "goal.act.request")
