@@ -1086,8 +1086,91 @@ def get_goal(signaling_url: str, access_token: str, goal_id: str) -> dict[str, A
 
 
 def get_goal_evidence(signaling_url: str, access_token: str, goal_id: str) -> dict[str, Any]:
-    return _task_oneshot(signaling_url, access_token, "GET",
-                         f"/relay/v1/goals/{quote(goal_id, safe='')}/evidence")
+    """Fetch and assemble bounded turn pages from a Goal-aware relay.
+
+    Older relays ignore the pagination query and return the legacy whole record; absence of the
+    pagination object is therefore the compatibility signal, not an extra version probe.
+    """
+    path = f"/relay/v1/goals/{quote(goal_id, safe='')}/evidence"
+
+    def fetch(cursor: int) -> dict[str, Any]:
+        answer = _task_oneshot(
+            signaling_url, access_token, "GET", path, timeout=60.0,
+            params={"limit": "20", "cursor": str(cursor)})
+        if not isinstance(answer, dict):
+            raise RelayError("get_goal_evidence returned a malformed body")
+        return answer
+
+    record = fetch(0)
+    paging = record.get("pagination")
+    if not isinstance(paging, dict):
+        return record
+
+    total = paging.get("total_turns")
+    expected_cursor = 0
+    pages = 0
+    baseline_goal = record.get("goal")
+    baseline_relationships = record.get("relationships")
+    combined = record
+    page = record
+    combined_trajectory = (combined.get("trajectory")
+                           if isinstance(combined.get("trajectory"), dict) else {})
+    for key in ("turns", "attempt_events", "inference", "eval_runs"):
+        if not isinstance(combined.get(key), list):
+            raise RelayError(f"Goal evidence page has malformed {key}")
+    for key in ("pruned_turn_branches", "worktree_chain", "retry_checkpoint_chain"):
+        if not isinstance(combined_trajectory.get(key), list):
+            raise RelayError(f"Goal evidence page has malformed trajectory.{key}")
+
+    while True:
+        paging = page.get("pagination")
+        if (not isinstance(paging, dict)
+                or paging.get("cursor") != expected_cursor
+                or not isinstance(paging.get("limit"), int)
+                or paging["limit"] < 1
+                or not isinstance(total, int)
+                or total < 0
+                or paging.get("total_turns") != total):
+            raise RelayError("Goal evidence pagination metadata is inconsistent")
+        page_turns = page["turns"]
+        if len(page_turns) > paging["limit"]:
+            raise RelayError("Goal evidence page exceeds its declared turn limit")
+        consumed = expected_cursor + len(page_turns)
+        expected_next = consumed if consumed < total else None
+        if (paging.get("next_cursor") != expected_next
+                or paging.get("complete") is not (expected_next is None)):
+            raise RelayError("Goal evidence pagination cursor is not contiguous")
+        pages += 1
+        if expected_next is None:
+            break
+        expected_cursor = expected_next
+        page = fetch(expected_cursor)
+        paging = page.get("pagination")
+        if (page.get("schema_version") != combined.get("schema_version")
+                or page.get("goal") != baseline_goal
+                or page.get("relationships") != baseline_relationships):
+            raise RelayError("Goal changed while its evidence pages were being exported")
+        page_trajectory = (page.get("trajectory")
+                           if isinstance(page.get("trajectory"), dict) else {})
+        for key in ("turns", "attempt_events", "inference", "eval_runs"):
+            values = page.get(key)
+            if not isinstance(values, list):
+                raise RelayError(f"Goal evidence page has malformed {key}")
+            combined[key].extend(values)
+        for key in ("pruned_turn_branches", "worktree_chain", "retry_checkpoint_chain"):
+            values = page_trajectory.get(key)
+            if not isinstance(values, list):
+                raise RelayError(f"Goal evidence page has malformed trajectory.{key}")
+            combined_trajectory[key].extend(values)
+
+    if len(combined["turns"]) != total:
+        raise RelayError("Goal evidence pagination ended before every turn was exported")
+    turn_ids = [turn.get("id") for turn in combined["turns"] if isinstance(turn, dict)]
+    if len(turn_ids) != total or len(set(turn_ids)) != total:
+        raise RelayError("Goal evidence pagination returned duplicate or malformed turns")
+    combined.pop("pagination", None)
+    combined["export"] = {"paginated": True, "pages": pages, "total_turns": total}
+    return combined
 
 
 def control_goal(signaling_url: str, access_token: str, goal_id: str,

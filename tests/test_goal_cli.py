@@ -189,6 +189,66 @@ def test_goal_evidence_prints_machine_readable_audit_record(monkeypatch, capsys)
     assert json.loads(capsys.readouterr().out)["turns"][0]["provider_node_id"] == "node-A"
 
 
+def test_goal_evidence_client_assembles_contiguous_bounded_pages(monkeypatch):
+    from remote import relay
+
+    common = {
+        "schema_version": 1, "goal": {"id": "goal-1", "status": "complete"},
+        "relationships": {"parent_goal_id": None, "children": []},
+    }
+    pages = [{
+        **common,
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
+                       "worktree_chain": [], "retry_checkpoint_chain": []},
+        "turns": [{"id": "turn-1"}], "attempt_events": [{"turn_id": "turn-1"}],
+        "inference": [{"turn_id": "turn-1"}], "eval_runs": [{"turn_id": "turn-1"}],
+        "pagination": {"cursor": 0, "limit": 1, "total_turns": 2,
+                       "next_cursor": 1, "complete": False},
+    }, {
+        **common,
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": ["turn-2"],
+                       "worktree_chain": [{"from_turn_id": "turn-1",
+                                           "to_turn_id": "turn-2"}],
+                       "retry_checkpoint_chain": [{"turn_id": "turn-2"}]},
+        "turns": [{"id": "turn-2"}], "attempt_events": [{"turn_id": "turn-2"}],
+        "inference": [{"turn_id": "turn-2"}], "eval_runs": [{"turn_id": "turn-2"}],
+        "pagination": {"cursor": 1, "limit": 1, "total_turns": 2,
+                       "next_cursor": None, "complete": True},
+    }]
+    calls = []
+
+    def request(*_args, **kwargs):
+        calls.append(kwargs)
+        cursor = int(kwargs["params"]["cursor"])
+        return json.loads(json.dumps(pages[cursor]))
+
+    monkeypatch.setattr(relay, "_task_oneshot", request)
+    record = relay.get_goal_evidence("http://relay", "token", "goal-1")
+    assert [turn["id"] for turn in record["turns"]] == ["turn-1", "turn-2"]
+    assert [item["turn_id"] for item in record["attempt_events"]] == ["turn-1", "turn-2"]
+    assert record["trajectory"]["pruned_turn_branches"] == ["turn-2"]
+    assert len(record["trajectory"]["worktree_chain"]) == 1
+    assert record["export"] == {"paginated": True, "pages": 2, "total_turns": 2}
+    assert [call["params"] for call in calls] == [
+        {"limit": "20", "cursor": "0"}, {"limit": "20", "cursor": "1"}]
+
+    pages[1]["pagination"]["cursor"] = 0
+    with pytest.raises(relay.RelayError, match="pagination metadata is inconsistent"):
+        relay.get_goal_evidence("http://relay", "token", "goal-1")
+
+
+def test_goal_evidence_client_accepts_legacy_unpaginated_relay(monkeypatch):
+    from remote import relay
+
+    legacy = {"schema_version": 1, "goal": {"id": "goal-1"}, "turns": []}
+    calls = []
+    monkeypatch.setattr(
+        relay, "_task_oneshot",
+        lambda *_args, **kwargs: calls.append(kwargs) or legacy)
+    assert relay.get_goal_evidence("http://relay", "token", "goal-1") is legacy
+    assert len(calls) == 1 and calls[0]["params"] == {"limit": "20", "cursor": "0"}
+
+
 def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, capsys):
     from cli import goal
     from remote import relay

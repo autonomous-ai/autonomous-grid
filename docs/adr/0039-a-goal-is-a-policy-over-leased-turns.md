@@ -224,6 +224,12 @@ evidence. A completion retry that collides with a damaged idempotent eval row at
 the cached verdict to `error`, clears acceptance and blocks the Goal; it never 500-loops or retains
 an unverifiable passing label.
 
+Evidence transport is turn-paginated without changing the assembled schema. A page contains at most
+100 turns (the CLI requests 20), only their event/inference/eval rows, and ancestry edges whose
+destination is on that page. The client rejects gaps, duplicate turns, total changes, or Goal and
+relationship changes between pages, then records page count and total turns in export metadata.
+Offline verification recomputes that total and requires one worktree edge per adjacent turn.
+
 If native completion is nominated and evaluation fails, the Goal stays active. The next turn gets
 the failed checks and evidence as a relay-authored handoff block. In the synchronous file-eval slice,
 an evaluator infrastructure error leaves the Goal `blocked`, never complete; leased asynchronous

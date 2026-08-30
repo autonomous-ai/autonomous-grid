@@ -271,6 +271,14 @@ attempt identity matters because a reclaimed turn keeps the same turn id while C
 may be replaced by Claude on another. Failed requests remain useful failure evidence, but only
 `completed` requests can prove that a turn actually executed through Grid inference.
 
+The CLI requests evidence in bounded 20-turn pages. Each relay page loads only those turns and their
+events, inference, evals, and Git ancestry edges; the client requires contiguous cursors, a stable
+Goal/relationship snapshot, unique turn ids, and the declared total before assembling the familiar
+schema. `grid goal evidence --verify` additionally requires exactly one ancestry edge per turn
+handoff. A Goal that changes during an active export fails clearly and can be retried instead of
+producing a mixed-time training record. Relays predating pagination still return the legacy whole
+record and remain readable.
+
 Malformed stored event or evaluator JSON never makes the whole evidence export unavailable. Grid
 exports an explicit corruption marker so an operator can inspect the surviving trajectory, while
 `grid goal evidence --verify` rejects the record. Damaged evidence therefore remains auditable but

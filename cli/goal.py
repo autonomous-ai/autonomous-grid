@@ -164,6 +164,15 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     if not turns:
         failures.append("no Goal turns were recorded")
         return failures
+    recorded_turn_ids = [turn.get("id") for turn in turns if isinstance(turn, dict)]
+    if len(recorded_turn_ids) != len(turns) or len(set(recorded_turn_ids)) != len(turns):
+        failures.append("Goal evidence contains duplicate or malformed turn identities")
+    export = record.get("export")
+    if export is not None:
+        if (not isinstance(export, dict) or export.get("paginated") is not True
+                or not isinstance(export.get("pages"), int) or export["pages"] < 1
+                or export.get("total_turns") != len(turns)):
+            failures.append("Goal evidence has inconsistent paginated export metadata")
 
     trajectory = (record.get("trajectory")
                   if isinstance(record.get("trajectory"), dict) else {})
@@ -294,6 +303,9 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     retry_checkpoint_chain = (
         trajectory.get("retry_checkpoint_chain")
         if isinstance(trajectory.get("retry_checkpoint_chain"), list) else [])
+    if len(worktree_chain) != max(0, len(turns) - 1):
+        failures.append(
+            "Goal worktree ancestry chain does not contain exactly one edge per turn handoff")
     for index, (previous, current) in enumerate(pairwise(turns), 2):
         if not isinstance(previous, dict) or not isinstance(current, dict):
             continue
