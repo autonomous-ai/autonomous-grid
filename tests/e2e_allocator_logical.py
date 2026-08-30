@@ -338,10 +338,25 @@ def run(
         if scenario == "contention"
         else nodes
     )
-    claimed_memory_mb = (
-        8_000 if scenario in ("contention", "preemption") else 256
-    )
     physical = collect_device_info()
+    # The contention tests need a non-trivial capacity claim so the planner cannot place both
+    # models on one logical host.  Derive that claim from current free memory, though: a fixed
+    # 8 GiB claim made the harness itself infeasible whenever macOS had less than 32 GiB free at
+    # the start of a four-node run.  ``max_colocated_models=1`` below remains the authoritative
+    # one-model-per-host constraint; this value only keeps the synthetic accounting realistic.
+    logical_available_mb = max(
+        256,
+        int(
+            float((physical.get("memory") or {}).get("available_gb") or 0)
+            * 1024
+            / nodes
+        ),
+    )
+    claimed_memory_mb = (
+        min(8_000, max(256, logical_available_mb // 2))
+        if scenario in ("contention", "preemption")
+        else 256
+    )
     artifact_sha256 = LlamaCppBackend().artifact_sha256(model)
     second_artifact_sha256 = (
         LlamaCppBackend().artifact_sha256(second_model)

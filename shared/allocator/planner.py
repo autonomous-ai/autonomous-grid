@@ -170,6 +170,7 @@ _PairSeconds = tuple[tuple[tuple[str, str], float], ...]
 class _RepackSearchState:
     """Bound one deterministic augmenting search and prune placement cycles."""
 
+    max_steps: int = _MAX_REPACK_SEARCH_STATES
     explored_steps: int = 0
     visited: set[
         tuple[
@@ -179,7 +180,7 @@ class _RepackSearchState:
     ] = field(default_factory=set)
 
     def consume_step(self) -> bool:
-        if self.explored_steps >= _MAX_REPACK_SEARCH_STATES:
+        if self.explored_steps >= self.max_steps:
             return False
         self.explored_steps += 1
         return True
@@ -297,6 +298,7 @@ class PlacementPlanner:
         warm_by_pair = _validated_startup_seconds(startup_seconds)
         load_by_pair = _validated_load_seconds(load_seconds)
         hints: dict[str, dict[str, object]] = {}
+        relocation_cache: dict[tuple[str, str, frozenset[str]], str] = {}
 
         def relocation_target(
             victim: ModelProfile,
@@ -306,6 +308,10 @@ class PlacementPlanner:
         ) -> str:
             """Find a host that can receive a required victim before its current copy drains."""
 
+            cache_key = (victim.model_id, blocked_node_id, excluded_node_ids)
+            cached = relocation_cache.get(cache_key)
+            if cached is not None:
+                return cached
             candidates: list[tuple[float, int, str]] = []
             for candidate_node in node_list:
                 if (
@@ -361,7 +367,9 @@ class PlacementPlanner:
                         candidate_node.node_id,
                     )
                 )
-            return min(candidates)[2] if candidates else ""
+            result = min(candidates)[2] if candidates else ""
+            relocation_cache[cache_key] = result
+            return result
 
         for model in model_list:
             rejected: Counter[str] = Counter()
@@ -691,6 +699,18 @@ class PlacementPlanner:
         colocation_policy_active = any(
             profile.max_colocated_models or profile.colocation_excludes
             for profile in model_list
+        )
+        # Augmenting placement repair is deliberately bounded because its backtracking space is
+        # exponential. Preserve the full search for the 2/4/8-node operating envelope while
+        # scaling the per-replica budget down for very large node×model matrices. Exhaustion is
+        # fail-safe: the planner reports an unsatisfied replica instead of emitting an unsafe plan
+        # or blocking the controller for seconds.
+        repack_search_steps = min(
+            _MAX_REPACK_SEARCH_STATES,
+            max(
+                512,
+                1_000_000 // max(1, len(node_list) * len(model_list)),
+            ),
         )
         fit_cache: dict[tuple[str, str, int, int, int, int, int], bool] = {}
 
@@ -1258,9 +1278,10 @@ class PlacementPlanner:
             if depth > _MAX_REPACK_DEPTH:
                 return False
             if search_state is None:
-                # Each missing replica gets the same bounded search effort. A prior failed search
-                # or unrelated ineligible inventory cannot change an otherwise identical result.
-                search_state = _RepackSearchState()
+                # Each missing replica gets the same scale-aware bounded search effort. A prior
+                # failed search or unrelated ineligible inventory cannot change an otherwise
+                # identical result.
+                search_state = _RepackSearchState(max_steps=repack_search_steps)
             pending_signature = (
                 (placement_model.model_id, replica_index, required_domain_floor),
                 *(

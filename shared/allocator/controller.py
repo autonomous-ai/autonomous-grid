@@ -38,7 +38,11 @@ from shared.allocator.models import (
     ResidencyState,
     canonical_sha256,
 )
-from shared.allocator.planner import PlacementPlanner, PlannerPolicy
+from shared.allocator.planner import (
+    PlacementPlanner,
+    PlannerPolicy,
+    desired_replica_count,
+)
 from shared.allocator.reconcile import (
     MutationRecord,
     MutationStatus,
@@ -1315,6 +1319,19 @@ class AllocatorController:
             return None
 
         row_by_workload = {str(row["workload"]): row for row in active_rows}
+        # Every portfolio candidate invokes the complete placement planner. Keep the original
+        # exhaustive-ish budget for small fleets, but bound controller latency as the
+        # node×workload decision surface grows. At the supported maximum the exploitation
+        # portfolio still receives one complete planner validation; intermediate fleets spend a
+        # smoothly decreasing budget on the candidates ranked by the cheap set-cover beam.
+        evaluation_limit = (
+            _MAX_JOINT_PORTFOLIO_EVALUATIONS
+            if len(nodes) <= 8
+            else min(
+                _MAX_JOINT_PORTFOLIO_EVALUATIONS,
+                max(1, 128 // max(1, len(nodes) * len(active_rows))),
+            )
+        )
         selectable_by_workload = {
             workload: [
                 candidate
@@ -1404,15 +1421,20 @@ class AllocatorController:
         # node, so executable-plan identity hashing would serialize the same fleet dozens of times
         # without adding fencing safety. The authoritative plan built by `_tick_locked` retains its
         # normal digest and generation.
-        baseline = self.planner.plan(
-            nodes,
-            profiles,
-            direct,
-            now=now,
-            compute_input_digest=False,
-        )
-        baseline_targets = dict(baseline.desired_replicas)
         direct_by_model = {forecast.model_id: forecast for forecast in direct}
+        baseline_targets = {
+            profile.model_id: desired_replica_count(
+                profile,
+                direct_by_model.get(profile.model_id),
+                nodes=nodes,
+                now=now,
+                policy=self.planner.policy,
+                # Direct service is a floor for portfolio optimization. A conservative cold-start
+                # horizon avoids under-protecting it and removes a redundant complete fleet plan.
+                startup_horizon_seconds=profile.load_seconds + profile.warm_seconds,
+            )
+            for profile in profiles
+        }
 
         def direct_pressure(forecast: DemandForecast | None) -> bool:
             if forecast is None:
@@ -1737,6 +1759,69 @@ class AllocatorController:
             ),
         )
         best_metric = metric(selection)
+
+        if not scarce_portfolio:
+            full_pressure = 0.0
+            full_requests = 0.0
+            for row in row_by_workload.values():
+                confidence = 0.5 + 0.5 * float(row.get("confidence") or 0.0)
+                full_pressure += max(
+                    1e-6,
+                    float(row.get("offered_concurrency") or 0.0),
+                ) * confidence
+                full_requests += max(
+                    1e-6,
+                    float(row.get("requests_per_minute") or 0.0),
+                ) * confidence
+
+            # When the exploitation portfolio already places every requested replica and covers
+            # all offered work, additional joint plans cannot improve admission or throughput.
+            # The only useful remaining move is one bounded exploration (the policy permits one
+            # exploration model at a time), so rank those swaps cheaply and validate only the
+            # strongest one with the authoritative planner. Scarce or under-served fleets retain
+            # the complete set-cover/coordinate search below.
+            fully_served = bool(
+                best_metric[3] == 0.0
+                and best_metric[1] >= full_pressure - 1e-9
+                and best_metric[2] >= full_requests - 1e-9
+            )
+            if fully_served:
+                exploration_trials: list[
+                    tuple[float, str, str, dict[str, str]]
+                ] = []
+                for workload, model_ids in options.items():
+                    incumbent_id = selection[workload]
+                    incumbent = candidate_by_workload[workload][incumbent_id]
+                    incumbent_score = float(incumbent.get("score") or 0.0)
+                    row = row_by_workload[workload]
+                    pressure = max(
+                        1e-6,
+                        float(row.get("offered_concurrency") or 0.0),
+                    ) * (0.5 + 0.5 * float(row.get("confidence") or 0.0))
+                    for model_id in model_ids:
+                        if model_id == incumbent_id:
+                            continue
+                        candidate_score = float(
+                            candidate_by_workload[workload][model_id].get("score")
+                            or 0.0
+                        )
+                        trial = dict(selection)
+                        trial[workload] = model_id
+                        exploration_trials.append(
+                            (
+                                pressure * (candidate_score - incumbent_score),
+                                workload,
+                                model_id,
+                                trial,
+                            )
+                        )
+                if exploration_trials:
+                    _, _, _, trial = max(exploration_trials)
+                    trial_metric = metric(trial)
+                    if trial_metric > best_metric:
+                        selection = trial
+                return dict(sorted(selection.items()))
+
         def subset_selection(model_subset: frozenset[str]) -> dict[str, str]:
             result: dict[str, str] = {}
             for workload, candidates in candidate_by_workload.items():
@@ -1818,7 +1903,7 @@ class AllocatorController:
                         tuple(sorted(model_subset)),
                     ),
                     reverse=True,
-                )[:_MAX_JOINT_PORTFOLIO_EVALUATIONS]
+                )[:evaluation_limit]
                 discovered.update(beam)
             subsets = list(discovered)
         subsets.sort(
@@ -1829,7 +1914,7 @@ class AllocatorController:
             reverse=True,
         )
         for model_subset in subsets:
-            if len(evaluation_cache) >= _MAX_JOINT_PORTFOLIO_EVALUATIONS:
+            if len(evaluation_cache) >= evaluation_limit:
                 break
             trial = subset_selection(model_subset)
             trial_metric = metric(trial)
@@ -1849,7 +1934,7 @@ class AllocatorController:
             # original bounded coordinate search. Scarce fleets use the explicit set-cover search
             # above, which already crosses multi-move local optima.
             for model_id in shared_models:
-                if len(evaluation_cache) >= _MAX_JOINT_PORTFOLIO_EVALUATIONS:
+                if len(evaluation_cache) >= evaluation_limit:
                     break
                 trial = dict(selection)
                 for workload, model_ids in options.items():
@@ -1865,7 +1950,7 @@ class AllocatorController:
                 best_model = selection[workload]
                 best_metric = metric(selection)
                 for model_id in options[workload]:
-                    if len(evaluation_cache) >= _MAX_JOINT_PORTFOLIO_EVALUATIONS:
+                    if len(evaluation_cache) >= evaluation_limit:
                         break
                     trial = dict(selection)
                     trial[workload] = model_id
@@ -1876,7 +1961,7 @@ class AllocatorController:
                 if best_model != selection[workload]:
                     selection[workload] = best_model
                     changed = True
-            if not changed or len(evaluation_cache) >= _MAX_JOINT_PORTFOLIO_EVALUATIONS:
+            if not changed or len(evaluation_cache) >= evaluation_limit:
                 break
         return dict(sorted(selection.items()))
 
@@ -2993,6 +3078,32 @@ def _spare_canary_hints(
         placement_hints=result,
         workload_forecasts=workload_forecasts,
     )
+    weak_rows = sorted(
+        (
+            row
+            for row in projections
+            if str(row.get("workload") or "") in {"image", "video"}
+            and float(row.get("requests_per_minute") or 0.0) > 0
+            and not intelligence.portfolio_evidence_ready(
+                int(row.get("samples") or 0),
+                float(row.get("offered_concurrency") or 0.0),
+            )
+            and intelligence.portfolio_evidence_ready(
+                int(row.get("samples") or 0),
+                float(row.get("offered_concurrency") or 0.0),
+                immediately_feasible=True,
+            )
+        ),
+        key=lambda row: (
+            -float(row.get("offered_concurrency") or 0.0),
+            str(row.get("workload") or ""),
+        ),
+    )
+    if not weak_rows:
+        # This proof exists solely to authorize low-evidence media canaries. Once every active
+        # media workload has ordinary evidence (or none is active), a complete counterfactual
+        # fleet plan cannot change any downstream admission decision.
+        return result
     ordinary_rows = tuple(
         row
         for row in projections
@@ -3084,27 +3195,6 @@ def _spare_canary_hints(
         speculative_budget = 0
 
     profile_by_id = {profile.model_id: profile for profile in profile_list}
-    weak_rows = sorted(
-        (
-            row
-            for row in projections
-            if str(row.get("workload") or "") in {"image", "video"}
-            and float(row.get("requests_per_minute") or 0.0) > 0
-            and not intelligence.portfolio_evidence_ready(
-                int(row.get("samples") or 0),
-                float(row.get("offered_concurrency") or 0.0),
-            )
-            and intelligence.portfolio_evidence_ready(
-                int(row.get("samples") or 0),
-                float(row.get("offered_concurrency") or 0.0),
-                immediately_feasible=True,
-            )
-        ),
-        key=lambda row: (
-            -float(row.get("offered_concurrency") or 0.0),
-            str(row.get("workload") or ""),
-        ),
-    )
     authorized_new_models: set[str] = set()
     for row in weak_rows:
         model_id = str(row.get("chosen_model") or "")
@@ -3232,14 +3322,23 @@ def _portfolio_selection_hints(
         chosen_models=preferred_selection,
         workload_forecasts=workload_forecasts,
     )
-    protection_plan = planner.plan(
-        node_list,
-        profile_list,
-        protection_forecasts,
-        now=now,
-        compute_input_digest=False,
-    )
-    demand_replica_floors = dict(protection_plan.desired_replicas)
+    protection_by_model = {
+        forecast.model_id: forecast for forecast in protection_forecasts
+    }
+    demand_replica_floors = {
+        profile.model_id: desired_replica_count(
+            profile,
+            protection_by_model.get(profile.model_id),
+            nodes=node_list,
+            now=now,
+            policy=planner.policy,
+            # The fence must not under-protect demand because a currently cached artifact makes
+            # one node look unusually quick. A full cold-start horizon is conservative and avoids
+            # running a complete placement search merely to recover its replica-count formula.
+            startup_horizon_seconds=profile.load_seconds + profile.warm_seconds,
+        )
+        for profile in profile_list
+    }
     preferred_models = frozenset(preferred_selection.values())
 
     def has_direct_pressure(forecast: DemandForecast) -> bool:
