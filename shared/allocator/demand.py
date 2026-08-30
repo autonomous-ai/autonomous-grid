@@ -336,6 +336,17 @@ class DemandTracker:
             sequence_edges=validated_edges,
         )
 
+    def model_ids(self) -> tuple[str, ...]:
+        """Return stable demand keys without serializing retained samples.
+
+        ``to_dict`` is the durable-state boundary and deliberately deep-copies every sample.  Hot
+        planning paths need only the keys; making that distinction explicit prevents fleet
+        intelligence from repeatedly encoding the complete K-user history just to discover which
+        workloads exist.
+        """
+
+        return tuple(sorted(self._samples))
+
     def clear(self, model_id: str | None = None) -> None:
         if model_id is None:
             self._samples.clear()

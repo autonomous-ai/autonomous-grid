@@ -333,7 +333,7 @@ class WorkloadIntelligence:
         self, *, now: float | None = None
     ) -> tuple[DemandForecast, ...]:
         timestamp = time.time() if now is None else float(now)
-        keys = tuple(sorted((self.demand.to_dict().get("models") or {}).keys()))
+        keys = self.demand.model_ids()
         return tuple(self.demand.forecast(key, now=timestamp) for key in keys)
 
     def portfolio_workload_forecast_map(
@@ -344,14 +344,12 @@ class WorkloadIntelligence:
         """Prepare one immutable-snapshot workload forecast map for portfolio search.
 
         A controller pass evaluates many model mappings against the same bounded demand snapshot.
-        Preparing these forecasts once avoids repeatedly serializing the tracker for every
-        counterfactual without changing any demand or placement decision.
+        Preparing these forecasts once avoids recomputing the tracker for every counterfactual
+        without changing any demand or placement decision.
         """
 
         timestamp = time.time() if now is None else float(now)
-        keys = tuple(
-            sorted((self.unbound_demand.to_dict().get("models") or {}).keys())
-        )
+        keys = self.unbound_demand.model_ids()
         return self._portfolio_workload_forecasts(keys, now=timestamp)
 
     def portfolio_evidence_ready(

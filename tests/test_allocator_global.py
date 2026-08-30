@@ -1464,6 +1464,18 @@ def test_demand_tracker_bounds_history_and_round_trips():
     assert restored.to_dict() == tracker.to_dict()
 
 
+def test_demand_tracker_model_ids_are_sorted_and_do_not_expose_history():
+    tracker = DemandTracker()
+    tracker.observe("z", timestamp=1)
+    tracker.observe("a", timestamp=1)
+
+    keys = tracker.model_ids()
+    tracker.clear("a")
+
+    assert keys == ("a", "z")
+    assert tracker.model_ids() == ("z",)
+
+
 def test_clock_skewed_model_does_not_suppress_another_models_fresh_demand():
     tracker = DemandTracker(window_seconds=100, bucket_seconds=10)
     tracker.observe("healthy", requests=10, timestamp=100, service_seconds=1)

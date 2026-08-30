@@ -1855,8 +1855,7 @@ class AllocatorController:
         """Drop telemetry keys that cannot influence any configured active profile."""
 
         with self._demand_lock:
-            model_ids = tuple((self.demand.to_dict().get("models") or {}).keys())
-            for model_id in model_ids:
+            for model_id in self.demand.model_ids():
                 if model_id not in self._observable_models:
                     self.demand.clear(model_id)
 
