@@ -1321,11 +1321,14 @@ class AllocatorController:
             evaluation_cache[key] = result
             return result
 
-        # Heaviest and best-observed workloads choose first. Each trial still evaluates the full
-        # current mapping, so an early specialist sees the capacity needs of every later workload.
+        # Heaviest and best-observed workloads choose first. Use offered concurrency before raw
+        # request count so a slow image/video job receives its true device-time weight rather than
+        # losing the bounded search budget to many cheap embedding calls. Each trial still evaluates
+        # the full current mapping, so an early specialist sees every later workload's capacity.
         order = sorted(
             row_by_workload,
             key=lambda workload: (
+                -float(row_by_workload[workload].get("offered_concurrency") or 0.0),
                 -float(row_by_workload[workload].get("requests_per_minute") or 0.0),
                 -float(row_by_workload[workload].get("confidence") or 0.0),
                 workload,

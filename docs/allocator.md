@@ -104,6 +104,8 @@ service-time-aware resource-pressure coverage, then request coverage, minimizes 
 and compares measured utility and transition cost. Resource pressure uses offered concurrency—the
 arrival rate multiplied by measured service time, plus queued work—so a long image or video job is
 not incorrectly treated as cheaper than a short embedding call merely because fewer jobs arrive.
+The bounded coordinate search also visits workloads in offered-concurrency order, ensuring its
+finite evaluation budget is spent on the workloads consuming the most device time first.
 A shared generalist can therefore beat two slightly better specialists when
 only one model slot is available. Search considers at most four candidates
 per workload and 64 distinct portfolios, so catalog size cannot create an unbounded planning pass.

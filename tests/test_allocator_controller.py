@@ -444,6 +444,61 @@ def test_joint_portfolio_uses_service_time_aware_resource_pressure():
     assert admissions["embedding"]["ready_replicas"] == 0
 
 
+def test_joint_portfolio_spends_bounded_search_on_highest_device_time(monkeypatch):
+    # The evaluation cap is deliberately tiny: after scoring the exploitation baseline, the search
+    # can examine only one alternative. Raw request order would spend it on embedding; device-time
+    # order spends it on the video alternative that lets both workloads fit.
+    monkeypatch.setattr(
+        "shared.allocator.controller._MAX_JOINT_PORTFOLIO_EVALUATIONS", 2
+    )
+    controller = AllocatorController()
+    for model_id, memory_mb, workload, score in (
+        ("embedding-incumbent", 8_000, "embedding", 1.0),
+        ("embedding-alternative", 12_000, "embedding", 0.9),
+        ("video-incumbent", 12_000, "video", 1.0),
+        ("video-alternative", 8_000, "video", 0.9),
+    ):
+        controller.put_profile(
+            ModelProfile(
+                model_id,
+                memory_mb,
+                runtimes=("llama.cpp",),
+                backends=("metal",),
+                min_replicas=0,
+                max_replicas=1,
+                min_residency_seconds=0,
+                workload_scores=((workload, score),),
+            )
+        )
+    for _ in range(10):
+        controller.observe_lifecycle(
+            RequestFeatures("embeddings", "auto", "embedding"),
+            service_seconds=0.1,
+            timestamp=100,
+        )
+    for _ in range(3):
+        controller.observe_lifecycle(
+            RequestFeatures("videos/generations", "auto", "video"),
+            service_seconds=60,
+            timestamp=100,
+        )
+    machine = NodeSnapshot(
+        "two-slots",
+        17_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        max_models=2,
+        last_heartbeat=100,
+    )
+
+    status = controller.status((machine,), now=100)
+
+    assert status["portfolio_selection"] == {
+        "embedding": "embedding-incumbent",
+        "video": "video-alternative",
+    }
+
+
 def test_portfolio_admission_distinguishes_infeasible_workload():
     controller = AllocatorController()
     controller.put_profile(
