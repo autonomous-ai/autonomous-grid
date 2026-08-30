@@ -1574,6 +1574,23 @@ def test_goal_evaluation_finishes_inside_the_terminal_report_timeout():
         f"relay protects that work for only {settlement_lease}s; a short configured task TTL could "
         "reclaim a valid Goal result before its response lands")
 
+    work_assignments = [
+        node for node in ast.parse(tasks_source.read_text()).body
+        if isinstance(node, ast.Assign) and any(
+            getattr(target, "id", None) == "GOAL_RESULT_SETTLEMENT_WORK_SECONDS"
+            for target in node.targets)
+    ]
+    assert len(work_assignments) == 1
+    settlement_work = _numeric(
+        work_assignments[0].value, "GOAL_RESULT_SETTLEMENT_WORK_SECONDS")
+    assert evaluation_ceiling <= settlement_work, (
+        f"one evaluation may need {evaluation_ceiling}s but the whole Git/eval settlement budget "
+        f"is only {settlement_work}s")
+    assert settlement_work <= relay._TASK_RESULT_TIMEOUT - 10, (
+        f"the relay can spend {settlement_work}s across result refs, evaluation and branch "
+        f"advancement, but the provider stops waiting after {relay._TASK_RESULT_TIMEOUT}s; leave "
+        "ten seconds for the fenced transaction and response")
+
 
 def test_the_heartbeat_carries_a_tree_snapshot_while_the_agent_works(renewals):
     """ADR 0032 D-f's tracer bullet: the workspace view rides the beat that already exists.
