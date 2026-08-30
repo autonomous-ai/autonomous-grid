@@ -311,8 +311,11 @@ def test_goal_waits_at_attempt_zero_while_advertised_inference_quota_is_exhauste
         .get("model_readiness") == {"state": "ready", "agents": ["codex"]},
         # A relay under concurrent regression load can spend several seconds draining the
         # invalidated readiness snapshot before the provider's next long poll republishes its
-        # eligible native profile. This is an eventual-dispatch assertion, not a 5-second SLO.
-        timeout=15,
+        # eligible native profile. This is an eventual-dispatch assertion, not a latency SLO. The
+        # full cross-repo matrix has measured just over 15 seconds while the exact isolated test
+        # passes, so keep enough room for two complete long-poll cycles without weakening any state
+        # or attempt-count assertion.
+        timeout=30,
     ), (relay_client.get_goal(relay, owner_token, goal["id"]), node_a.output())
     complete = H.wait_for(
         lambda: _completed_goal(relay, owner_token, goal["id"]), timeout=25)
