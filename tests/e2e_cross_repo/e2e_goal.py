@@ -648,6 +648,76 @@ def test_claude_protocol_drift_quarantines_node_and_hands_same_turn_to_codex(
     _assert_transcript_chain(evidence, 1, min_nodes=2)
 
 
+def test_codex_protocol_drift_quarantines_node_and_hands_same_turn_to_claude(
+        relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
+    """A schema-admitted Codex whose runtime method disappears must yield to Claude."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-codex-protocol-drift")['id']
+    H.seed_trunk(relay, owner_token, project_id)
+    node_a = spawn_goal_provider(
+        "A", agent_kinds="codex", scenario="codex_protocol_drift",
+        disk_label="codex-drift-A")
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Recover a partial artifact when the Codex app-server protocol changes",
+        done_when="PARTIAL.md and DONE.md prove a cross-harness same-turn recovery",
+        model="fake-grid-model", token_budget=3_000, tools=[],
+        agents=["codex", "claude"],
+        evals=[
+            {"type": "file", "name": "accepted Codex checkpoint", "path": "PARTIAL.md",
+             "max_bytes": 2_000, "contains": ["Codex A"]},
+            {"type": "file", "name": "Claude recovery", "path": "DONE.md",
+             "max_bytes": 2_000, "contains": ["Claude B", "same Goal turn"]},
+        ])
+
+    def queued_after_drift():
+        rows = _tasks(relay, owner_token, project_id, goal["id"])
+        return bool(rows and rows[0]["state"] == "queued" and rows[0]["attempt"] == 1)
+
+    assert H.wait_for(queued_after_drift, timeout=30), node_a.output()
+    assert node_a.proc.poll() is None, "Codex A exited instead of remaining a Grid inference node"
+    queued = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(queued) == 1 and queued[0]["id"] == goal["turn_id"], queued
+    assert queued[0]["checkpoint_commit"]
+
+    node_b = spawn_goal_provider(
+        "B", agent_kinds="claude", scenario="codex_protocol_drift",
+        disk_label="codex-drift-B", one_task=True)
+    complete = H.wait_for(
+        lambda: _completed_goal(relay, owner_token, goal["id"]), timeout=45)
+    assert complete, f"Claude B did not recover Codex protocol drift:\n{node_b.output()}"
+    rows = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(rows) == 1 and rows[0]["id"] == goal["turn_id"], rows
+    assert rows[0]["attempt"] == 2 and rows[0]["provider_id"] == node_b.node_id
+    assert rows[0]["agent_kind"] == "claude"
+
+    destination = tmp_path / "codex-protocol-drift-result"
+    destination.mkdir()
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=rows[0]["branch"], commit=rows[0]["result_commit"], project_id=project_id)
+    assert {"PARTIAL.md", "DONE.md"} <= {path.name for path in destination.iterdir()}
+
+    # Claude B's empty machine receives Codex's opaque rollout/history from the transcript side-ref,
+    # even though Claude never interprets that namespace itself.
+    histories = list((goal_workspace_root / "codex-drift-B").rglob("fake-history.json"))
+    assert len(histories) == 1
+    assert json.loads(histories[0].read_text()) == [
+        {"node": "A", "protocol": "thread-goal-get-removed"}]
+
+    evidence = relay_client.get_goal_evidence(relay, owner_token, goal["id"])
+    retry = next(item["event"] for item in evidence["attempt_events"]
+                 if item["event"].get("type") == "task.retry")
+    assert retry["reason"] == "native_harness_failure"
+    assert retry["previous_provider_id"] == node_a.node_id
+    assert retry["previous_agent_kind"] == "codex"
+    assert retry["checkpoint_commit"] and retry["transcript_checkpoint_commit"]
+    _assert_transcript_chain(evidence, 1, min_nodes=2)
+
+
 def test_committed_business_action_survives_immediate_native_checkpoint_handoff(
         relay, owner_token, spawn_goal_provider, goal_workspace_root, business_api, tmp_path):
     """A's API write commits, its harness crashes, and B replays one accepted checkpoint safely."""

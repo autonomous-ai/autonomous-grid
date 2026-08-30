@@ -323,6 +323,24 @@ def main() -> int:
         # drift, quarantine this exact Claude revision, and hand its Git/transcript checkpoint to a
         # different harness instead of accepting success or letting A consume another attempt.
         return 0
+    if scenario == "codex_protocol_drift":
+        node = os.environ.get("GRID_E2E_GOAL_NODE")
+        if node != "B" or resume is not None or not prompt.startswith("/goal "):
+            sys.stderr.write("fake Claude Codex-drift recovery reached an invalid assignment\n")
+            return 2
+        partial = pathlib.Path("PARTIAL.md")
+        if not partial.is_file() or "Codex A" not in partial.read_text():
+            sys.stderr.write("Claude B did not receive Codex A's accepted partial worktree\n")
+            return 2
+        pathlib.Path("DONE.md").write_text(
+            "# Recovered\n\nClaude B finished the same Goal turn after Codex protocol drift.\n")
+        _emit({"type": "assistant", "message": {"usage": {
+            "input_tokens": 12, "output_tokens": 8}, "content": [
+            {"type": "text", "text": "Claude recovered Codex's protocol checkpoint"}]}})
+        _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": True,
+               "reason": "DONE.md proves cross-harness protocol recovery", "iterations": 1,
+               "tokens": 20}})
+        return 0
     if scenario in ("mixed", "mixed_eval_repair"):
         node = os.environ.get("GRID_E2E_GOAL_NODE")
         if node not in ("B", "D"):

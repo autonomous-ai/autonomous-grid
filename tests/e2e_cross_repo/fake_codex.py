@@ -78,6 +78,16 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
         save_history(history)
         return "complete", "Codex B recovered Claude A's protocol-drift checkpoint", 200
 
+    if scenario == "codex_protocol_drift":
+        if node != "A" or history:
+            raise RuntimeError(
+                f"Codex protocol-drift scenario reached an invalid state: {node}, {history!r}")
+        (cwd / "PARTIAL.md").write_text(
+            "# Codex checkpoint\n\nCodex A wrote this before an app-server method disappeared.\n")
+        history.append({"node": "A", "protocol": "thread-goal-get-removed"})
+        save_history(history)
+        return "active", "Codex wrote a partial artifact before protocol drift", 100
+
     if scenario == "graceful_crash":
         if node == "A" and not history:
             (cwd / "index.html").write_text(
@@ -463,8 +473,12 @@ def main() -> int:
                         "threadId": thread_id,
                         "turn": {"status": "failed", "error": str(exc)}}})
         elif method == "thread/goal/get":
-            reply(request, {"goal": {"status": native_status, "tokensUsed": tokens,
-                                      "timeUsedSeconds": 1}})
+            if os.environ.get("GRID_E2E_GOAL_SCENARIO") == "codex_protocol_drift":
+                emit({"id": request["id"], "error": {
+                    "code": -32601, "message": "thread/goal/get removed after schema generation"}})
+            else:
+                reply(request, {"goal": {"status": native_status, "tokensUsed": tokens,
+                                          "timeUsedSeconds": 1}})
         else:
             emit({"id": request["id"], "error": {"code": -32601,
                                                    "message": f"unsupported {method}"}})
