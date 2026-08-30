@@ -1023,6 +1023,10 @@ the predictive cache TTL (six hours by default). Expiration is exact-SHA fenced 
 an unused managed predictive cache entry; existing operator caches, pinned artifacts, active models,
 used downloads, manually managed nodes, and older nodes without the `evict` actuator remain
 untouched. Queued eviction commands are revalidated against the latest heartbeat before delivery.
+When several workflow predictions compete for the bounded prefetch budget, Grid ranks them by
+confidence- and pressure-weighted cold-start value per artifact MB. The estimate uses current
+predicted concurrency and learned per-host transfer time, then is recomputed after every chosen
+transfer because each choice changes the remaining node disk ledger.
 
 `--oracle` adds a bounded exhaustive benchmark for at most four machines, nine models, and 240
 minutes. It replays the exact observed request trace with perfect future knowledge, exhaustively

@@ -2396,40 +2396,10 @@ class PlacementPlanner:
         # speculative transfer must not race a real load for the same free-disk observation.
         prefetch_disk_remaining = dict(disk_remaining)
         artifact_prefetches: list[ArtifactPrefetch] = []
-        predictive_models = sorted(
-            (
-                model
-                for model in model_list
-                if compute_input_digest
-                and model.artifact_source
-                and desired_by_model[model.model_id]
-                > placed_by_model[model.model_id]
-                and _placement_demand_urgency(
-                    model,
-                    forecast_by_model.get(model.model_id),
-                )
-                == 1
-            ),
-            key=lambda model: (
-                -(
-                    forecast_by_model[model.model_id].offered_concurrency
-                    if model.model_id in forecast_by_model
-                    else 0.0
-                ),
-                -(
-                    forecast_by_model[model.model_id].correlation_confidence
-                    if model.model_id in forecast_by_model
-                    else 0.0
-                ),
-                model.model_id,
-            ),
-        )
-        for model in predictive_models:
-            if (
-                len(artifact_prefetches)
-                >= self.policy.max_predictive_artifact_prefetches
-            ):
-                break
+
+        def predictive_prefetch_candidates(
+            model: ModelProfile,
+        ) -> list[NodeSnapshot]:
             candidates: list[NodeSnapshot] = []
             for node_id in future_eligible_nodes.get(model.model_id, ()):
                 node = node_by_id[node_id]
@@ -2462,6 +2432,58 @@ class PlacementPlanner:
                     <= remaining_disk
                 ):
                     candidates.append(node)
+            return candidates
+
+        def predictive_prefetch_rank(model: ModelProfile) -> tuple[float, float, float, str]:
+            """Rank speculative transfers by expected critical-path value per stored byte."""
+
+            forecast = forecast_by_model[model.model_id]
+            best_load_seconds = min(
+                (
+                    load_by_pair.get(
+                        (node.node_id, model.model_id),
+                        model.load_seconds,
+                    )
+                    for node in predictive_prefetch_candidates(model)
+                ),
+                default=0.0,
+            )
+            expected_startup_value = (
+                forecast.correlation_confidence
+                * max(forecast.offered_concurrency, 0.01)
+                * best_load_seconds
+            )
+            value_per_mb = expected_startup_value / max(1, model.artifact_size_mb)
+            return (
+                -value_per_mb,
+                -expected_startup_value,
+                -forecast.correlation_confidence,
+                model.model_id,
+            )
+
+        predictive_models = [
+            model
+            for model in model_list
+            if compute_input_digest
+            and model.artifact_source
+            and desired_by_model[model.model_id] > placed_by_model[model.model_id]
+            and _placement_demand_urgency(
+                model,
+                forecast_by_model.get(model.model_id),
+            )
+            == 1
+        ]
+        while (
+            predictive_models
+            and len(artifact_prefetches)
+            < self.policy.max_predictive_artifact_prefetches
+        ):
+            # Re-rank after every admission because one transfer changes the per-node disk ledger.
+            # This matters when policy permits several predictions: a model's best host before the
+            # first choice may no longer be feasible afterward.
+            model = min(predictive_models, key=predictive_prefetch_rank)
+            predictive_models.remove(model)
+            candidates = predictive_prefetch_candidates(model)
             if not candidates:
                 continue
             selected = min(

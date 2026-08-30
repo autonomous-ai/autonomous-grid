@@ -5867,6 +5867,199 @@ def test_predictive_prefetch_reserves_disk_after_uncached_desired_loads():
     assert roomier.artifact_prefetches == (ArtifactPrefetch("media", "predicted"),)
 
 
+def test_predictive_prefetch_optimizes_expected_startup_value_per_artifact_byte():
+    baseline = model("baseline", min_replicas=1, max_replicas=1)
+    efficient = model(
+        "efficient",
+        min_replicas=0,
+        max_replicas=1,
+        load_seconds=80,
+        artifact_sha256="a" * 64,
+        artifact_source="hf://example/models/efficient.gguf",
+        artifact_size_mb=4_000,
+    )
+    bulky = model(
+        "bulky",
+        min_replicas=0,
+        max_replicas=1,
+        load_seconds=80,
+        artifact_sha256="b" * 64,
+        artifact_source="hf://example/models/bulky.gguf",
+        artifact_size_mb=20_000,
+    )
+    machine = node(
+        "cache-host",
+        8_000,
+        residencies=(ready("baseline", 8_000),),
+        max_models=1,
+        disk_capacity_mb=100_000,
+        disk_available_mb=100_000,
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+    )
+
+    def predicted(model_id: str, concurrency: float) -> DemandForecast:
+        return DemandForecast(
+            model_id,
+            requests_per_minute=12,
+            offered_concurrency=concurrency,
+            confidence=0.9,
+            correlated_requests_per_minute=12,
+            correlation_confidence=0.9,
+            correlation_sources=("workload-predictor:design",),
+            sample_count=10,
+            updated_at=10,
+        )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        (baseline, efficient, bulky),
+        (predicted("efficient", 1), predicted("bulky", 3)),
+        now=10,
+    )
+
+    # Raw pressure favors bulky 3:1. The smaller artifact still saves more expected transfer time
+    # per occupied MB, so one bounded speculative slot goes to the efficient prediction.
+    assert plan.artifact_prefetches == (
+        ArtifactPrefetch("cache-host", "efficient"),
+    )
+
+
+def test_predictive_prefetch_uses_learned_host_load_time_in_value_rank():
+    baseline = model("baseline", min_replicas=1, max_replicas=1)
+    historically_slow = model(
+        "historically-slow",
+        min_replicas=0,
+        max_replicas=1,
+        load_seconds=10,
+        artifact_sha256="a" * 64,
+        artifact_source="hf://example/models/historically-slow.gguf",
+        artifact_size_mb=4_000,
+    )
+    ordinary = model(
+        "ordinary",
+        min_replicas=0,
+        max_replicas=1,
+        load_seconds=30,
+        artifact_sha256="b" * 64,
+        artifact_source="hf://example/models/ordinary.gguf",
+        artifact_size_mb=4_000,
+    )
+    machine = node(
+        "cache-host",
+        8_000,
+        residencies=(ready("baseline", 8_000),),
+        max_models=1,
+        disk_capacity_mb=100_000,
+        disk_available_mb=100_000,
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+    )
+    forecasts = tuple(
+        DemandForecast(
+            model_id,
+            requests_per_minute=6,
+            offered_concurrency=1,
+            confidence=0.9,
+            correlated_requests_per_minute=6,
+            correlation_confidence=0.9,
+            correlation_sources=("workload-predictor:design",),
+            sample_count=10,
+            updated_at=10,
+        )
+        for model_id in ("historically-slow", "ordinary")
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        (baseline, historically_slow, ordinary),
+        forecasts,
+        now=10,
+        load_seconds={("cache-host", "historically-slow"): 90},
+    )
+
+    assert plan.artifact_prefetches == (
+        ArtifactPrefetch("cache-host", "historically-slow"),
+    )
+
+
+def test_multi_prefetch_value_is_reranked_after_each_disk_reservation():
+    baseline = model("baseline", min_replicas=2, max_replicas=2)
+
+    def speculative(model_id: str, size_mb: int) -> ModelProfile:
+        return model(
+            model_id,
+            min_replicas=0,
+            max_replicas=1,
+            artifact_sha256=(model_id[0] * 64),
+            artifact_source=f"hf://example/models/{model_id}.gguf",
+            artifact_size_mb=size_mb,
+        )
+
+    first = node(
+        "first",
+        8_000,
+        residencies=(ready("baseline", 8_000),),
+        max_models=1,
+        disk_capacity_mb=8_000,
+        disk_available_mb=8_000,
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+    )
+    second = node(
+        "second",
+        8_000,
+        residencies=(ready("baseline", 8_000),),
+        max_models=1,
+        disk_capacity_mb=4_000,
+        disk_available_mb=4_000,
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+    )
+    models = (
+        baseline,
+        speculative("alpha", 6_000),
+        speculative("bravo", 4_000),
+        speculative("charlie", 4_000),
+    )
+    forecasts = tuple(
+        DemandForecast(
+            model_id,
+            requests_per_minute=6,
+            offered_concurrency=1,
+            confidence=0.9,
+            correlated_requests_per_minute=6,
+            correlation_confidence=0.9,
+            correlation_sources=("workload-predictor:design",),
+            sample_count=10,
+            updated_at=10,
+        )
+        for model_id in ("alpha", "bravo", "charlie")
+    )
+    plan = PlacementPlanner(
+        PlannerPolicy(
+            memory_headroom_fraction=0,
+            max_predictive_artifact_prefetches=2,
+            predictive_artifact_disk_reserve_mb=0,
+        )
+    ).plan(
+        (first, second),
+        models,
+        forecasts,
+        now=10,
+        load_seconds={
+            ("first", "alpha"): 200,
+            ("first", "bravo"): 100,
+            ("second", "bravo"): 1,
+            ("first", "charlie"): 20,
+            ("second", "charlie"): 50,
+        },
+    )
+
+    # Alpha consumes most of first's disk. Bravo's remaining-host value then collapses below
+    # Charlie's, so the second choice is recomputed rather than frozen from the initial ledger.
+    assert plan.artifact_prefetches == (
+        ArtifactPrefetch("first", "alpha"),
+        ArtifactPrefetch("second", "charlie"),
+    )
+
+
 def test_stale_allocator_fetched_prediction_is_safely_evicted():
     predicted = model(
         "predicted",
