@@ -62,6 +62,40 @@ def _assert_transcript_chain(evidence: dict, expected_turns: int, *, min_nodes: 
     assert _verify_evidence(evidence, min_execution_nodes=min_nodes) == []
 
 
+def test_root_goal_create_replay_returns_one_durable_identity(relay, owner_token):
+    """A lost create acknowledgement cannot launch two autonomous Goal trees."""
+    from remote import relay as relay_client
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-idempotent-goal-create")["id"]
+    H.seed_trunk(relay, owner_token, project_id)
+    request = {
+        "project_id": project_id,
+        "objective": "Create exactly one durable Goal",
+        "done_when": "one.txt exists",
+        "model": "fake-grid-model",
+        "token_budget": 1_000,
+        "idempotency_key": "e2e-root-goal-once",
+    }
+
+    first = relay_client.create_goal(relay, owner_token, **request)
+    replay = relay_client.create_goal(relay, owner_token, **request)
+    assert replay["id"] == first["id"]
+    assert replay["turn_id"] == first["turn_id"]
+    rows = _tasks(relay, owner_token, project_id, first["id"])
+    assert len(rows) == 1, rows
+    assert rows[0]["id"] == first["turn_id"]
+
+    try:
+        relay_client.create_goal(
+            relay, owner_token, **{**request, "objective": "Create a different Goal"})
+    except relay_client.TaskRefusal as exc:
+        assert exc.status == 409
+        assert exc.refusal_code == "goal_idempotency_key_reused"
+    else:
+        raise AssertionError("a changed Goal request reused an existing create key")
+
+
 def test_three_nodes_reclaim_goal_turns_and_finish_one_game(
         relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
     from remote import relay as relay_client
