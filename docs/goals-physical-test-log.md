@@ -244,3 +244,21 @@ The attempted manual worker kill on the passing run landed after the first paren
 settled, so it is not described as a live retry. The checked-in deterministic test covers the exact
 post-spawn native failure window with four isolated node roots and proves two attempts emit one
 stable action key, return one child id, and fan in one branch.
+
+## 2026-08-30 — `nd-task-e2e-pp-0830` live preflight
+
+This was a compatibility preflight, not a completed Goal, and is recorded explicitly so an older
+relay or inference-only node is not mistaken for distributed Goal evidence.
+
+- Remote membership sync discovered Grid `nd-task-e2e-pp-0830`
+  (`grid-4a3faca05af44efb`, `permissioned-providers`).
+- One online Linux inference node named `Grid` advertised Responses routes for
+  `deepseek/deepseek-v4-flash-0731` (1,048,576-token context) and `qwen/qwen3.8-27b`
+  (1,000,000-token context).
+- `grid goal list --grid nd-task-e2e-pp-0830 --all --json` failed with the CLI's explicit rolling
+  upgrade error: `This grid's relay does not support Grid Goal yet.`
+- `grid engines` showed no task-only Codex or Claude worker. The online inference node is not
+  counted as an agent executor.
+- No Goal was created and no worker was joined after the failed preflight. The next valid run needs
+  the private relay upgraded to the recorded release-candidate revision, then at least one native
+  Goal-capable task worker joined with `--tasks-only`.

@@ -18,7 +18,8 @@ GRID_SRC_REPO=/path/to/autonomous-grid-cli uv run pytest -q tests/e2e_cross_repo
 # autonomous-grid-cli
 uv run pytest -q grid_cli/private_server/tests/test_goals.py \
   grid_cli/private_server/tests/test_task_reclaim.py::TestADeadTaskBranchIsEventuallyPruned \
-  grid_cli/private_server/tests/test_transcript_ref.py::TestRetentionIsKeyedOnTheConversationNotOnATurnEnding
+  grid_cli/private_server/tests/test_transcript_ref.py::TestRetentionIsKeyedOnTheConversationNotOnATurnEnding \
+  grid_cli/private_server/tests/test_task_git.py::TestTheFastForwardIsIdempotent
 ```
 
 Before physical acceptance, a reviewer should confirm all of the following:
