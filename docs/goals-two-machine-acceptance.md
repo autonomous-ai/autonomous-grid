@@ -4,6 +4,8 @@ This is the first physical-machine gate for Grid Goal. It proves a Goal starts u
 on machine A, survives the abrupt loss of A, and continues from relay-owned Git and trajectory
 state under a native harness on machine B. It complements, but does not replace, the complete
 [three-machine release gate](goals-three-machine-acceptance.md).
+Record every physical run in the [physical test log](goals-physical-test-log.md), including failed
+runs that expose framework bugs.
 
 The game is only the workload. The actual metric for this gate is: one completed Goal, one exact
 turn reclaimed after lease expiry, at least two relay-authenticated execution node ids, a continuous
