@@ -563,7 +563,18 @@ class ToolExecutor:
             # turn created after an eval failure. Relay-internal actions remain turn-scoped because
             # their lease fence and child-spawn ownership are explicitly tied to one turn.
             action_scope = self.turn_scope if internal else self.scope
-            canonical = json.dumps([action_scope, name, arguments], sort_keys=True,
+            action_identity: Any = arguments
+            if internal and name == "grid_spawn_subgoal":
+                # A replacement native session reconstructs tool arguments from the objective. It
+                # may spell the eval manifest or optional routing hints differently even though it
+                # is retrying the same delegation. Key that delegation by its stable, human-visible
+                # intent inside this parent turn; otherwise a worker loss can create two children
+                # that do the same work and later conflict during fan-in. Deliberately distinct
+                # children must have distinct objectives, which also keeps their audit trail clear.
+                objective = arguments.get("objective")
+                if isinstance(objective, str) and objective.strip():
+                    action_identity = {"objective": " ".join(objective.split())}
+            canonical = json.dumps([action_scope, name, action_identity], sort_keys=True,
                                    separators=(",", ":"), ensure_ascii=False,
                                    allow_nan=False).encode()
             headers["Idempotency-Key"] = "grid-goal-" + hashlib.sha256(canonical).hexdigest()

@@ -383,19 +383,27 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
             "https://grid.example", "grid-token", claim_id="claim-generation-7"),
         scope="parent", turn_scope="parent:1")
     result = executor.call(
-        "grid_spawn_subgoal", {"objective": "child"}, "call-1")
+        "grid_spawn_subgoal", {
+            "objective": "child", "evals": [{"type": "file", "path": "a.txt"}],
+        }, "call-1")
     assert result["success"] is True
     # A replacement machine may replay the same logical action with a new transient Codex call id.
-    # The receiving business API must see the same key for that retry, but a later Grid Goal turn
-    # must get a new key so an intentional repeated action is not suppressed forever.
+    # It may also reconstruct optional policy fields differently. The receiving relay must still
+    # see the same key for that retry, but a later Grid Goal turn must get a new key so an
+    # intentional repeated action is not suppressed forever.
     assert executor.call(
-        "grid_spawn_subgoal", {"objective": "child"}, "replacement-call")["success"] is True
+        "grid_spawn_subgoal", {
+            "objective": "  child  ", "evals": [{"type": "json", "path": "b.json"}],
+            "required_capabilities": ["different-reconstruction"],
+        }, "replacement-call")["success"] is True
     later = task_codex.ToolExecutor(executor.tools.values(), publish=lambda *_a, **_k: None,
         inference=task_codex.GridInference(
             "https://grid.example", "grid-token", claim_id="claim-generation-8"),
         scope="parent", turn_scope="parent:2")
     assert later.call(
         "grid_spawn_subgoal", {"objective": "child"}, "call-1")["success"] is True
+    assert executor.call(
+        "grid_spawn_subgoal", {"objective": "different child"}, "call-2")["success"] is True
 
     assert captured[0]["url"] == "https://grid.example/relay/v1/goals/parent/children"
     assert captured[0]["headers"]["Authorization"] == "Bearer grid-token"
@@ -406,6 +414,7 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
     assert keys[0].startswith("grid-goal-")
     assert keys[0] == keys[1]
     assert keys[2] != keys[0]
+    assert keys[3] != keys[0]
 
 
 def test_internal_subgoal_tool_refreshes_expired_node_token_without_repeating_action(monkeypatch):
