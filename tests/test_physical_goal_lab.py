@@ -51,6 +51,21 @@ def test_physical_identity_set_refuses_shared_or_missing_worker_ids():
         lab.validate_physical_node_ids("relay", [])
 
 
+def test_disposable_lab_root_refuses_the_real_user_home_tree():
+    with pytest.raises(SystemExit, match="unsafe lab root"):
+        lab._safe_root(str(Path.home() / ".grid" / "looks-disposable"))
+
+
+def test_disposable_lab_root_refuses_a_symlink_even_when_its_target_is_temporary(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "friendly-name"
+    link.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(SystemExit, match="unsafe lab root"):
+        lab._safe_root(str(link))
+
+
 def test_configure_exposes_automation_bundle_parameter_with_warning():
     parser = lab.build_parser()
     args = parser.parse_args(["configure", "--bundle", "disposable"])

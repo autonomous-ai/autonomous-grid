@@ -234,9 +234,15 @@ def discover_lan_host() -> str:
 
 
 def _safe_root(raw: str) -> Path:
-    root = Path(raw).expanduser().resolve()
-    forbidden = {Path("/").resolve(), Path.home().resolve()}
-    if root in forbidden or len(root.parts) < 3:
+    expanded = Path(raw).expanduser()
+    # A disposable pairing helper must never be pointed through a friendly-looking symlink at a
+    # real Grid home. Resolve parents for the containment check, but remember whether the leaf the
+    # operator actually typed was itself a link before resolution erased that fact.
+    leaf_is_symlink = expanded.is_symlink()
+    root = expanded.resolve()
+    user_home = Path.home().resolve()
+    inside_user_home = root == user_home or user_home in root.parents
+    if leaf_is_symlink or inside_user_home or root == Path("/").resolve() or len(root.parts) < 3:
         raise SystemExit(f"Refusing unsafe lab root: {root}")
     return root
 
