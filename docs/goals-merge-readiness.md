@@ -8,7 +8,7 @@ The detailed physical artifacts are indexed in
 ## Tested code revisions
 
 - Public worker/CLI: `4d85a8d5f1d2e15ae6564b6e2c89c3ea185af4c2`
-- Private relay: `330998099dbcc18b9ccad470472623300b40be1a`
+- Private relay: `019564b5591fd20e8fd7d569a0a7fd913118df14`
 - Both `grid-goal-distributed` code revisions were clean and pushed when these gates completed.
   The public working tree contained only the documentation changes recorded by the following
   documentation-only commit; it changes no runtime or test code.
@@ -19,7 +19,7 @@ The detailed physical artifacts are indexed in
 |---|---:|---|
 | Full public suite | 3,342 passed, 55 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
 | Private runbook release bundle | 136 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, retention, dead-branch pruning, inference attribution, and capability matching |
-| Private Goal migration companion | 1 passed | An older relay schema upgrades to the complete Goal schema |
+| Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
 | Cross-repository distributed matrix | 17 passed | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 
@@ -33,8 +33,10 @@ run uninterrupted against the exact revisions above. The evaluator audit also pr
 - all checks in a nomination share a 45-second deadline inside the worker's 60-second result timeout,
   and one infrastructure failure prevents additional evaluator subprocesses from multiplying it;
 - remote Goal budgets and native counters are exact-JSON integers bounded so the maximum permitted
-  eight-way, depth-three hierarchy cannot overflow signed database arithmetic. Ten-million-token
-  local-model Goals remain well inside that bound.
+  eight-way, depth-three hierarchy cannot overflow signed database arithmetic. Goal budget, usage,
+  time and child-accounting columns are `BIGINT` on PostgreSQL, and the startup migration widens
+  pre-release `INTEGER` columns idempotently. Ten-million-token local-model Goals remain well inside
+  that bound.
 
 The final 17-scenario matrix was run in one uninterrupted invocation against both candidate
 revisions. It includes:
