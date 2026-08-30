@@ -39145,6 +39145,10 @@ def test_the_join_runs_the_REAL_check_not_a_stand_in(monkeypatch, tmp_path, caps
     _seed_running_remote_grid(monkeypatch, tmp_path)
     spawned = _mock_remote_spawn(monkeypatch)
     monkeypatch.setenv("GRID_TASKS", "1")
+    # This test proves the real Claude preflight chain. With both harnesses enabled, a valid Codex
+    # installation is intentionally allowed to keep task serving on after Claude's configuration is
+    # refused; whether its protocol probe is already cached must not change this test's meaning.
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude")
     monkeypatch.delenv(task_sandbox.SANDBOX_ENV, raising=False)  # sandbox on: the mode is refused
     monkeypatch.setenv("GRID_TASK_PERMISSION_MODE", "bypassPermissions")
 
