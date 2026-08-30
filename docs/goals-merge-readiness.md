@@ -7,21 +7,34 @@ The detailed physical artifacts are indexed in
 
 ## Tested code revisions
 
-- Public worker/CLI: `6d1de5a76fe39fa4f64035ef49476419c187553b`
-- Private relay: `c90b4fa6a03174fe05fc89f97425ea823be79b50`
+- Public worker/CLI: `4d85a8d5f1d2e15ae6564b6e2c89c3ea185af4c2`
+- Private relay: `330998099dbcc18b9ccad470472623300b40be1a`
 - Both `grid-goal-distributed` code revisions were clean and pushed when these gates completed.
-  The public branch's following documentation-only commit adds this record and changes no runtime
-  or test code.
+  The public working tree contained only the documentation changes recorded by the following
+  documentation-only commit; it changes no runtime or test code.
 
 ## Software gates
 
 | Gate | Result | What it proves |
 |---|---:|---|
-| Full public suite | 3,340 passed, 56 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
-| Private Goal + Goal migration suite | 123 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, evidence, inference attribution, capability matching, and schema upgrades |
+| Full public suite | 3,342 passed, 55 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
+| Private runbook release bundle | 136 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, retention, dead-branch pruning, inference attribution, and capability matching |
+| Private Goal migration companion | 1 passed | An older relay schema upgrades to the complete Goal schema |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
 | Cross-repository distributed matrix | 17 passed | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
-| Claim-ingress regression | 3 passed | Disconnect during assignment remains cancellable and mixed Goal attempts retain exact inference identity |
+
+The full public suite, private runbook bundle, migration companion, and 17-scenario matrix were each
+run uninterrupted against the exact revisions above. The evaluator audit also proves that:
+
+- completion checks read the relay-resolved immutable result commit rather than a provider-supplied
+  ref, and only lease-fenced run ids can be accepted with the terminal transition;
+- file and JSON checks reject symlinks, Git links, protected paths, ambiguous/non-finite/deep JSON,
+  malformed Unicode, oversized inputs, and damaged cached evidence;
+- all checks in a nomination share a 45-second deadline inside the worker's 60-second result timeout,
+  and one infrastructure failure prevents additional evaluator subprocesses from multiplying it;
+- remote Goal budgets and native counters are exact-JSON integers bounded so the maximum permitted
+  eight-way, depth-three hierarchy cannot overflow signed database arithmetic. Ten-million-token
+  local-model Goals remain well inside that bound.
 
 The final 17-scenario matrix was run in one uninterrupted invocation against both candidate
 revisions. It includes:
@@ -39,14 +52,14 @@ revisions. It includes:
 - required and optional distributed subgoals with independent fan-in;
 - model and quota outages that preserve attempt zero until inference is ready.
 
-The repository-wide private suite is not used as a false green gate. The broader 20-file compatibility
-sweep passed 684 tests and failed four: three domain-claim fixtures received `204` instead of `200`,
+The historical repository-wide private sweep is not used as a false green gate. The broader 20-file
+compatibility sweep passed 684 tests and failed four: three domain-claim fixtures received `204`
+instead of `200`,
 and one Python JSON-depth fixture expected a 5,000-level body to parse but the installed decoder
 returned `400`. All four fail identically on private revision `7f16213`, before the final child
 validation/schema/yield fixes; none touches the Goal changes between that revision and the candidate.
-The 684-test sweep ran at private revision `2bd0479`; the following `c90b4fa` change only tightened
-the child capability schema/error and then passed the 123-test Goal suite plus the complete
-17-scenario cross-repository matrix.
+The 684-test sweep ran at private revision `2bd0479`; later Goal-specific hardening was validated by
+the exact 136-test private release bundle and complete 17-scenario cross-repository matrix above.
 Other stale legacy tests on current `main` also independently fail against current contracts, such as
 constructing `AccountRow(node_id=...)` after the model moved to `user_id`. The dedicated Goal suite,
 the complete public suite, and the real cross-repository seam were therefore retained as the release

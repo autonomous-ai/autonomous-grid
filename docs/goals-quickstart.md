@@ -145,6 +145,9 @@ cancelled Goals cannot be revived. A budget-limited root Goal is the intentional
 it with a larger cumulative `--token-budget` and Grid queues the next turn from the same branch and
 native transcript. The new cap must exceed both the old cap and all consumed/reserved tokens;
 replaying the same successful extension is idempotent. Child allocations remain parent-managed.
+Budgets and native usage counters may be as large as `9,007,199,254,740,991` (the largest exact JSON
+integer), so million- or ten-million-token local-model runs are ordinary supported values. The bound
+also guarantees that the largest allowed subgoal hierarchy cannot overflow relay database sums.
 If a paused parent reveals another terminal outcome, Grid cancels its still-live descendant turns
 rather than waking workers whose results can no longer be reconciled into that parent.
 
@@ -189,7 +192,7 @@ For example, `game-evals.json` can require artifacts without trusting the acting
 }
 ```
 
-Structured business outcomes can use a commit-pinned JSON metric instead of brittle text matching:
+Structured artifact outcomes can use a commit-pinned JSON metric instead of brittle text matching:
 
 ```json
 {"version": 1, "evals": [{
@@ -203,12 +206,26 @@ Structured business outcomes can use a commit-pinned JSON metric instead of brit
 }]}
 ```
 
+The relay independently computes these predicates, but a repository artifact is only as trustworthy
+as its producer. If the acting agent writes `metrics.json` itself, the check proves what that file
+says—not that an external business system agrees. Use JSON metrics only when a trusted test,
+importer, or separately controlled system produces the artifact. File/JSON checks are strong for
+exact artifact contracts; they are not a substitute for an external KPI oracle. Recorded `verify`
+tool calls remain trajectory evidence in this MVP, but do not independently gate completion.
+
 Pointers use RFC 6901 escaping. Supported operations are `equals`, `not_equals`,
 `greater_or_equal`, `less_or_equal`, and `exists`. Numeric comparisons reject booleans and
 non-finite values. A JSON file is capped at 4 MiB, all JSON evals at 16 MiB per nomination, and
 parsing is bounded by depth and value count. Duplicate object keys and unpaired Unicode surrogates
 are rejected as ambiguous data. Invalid JSON is a measured failure the next Goal turn can repair;
 Git/read failures remain blocking evaluator infrastructure errors.
+
+All definitions in one completion nomination share a 45-second wall-clock evaluator deadline. The
+Goal worker has already stopped lease renewal at this point and its terminal-report request waits 60
+seconds, so the remaining headroom covers ref settlement, the lease-fenced database transaction and
+the response. One evaluator infrastructure error records blocked audit rows for the remaining
+definitions without starting more Git subprocesses; a single wedged repository therefore cannot
+multiply its timeout by every check in the manifest.
 
 Each definition is immutable, and its hash includes the evaluator-semantics version. Every score is
 stored with that definition hash, its turn, evaluator node, and exact Git commit. The guarded lease
