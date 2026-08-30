@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -88,6 +89,7 @@ class DeferredMutation:
 class ReconcilePolicy:
     max_concurrent_mutations: int = 4
     max_mutations_per_node: int = 1
+    max_concurrent_loads_per_artifact: int = 2
     mutation_cooldown_seconds: float = 60.0
     failure_backoff_base_seconds: float = 30.0
     failure_backoff_max_seconds: float = 3_600.0
@@ -96,6 +98,12 @@ class ReconcilePolicy:
     def __post_init__(self) -> None:
         if self.max_concurrent_mutations < 1 or self.max_mutations_per_node < 1:
             raise ValueError("mutation limits must be positive")
+        if (
+            isinstance(self.max_concurrent_loads_per_artifact, bool)
+            or not isinstance(self.max_concurrent_loads_per_artifact, int)
+            or self.max_concurrent_loads_per_artifact < 1
+        ):
+            raise ValueError("max_concurrent_loads_per_artifact must be positive")
         for name in (
             "mutation_cooldown_seconds",
             "failure_backoff_base_seconds",
@@ -416,6 +424,11 @@ class Reconciler:
             item for item in records if item.status in (MutationStatus.PENDING, MutationStatus.RUNNING)
         ]
         active_by_node: dict[str, int] = {}
+        active_loads_by_artifact = Counter(
+            record.artifact_sha256 or record.model_id
+            for record in active_records
+            if record.kind == ActionKind.LOAD
+        )
         for record in active_records:
             active_by_node[record.node_id] = active_by_node.get(record.node_id, 0) + 1
         budget = max(0, self.policy.max_concurrent_mutations - len(active_records))
@@ -1112,6 +1125,8 @@ class Reconciler:
         proposals.sort(key=proposal_sort_key)
         selected: list[MutationAction] = []
         scheduled_by_node = dict(active_by_node)
+        scheduled_loads_by_artifact = Counter(active_loads_by_artifact)
+        blocked_proposal_ids: set[str] = set()
         for proposal in proposals:
             if mode == AllocatorMode.OBSERVE:
                 deferred.append(
@@ -1125,7 +1140,23 @@ class Reconciler:
                 )
                 continue
             if mode == AllocatorMode.AUTOMATIC:
+                if any(
+                    dependency in blocked_proposal_ids
+                    for dependency in proposal.dependencies
+                ):
+                    blocked_proposal_ids.add(proposal.action_id)
+                    deferred.append(
+                        DeferredMutation(
+                            proposal.kind,
+                            proposal.node_id,
+                            proposal.model_id,
+                            "dependency_deferred",
+                            "A prerequisite mutation was deferred in this reconciliation pass",
+                        )
+                    )
+                    continue
                 if scheduled_by_node.get(proposal.node_id, 0) >= self.policy.max_mutations_per_node:
+                    blocked_proposal_ids.add(proposal.action_id)
                     deferred.append(
                         DeferredMutation(
                             proposal.kind,
@@ -1137,6 +1168,7 @@ class Reconciler:
                     )
                     continue
                 if budget <= 0:
+                    blocked_proposal_ids.add(proposal.action_id)
                     deferred.append(
                         DeferredMutation(
                             proposal.kind,
@@ -1144,6 +1176,23 @@ class Reconciler:
                             proposal.model_id,
                             "global_mutation_limit",
                             "The global mutation budget is full",
+                        )
+                    )
+                    continue
+                artifact_key = proposal.artifact_sha256 or proposal.model_id
+                if (
+                    proposal.kind == ActionKind.LOAD
+                    and scheduled_loads_by_artifact[artifact_key]
+                    >= self.policy.max_concurrent_loads_per_artifact
+                ):
+                    blocked_proposal_ids.add(proposal.action_id)
+                    deferred.append(
+                        DeferredMutation(
+                            proposal.kind,
+                            proposal.node_id,
+                            proposal.model_id,
+                            "artifact_load_fanout",
+                            "The concurrent load fanout for this exact artifact is full",
                         )
                     )
                     continue
@@ -1166,6 +1215,8 @@ class Reconciler:
                 )
                 budget -= 1
                 scheduled_by_node[proposal.node_id] = scheduled_by_node.get(proposal.node_id, 0) + 1
+                if proposal.kind == ActionKind.LOAD:
+                    scheduled_loads_by_artifact[artifact_key] += 1
             selected.append(proposal)
         deferred.sort(key=lambda item: (item.node_id, item.model_id, item.kind.value, item.code))
         return ReconcileResult(plan.generation, mode, tuple(selected), tuple(deferred))

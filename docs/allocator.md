@@ -518,6 +518,10 @@ The planner and reconciler keep these rules even when demand, membership, or clo
    that can start the beneficiary soonest, including cached weights and learned warm-start time;
    under a tight mutation budget it finishes the group with the fewest remaining lifecycle
    transitions instead of spending a slot on a partial release that cannot yet serve traffic.
+   Exact-artifact loads also have an independent fanout limit (two by default). A third replica of
+   the same SHA waits instead of joining a download stampede, while a different artifact may use
+   the remaining global mutation budget. Pending and running loads count toward the limit, and a
+   dependent warm is deferred with its blocked load rather than starting out of order.
 9. **Make retries idempotent.** Actions have stable IDs, pending equivalents are suppressed, and
    duplicate acknowledgements are harmless. Command delivery is durably marked before the response
    is returned to a node. A late success or failure may complete an action that the controller had
@@ -1219,6 +1223,10 @@ The design follows several primary systems results while preserving Grid's alloc
   [Libra](https://www.usenix.org/conference/nsdi26/presentation/ruan-libra) motivate dynamic
   rescheduling, isolation, and SLO-aware adaptation under changing load. Grid's load/warm and
   drain/unload state machine applies those ideas at the slower fleet-allocation timescale.
+- [Strata](https://www.usenix.org/conference/osdi26/presentation/xie-zhiqiang) identifies cache-
+  loading latency, fragmented storage, and concurrent delay hits as first-class scheduling costs.
+  Grid applies the portable parts at whole-model scope: learned load time, deadline-aware
+  prefetching, aggregate fragmented-cache replacement proofs, and bounded exact-artifact fanout.
 
 ## Current limits
 

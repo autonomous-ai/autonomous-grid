@@ -1376,6 +1376,10 @@ def test_allocator_models_validate_impossible_values():
         PlannerPolicy(predictive_artifact_replacement_max_victims=9)
     with pytest.raises(ValueError, match="predictive_artifact_replacement_max_victims"):
         PlannerPolicy(predictive_artifact_replacement_max_victims=True)
+    with pytest.raises(ValueError, match="max_concurrent_loads_per_artifact"):
+        ReconcilePolicy(max_concurrent_loads_per_artifact=0)
+    with pytest.raises(ValueError, match="max_concurrent_loads_per_artifact"):
+        ReconcilePolicy(max_concurrent_loads_per_artifact=True)
     with pytest.raises(ValueError, match="non-negative"):
         PlannerPolicy(max_predictive_lookahead_seconds=-1)
     with pytest.raises(ValueError, match="predictive_growth_limit"):
@@ -4850,6 +4854,81 @@ def test_reconciler_automatic_mode_applies_global_and_per_node_governor():
     assert len(result.executable_actions) == 2
     assert {item.node_id for item in result.executable_actions} == {"a", "b"}
     assert any(item.code == "node_mutation_limit" for item in result.deferred)
+
+
+def test_mutation_governor_bounds_same_artifact_load_fanout_without_blocking_peers():
+    machines = tuple(node(node_id) for node_id in ("a", "b", "c", "d"))
+    shared = model(
+        "shared",
+        min_replicas=3,
+        max_replicas=3,
+        pinned_nodes=("a", "b", "c"),
+        artifact_sha256="a" * 64,
+        artifact_source="hf://owner/repo/shared.gguf",
+        artifact_size_mb=4_000,
+    )
+    peer = model(
+        "peer",
+        pinned_nodes=("d",),
+        artifact_sha256="b" * 64,
+        artifact_source="hf://owner/repo/peer.gguf",
+        artifact_size_mb=4_000,
+    )
+    plan = PlacementPlanner().plan(machines, (shared, peer), now=10)
+    reconciler = Reconciler(
+        ReconcilePolicy(
+            max_concurrent_mutations=4,
+            max_mutations_per_node=1,
+            max_concurrent_loads_per_artifact=2,
+        )
+    )
+
+    result = reconciler.reconcile(
+        plan,
+        machines,
+        (shared, peer),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+
+    loads = [
+        action for action in result.executable_actions if action.kind == ActionKind.LOAD
+    ]
+    assert sum(action.model_id == shared.model_id for action in loads) == 2
+    assert sum(action.model_id == peer.model_id for action in loads) == 1
+    assert any(
+        item.model_id == shared.model_id and item.code == "artifact_load_fanout"
+        for item in result.deferred
+    )
+    assert any(
+        item.model_id == shared.model_id and item.code == "dependency_deferred"
+        for item in result.deferred
+    )
+
+    already_loading = MutationRecord(
+        "existing-shared-load",
+        ActionKind.LOAD,
+        "existing-node",
+        shared.model_id,
+        MutationStatus.RUNNING,
+        attempted_at=9,
+        artifact_sha256=shared.artifact_sha256,
+    )
+    with_active = reconciler.reconcile(
+        plan,
+        machines,
+        (shared, peer),
+        (already_loading,),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+    active_loads = [
+        action
+        for action in with_active.executable_actions
+        if action.kind == ActionKind.LOAD
+    ]
+    assert sum(action.model_id == shared.model_id for action in active_loads) == 1
+    assert sum(action.model_id == peer.model_id for action in active_loads) == 1
 
 
 def test_mutation_governor_starts_fastest_learned_cold_path_first():
