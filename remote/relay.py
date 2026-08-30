@@ -847,6 +847,15 @@ class TaskRefusal(SystemExit):
         self.status = status
 
 
+class TaskTransportError(SystemExit):
+    """A one-shot task request received no HTTP answer.
+
+    It remains a ``SystemExit`` for every existing CLI caller. The narrower type exists so the one
+    POST that is safe to replay can distinguish transport ambiguity from authoritative responses
+    such as the old-relay missing-route hint, which is also intentionally rendered as SystemExit.
+    """
+
+
 def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str, *,
                   missing_route_hint: str | None = None, timeout: float = _REGISTER_TIMEOUT,
                   **kwargs: Any) -> Any:
@@ -871,7 +880,8 @@ def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str,
         # it is raised by the `httpx.Client(base_url=...)` construction inside this very `try`. These
         # are CLI one-shots whose CALLER classifies the exception (the contract is "any failure is a
         # clean SystemExit"), which is exactly the condition that makes the mapping load-bearing.
-        raise SystemExit(f"Cannot reach the relay ({method} {path}): {exc}") from None
+        raise TaskTransportError(
+            f"Cannot reach the relay ({method} {path}): {exc}") from None
     if resp.status_code >= 400:
         message = _task_error_message(resp)
         if (missing_route_hint
@@ -1053,11 +1063,7 @@ def create_goal(signaling_url: str, access_token: str, *, project_id: str, objec
                 signaling_url, access_token, "POST", "/relay/v1/goals", json=body,
                 headers={"Idempotency-Key": key},
                 missing_route_hint="This grid's relay does not support Grid Goal yet.")
-        except SystemExit as exc:
-            # Relay refusals are authoritative answers, never transport ambiguity. Retry only the
-            # bare SystemExit `_task_oneshot` uses when no HTTP response arrived.
-            if isinstance(exc, TaskRefusal):
-                raise
+        except TaskTransportError as exc:
             if attempt == 0:
                 continue
             raise SystemExit(

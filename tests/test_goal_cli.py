@@ -79,7 +79,8 @@ def test_goal_create_retries_transport_ambiguity_with_the_same_identity(monkeypa
     def create_once(*args, **kwargs):
         calls.append(kwargs["headers"]["Idempotency-Key"])
         if len(calls) == 1:
-            raise SystemExit("Cannot reach the relay (POST /relay/v1/goals): response lost")
+            raise relay.TaskTransportError(
+                "Cannot reach the relay (POST /relay/v1/goals): response lost")
         return {"id": "goal-1", "turn_id": "turn-1"}
 
     monkeypatch.setattr(relay, "_task_oneshot", create_once)
@@ -118,7 +119,8 @@ def test_goal_create_reports_the_recovery_key_after_two_lost_responses(monkeypat
 
     def lose(*args, **kwargs):
         calls.append(kwargs["headers"]["Idempotency-Key"])
-        raise SystemExit("Cannot reach the relay (POST /relay/v1/goals): response lost")
+        raise relay.TaskTransportError(
+            "Cannot reach the relay (POST /relay/v1/goals): response lost")
 
     monkeypatch.setattr(relay, "_task_oneshot", lose)
     with pytest.raises(SystemExit, match="--idempotency-key recover-this-goal"):
@@ -127,6 +129,26 @@ def test_goal_create_reports_the_recovery_key_after_two_lost_responses(monkeypat
             done_when="Checks pass", model="grid-model", token_budget=100,
             idempotency_key="recover-this-goal")
     assert calls == ["recover-this-goal", "recover-this-goal"]
+
+
+def test_goal_create_does_not_retry_an_old_relay_missing_route(monkeypatch):
+    from remote import relay
+
+    calls = 0
+
+    def missing(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise SystemExit("This grid's relay does not support Grid Goal yet.")
+
+    monkeypatch.setattr(relay, "_task_oneshot", missing)
+    with pytest.raises(SystemExit, match="does not support Grid Goal yet") as caught:
+        relay.create_goal(
+            "http://relay", "token", project_id="project-1", objective="Build it",
+            done_when="Checks pass", model="grid-model", token_budget=100,
+            idempotency_key="not-a-transport-retry")
+    assert "may already have succeeded" not in str(caught.value)
+    assert calls == 1
 
 
 @pytest.mark.parametrize("action", ["pause", "resume", "cancel"])
