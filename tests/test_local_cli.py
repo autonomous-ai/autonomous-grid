@@ -28229,8 +28229,44 @@ def test_task_attempt_start_announces_the_claimed_native_harness(monkeypatch):
 
     assert isinstance(publisher, Publisher)
     assert announced == [("task.attempt_started", {
+        "_flush": False,
         "attempt": 2, "provider_id": "node-B", "agent_kind": "claude",
     })]
+
+    announced.clear()
+    goal_publisher = tasks._publisher_for("serve-state", "T1", {
+        "attempt": 3, "provider_id": "node-C", "agent_kind": "codex", "goal": {},
+    })
+    assert goal_publisher._goal_attempt_recorded is False  # fake publisher returns None
+    assert announced == 2 * [("task.attempt_started", {
+        "_flush": True,
+        "attempt": 3, "provider_id": "node-C", "agent_kind": "codex",
+    })]
+
+
+def test_unrecorded_goal_attempt_never_starts_native_work(monkeypatch, capsys):
+    """An evidence outage cannot create invisible file changes or business side effects."""
+    from remote import tasks
+
+    closed = []
+
+    class Publisher:
+        _goal_attempt_recorded = False
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *_args: Publisher())
+    monkeypatch.setattr(
+        tasks, "run_task",
+        lambda *_args, **_kwargs: pytest.fail("an unrecorded Goal attempt started the harness"))
+
+    tasks._supervise_one_task("serve-state", {
+        "task_id": "T1", "goal": {"objective": "act safely"},
+    }, "T1", None)
+
+    assert closed == [True]
+    assert "not starting the native harness" in capsys.readouterr().err
 
 
 def test_post_spawn_goal_harness_failure_is_left_for_another_machine(monkeypatch, capsys):

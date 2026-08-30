@@ -434,12 +434,12 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             if start.get("provider_id") == previous_provider
             and start.get("agent_kind") == previous_agent
         ]
-        if len(matching_starts) != 1 or len(starts) != 1:
+        if starts and (len(matching_starts) != 1 or len(starts) != 1):
             failures.append(
-                f"turn {turn_id} retry attempt {attempt} has no unique matching relay-stamped "
+                f"turn {turn_id} retry attempt {attempt} disagrees with its relay-stamped "
                 "attempt start identity")
             valid = False
-        if valid:
+        if valid and len(matching_starts) == 1:
             verified_retry_nodes.add(previous_provider)
 
     # A killed provider cannot appear as the terminal provider on the reclaimed row. Count it only

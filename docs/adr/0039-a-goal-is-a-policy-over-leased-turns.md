@@ -312,7 +312,9 @@ Release evidence includes relay-computed ancestry from every accepted retry chec
 turn's final worktree and transcript outputs; offline verification binds those checks back to the
 exact retry event and latest checkpoint columns. Every prior attempt requires exactly one retry, and
 a reclaimed node counts toward the physical-node gate only when the retry's node, harness and
-attempt match one unique relay-stamped attempt-start event.
+attempt match one unique relay-stamped attempt-start event. A Goal provider synchronously flushes
+that idempotent marker before spawning the native harness; without an acknowledgement it executes
+nothing and lets the lease recover, so useful work cannot become an invisible training trajectory.
 It must also include Codex A -> Claude B -> Codex C -> Claude D where C's completion nomination
 fails an independent commit-pinned check and D resumes B's native Claude session, consumes the
 relay-authored failure evidence, repairs the worktree, and passes a fresh evaluation. This proves

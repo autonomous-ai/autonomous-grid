@@ -396,6 +396,9 @@ Attempt-start events are stamped from the live claim row, overriding any provide
 attempt, or harness values before they enter training evidence. The verifier requires exactly one
 retry for every prior attempt and counts a reclaimed machine only when that retry has one matching
 relay-stamped attempt-start identity; an orphan or duplicate retry cannot prove a handoff.
+For Goal turns, the provider flushes that start marker synchronously before launching Codex or
+Claude. The relay deduplicates a replay after an ambiguous response; if no durable acknowledgement
+arrives, the provider starts no native work or business action and leaves the lease for recovery.
 
 Owner controls are ordered against checkpoint settlement, not treated as best-effort UI state. A
 pause that races an accepted nonterminal checkpoint keeps its exact pins but makes the queued retry

@@ -1316,6 +1316,16 @@ def _release_workspace(project_id: str, member_key: str, conversation_id: str) -
 def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity: Any) -> None:
     """`_run_and_report`'s body, with this member's workspace on this project already reserved."""
     publisher = _publisher_for(state, task_id, job)
+    if (isinstance(job.get("goal"), dict)
+            and getattr(publisher, "_goal_attempt_recorded", True) is not True):
+        # Training/release evidence must be able to prove which machine actually started a native
+        # Goal attempt. Do not run unrecorded work or business actions. The live lease expires and
+        # the relay requeues the untouched turn for another capable node.
+        _warn(
+            f"task {task_id}: the relay did not durably acknowledge the Goal attempt-start "
+            "record; not starting the native harness")
+        publisher.close()
+        return
     remote = _git_remote(state, job)
     landed = True
     retry_handed_off = False
@@ -1795,17 +1805,32 @@ def _publisher_for(state: Any, task_id: str, job: dict[str, Any]) -> Any:
 
     publisher = TaskEventPublisher(state, task_id)
     try:
-        publisher.publish(
-            "task.attempt_started",
-            attempt=job.get("attempt"),
-            provider_id=job.get("provider_id"),
-            # The relay overwrites this from the claim row, so the durable trajectory does not
-            # trust the worker. Sending it keeps provider-first rolling upgrades informative when
-            # an older relay stores the event opaquely.
-            agent_kind=job.get("agent_kind"),
-        )
+        is_goal = isinstance(job.get("goal"), dict)
+        accepted = False
+        for _attempt in range(2 if is_goal else 1):
+            accepted = publisher.publish(
+                "task.attempt_started",
+                # Ordinary task narration stays buffered. Goal attempt identity is a
+                # release/training boundary and must be durably acknowledged before the native
+                # harness can execute. The relay deduplicates this bounded ambiguity retry.
+                _flush=is_goal,
+                attempt=job.get("attempt"),
+                provider_id=job.get("provider_id"),
+                # The relay overwrites this from the claim row, so the durable trajectory does not
+                # trust the worker. Sending it keeps provider-first rolling upgrades informative
+                # when an older relay stores the event opaquely.
+                agent_kind=job.get("agent_kind"),
+            )
+            if accepted:
+                break
+        if is_goal:
+            publisher._goal_attempt_recorded = accepted is True
     except (Exception, SystemExit) as exc:
-        _warn(f"could not announce the start of task {task_id} ({exc!r}); running it anyway")
+        is_goal = isinstance(job.get("goal"), dict)
+        action = "the Goal will not start" if is_goal else "running it anyway"
+        _warn(f"could not announce the start of task {task_id} ({exc!r}); {action}")
+        if is_goal:
+            publisher._goal_attempt_recorded = False
     return publisher
 
 

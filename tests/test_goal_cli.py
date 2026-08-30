@@ -467,8 +467,8 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
 
     start = record["attempt_events"].pop(0)
     failures = _verify_evidence(record, min_execution_nodes=2)
-    assert any("no unique matching relay-stamped attempt start" in item for item in failures)
     assert any("fewer than required 2" in item for item in failures)
+    assert not any("attempt start identity" in item for item in failures)
     record["attempt_events"].insert(0, start)
 
     # A retry naming the eventual winner cannot fabricate a second physical worker for the strict
