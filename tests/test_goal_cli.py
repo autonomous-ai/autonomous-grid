@@ -280,6 +280,7 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
         "goal": {"id": "goal-1", "status": "complete", "evals": [{
             "definition_id": "eval-1", "definition_hash": "hash-1", "name": "artifact",
         }]},
+        "relationships": {"parent_goal_id": None, "children": []},
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
                        "worktree_chain": [{
                            "from_turn_id": "turn-1", "to_turn_id": "turn-2",
@@ -296,7 +297,7 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
              "input_commit": "2" * 40, "result_commit": "3" * 40,
              "transcript_commit": "a" * 40, "transcript_result_commit": "b" * 40},
         ],
-        "eval_runs": [{
+        "attempt_events": [], "inference": [], "eval_runs": [{
             "id": "run-1", "turn_id": "turn-2",
             "definition_id": "eval-1", "definition_hash": "hash-1",
             "result_commit": "3" * 40, "evaluator_node_id": "relay", "state": "passed",
@@ -357,6 +358,7 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
         "goal": {"id": "goal-1", "status": "complete", "evals": [{
             **spec, "definition_id": "eval-1", "definition_hash": definition_hash,
         }]},
+        "relationships": {"parent_goal_id": None, "children": []},
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
                        "worktree_chain": []},
         "turns": [{
@@ -382,6 +384,17 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
     record["eval_runs"][0]["evaluator_node_id"] = "node-A"
     assert any("no accepted passing run" in failure for failure in goal._verify_evidence(record))
     record["eval_runs"][0]["evaluator_node_id"] = "relay"
+
+    original_evals = record["goal"]["evals"]
+    record["goal"]["evals"] = {"corrupt": True}
+    assert any("no valid immutable eval list" in failure
+               for failure in goal._verify_evidence(record))
+    record["goal"]["evals"] = original_evals
+
+    record["attempt_events"] = {"corrupt": True}
+    assert any("no valid attempt_events list" in failure
+               for failure in goal._verify_evidence(record))
+    record["attempt_events"] = []
 
     # A valid final witness cannot hide an extra accepted label outside the immutable manifest.
     stray = dict(record["eval_runs"][0])
@@ -414,6 +427,7 @@ def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
     record = {
         "schema_version": 1,
         "goal": {"id": "goal-1", "status": "complete", "evals": []},
+        "relationships": {"parent_goal_id": None, "children": []},
         "trajectory": {
             "transcript_pruned": False, "pruned_turn_branches": [],
             "worktree_chain": [],
@@ -500,6 +514,7 @@ def test_goal_evidence_verify_refuses_pruned_training_objects():
     record = {
         "schema_version": 1,
         "goal": {"status": "complete", "evals": []},
+        "relationships": {"parent_goal_id": None, "children": []},
         "trajectory": {"transcript_pruned": True, "pruned_turn_branches": ["turn-1"]},
         "turns": [{
             "id": "turn-1", "state": "completed", "agent_kind": "codex",
@@ -549,6 +564,7 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
     record = {
         "schema_version": 1,
         "goal": {"status": "complete", "evals": []},
+        "relationships": {"parent_goal_id": None, "children": []},
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
         "turns": [{
             "id": "turn-1", "attempt": 2, "state": "completed", "agent_kind": "codex",
@@ -556,8 +572,7 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
             "result_commit": "2" * 40, "transcript_commit": None,
             "transcript_result_commit": "a" * 40,
         }],
-        "attempt_events": [],
-        "eval_runs": [],
+        "attempt_events": [], "inference": [], "eval_runs": [],
     }
     assert any("no authoritative retry event" in item for item in _verify_evidence(record))
 
@@ -610,6 +625,7 @@ def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
     record = {
         "schema_version": 1,
         "goal": {"status": "complete", "evals": []},
+        "relationships": {"parent_goal_id": None, "children": []},
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
         "turns": [{
             "id": "turn-1", "attempt": 2, "state": "completed", "agent_kind": "codex",
@@ -654,7 +670,7 @@ def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
                 "tool": "check_ticket", "call_id": "verify-1",
             }},
         ],
-        "eval_runs": [],
+        "inference": [], "eval_runs": [],
     }
     assert _verify_evidence(record, min_execution_nodes=2) == []
 
@@ -709,6 +725,7 @@ def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
     record = {
         "schema_version": 1,
         "goal": {"status": "complete", "model": "grid-model", "evals": []},
+        "relationships": {"parent_goal_id": None, "children": []},
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
         "turns": [{
             "id": "turn-1", "attempt": 1, "state": "completed", "agent_kind": "codex",
@@ -757,6 +774,7 @@ def test_goal_evidence_keeps_mixed_harness_inference_bound_to_each_retry_attempt
     record = {
         "schema_version": 1,
         "goal": {"status": "complete", "model": "grid-model", "evals": []},
+        "relationships": {"parent_goal_id": None, "children": []},
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
         "turns": [{
             "id": "turn-1", "attempt": 2, "state": "completed", "agent_kind": "claude",

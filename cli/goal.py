@@ -112,8 +112,14 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             or schema_version != 1):
         failures.append(
             f"unsupported Goal evidence schema version {schema_version!r}")
-    goal = record.get("goal") if isinstance(record.get("goal"), dict) else {}
-    turns = record.get("turns") if isinstance(record.get("turns"), list) else []
+    raw_goal = record.get("goal")
+    if not isinstance(raw_goal, dict):
+        failures.append("Goal evidence has no valid goal object")
+    goal = raw_goal if isinstance(raw_goal, dict) else {}
+    raw_turns = record.get("turns")
+    if not isinstance(raw_turns, list):
+        failures.append("Goal evidence has no valid turns list")
+    turns = raw_turns if isinstance(raw_turns, list) else []
     if goal.get("status") != "complete":
         failures.append(f"Goal status is {goal.get('status')!r}, not 'complete'")
 
@@ -197,8 +203,13 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             # verification into accepting pages from different moments.
             failures.append("Goal evidence has no valid paginated snapshot")
 
-    trajectory = (record.get("trajectory")
-                  if isinstance(record.get("trajectory"), dict) else {})
+    raw_relationships = record.get("relationships")
+    if not isinstance(raw_relationships, dict):
+        failures.append("Goal evidence has no valid relationships object")
+    raw_trajectory = record.get("trajectory")
+    if not isinstance(raw_trajectory, dict):
+        failures.append("Goal evidence has no valid trajectory object")
+    trajectory = raw_trajectory if isinstance(raw_trajectory, dict) else {}
     if trajectory.get("transcript_pruned") is True:
         failures.append("the Goal transcript ref has been pruned")
     pruned_branches = trajectory.get("pruned_turn_branches")
@@ -206,8 +217,10 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         failures.append(
             "turn branches have been pruned: " + ", ".join(map(str, pruned_branches)))
 
-    attempt_events = (record.get("attempt_events")
-                      if isinstance(record.get("attempt_events"), list) else [])
+    raw_attempt_events = record.get("attempt_events")
+    if not isinstance(raw_attempt_events, list):
+        failures.append("Goal evidence has no valid attempt_events list")
+    attempt_events = raw_attempt_events if isinstance(raw_attempt_events, list) else []
     for index, item in enumerate(attempt_events, 1):
         if (isinstance(item, dict) and isinstance(item.get("event"), dict)
                 and item["event"].get("type") == "task.event.corrupt"):
@@ -346,14 +359,23 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"turn {index} input does not contain turn {index - 1} result: {detail}")
 
-    evals = goal.get("evals") if isinstance(goal.get("evals"), list) else []
-    runs = record.get("eval_runs") if isinstance(record.get("eval_runs"), list) else []
+    raw_evals = goal.get("evals")
+    if not isinstance(raw_evals, list):
+        failures.append("Goal evidence has no valid immutable eval list")
+    evals = raw_evals if isinstance(raw_evals, list) else []
+    raw_runs = record.get("eval_runs")
+    if not isinstance(raw_runs, list):
+        failures.append("Goal evidence has no valid eval_runs list")
+    runs = raw_runs if isinstance(raw_runs, list) else []
     for run in runs:
         if (isinstance(run, dict) and isinstance(run.get("evidence"), dict)
                 and run["evidence"].get("_corrupt") is True):
             failures.append(
                 f"evaluation run {run.get('id') or '?'} contains corrupt stored evidence")
-    inference = record.get("inference") if isinstance(record.get("inference"), list) else []
+    raw_inference = record.get("inference")
+    if not isinstance(raw_inference, list):
+        failures.append("Goal evidence has no valid inference list")
+    inference = raw_inference if isinstance(raw_inference, list) else []
     requested_model = goal.get("model")
     routed_model = (isinstance(requested_model, str)
                     and (requested_model == "auto" or requested_model.startswith("auto/")))
