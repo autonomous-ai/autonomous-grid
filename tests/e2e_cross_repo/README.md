@@ -51,6 +51,8 @@ real.
 | Scenario | Nodes and harnesses | Failure or constraint | Proof |
 |---|---|---|---|
 | Root create replay | Client -> relay twice | First acknowledgement may be lost | Same member key returns one Goal and one turn; changed body conflicts |
+| Model arrival | A Codex polls; inference-only C joins | Requested route does not exist yet | Same row remains attempt 0, then A claims attempt 1 when C advertises it |
+| Quota recovery | A Codex polls; inference-only C heartbeats | Route exists but its subscription seat reports `serving: false` | No attempt/evidence during withdrawal; same row wakes on C's healthy heartbeat |
 | Four-feature game | A Codex -> B Codex -> C Codex | A and B are killed mid-turn | Same rows are reclaimed; commit-pinned wiring/click/score/style evals pass |
 | Native crash checkpoint | A Codex -> B Codex | A's app-server fails after partial work | Same turn immediately requeues; B restores partial tree/thread and behavior evals pass |
 | Native crash after API commit | A Codex -> B Codex | A's app-server fails after a successful business mutation | Stable key yields one side effect; both attempts retain request/result evidence |

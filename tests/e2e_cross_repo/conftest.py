@@ -136,10 +136,23 @@ def provider_nodes(relay, owner_token):
 @pytest.fixture
 def advertise_goal_models(relay, provider_nodes):
     """Advertise inference on a node without starting its task/agent process."""
-    def advertise(label: str, *models: str) -> str:
+    def advertise(label: str, *models: str, quota_serving: bool | None = None) -> str:
+        from remote import relay as relay_client
+
         node_id, node_token = provider_nodes[label]
         combined = tuple(dict.fromkeys((*_BASE_GOAL_MODELS, *models)))
         _advertise_goal_models(relay, node_token, node_id, combined)
+        if quota_serving is not None:
+            # Registration owns static routes; the heartbeat owns live allowance. Keeping these as
+            # two real requests is the field topology and catches a scheduler that mistakes an
+            # advertised-but-withdrawn subscription seat for usable inference.
+            assert relay_client.heartbeat(
+                relay, node_token,
+                load={"quota": {
+                    "serving": quota_serving,
+                    "headroom_pct": 100 if quota_serving else 0,
+                }},
+            ) == "ok"
         return node_id
 
     return advertise

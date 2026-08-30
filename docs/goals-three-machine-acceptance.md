@@ -91,12 +91,16 @@ Run this separately to prove task capacity never substitutes for inference readi
    evidence.
 3. Start the model on an inference-only node C with a tool-capable Responses route. Confirm task
    node A claims the untouched row as Codex attempt 1 even though C, not A, serves inference.
-4. For a second Goal allowing Claude then Codex, expose the model only on Responses. Confirm Grid
+4. Keep a second unique model advertised on C but heartbeat its allowance as
+   `quota.serving: false`. Confirm a Goal using it remains at attempt 0; heartbeat `serving: true`
+   and confirm the untouched row becomes claimable without a retry. Repeat with a relay-level model
+   prune/demotion when validating an inference failure recovery build.
+5. For a second Goal allowing Claude then Codex, expose the model only on Responses. Confirm Grid
    skips the first policy entry and chooses Codex. Complete one nonterminal turn.
-5. Move the model to a tool-capable Messages/chat route, withdraw Responses, and let task node B
+6. Move the model to a tool-capable Messages/chat route, withdraw Responses, and let task node B
    claim the next turn. Confirm the selected harness is now Claude and no failed harness attempt was
    needed to make that choice.
-6. Repeat the initial outage with model `auto` while routing is disabled. Confirm attempt 0 is
+7. Repeat the initial outage with model `auto` while routing is disabled. Confirm attempt 0 is
    preserved, then enable routing and confirm the first claim is attempt 1.
 
 ## Required evidence

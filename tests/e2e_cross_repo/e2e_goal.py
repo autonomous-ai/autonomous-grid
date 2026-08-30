@@ -154,6 +154,69 @@ def test_goal_waits_at_attempt_zero_until_separate_inference_node_adds_model(
                 if item["event"].get("type") == "task.retry"]
 
 
+def test_goal_waits_at_attempt_zero_while_advertised_inference_quota_is_exhausted(
+        relay, owner_token, spawn_goal_provider, advertise_goal_models):
+    """A route existing in the catalog is not readiness when its seat has withdrawn service."""
+    from remote import relay as relay_client
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-goal-quota-readiness")["id"]
+    H.seed_trunk(relay, owner_token, project_id)
+    node_a = spawn_goal_provider(
+        "A", scenario="model_readiness", disk_label="quota-ready-A", one_task=True)
+    assert H.wait_for(lambda: "provider" in node_a.output(), timeout=5), node_a.output()
+
+    model = "quota-recovery-model"
+    inference_node = advertise_goal_models("C", model, quota_serving=False)
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Prove an exhausted Grid inference seat cannot spend a Goal attempt",
+        done_when="READY.md exists",
+        model=model, token_budget=1_000, tools=[],
+        evals=[{"type": "file", "name": "quota recovery proof", "path": "READY.md"}])
+    assert relay_client.get_goal(relay, owner_token, goal["id"])["model_readiness"] == {
+        "state": "waiting", "agents": [],
+    }
+    time.sleep(1.5)  # several task polls and longer than the readiness snapshot TTL
+
+    waiting = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(waiting) == 1, waiting
+    assert waiting[0]["id"] == goal["turn_id"]
+    assert waiting[0]["state"] == "queued"
+    assert waiting[0]["attempt"] == 0
+    assert waiting[0]["provider_id"] is None
+    before = relay_client.get_goal_evidence(relay, owner_token, goal["id"])
+    assert not [item for item in before["attempt_events"]
+                if item["event"].get("type") in ("task.attempt_started", "task.retry")]
+
+    # C changes only its live heartbeat allowance. The route, task node, turn id, and agent process
+    # are unchanged; A must wake on the same row once Grid can actually dispatch model requests.
+    assert advertise_goal_models("C", model, quota_serving=True) == inference_node
+    assert H.wait_for(
+        lambda: relay_client.get_goal(relay, owner_token, goal["id"])
+        .get("model_readiness") == {"state": "ready", "agents": ["codex"]},
+        timeout=5,
+    )
+    complete = H.wait_for(
+        lambda: _completed_goal(relay, owner_token, goal["id"]), timeout=25)
+    assert complete, f"Goal did not wake after quota recovery; A output:\n{node_a.output()}"
+
+    rows = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(rows) == 1, rows
+    assert rows[0]["id"] == goal["turn_id"]
+    assert rows[0]["state"] == "completed"
+    assert rows[0]["attempt"] == 1
+    assert rows[0]["provider_id"] == node_a.node_id
+    assert inference_node != node_a.node_id
+    evidence = relay_client.get_goal_evidence(relay, owner_token, goal["id"])
+    starts = [item["event"] for item in evidence["attempt_events"]
+              if item["event"].get("type") == "task.attempt_started"]
+    assert len(starts) == 1, starts
+    assert starts[0]["attempt"] == 1 and starts[0]["provider_id"] == node_a.node_id
+    assert not [item for item in evidence["attempt_events"]
+                if item["event"].get("type") == "task.retry"]
+
+
 def test_three_nodes_reclaim_goal_turns_and_finish_one_game(
         relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
     from remote import relay as relay_client
