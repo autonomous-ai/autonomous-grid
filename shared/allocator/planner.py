@@ -884,6 +884,7 @@ class PlacementPlanner:
                     remaining_mb,
                     domains,
                     self.policy,
+                    forecast=forecast_by_model.get(model.model_id),
                     now=timestamp,
                     need_new_domain=need_new_domain,
                     startup_seconds=startup_by_pair,
@@ -3166,6 +3167,7 @@ def _candidate_score(
     domains: set[str],
     policy: PlannerPolicy,
     *,
+    forecast: DemandForecast | None,
     now: float,
     need_new_domain: bool,
     startup_seconds: Mapping[tuple[str, str], float],
@@ -3175,6 +3177,7 @@ def _candidate_score(
     residency = node.residency(model.model_id)
     startup_key = (node.node_id, model.model_id)
     warm_seconds = startup_seconds.get(startup_key, model.warm_seconds)
+    performance_value_weight = _performance_value_weight(model, forecast)
     artifact_matches = model.matches_artifact(residency)
     if residency and residency.state == ResidencyState.READY and artifact_matches:
         score += 100_000.0
@@ -3303,7 +3306,12 @@ def _candidate_score(
         throughput_weight = (
             model_throughput_weight if model_performance is not None else 1.0
         )
-        score += min(measured_tokens_per_second, 10_000.0) * 2.0 * throughput_weight
+        score += (
+            min(measured_tokens_per_second, 10_000.0)
+            * 2.0
+            * throughput_weight
+            * performance_value_weight
+        )
         reasons.append("measured throughput")
     hardware_weight = 1.0
     if measured_tokens_per_second:
@@ -3315,14 +3323,33 @@ def _candidate_score(
         # estimates break cold/unmeasured ties and blend out as proxy evidence matures. READY and
         # cached bonuses above are intentionally much larger, so hardware heterogeneity never
         # causes gratuitous migration.
-        score += min(node.memory_bandwidth_gbps, 2_000.0) * 10.0 * hardware_weight
         score += (
-            min(math.log2(1.0 + node.compute_gflops) * 100.0, 2_000.0) * hardware_weight
+            min(node.memory_bandwidth_gbps, 2_000.0)
+            * 10.0
+            * hardware_weight
+            * performance_value_weight
+        )
+        score += (
+            min(math.log2(1.0 + node.compute_gflops) * 100.0, 2_000.0)
+            * hardware_weight
+            * performance_value_weight
         )
         reasons.append("hardware performance estimate")
     if measured_latency_ms:
         latency_weight = model_latency_weight if model_performance is not None else 1.0
-        score -= min(measured_latency_ms, 60_000.0) / 50.0 * latency_weight
+        score -= (
+            min(measured_latency_ms, 60_000.0)
+            / 50.0
+            * latency_weight
+            * performance_value_weight
+        )
+    if performance_value_weight > 1 and (
+        measured_tokens_per_second
+        or measured_latency_ms
+        or node.memory_bandwidth_gbps
+        or node.compute_gflops
+    ):
+        reasons.append("performance value amortized by demand")
     if node.max_concurrency > 0:
         utilization = node.active_requests / node.max_concurrency
         if utilization:
@@ -3336,6 +3363,26 @@ def _candidate_score(
         reasons.append("host is throttled")
     score -= min(max(0, node.host_priority), 1_000_000_000_000) * 100.0
     return score, tuple(reasons)
+
+
+def _performance_value_weight(
+    model: ModelProfile,
+    forecast: DemandForecast | None,
+) -> float:
+    """Bound how strongly sustained demand can amortize a faster host's cold start."""
+
+    if forecast is None:
+        return 1.0
+    offered_concurrency = max(
+        forecast.offered_concurrency,
+        float(forecast.queue_depth),
+    )
+    if offered_concurrency <= 0 and forecast.requests_per_minute > 0:
+        offered_concurrency = (
+            forecast.requests_per_minute / 60.0 * model.expected_service_seconds
+        )
+    replica_capacity = model.replica_concurrency * model.target_utilization
+    return min(8.0, max(1.0, offered_concurrency / replica_capacity))
 
 
 def _assignment(

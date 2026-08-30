@@ -787,6 +787,58 @@ def test_cold_unmeasured_placement_prefers_faster_hardware_without_repacking_cac
     assert "weights cached locally" in stable.assignments[0].reasons
 
 
+def test_hot_model_amortizes_cold_start_onto_materially_faster_host():
+    profile = replace(model(), backends=(), replica_concurrency=1)
+    cached_slow = node(
+        "cached-slow",
+        backend="cpu",
+        cached=(profile.model_id,),
+        memory_bandwidth_gbps=50,
+        compute_gflops=1_000,
+    )
+    cold_fast = node(
+        "cold-fast",
+        memory_bandwidth_gbps=400,
+        compute_gflops=27_132,
+    )
+    planner = PlacementPlanner()
+
+    light = planner.plan(
+        (cached_slow, cold_fast),
+        (profile,),
+        (
+            DemandForecast(
+                profile.model_id,
+                requests_per_minute=1,
+                observed_requests_per_minute=1,
+                offered_concurrency=0.5,
+                sample_count=1,
+                updated_at=10,
+            ),
+        ),
+        now=10,
+    )
+    hot = planner.plan(
+        (cached_slow, cold_fast),
+        (profile,),
+        (
+            DemandForecast(
+                profile.model_id,
+                requests_per_minute=10,
+                observed_requests_per_minute=10,
+                offered_concurrency=6,
+                sample_count=10,
+                updated_at=10,
+            ),
+        ),
+        now=10,
+    )
+
+    assert light.nodes_for(profile.model_id) == ("cached-slow",)
+    assert hot.nodes_for(profile.model_id) == ("cold-fast",)
+    assert "performance value amortized by demand" in hot.assignments[0].reasons
+
+
 def test_failed_cached_target_yields_to_healthy_peer_but_remains_a_fallback():
     profile = model(min_residency_seconds=0)
     failed = node(

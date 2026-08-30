@@ -210,7 +210,12 @@ victim selection; freeing a different host that cannot satisfy the pin would be 
 Candidates otherwise prefer an existing ready residency, local cached weights, another failure
 domain, measured throughput, and best-fit memory. Before measured
 throughput exists, bounded memory-bandwidth and compute estimates break otherwise-cold ties; ready
-and cached bonuses remain much larger, so hardware estimates do not cause gratuitous migration.
+and cached bonuses remain much larger at light demand, so hardware estimates do not cause
+gratuitous migration. As offered concurrency exceeds one replica's target capacity, Grid increases
+the value of measured performance and hardware speed by a bounded factor (at most 8×). Sustained
+hot demand can therefore amortize a materially faster cold host, while a light workload still
+prefers cached weights. This affects new placement only; it does not manufacture a migration after
+the desired replica set is already healthy.
 Placement also computes each desired model's future-compatible host set without pretending that
 live memory is already free. A flexible small model is penalized on a host needed by a more
 constrained model when it has another valid destination. A newly loaded incumbent remains sticky
