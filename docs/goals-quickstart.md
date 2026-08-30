@@ -148,7 +148,9 @@ Repeated pause is idempotent and never overwrites that saved outcome. One delibe
 case remains useful: directly pausing a child already paused by its parent detaches it from the
 parent's cascade while preserving the child's saved state. Pause ownership moves with that child's
 whole subtree, so resuming the parent cannot wake grandchildren underneath the still-paused child;
-resuming the child later restores only its own cascade.
+resuming the child later restores only its own cascade. A descendant cannot be resumed while any
+ancestor is still paused; Grid returns `goal_ancestor_paused` with the ancestor Goal id instead of
+letting child work bypass the hierarchy-wide stop.
 
 The same dependency fence applies to every terminal parent path, not only pause/resume: an explicit
 failed result, deadline, or exhausted retry cap cancels queued/running descendants through the
