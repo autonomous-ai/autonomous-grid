@@ -22,6 +22,7 @@ from shared.allocator.models import (
     NodeSnapshot,
     NodeState,
     PlacementPlan,
+    PlacementPreemption,
     ResidencyState,
     canonical_sha256,
     stable_digest,
@@ -130,6 +131,39 @@ class _DestructiveSafetyState:
     target_by_model: dict[str, int]
 
 
+_VERIFIED_ARTIFACT_STATES = frozenset(
+    {
+        ResidencyState.CACHED,
+        ResidencyState.WARMING,
+        ResidencyState.READY,
+        ResidencyState.DRAINING,
+        ResidencyState.FAILED,
+    }
+)
+
+
+def _preemption_artifact_pending(
+    preemption: PlacementPreemption | None,
+    residency_by_pair: Mapping[tuple[str, str], ModelResidency],
+    profile_by_id: Mapping[str, ModelProfile],
+) -> bool:
+    """Whether a source-backed beneficiary still lacks its exact verified artifact."""
+
+    if preemption is None or not preemption.for_model_id:
+        return False
+    beneficiary = profile_by_id.get(preemption.for_model_id)
+    if beneficiary is None or not beneficiary.artifact_source:
+        return False
+    residency = residency_by_pair.get(
+        (preemption.node_id, preemption.for_model_id)
+    )
+    return not (
+        residency is not None
+        and residency.state in _VERIFIED_ARTIFACT_STATES
+        and beneficiary.matches_artifact(residency)
+    )
+
+
 class Reconciler:
     def __init__(self, policy: ReconcilePolicy | None = None) -> None:
         self.policy = policy or ReconcilePolicy()
@@ -174,11 +208,14 @@ class Reconciler:
         profile_by_id = {profile.model_id: profile for profile in profiles}
         safety = _destructive_safety_state(plan, node_by_id, profile_by_id)
         desired_pairs = plan.desired_pairs
-        preempted_pairs = plan.preempted_pairs
+        preemptions = {
+            (item.node_id, item.model_id): item for item in plan.preemptions
+        }
         deferrals: dict[str, DeferredMutation] = {}
         for action in destructive:
             pair = (action.node_id, action.model_id)
-            priority_preemption = pair in preempted_pairs
+            preemption = preemptions.get(pair)
+            priority_preemption = preemption is not None
             if pair in desired_pairs and not priority_preemption:
                 deferrals[action.action_id] = DeferredMutation(
                     action.kind,
@@ -198,6 +235,22 @@ class Reconciler:
                     action.model_id,
                     "target_missing",
                     "The target node, model profile, or residency no longer exists",
+                )
+                continue
+            if _preemption_artifact_pending(
+                preemption,
+                residency_by_pair,
+                profile_by_id,
+            ):
+                deferrals[action.action_id] = DeferredMutation(
+                    action.kind,
+                    action.node_id,
+                    action.model_id,
+                    "beneficiary_artifact_not_cached",
+                    (
+                        "The preemption beneficiary's exact artifact must be "
+                        "verified before current service is disrupted"
+                    ),
                 )
                 continue
             deferral = _destructive_deferral(
@@ -550,6 +603,67 @@ class Reconciler:
             else:
                 proposals.append(warm_action)
 
+        # A staged preemption already proves which model will consume this host after its victims
+        # release capacity. Fetch an exact operator-authorized artifact before disrupting current
+        # service, so network/disk cold-start work is not left on the critical path after unload.
+        # LOAD produces only a CACHED residency and therefore consumes neither runtime memory nor a
+        # serving slot; WARM remains impossible until a later authoritative plan assigns the model.
+        beneficiary_preemptions = {
+            (item.node_id, item.for_model_id): item
+            for item in plan.preemptions
+            if item.for_model_id
+        }
+        preemption_prefetch_pending: set[tuple[str, str]] = set()
+        for node_id, model_id in sorted(beneficiary_preemptions):
+            pair = (node_id, model_id)
+            node = node_by_id.get(node_id)
+            profile = profile_by_id.get(model_id)
+            if node is None or profile is None or not profile.artifact_source:
+                continue
+            residency = residency_by_pair.get(pair)
+            if not _preemption_artifact_pending(
+                beneficiary_preemptions[pair],
+                residency_by_pair,
+                profile_by_id,
+            ):
+                continue
+            preemption_prefetch_pending.add(pair)
+            if pair in desired:
+                # The ordinary availability path above already owns LOAD -> WARM sequencing.
+                continue
+            if residency is not None and residency.state == ResidencyState.LOADING:
+                continue
+            action = self._proposal(
+                ActionKind.LOAD,
+                node,
+                profile,
+                plan,
+                timestamp,
+                "Prestage exact model weights before releasing scarce serving capacity",
+                history_by_transition=history_by_transition,
+                mode=mode,
+                blocked_until=mutation_blocks,
+                blocked_causes=mutation_block_causes,
+                history_cooldowns=history_cooldowns,
+                memory_mb=profile.memory_for(node.runtimes),
+            )
+            if action is None:
+                deferred.extend(
+                    self._why_deferred(
+                        ActionKind.LOAD,
+                        node,
+                        profile,
+                        history_by_transition,
+                        timestamp,
+                        mode=mode,
+                        blocked_until=mutation_blocks,
+                        blocked_causes=mutation_block_causes,
+                        history_cooldowns=history_cooldowns,
+                    )
+                )
+            else:
+                proposals.append(action)
+
         # Destructive work is staged. READY -> DRAIN only when every desired replacement is ready;
         # DRAINING -> UNLOAD only after the node reports no active requests.
         for node in sorted(node_by_id.values(), key=lambda item: item.node_id):
@@ -579,6 +693,28 @@ class Reconciler:
                     if residency.state == ResidencyState.READY
                     else ActionKind.UNLOAD
                 )
+                if (
+                    priority_preemption is not None
+                    and priority_preemption.for_model_id
+                    and (
+                        node.node_id,
+                        priority_preemption.for_model_id,
+                    )
+                    in preemption_prefetch_pending
+                ):
+                    deferred.append(
+                        DeferredMutation(
+                            action_kind,
+                            node.node_id,
+                            residency.model_id,
+                            "beneficiary_artifact_not_cached",
+                            (
+                                "The preemption beneficiary's exact artifact must be "
+                                "verified before current service is disrupted"
+                            ),
+                        )
+                    )
+                    continue
                 safety_deferral = _destructive_deferral(
                     action_kind,
                     node,

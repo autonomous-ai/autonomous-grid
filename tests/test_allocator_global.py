@@ -14,6 +14,7 @@ from shared.allocator.models import (
     ModelPerformance,
     ModelProfile,
     ModelResidency,
+    MutationAction,
     NodeSnapshot,
     NodeState,
     PlacementAssignment,
@@ -5382,6 +5383,201 @@ def test_mutation_governor_prioritizes_drain_for_preemption_beneficiary():
     assert [
         (item.kind, item.node_id, item.model_id) for item in result.executable_actions
     ] == [(ActionKind.DRAIN, "z-preempt", "batch")]
+
+
+def test_preemption_prefetches_exact_beneficiary_before_disrupting_service():
+    machine = node(
+        "scarce",
+        8_000,
+        residencies=(ready("batch", 8_000),),
+        disk_capacity_mb=32_000,
+        disk_available_mb=16_000,
+    )
+    batch = model(
+        "batch",
+        8_000,
+        min_replicas=0,
+        max_replicas=0,
+        priority=1,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=0,
+    )
+    critical = model(
+        "critical",
+        8_000,
+        priority=1_000,
+        min_residency_seconds=0,
+        artifact_sha256="a" * 64,
+        artifact_source="hf://example/models/critical.gguf",
+        artifact_size_mb=4_000,
+    )
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        (batch, critical),
+        now=10,
+    )
+    assert plan.preemptions == (
+        PlacementPreemption("scarce", "batch", "critical"),
+    )
+
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
+        plan,
+        (machine,),
+        (batch, critical),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+
+    assert [
+        (item.kind, item.node_id, item.model_id, item.artifact_source)
+        for item in result.executable_actions
+    ] == [
+        (
+            ActionKind.LOAD,
+            "scarce",
+            "critical",
+            "hf://example/models/critical.gguf",
+        )
+    ]
+    assert any(
+        item.kind == ActionKind.DRAIN
+        and item.node_id == "scarce"
+        and item.model_id == "batch"
+        and item.code == "beneficiary_artifact_not_cached"
+        for item in result.deferred
+    )
+
+    loading_machine = replace(
+        machine,
+        residencies=(
+            ready("batch", 8_000),
+            ModelResidency(
+                "critical",
+                8_000,
+                ResidencyState.LOADING,
+                artifact_sha256="a" * 64,
+            ),
+        ),
+        last_heartbeat=10.5,
+    )
+    while_loading = Reconciler(
+        ReconcilePolicy(max_concurrent_mutations=1)
+    ).reconcile(
+        plan,
+        (loading_machine,),
+        (batch, critical),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10.5,
+    )
+    assert while_loading.executable_actions == ()
+    assert any(
+        item.kind == ActionKind.DRAIN
+        and item.node_id == "scarce"
+        and item.model_id == "batch"
+        and item.code == "beneficiary_artifact_not_cached"
+        for item in while_loading.deferred
+    )
+
+    cached_machine = replace(
+        machine,
+        residencies=(
+            ready("batch", 8_000),
+            ModelResidency(
+                "critical",
+                8_000,
+                ResidencyState.CACHED,
+                artifact_sha256="a" * 64,
+            ),
+        ),
+        last_heartbeat=11,
+    )
+    after_prefetch = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
+        plan,
+        (cached_machine,),
+        (batch, critical),
+        mode=AllocatorMode.AUTOMATIC,
+        now=11,
+    )
+    assert [
+        (item.kind, item.node_id, item.model_id)
+        for item in after_prefetch.executable_actions
+    ] == [(ActionKind.DRAIN, "scarce", "batch")]
+
+
+def test_queued_preemption_drain_is_revalidated_against_beneficiary_cache():
+    machine = node(
+        "scarce",
+        8_000,
+        residencies=(ready("batch", 8_000),),
+        disk_capacity_mb=32_000,
+        disk_available_mb=16_000,
+    )
+    batch = model(
+        "batch",
+        8_000,
+        min_replicas=0,
+        max_replicas=0,
+        priority=1,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=0,
+    )
+    critical = model(
+        "critical",
+        8_000,
+        priority=1_000,
+        artifact_sha256="a" * 64,
+        artifact_source="hf://example/models/critical.gguf",
+        artifact_size_mb=4_000,
+    )
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        (batch, critical),
+        now=10,
+    )
+    queued_drain = MutationAction(
+        "queued-drain",
+        ActionKind.DRAIN,
+        "scarce",
+        "batch",
+        8_000,
+        "Release capacity for critical",
+        plan.generation,
+        9,
+        executable=True,
+    )
+    reconciler = Reconciler()
+
+    before_cache = reconciler.destructive_command_deferrals(
+        plan,
+        (machine,),
+        (batch, critical),
+        (queued_drain,),
+        now=10,
+    )
+    assert before_cache["queued-drain"].code == "beneficiary_artifact_not_cached"
+
+    cached_machine = replace(
+        machine,
+        residencies=(
+            ready("batch", 8_000),
+            ModelResidency(
+                "critical",
+                8_000,
+                ResidencyState.CACHED,
+                artifact_sha256="a" * 64,
+            ),
+        ),
+    )
+    assert (
+        reconciler.destructive_command_deferrals(
+            plan,
+            (cached_machine,),
+            (batch, critical),
+            (queued_drain,),
+            now=10,
+        )
+        == {}
+    )
 
 
 def test_preemption_governor_unloads_drained_capacity_before_starting_new_drain():

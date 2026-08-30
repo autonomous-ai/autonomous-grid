@@ -265,6 +265,11 @@ the delay of restoring displaced service after the burst. Required failure-domai
 before that disruption comparison, so several convenient victims in one rack cannot strand a critical model
 that needs capacity across racks. A missing hard pin targets its exact node before either domain or
 victim selection; freeing a different host that cannot satisfy the pin would be gratuitous disruption.
+When a staged preemption names its beneficiary and that profile has an immutable operator-authorized
+artifact source, reconciliation fetches and verifies the weights before draining the incumbent.
+This disk-only CACHED state consumes no runtime memory or model slot, and WARM remains fenced until
+a later authoritative plan assigns the released capacity; failed transfers retain ordinary bounded
+backoff and never weaken drain safety.
 Candidates otherwise prefer an existing ready residency, local cached weights, another failure
 domain, measured throughput, and best-fit memory. Before measured
 throughput exists, bounded memory-bandwidth and compute estimates break otherwise-cold ties; ready
