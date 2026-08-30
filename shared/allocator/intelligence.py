@@ -10,8 +10,9 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import statistics
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Iterable, Mapping
 
@@ -253,7 +254,9 @@ class WorkloadIntelligence:
         # state proves that the same workflow actually moved from one workload to another; fleet-
         # wide coincidence is deliberately insufficient evidence for proactive model movement.
         self._workflow_states: dict[str, tuple[str, float]] = {}
-        self._workflow_transitions: list[tuple[float, str, str]] = []
+        self._workflow_transitions: list[
+            tuple[float, str, str, float | None]
+        ] = []
 
     @property
     def outcomes(self) -> tuple[ModelWorkloadOutcome, ...]:
@@ -657,6 +660,9 @@ class WorkloadIntelligence:
                             "demand_correlation_confidence": (
                                 forecast.correlation_confidence
                             ),
+                            "prediction_lead_seconds": (
+                                forecast.prediction_lead_seconds
+                            ),
                             "chosen_model": "",
                             "deferred": forced_model_id == "",
                             "reason": (
@@ -705,6 +711,7 @@ class WorkloadIntelligence:
                     "confidence": forecast.confidence,
                     "demand_correlation_sources": forecast.correlation_sources,
                     "demand_correlation_confidence": forecast.correlation_confidence,
+                    "prediction_lead_seconds": forecast.prediction_lead_seconds,
                     "successful_outcome_evidence": max(
                         0.0,
                         chosen_evidence["effective_requests"]
@@ -769,8 +776,13 @@ class WorkloadIntelligence:
                         "timestamp": timestamp,
                         "source": source,
                         "target": target,
+                        **(
+                            {"lead_seconds": lead_seconds}
+                            if lead_seconds is not None
+                            else {}
+                        ),
                     }
-                    for timestamp, source, target in self._workflow_transitions
+                    for timestamp, source, target, lead_seconds in self._workflow_transitions
                 ],
             },
             "outcomes": [asdict(item) for item in self.outcomes],
@@ -818,16 +830,37 @@ class WorkloadIntelligence:
             timestamp = float(row.get("timestamp") or 0.0)
             source = str(row.get("source") or "")
             target = str(row.get("target") or "")
+            raw_lead_seconds = row.get("lead_seconds")
+            try:
+                lead_seconds = (
+                    None
+                    if raw_lead_seconds is None
+                    else float(raw_lead_seconds)
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    "workflow sequence transition contains invalid data"
+                ) from exc
             if (
                 not math.isfinite(timestamp)
                 or timestamp < 0
                 or source not in KNOWN_WORKLOADS
                 or target not in KNOWN_WORKLOADS
                 or source == target
+                or (
+                    lead_seconds is not None
+                    and (
+                        isinstance(raw_lead_seconds, bool)
+                        or not math.isfinite(lead_seconds)
+                        or lead_seconds <= 0
+                    )
+                )
                 or len(result._workflow_transitions) >= _MAX_WORKFLOW_TRANSITIONS
             ):
                 raise ValueError("workflow sequence transition contains invalid data")
-            result._workflow_transitions.append((timestamp, source, target))
+            result._workflow_transitions.append(
+                (timestamp, source, target, lead_seconds)
+            )
         for row in value.get("outcomes") or ():
             fields = dict(row)
             # Legacy records shared one timestamp between service and quality. Retain their service
@@ -873,7 +906,9 @@ class WorkloadIntelligence:
                 source != workload
                 and 0 < gap <= _WORKFLOW_SEQUENCE_MAX_GAP_SECONDS
             ):
-                self._workflow_transitions.append((timestamp, source, workload))
+                self._workflow_transitions.append(
+                    (timestamp, source, workload, gap)
+                )
         elif len(self._workflow_states) >= _MAX_WORKFLOW_STATES:
             oldest = min(
                 self._workflow_states,
@@ -897,15 +932,19 @@ class WorkloadIntelligence:
         self,
         *,
         now: float,
-    ) -> dict[tuple[str, str], float]:
+    ) -> dict[tuple[str, str], tuple[float, float | None]]:
         cutoff = now - _WORKFLOW_SEQUENCE_WINDOW_SECONDS
         transitions = [
             item
             for item in self._workflow_transitions
             if cutoff <= item[0] <= now + self.unbound_demand.max_future_skew_seconds
         ]
-        departures = Counter(source for _, source, _ in transitions)
-        edges = Counter((source, target) for _, source, target in transitions)
+        departures = Counter(source for _, source, _, _ in transitions)
+        edges = Counter((source, target) for _, source, target, _ in transitions)
+        lead_seconds_by_edge: defaultdict[tuple[str, str], list[float]] = defaultdict(list)
+        for _timestamp, source, target, lead_seconds in transitions:
+            if lead_seconds is not None:
+                lead_seconds_by_edge[(source, target)].append(lead_seconds)
         active_sources = {
             workload
             for workload, last_seen_at in self._workflow_states.values()
@@ -913,14 +952,18 @@ class WorkloadIntelligence:
             <= now - last_seen_at
             <= self.unbound_demand.bucket_seconds
         }
-        admitted: dict[tuple[str, str], float] = {}
+        admitted: dict[tuple[str, str], tuple[float, float | None]] = {}
         for edge, count in edges.items():
             source, _ = edge
             if source not in active_sources or count < _WORKFLOW_SEQUENCE_MIN_TRANSITIONS:
                 continue
             confidence = (count + 1) / (departures[source] + 2)
             if confidence >= _WORKFLOW_SEQUENCE_CONFIDENCE:
-                admitted[edge] = confidence
+                leads = lead_seconds_by_edge.get(edge, ())
+                admitted[edge] = (
+                    confidence,
+                    statistics.median(leads) if leads else None,
+                )
         return admitted
 
     def _portfolio_workload_forecasts(
@@ -942,14 +985,39 @@ class WorkloadIntelligence:
                 workload_keys,
                 now=now,
                 sequential_only=True,
-                sequence_edges=sequence_edges,
+                sequence_edges={
+                    edge: confidence
+                    for edge, (confidence, _lead_seconds) in sequence_edges.items()
+                },
             )
         }
         result = dict(independent)
+        latest_active_source = {
+            workload: max(
+                last_seen_at
+                for active_workload, last_seen_at in self._workflow_states.values()
+                if active_workload == workload
+            )
+            for workload in {
+                source for source, _target in sequence_edges
+            }
+        }
         for workload, forecast in inferred.items():
             base = independent[workload]
             if not forecast.correlation_sources or forecast.requests_per_minute <= base.requests_per_minute:
                 continue
+            remaining_leads = [
+                max(
+                    0.0,
+                    float(lead_seconds)
+                    - max(0.0, now - latest_active_source[source]),
+                )
+                for source in forecast.correlation_sources
+                for _confidence, lead_seconds in (
+                    (sequence_edges.get((source, workload), (0.0, None)),)
+                )
+                if lead_seconds is not None and source in latest_active_source
+            ]
             result[workload] = replace(
                 base,
                 requests_per_minute=forecast.requests_per_minute,
@@ -962,6 +1030,9 @@ class WorkloadIntelligence:
                 correlated_requests_per_minute=forecast.correlated_requests_per_minute,
                 correlation_confidence=forecast.correlation_confidence,
                 correlation_sources=forecast.correlation_sources,
+                prediction_lead_seconds=(
+                    min(remaining_leads) if remaining_leads else None
+                ),
             )
         return result
 
@@ -1399,6 +1470,14 @@ def _merge_forecasts(
     direct_count = direct.sample_count
     projected_count = projected.sample_count
     total_count = direct_count + projected_count
+    known_prediction_leads = tuple(
+        value
+        for value in (
+            direct.prediction_lead_seconds,
+            projected.prediction_lead_seconds,
+        )
+        if value is not None
+    )
     return DemandForecast(
         model_id=direct.model_id,
         requests_per_minute=direct.requests_per_minute + projected.requests_per_minute,
@@ -1426,6 +1505,9 @@ def _merge_forecasts(
         ),
         sample_count=total_count,
         updated_at=max(direct.updated_at, projected.updated_at),
+        prediction_lead_seconds=(
+            min(known_prediction_leads) if known_prediction_leads else None
+        ),
         # An empty direct forecast is routinely present for every configured model and must not
         # erase the workload canary marker. Any real direct/strong projection lifts the cap.
         canary_only=(

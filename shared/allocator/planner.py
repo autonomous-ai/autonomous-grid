@@ -2491,13 +2491,22 @@ class PlacementPlanner:
                 or _placement_demand_urgency(model, forecast) != 1
             ):
                 return (0.0, 0.0)
+            load_seconds = load_by_pair.get(
+                (node.node_id, model.model_id),
+                model.load_seconds,
+            )
+            # A transfer that is only half complete when predicted demand arrives still removes
+            # half of the later cold-path wait. Unknown lead retains the conservative historical
+            # estimate; a calibrated deadline discounts value to work that can finish in time.
+            useful_transfer_seconds = (
+                load_seconds
+                if forecast.prediction_lead_seconds is None
+                else min(load_seconds, forecast.prediction_lead_seconds)
+            )
             expected_startup_value = (
                 forecast.correlation_confidence
                 * max(forecast.offered_concurrency, 0.01)
-                * load_by_pair.get(
-                    (node.node_id, model.model_id),
-                    model.load_seconds,
-                )
+                * useful_transfer_seconds
             )
             return (
                 expected_startup_value / max(1, model.artifact_size_mb),
@@ -2578,6 +2587,12 @@ class PlacementPlanner:
                     node.node_id,
                 ),
             )
+            _value_density, expected_value = predictive_artifact_value(
+                model,
+                selected,
+            )
+            if expected_value <= 0:
+                continue
             artifact_prefetches.append(
                 ArtifactPrefetch(selected.node_id, model.model_id)
             )
@@ -4335,6 +4350,7 @@ def _input_digest(
                     "correlated_requests_per_minute": item.correlated_requests_per_minute,
                     "correlation_confidence": item.correlation_confidence,
                     "correlation_sources": item.correlation_sources,
+                    "prediction_lead_seconds": item.prediction_lead_seconds,
                     "observed_requests_per_minute": item.observed_requests_per_minute,
                     "canary_only": item.canary_only,
                     "sample_count": item.sample_count,

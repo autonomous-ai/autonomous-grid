@@ -1334,6 +1334,10 @@ def test_allocator_models_validate_impossible_values():
         model(pinned_nodes=("a", "b"), max_replicas=1)
     with pytest.raises(ValueError, match="finite"):
         DemandForecast("m", requests_per_minute=math.inf)
+    with pytest.raises(ValueError, match="prediction_lead_seconds"):
+        DemandForecast("m", prediction_lead_seconds=-1)
+    with pytest.raises(ValueError, match="prediction_lead_seconds"):
+        DemandForecast("m", prediction_lead_seconds=math.inf)
     with pytest.raises(ValueError, match="active_requests"):
         ready(active_requests=-1)
     with pytest.raises(ValueError, match="non-negative"):
@@ -5985,6 +5989,74 @@ def test_predictive_prefetch_uses_learned_host_load_time_in_value_rank():
     assert plan.artifact_prefetches == (
         ArtifactPrefetch("cache-host", "historically-slow"),
     )
+
+
+def test_predictive_prefetch_discounts_transfer_work_that_misses_demand_deadline():
+    baseline = model("baseline", min_replicas=1, max_replicas=1)
+    too_late = model(
+        "too-late",
+        min_replicas=0,
+        max_replicas=1,
+        load_seconds=120,
+        artifact_sha256="a" * 64,
+        artifact_source="hf://example/models/too-late.gguf",
+        artifact_size_mb=4_000,
+    )
+    useful = model(
+        "useful",
+        min_replicas=0,
+        max_replicas=1,
+        load_seconds=30,
+        artifact_sha256="b" * 64,
+        artifact_source="hf://example/models/useful.gguf",
+        artifact_size_mb=4_000,
+    )
+    machine = node(
+        "cache-host",
+        8_000,
+        residencies=(ready("baseline", 8_000),),
+        max_models=1,
+        disk_capacity_mb=100_000,
+        disk_available_mb=100_000,
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+    )
+
+    def forecast(model_id: str, lead_seconds: float) -> DemandForecast:
+        return DemandForecast(
+            model_id,
+            requests_per_minute=6,
+            offered_concurrency=1,
+            confidence=0.9,
+            correlated_requests_per_minute=6,
+            correlation_confidence=0.9,
+            correlation_sources=("workflow:design",),
+            sample_count=10,
+            updated_at=10,
+            prediction_lead_seconds=lead_seconds,
+        )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        (baseline, too_late, useful),
+        (forecast("too-late", 5), forecast("useful", 20)),
+        now=10,
+    )
+
+    # Raw load time alone would pick too-late (120s). Only five seconds of that transfer can occur
+    # before predicted demand, while useful can remove twenty seconds from the later wait.
+    assert plan.artifact_prefetches == (
+        ArtifactPrefetch("cache-host", "useful"),
+    )
+    revised_timing = PlacementPlanner(
+        PlannerPolicy(memory_headroom_fraction=0)
+    ).plan(
+        (machine,),
+        (baseline, too_late, useful),
+        (forecast("too-late", 5), forecast("useful", 21)),
+        now=10,
+    )
+    assert revised_timing.artifact_prefetches == plan.artifact_prefetches
+    assert revised_timing.input_digest != plan.input_digest
 
 
 def test_multi_prefetch_value_is_reranked_after_each_disk_reservation():

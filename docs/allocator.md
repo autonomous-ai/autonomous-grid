@@ -1027,6 +1027,10 @@ When several workflow predictions compete for the bounded prefetch budget, Grid 
 confidence- and pressure-weighted cold-start value per artifact MB. The estimate uses current
 predicted concurrency and learned per-host transfer time, then is recomputed after every chosen
 transfer because each choice changes the remaining node disk ledger.
+Repeated within-session workflow transitions also learn a bounded median stage-to-stage lead time.
+When that timing is known, cache value counts only transfer work that can finish before predicted
+demand; an enormous download with five seconds of lead no longer beats a smaller artifact that can
+remove more of the actual cold-path wait. Unknown timing retains the ordinary load-time estimate.
 If authenticated disk is full, a mature unused predictive artifact may be replaced by a stronger
 prediction. The incoming artifact must provide at least the configured value-per-byte gain (2× by
 default), must not have less total expected startup value, and the victim must have spent at least
@@ -1232,8 +1236,9 @@ The design follows several primary systems results while preserving Grid's alloc
 - Capacity is refreshed by the node as stable physical capacity plus dynamic non-Grid reserve.
   Device count and per-device VRAM are preserved, and profiles may fail closed with
   `min_gpu_count` and `min_gpu_memory_mb` constraints. This covers basic tensor-parallel
-  feasibility and artifact disk admission but does not yet model GPU interconnect bandwidth,
-  heterogeneous sharding, NUMA boundaries, cache eviction, or transfer-bandwidth bottlenecks.
+  feasibility, artifact disk admission, and safe predictive-cache eviction but does not yet model
+  GPU interconnect bandwidth, heterogeneous sharding, NUMA boundaries, or simultaneous transfer-
+  bandwidth bottlenecks.
 - Model profiles accept a portable `memory_mb` fallback plus runtime-specific
   `runtime_memory_mb` estimates, so llama.cpp/Metal and vLLM/CUDA placements account for their
   distinct footprints. If a node advertises several matching runtimes, the planner conservatively

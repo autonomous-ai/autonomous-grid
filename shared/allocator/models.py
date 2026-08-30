@@ -630,12 +630,29 @@ class DemandForecast:
     updated_at: float = 0.0
     observed_requests_per_minute: float = 0.0
     canary_only: bool = False
+    # Known time until correlation-only demand is expected. ``None`` means the predictor has no
+    # calibrated timing evidence; zero is a real prediction that demand is already due.
+    prediction_lead_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not self.model_id:
             raise ValueError("model_id is required")
         if not isinstance(self.canary_only, bool):
             raise ValueError("canary_only must be a boolean")
+        if self.prediction_lead_seconds is not None:
+            if isinstance(self.prediction_lead_seconds, bool):
+                raise ValueError(
+                    "prediction_lead_seconds must be finite and non-negative or None"
+                )
+            _finite_nonnegative(
+                float(self.prediction_lead_seconds),
+                "prediction_lead_seconds",
+            )
+            object.__setattr__(
+                self,
+                "prediction_lead_seconds",
+                float(self.prediction_lead_seconds),
+            )
         for name in (
             "requests_per_minute",
             "offered_concurrency",

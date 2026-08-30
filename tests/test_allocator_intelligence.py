@@ -330,6 +330,7 @@ def test_portfolio_prewarms_a_workload_from_a_mature_directional_sequence():
     assert independent.requests_per_minute == 0
     assert projected["video-model"].requests_per_minute > 0
     assert projected["video-model"].observed_requests_per_minute == 0
+    assert projected["video-model"].prediction_lead_seconds == pytest.approx(10)
     assert projected["video-model"].correlation_sources == (
         "workload-predictor:image",
         "workload:video",
@@ -338,12 +339,24 @@ def test_portfolio_prewarms_a_workload_from_a_mature_directional_sequence():
     assert projection_rows["video"]["demand_correlation_confidence"] == pytest.approx(
         6 / 7
     )
+    assert projection_rows["video"]["prediction_lead_seconds"] == pytest.approx(10)
     serialized = intelligence.to_dict()
     assert "campaign-session" not in repr(serialized)
+    assert {
+        row["lead_seconds"] for row in serialized["workflow_sequences"]["transitions"]
+    } == {10}
     restored = WorkloadIntelligence.from_dict(serialized)
     assert {
         forecast.model_id for forecast in restored.portfolio_forecasts(candidates, (), now=101)
     } == {"image-model", "video-model"}
+    for row in serialized["workflow_sequences"]["transitions"]:
+        row.pop("lead_seconds")
+    legacy_restored = WorkloadIntelligence.from_dict(serialized)
+    legacy_projection = {
+        forecast.model_id: forecast
+        for forecast in legacy_restored.portfolio_forecasts(candidates, (), now=101)
+    }
+    assert legacy_projection["video-model"].prediction_lead_seconds is None
 
 
 def test_portfolio_does_not_predict_a_workload_from_two_directional_examples():

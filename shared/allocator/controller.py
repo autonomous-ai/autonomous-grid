@@ -3356,6 +3356,11 @@ def _portfolio_admissions(
             base["demand_correlation_confidence"] = float(
                 projection.get("demand_correlation_confidence") or 0.0
             )
+            prediction_lead_seconds = projection.get("prediction_lead_seconds")
+            if prediction_lead_seconds is not None:
+                base["prediction_lead_seconds"] = float(
+                    prediction_lead_seconds
+                )
         if not model_id:
             blocked_candidate = next(
                 (

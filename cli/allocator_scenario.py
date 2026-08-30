@@ -192,11 +192,17 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
                     confidence = 100.0 * float(
                         admission.get("demand_correlation_confidence") or 0.0
                     )
+                    prediction_lead = admission.get("prediction_lead_seconds")
+                    lead_label = (
+                        f" · expected in {float(prediction_lead):.0f}s"
+                        if prediction_lead is not None
+                        else ""
+                    )
                     print(
                         "      proactive: learned workflow "
                         + ", ".join(str(item) for item in sequence_sources)
                         + f" → {admission.get('workload') or 'unknown'} · "
-                        f"{confidence:.0f}% confidence"
+                        f"{confidence:.0f}% confidence{lead_label}"
                     )
                 if admission.get("state") == "ready":
                     continue
