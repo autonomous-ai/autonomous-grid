@@ -64,6 +64,13 @@ never retained; workflow cursors and transitions contain only a double-hashed ke
 512 active workflows and 4,096 transitions, and expire after one hour. Out-of-order or simultaneous
 completion callbacks update aggregate demand but cannot establish ordering. `grid allocator
 status` labels these proactive decisions with the learned workload edge and its confidence.
+If a correlation-only prediction cannot yet receive a serving slot, the authoritative plan may
+stage one policy-bounded cache-only advisory on a future-compatible host. This requires an exact
+operator-authorized source, SHA-256, declared artifact size, authenticated free disk, and managed
+`load` capability. Reconciliation downloads and verifies the artifact but never warms it, consumes
+VRAM, or drains an incumbent; direct and baseline demand therefore keep all serving and eviction
+authority. A later real-demand placement can reuse the cache and skip the network-transfer phase.
+Counterfactual portfolio evaluations do not emit these operational advisories.
 
 Portfolio admission normally requires three observations, preventing a cheap one-off request from
 churning a large model into memory. Device-time evidence can cross the gate earlier: at least 1.5

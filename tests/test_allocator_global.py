@@ -10,6 +10,7 @@ from shared.allocator.demand import DemandTracker
 from shared.allocator.models import (
     ActionKind,
     AllocatorMode,
+    ArtifactPrefetch,
     DemandForecast,
     ModelPerformance,
     ModelProfile,
@@ -426,6 +427,18 @@ def test_plan_rejects_a_residency_that_is_both_desired_and_preempted():
         replace(
             plan,
             preemptions=(PlacementPreemption("n", "qwen", "critical"),),
+        )
+
+
+def test_plan_rejects_predictive_prefetch_for_a_preemption_beneficiary():
+    plan = PlacementPlanner().plan((node("n"),), (model(),), now=10)
+
+    with pytest.raises(ValueError, match="preemption beneficiary"):
+        replace(
+            plan,
+            assignments=(),
+            preemptions=(PlacementPreemption("n", "qwen", "critical"),),
+            artifact_prefetches=(ArtifactPrefetch("n", "critical"),),
         )
 
 
@@ -1332,6 +1345,10 @@ def test_allocator_models_validate_impossible_values():
         PlannerPolicy(max_staged_preemptions=0)
     with pytest.raises(ValueError, match="max_staged_preemptions"):
         PlannerPolicy(max_staged_preemptions=True)
+    with pytest.raises(ValueError, match="max_predictive_artifact_prefetches"):
+        PlannerPolicy(max_predictive_artifact_prefetches=-1)
+    with pytest.raises(ValueError, match="max_predictive_artifact_prefetches"):
+        PlannerPolicy(max_predictive_artifact_prefetches=True)
     with pytest.raises(ValueError, match="non-negative"):
         PlannerPolicy(max_predictive_lookahead_seconds=-1)
     with pytest.raises(ValueError, match="predictive_growth_limit"):
@@ -5502,6 +5519,149 @@ def test_preemption_prefetches_exact_beneficiary_before_disrupting_service():
         (item.kind, item.node_id, item.model_id)
         for item in after_prefetch.executable_actions
     ] == [(ActionKind.DRAIN, "scarce", "batch")]
+
+
+def test_correlation_only_demand_prefetches_exact_artifact_without_eviction():
+    machine = node(
+        "scarce",
+        8_000,
+        residencies=(ready("baseline", 8_000),),
+        max_models=1,
+        disk_capacity_mb=32_000,
+        disk_available_mb=16_000,
+    )
+    baseline = model(
+        "baseline",
+        8_000,
+        min_replicas=1,
+        max_replicas=1,
+        priority=100,
+        min_residency_seconds=0,
+    )
+    predicted = model(
+        "predicted",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+        priority=100,
+        artifact_sha256="b" * 64,
+        artifact_source="hf://example/models/predicted.gguf",
+        artifact_size_mb=4_000,
+    )
+    forecast = DemandForecast(
+        "predicted",
+        requests_per_minute=6,
+        offered_concurrency=1,
+        confidence=0.9,
+        correlated_requests_per_minute=6,
+        correlation_confidence=0.9,
+        correlation_sources=("workload-predictor:image",),
+        sample_count=10,
+        updated_at=10,
+    )
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    plan = planner.plan(
+        (machine,),
+        (baseline, predicted),
+        (forecast,),
+        now=10,
+    )
+
+    assert plan.nodes_for("baseline") == ("scarce",)
+    assert plan.nodes_for("predicted") == ()
+    assert plan.preemptions == ()
+    assert plan.artifact_prefetches == (ArtifactPrefetch("scarce", "predicted"),)
+    assert plan.to_dict()["artifact_prefetches"] == [
+        {"node_id": "scarce", "model_id": "predicted"}
+    ]
+
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
+        plan,
+        (machine,),
+        (baseline, predicted),
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+    )
+    assert [
+        (item.kind, item.node_id, item.model_id, item.artifact_source)
+        for item in result.executable_actions
+    ] == [
+        (
+            ActionKind.LOAD,
+            "scarce",
+            "predicted",
+            "hf://example/models/predicted.gguf",
+        )
+    ]
+    assert all(
+        item.kind not in (ActionKind.WARM, ActionKind.DRAIN, ActionKind.UNLOAD)
+        for item in result.actions
+    )
+
+    cached_machine = replace(
+        machine,
+        residencies=(
+            ready("baseline", 8_000),
+            ModelResidency(
+                "predicted",
+                8_000,
+                ResidencyState.CACHED,
+                artifact_sha256="b" * 64,
+            ),
+        ),
+    )
+    cached_plan = planner.plan(
+        (cached_machine,),
+        (baseline, predicted),
+        (forecast,),
+        now=11,
+    )
+    assert cached_plan.artifact_prefetches == ()
+
+    disabled = PlacementPlanner(
+        PlannerPolicy(
+            memory_headroom_fraction=0,
+            max_predictive_artifact_prefetches=0,
+        )
+    ).plan(
+        (machine,),
+        (baseline, predicted),
+        (forecast,),
+        now=10,
+    )
+    assert disabled.artifact_prefetches == ()
+
+    higher_pressure = model(
+        "higher-pressure",
+        8_000,
+        min_replicas=0,
+        max_replicas=1,
+        priority=100,
+        artifact_sha256="c" * 64,
+        artifact_source="hf://example/models/higher-pressure.gguf",
+        artifact_size_mb=7_000,
+    )
+    higher_forecast = replace(
+        forecast,
+        model_id="higher-pressure",
+        requests_per_minute=12,
+        offered_concurrency=2,
+        correlated_requests_per_minute=12,
+    )
+    disk_bounded = PlacementPlanner(
+        PlannerPolicy(
+            memory_headroom_fraction=0,
+            max_predictive_artifact_prefetches=2,
+        )
+    ).plan(
+        (replace(machine, disk_available_mb=10_000),),
+        (baseline, predicted, higher_pressure),
+        (forecast, higher_forecast),
+        now=10,
+    )
+    assert disk_bounded.artifact_prefetches == (
+        ArtifactPrefetch("scarce", "higher-pressure"),
+    )
 
 
 def test_queued_preemption_drain_is_revalidated_against_beneficiary_cache():

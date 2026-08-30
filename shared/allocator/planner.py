@@ -17,6 +17,7 @@ from itertools import combinations
 
 from shared.allocator.models import (
     MAX_COUNTER,
+    ArtifactPrefetch,
     DemandForecast,
     ModelProfile,
     ModelResidency,
@@ -49,6 +50,7 @@ class PlannerPolicy:
     throttled_capacity_fraction: float = 0.5
     preserve_recent_residencies: bool = True
     max_staged_preemptions: int = 64
+    max_predictive_artifact_prefetches: int = 1
 
     def __post_init__(self) -> None:
         if not 0 <= self.memory_headroom_fraction < 1:
@@ -86,6 +88,15 @@ class PlannerPolicy:
             or not 1 <= self.max_staged_preemptions <= MAX_COUNTER
         ):
             raise ValueError(f"max_staged_preemptions must be in [1, {MAX_COUNTER}]")
+        if (
+            isinstance(self.max_predictive_artifact_prefetches, bool)
+            or not isinstance(self.max_predictive_artifact_prefetches, int)
+            or not 0 <= self.max_predictive_artifact_prefetches <= MAX_COUNTER
+        ):
+            raise ValueError(
+                "max_predictive_artifact_prefetches must be in "
+                f"[0, {MAX_COUNTER}]"
+            )
         if (
             not math.isfinite(self.latency_pressure_limit)
             or not math.isfinite(self.error_pressure_limit)
@@ -2304,6 +2315,105 @@ class PlacementPlanner:
             key=lambda item: (item.model_id, item.replica_index, item.node_id)
         )
         unsatisfied.sort(key=lambda item: (item.model_id, item.code, item.message))
+        # A correlation-only model cannot evict serving work, but a mature workflow prediction can
+        # still move its immutable artifact transfer off the future critical path. Cache at most a
+        # small policy-bounded set on hosts where the model can eventually run; this consumes only
+        # authenticated disk and never changes the serving assignment or preemption authority.
+        assignment_pairs = {
+            (item.node_id, item.model_id) for item in assignments
+        }
+        placed_by_model = Counter(item.model_id for item in assignments)
+        prefetch_disk_remaining = {
+            node.node_id: node.disk_available_mb for node in node_list
+        }
+        artifact_prefetches: list[ArtifactPrefetch] = []
+        predictive_models = sorted(
+            (
+                model
+                for model in model_list
+                if compute_input_digest
+                and model.artifact_source
+                and desired_by_model[model.model_id]
+                > placed_by_model[model.model_id]
+                and _placement_demand_urgency(
+                    model,
+                    forecast_by_model.get(model.model_id),
+                )
+                == 1
+            ),
+            key=lambda model: (
+                -(
+                    forecast_by_model[model.model_id].offered_concurrency
+                    if model.model_id in forecast_by_model
+                    else 0.0
+                ),
+                -(
+                    forecast_by_model[model.model_id].correlation_confidence
+                    if model.model_id in forecast_by_model
+                    else 0.0
+                ),
+                model.model_id,
+            ),
+        )
+        for model in predictive_models:
+            if (
+                len(artifact_prefetches)
+                >= self.policy.max_predictive_artifact_prefetches
+            ):
+                break
+            candidates: list[NodeSnapshot] = []
+            for node_id in future_eligible_nodes.get(model.model_id, ()):
+                node = node_by_id[node_id]
+                pair = (node_id, model.model_id)
+                residency = node.residency(model.model_id)
+                artifact_present = bool(
+                    residency
+                    and model.matches_artifact(residency)
+                    and residency.state
+                    in (
+                        ResidencyState.CACHED,
+                        ResidencyState.LOADING,
+                        ResidencyState.WARMING,
+                        ResidencyState.READY,
+                        ResidencyState.DRAINING,
+                        ResidencyState.FAILED,
+                    )
+                )
+                remaining_disk = prefetch_disk_remaining[node_id]
+                if (
+                    pair not in assignment_pairs
+                    and not artifact_present
+                    and (
+                        remaining_disk is None
+                        or model.artifact_size_mb <= remaining_disk
+                    )
+                ):
+                    candidates.append(node)
+            if not candidates:
+                continue
+            selected = min(
+                candidates,
+                key=lambda node: (
+                    load_by_pair.get(
+                        (node.node_id, model.model_id),
+                        model.load_seconds,
+                    )
+                    + startup_by_pair.get(
+                        (node.node_id, model.model_id),
+                        model.warm_seconds,
+                    ),
+                    node.host_priority,
+                    node.node_id,
+                ),
+            )
+            artifact_prefetches.append(
+                ArtifactPrefetch(selected.node_id, model.model_id)
+            )
+            selected_disk = prefetch_disk_remaining[selected.node_id]
+            if selected_disk is not None:
+                prefetch_disk_remaining[selected.node_id] = (
+                    selected_disk - model.artifact_size_mb
+                )
         # Wall-clock time is not itself a desired-state input, but TTL and scale-down boundaries
         # derived from it are. Include the resulting targets and placements so the controller
         # advances its logical generation exactly when a time-sensitive decision changes. A late
@@ -2316,6 +2426,7 @@ class PlacementPlanner:
                 desired_by_model=desired_by_model,
                 assignments=assignments,
                 preemptions=preemptions,
+                artifact_prefetches=artifact_prefetches,
             )
             if compute_input_digest
             else ""
@@ -2336,6 +2447,7 @@ class PlacementPlanner:
             objective_score=objective,
             input_digest=input_digest,
             preemptions=tuple(preemptions),
+            artifact_prefetches=tuple(artifact_prefetches),
             model_urgencies=tuple(
                 sorted(
                     (
@@ -3812,6 +3924,7 @@ def _input_digest(
     desired_by_model: dict[str, int],
     assignments: list[PlacementAssignment],
     preemptions: list[PlacementPreemption],
+    artifact_prefetches: list[ArtifactPrefetch],
 ) -> str:
     return stable_digest(
         {
@@ -3845,6 +3958,9 @@ def _input_digest(
             ],
             "preemptions": [
                 (item.node_id, item.model_id, item.for_model_id) for item in preemptions
+            ],
+            "artifact_prefetches": [
+                (item.node_id, item.model_id) for item in artifact_prefetches
             ],
         }
     )

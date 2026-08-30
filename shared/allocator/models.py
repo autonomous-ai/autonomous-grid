@@ -725,6 +725,23 @@ class PlacementPreemption:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactPrefetch:
+    """A cache-only placement hint that consumes disk but no runtime capacity."""
+
+    node_id: str
+    model_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.node_id
+            or not self.model_id
+            or len(self.node_id) > MAX_ID_LENGTH
+            or len(self.model_id) > MAX_ID_LENGTH
+        ):
+            raise ValueError("artifact prefetch node and model are required")
+
+
+@dataclass(frozen=True, slots=True)
 class PlacementPlan:
     generation: str
     created_at: float
@@ -734,6 +751,7 @@ class PlacementPlan:
     objective_score: float = 0.0
     input_digest: str = ""
     preemptions: tuple[PlacementPreemption, ...] = ()
+    artifact_prefetches: tuple[ArtifactPrefetch, ...] = ()
     model_urgencies: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
@@ -748,9 +766,25 @@ class PlacementPlan:
         preemption_pairs = [(item.node_id, item.model_id) for item in self.preemptions]
         if len(preemption_pairs) != len(set(preemption_pairs)):
             raise ValueError("a residency cannot be preempted more than once")
+        prefetch_pairs = [
+            (item.node_id, item.model_id) for item in self.artifact_prefetches
+        ]
+        if len(prefetch_pairs) != len(set(prefetch_pairs)):
+            raise ValueError("an artifact cannot be prefetched twice to the same node")
         desired_pairs = {(node_id, model_id) for model_id, node_id in pairs}
         if desired_pairs.intersection(preemption_pairs):
             raise ValueError("a residency cannot be both desired and preempted")
+        if desired_pairs.intersection(prefetch_pairs):
+            raise ValueError("a desired residency does not need a cache-only prefetch")
+        preemption_beneficiaries = {
+            (item.node_id, item.for_model_id)
+            for item in self.preemptions
+            if item.for_model_id
+        }
+        if preemption_beneficiaries.intersection(prefetch_pairs):
+            raise ValueError(
+                "a preemption beneficiary does not need a predictive artifact prefetch"
+            )
         urgency_models = [model_id for model_id, _ in self.model_urgencies]
         if len(urgency_models) != len(set(urgency_models)) or any(
             not model_id
@@ -799,6 +833,9 @@ class PlacementPlan:
             "objective_score": self.objective_score,
             "input_digest": self.input_digest,
             "preemptions": [asdict(item) for item in self.preemptions],
+            "artifact_prefetches": [
+                asdict(item) for item in self.artifact_prefetches
+            ],
             "model_urgencies": dict(self.model_urgencies),
         }
 

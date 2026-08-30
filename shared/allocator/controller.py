@@ -1882,6 +1882,7 @@ class AllocatorController:
             objective_score=plan.objective_score,
             input_digest=plan.input_digest,
             preemptions=plan.preemptions,
+            artifact_prefetches=plan.artifact_prefetches,
             model_urgencies=plan.model_urgencies,
         )
 

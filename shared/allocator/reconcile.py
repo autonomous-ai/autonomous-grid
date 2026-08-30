@@ -603,6 +603,58 @@ class Reconciler:
             else:
                 proposals.append(warm_action)
 
+        # Correlation-only demand may authorize a cache-only advisory without authorizing runtime
+        # capacity or eviction. Fetching exact weights now removes network/disk time from a likely
+        # future transition while leaving memory, serving slots, and current service untouched.
+        for prefetch in plan.artifact_prefetches:
+            pair = (prefetch.node_id, prefetch.model_id)
+            if pair in desired:
+                continue
+            node = node_by_id.get(prefetch.node_id)
+            profile = profile_by_id.get(prefetch.model_id)
+            if node is None or profile is None or not profile.artifact_source:
+                continue
+            residency = residency_by_pair.get(pair)
+            if (
+                residency is not None
+                and profile.matches_artifact(residency)
+                and (
+                    residency.state in _VERIFIED_ARTIFACT_STATES
+                    or residency.state == ResidencyState.LOADING
+                )
+            ):
+                continue
+            action = self._proposal(
+                ActionKind.LOAD,
+                node,
+                profile,
+                plan,
+                timestamp,
+                "Prestage exact weights for learned near-term demand",
+                history_by_transition=history_by_transition,
+                mode=mode,
+                blocked_until=mutation_blocks,
+                blocked_causes=mutation_block_causes,
+                history_cooldowns=history_cooldowns,
+                memory_mb=profile.memory_for(node.runtimes),
+            )
+            if action is None:
+                deferred.extend(
+                    self._why_deferred(
+                        ActionKind.LOAD,
+                        node,
+                        profile,
+                        history_by_transition,
+                        timestamp,
+                        mode=mode,
+                        blocked_until=mutation_blocks,
+                        blocked_causes=mutation_block_causes,
+                        history_cooldowns=history_cooldowns,
+                    )
+                )
+            else:
+                proposals.append(action)
+
         # A staged preemption already proves which model will consume this host after its victims
         # release capacity. Fetch an exact operator-authorized artifact before disrupting current
         # service, so network/disk cold-start work is not left on the critical path after unload.
