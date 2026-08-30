@@ -1539,6 +1539,57 @@ def test_joint_portfolio_keeps_fifth_ranked_shared_model_inside_bounded_search()
     }
 
 
+def test_scarce_portfolio_restores_failing_workload_when_admission_breadth_is_equal():
+    controller = AllocatorController()
+    for model_id, workload in (("coding-model", "coding"), ("research-model", "research")):
+        controller.put_profile(
+            ModelProfile(
+                model_id,
+                8_000,
+                runtimes=("llama.cpp",),
+                backends=("metal",),
+                min_replicas=0,
+                max_replicas=1,
+                min_residency_seconds=0,
+                workload_scores=((workload, 1.0),),
+            )
+        )
+    for timestamp in (98, 99, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("chat/completions", "auto", "coding"),
+            served_model="coding-model",
+            service_seconds=1,
+            error=False,
+            timestamp=timestamp,
+        )
+        controller.observe_lifecycle(
+            RequestFeatures("chat/completions", "auto", "research"),
+            service_seconds=1,
+            error=True,
+            timestamp=timestamp,
+        )
+    machine = NodeSnapshot(
+        "one-slot",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        max_models=1,
+        last_heartbeat=100,
+    )
+
+    status = controller.status((machine,), now=100)
+
+    projections = {
+        row["workload"]: row for row in status["portfolio_projections"]
+    }
+    assert projections["coding"]["error_rate"] == 0
+    assert projections["research"]["error_rate"] == 1
+    assert status["portfolio_selection"] == {
+        "coding": "",
+        "research": "research-model",
+    }
+
+
 def test_joint_portfolio_allows_only_one_uncertainty_driven_model_experiment():
     controller = AllocatorController()
     candidates = []

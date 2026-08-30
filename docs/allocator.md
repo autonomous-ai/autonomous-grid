@@ -133,9 +133,12 @@ planner. Configured baselines and direct demand are preserved first. When the co
 catalog is larger than the nominal fleet's model-slot count, Grid additionally searches bounded
 admitted model subsets. A workload may be explicitly deferred instead of every active workload
 creating a desired replica and leaving accidental model ordering to choose the losers. The scarce
-fleet objective maximizes distinct admitted workload coverage, service-time-aware pressure and
-request coverage, preserves spare slots when two portfolios serve the same demand, minimizes
-missing replicas, and then compares measured utility and transition cost. Resource pressure uses
+fleet objective maximizes distinct admitted workload coverage, then uses recent measured request
+failure to restore service among equally broad portfolios before comparing service-time-aware
+pressure and request coverage. This failure signal stays inside the bounded demand window and does
+not create durable service debt or bypass residency guards. The objective preserves spare slots
+when two portfolios serve the same demand, minimizes missing replicas, and then compares measured
+utility and transition cost. Resource pressure uses
 offered concurrency—the arrival rate multiplied by measured service time, plus queued work—so a
 long image or video job is not incorrectly treated as cheaper than a short embedding call merely
 because fewer jobs arrive.

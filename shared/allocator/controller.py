@@ -1013,6 +1013,7 @@ class AllocatorController:
                     "joint": bool(portfolio_selection is not None),
                     "objective": (
                         "preserve required service; maximize admitted workload coverage; "
+                        "restore recently failing workloads among equally broad portfolios; "
                         "maximize service-time-aware resource pressure and request coverage; "
                         "minimize replica shortfall; maximize measured model utility"
                     ),
@@ -1434,6 +1435,7 @@ class AllocatorController:
             request_coverage = 0.0
             current_pressure_coverage = 0.0
             workload_coverage = 0.0
+            failing_workload_coverage = 0.0
             utility = 0.0
             for workload, model_id in candidate_selection.items():
                 if not model_id:
@@ -1468,6 +1470,13 @@ class AllocatorController:
                 # represented workloads here lets the joint search discover that consolidation;
                 # pressure and request volume still rank equally broad portfolios below.
                 workload_coverage += float(horizon_placed.get(model_id, 0) > 0)
+                # Among portfolios that admit the same number of distinct workloads, restore
+                # service to demand that is measurably failing before optimizing aggregate
+                # throughput. This is a bounded-window signal, not durable service debt: hard
+                # placement constraints and the normal residency governor remain authoritative.
+                failing_workload_coverage += (
+                    float(row.get("error_rate") or 0.0) * confidence_weight * ratio
+                )
                 pressure_coverage += pressure_weight * ratio
                 request_coverage += request_weight * ratio
                 current_pressure_coverage += pressure_weight * current_ratio
@@ -1480,6 +1489,7 @@ class AllocatorController:
                     horizon_baseline_coverage,
                     baseline_coverage,
                     workload_coverage,
+                    failing_workload_coverage,
                     pressure_coverage,
                     request_coverage,
                     -float(len(horizon_plan.assignments)),
@@ -1546,6 +1556,7 @@ class AllocatorController:
 
         def cheap_subset_metric(model_subset: frozenset[str]) -> tuple[float, ...]:
             covered = 0.0
+            failing = 0.0
             pressure = 0.0
             requests = 0.0
             utility = 0.0
@@ -1560,6 +1571,7 @@ class AllocatorController:
                 row = row_by_workload[workload]
                 confidence = 0.5 + 0.5 * float(row.get("confidence") or 0.0)
                 covered += 1.0
+                failing += confidence * float(row.get("error_rate") or 0.0)
                 pressure += confidence * float(row.get("offered_concurrency") or 0.0)
                 requests += confidence * float(row.get("requests_per_minute") or 0.0)
                 utility += max(float(item.get("score") or 0.0) for item in admitted)
@@ -1569,6 +1581,7 @@ class AllocatorController:
             )
             return (
                 covered,
+                failing,
                 pressure,
                 requests,
                 -float(marginal_models),
