@@ -1185,7 +1185,20 @@ def task_loop(state: Any, capacity: Any = None) -> None:
             continue
 
         consecutive_404s = consecutive_403s = 0
-        if job is None:  # 204 — nothing queued; claim again
+        if job is None:  # 204 — nothing queued, or the local profile disappeared before the call
+            # Agent availability is deliberately re-read for every claim.  It can also disappear
+            # DURING the life of this loop: Codex runtime protocol drift quarantines that executable,
+            # an operator can replace/remove a binary, or its permissions can change.  In a
+            # Codex-only process, claim_once then returns None without touching the relay.  Treating
+            # that as an ordinary 204 would hot-spin forever because there is no network long-poll
+            # left to pace the loop.  Retire only task serving, exactly as at startup; inference on
+            # the same Grid node remains available.
+            if not _agent_profiles():
+                _warn("task serving retired because this node no longer has a runnable configured "
+                      "agent harness; install/enable Codex or Claude, or fix "
+                      "GRID_TASK_AGENT_KINDS (inference is unaffected)")
+                state.tasks_stop.set()
+                return
             continue
 
         _run_and_report(state, job, capacity)

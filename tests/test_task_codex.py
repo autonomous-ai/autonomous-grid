@@ -228,6 +228,10 @@ def test_runtime_method_drift_quarantines_codex_before_another_goal_claim(
     # The binary's stat-key is now poisoned. supports_distributed_goals() must fail without probing
     # again, causing this node's next scheduler profile to omit native_goal.
     assert task_codex.supports_distributed_goals(str(binary)) is False
+    from remote import tasks
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setattr(task_codex.shutil, "which", lambda _name: str(binary))
+    assert tasks._agent_profiles() == ()
 
 
 def test_unknown_native_goal_status_is_retryable_protocol_drift():

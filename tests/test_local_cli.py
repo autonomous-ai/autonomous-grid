@@ -28448,6 +28448,30 @@ def test_no_runnable_harness_retires_only_task_serving_without_claiming(monkeypa
     assert "no runnable configured agent harness" in capsys.readouterr().err
 
 
+def test_runtime_harness_quarantine_retires_instead_of_hot_spinning(monkeypatch, capsys):
+    """A Codex binary can fail its runtime protocol after task workers have already started."""
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=threading.Event(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    profiles = iter([
+        ({"kind": "codex", "capabilities": ["native_goal"]},),  # task_loop preflight
+        (),  # recheck after claim_once observes the process-wide quarantine
+    ])
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: next(profiles))
+    claims = []
+    monkeypatch.setattr(tasks, "claim_once", lambda _state: claims.append(True) or None)
+
+    tasks.task_loop(state)
+
+    assert claims == [True]
+    assert state.tasks_stop.is_set() and not state.stop.is_set()
+    assert "no longer has a runnable configured agent harness" in capsys.readouterr().err
+
+
 def test_native_goal_impossible_checkpoint_is_reported_not_retried(monkeypatch):
     """A harness crash and the native Goal's own terminal verdict are intentionally different."""
     tasks, state, fake_claim = _task_loop_state([{
