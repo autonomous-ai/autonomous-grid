@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "evals": [
+    {
+      "type": "file",
+      "name": "playable game page",
+      "path": "index.html",
+      "min_bytes": 500,
+      "max_bytes": 30000,
+      "contains": [
+        "<canvas id=\"game\"",
+        "id=\"score\"",
+        "id=\"lives\"",
+        "id=\"start-button\"",
+        "href=\"style.css\"",
+        "src=\"game.js\""
+      ]
+    },
+    {
+      "type": "file",
+      "name": "game loop and controls",
+      "path": "game.js",
+      "min_bytes": 2500,
+      "max_bytes": 50000,
+      "contains": [
+        "requestAnimationFrame",
+        "addEventListener",
+        "localStorage",
+        "collision",
+        "restartGame",
+        "score",
+        "lives"
+      ]
+    },
+    {
+      "type": "file",
+      "name": "visible responsive styling",
+      "path": "style.css",
+      "min_bytes": 500,
+      "max_bytes": 30000,
+      "contains": [
+        "canvas",
+        "@media",
+        ":focus-visible"
+      ]
+    },
+    {
+      "type": "file",
+      "name": "operator instructions",
+      "path": "README.md",
+      "min_bytes": 300,
+      "max_bytes": 20000,
+      "contains": [
+        "How to play",
+        "python3 -m http.server",
+        "Controls",
+        "Tests"
+      ]
+    },
+    {
+      "type": "file",
+      "name": "cross-machine handoff record",
+      "path": "HANDOFF.md",
+      "min_bytes": 100,
+      "max_bytes": 10000,
+      "contains": [
+        "A_ACCEPTED_CHECKPOINT",
+        "B_RECONSTRUCTED_CHECKPOINT"
+      ]
+    },
+    {
+      "type": "file",
+      "name": "browser-independent tests",
+      "path": "tests/game.test.mjs",
+      "min_bytes": 500,
+      "max_bytes": 30000,
+      "contains": [
+        "node:test",
+        "node:assert",
+        "collision",
+        "restart"
+      ]
+    }
+  ]
+}
