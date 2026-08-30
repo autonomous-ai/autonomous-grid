@@ -215,7 +215,9 @@ remain audit evidence with `accepted=false` and cannot change Goal state or ente
 Malformed stored task-event or evaluator-evidence JSON is exported as an explicit corruption marker
 instead of failing or silently omitting the evidence response. Offline verification rejects every
 such marker, preserving inspectability without admitting damaged records as release or training
-evidence.
+evidence. A completion retry that collides with a damaged idempotent eval row atomically downgrades
+the cached verdict to `error`, clears acceptance and blocks the Goal; it never 500-loops or retains
+an unverifiable passing label.
 
 If native completion is nominated and evaluation fails, the Goal stays active. The next turn gets
 the failed checks and evidence as a relay-authored handoff block. In the synchronous file-eval slice,

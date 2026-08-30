@@ -255,6 +255,9 @@ Malformed stored event or evaluator JSON never makes the whole evidence export u
 exports an explicit corruption marker so an operator can inspect the surviving trajectory, while
 `grid goal evidence --verify` rejects the record. Damaged evidence therefore remains auditable but
 cannot become release proof or training data.
+If a completion retry encounters a damaged cached evaluator verdict, the relay atomically
+downgrades it to an unaccepted infrastructure error and blocks the Goal instead of returning 500 or
+re-blessing a stale passing label.
 
 Inference attribution is relay-enforced, not trusted from agent headers. If `X-Request-Id` names a
 Goal turn, the request must come from that turn's current leased node, carry the matching
