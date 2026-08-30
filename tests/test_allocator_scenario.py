@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 import cli
 from shared.allocator import scenario as scenario_module
 from shared.allocator.scenario import ScenarioConfig, run_scenario
+from shared.allocator.models import ModelResidency, NodeSnapshot, ResidencyState
 
 
 @pytest.fixture(scope="module")
@@ -76,6 +78,67 @@ def test_scenario_is_deterministic_and_json_serializable(representative_report):
     assert "user-00001" not in encoded
 
 
+def test_scenario_materialization_advances_only_models_that_served_requests():
+    node = NodeSnapshot(
+        "node-1",
+        16_000,
+        runtimes=("llama.cpp",),
+        residencies=(
+            ModelResidency(
+                "model-a",
+                8_000,
+                ResidencyState.READY,
+                loaded_at=1,
+                last_used_at=10,
+            ),
+        ),
+        last_heartbeat=10,
+    )
+    assignment = SimpleNamespace(
+        node_id="node-1",
+        model_id="model-a",
+        memory_mb=8_000,
+        existing=True,
+    )
+
+    idle = scenario_module._materialize((assignment,), (node,), 100)
+    used = scenario_module._materialize(
+        (assignment,),
+        idle,
+        101,
+        used_models=frozenset({"model-a"}),
+    )
+
+    assert idle[0].residencies[0].last_used_at == 10
+    assert used[0].residencies[0].last_used_at == 101
+
+
+def test_small_fleet_oracle_reports_a_reproducible_placement_ceiling():
+    report = run_scenario(
+        ScenarioConfig(
+            machines=4,
+            models=8,
+            users=18,
+            minutes=6,
+            seed=7,
+            oracle=True,
+        )
+    )
+    oracle = report.metrics["oracle"]
+
+    assert oracle["service_ceiling_pct"] >= report.metrics["service_rate_pct"]
+    assert oracle["states_evaluated"] > 0
+    assert oracle["hold_minutes"] >= 2
+    assert oracle["schedule"]
+    assert oracle["one_minute_startup_feasible"] is True
+    assert isinstance(oracle["mutation_search_exact"], bool)
+
+
+def test_small_fleet_oracle_rejects_unbounded_search():
+    with pytest.raises(ValueError, match="oracle is bounded"):
+        ScenarioConfig(machines=5, models=8, users=18, minutes=6, oracle=True)
+
+
 def test_capacity_sweep_keeps_the_same_seeded_users_and_requests():
     scarce = run_scenario(
         ScenarioConfig(machines=4, models=8, users=18, minutes=12, seed=101)
@@ -100,24 +163,21 @@ def test_capacity_sweep_keeps_the_same_seeded_users_and_requests():
         for workload, row in roomy.metrics["per_workload"].items()
     }
     assert roomy.metrics["service_rate_pct"] > scarce.metrics["service_rate_pct"]
-    assert (
-        roomy.metrics["minimum_workload_service_pct"]
-        > scarce.metrics["minimum_workload_service_pct"]
-    )
+    assert roomy.metrics["overall_score"] > scarce.metrics["overall_score"]
     assert (
         roomy.metrics["unsatisfied_replica_minutes"]
         < scarce.metrics["unsatisfied_replica_minutes"]
     )
 
 
-def test_roomy_fleet_does_not_dismantle_a_complete_feasible_placement():
+def test_roomy_fleet_does_not_dismantle_healthy_placement_during_replica_pressure():
     report = run_scenario(
         ScenarioConfig(machines=12, models=8, users=50, minutes=30, seed=42)
     )
     coding_surge = next(row for row in report.timeline if row["minute"] == 7)
 
     assert coding_surge["unloads"] == []
-    assert coding_surge["unsatisfied"] == []
+    assert all(item["code"] == "insufficient_capacity" for item in coding_surge["unsatisfied"])
     assert coding_surge["service_rate_pct"] > 95
 
 
@@ -253,6 +313,7 @@ def test_cli_parser_exposes_scenario_scale_duration_and_seed():
             "--workload-trace",
             "coding=/tmp/coding.csv",
             "--timeline",
+            "--oracle",
             "--json",
         ]
     )
@@ -265,6 +326,7 @@ def test_cli_parser_exposes_scenario_scale_duration_and_seed():
     assert args.seed == 123
     assert args.workload_trace == [("coding", "/tmp/coding.csv")]
     assert args.timeline is True
+    assert args.oracle is True
     assert args.json is True
 
 

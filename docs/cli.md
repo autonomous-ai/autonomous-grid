@@ -624,7 +624,7 @@ process actuation:
 ```
 grid test scenario [--machines N] [--models N] [--users N]
     [--duration 30m|2h] [--seed N]
-    [--workload-trace WORKLOAD=CSV]... [--timeline] [--json]
+    [--workload-trace WORKLOAD=CSV]... [--oracle] [--timeline] [--json]
 grid test start [--machines N] [--candidate-model GGUF]...
     [--workload-model WORKLOAD=GGUF]...
     [--include-comfyui --media-bundle z_image]
@@ -642,6 +642,10 @@ it starts no engine processes and is not an inference test. Repeat `--workload-t
 workload's synthetic demand timing with a headerless CSV whose first columns are timestamp seconds
 and request rate. Extra columns are ignored. The lab normalizes the imported curve to that
 workload's original mean demand, so it compares burst shapes without silently changing scale.
+`--oracle` exhaustively benchmarks the exact trace on at most four logical machines, nine models,
+and 240 minutes. It reports the clairvoyant service ceiling, potential placement gain,
+minimum-churn winning schedule, and artifact/startup feasibility; it remains a planning benchmark
+and starts no engines.
 `--workload-model` gives the real test
 Grid explicit model capabilities such as `coding=qwen-coder.gguf` or
 `research=qwen-instruct.gguf`; several workloads may share one model. With those bindings,

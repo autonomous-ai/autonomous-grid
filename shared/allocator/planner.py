@@ -741,8 +741,12 @@ class PlacementPlanner:
         # proves its replacement ready before draining the old residency.
         future_eligible_nodes: dict[str, frozenset[str]] = {}
         for candidate_model in model_list:
-            if desired_by_model[candidate_model.model_id] <= 0:
-                continue
+            # Dormant catalog models still carry topology option value. A flexible LLM should use
+            # an equivalent general-purpose host instead of occupying the only ComfyUI/GPU host
+            # merely because the first media request has not crossed its evidence threshold yet.
+            # This does not reserve or idle capacity: zero-demand models are never placed. It only
+            # breaks otherwise-equivalent placement ties in favor of preserving uniquely capable
+            # hosts for demand that may arrive during the model's startup horizon.
             future_eligible_nodes[candidate_model.model_id] = frozenset(
                 candidate_node.node_id
                 for candidate_node in node_list

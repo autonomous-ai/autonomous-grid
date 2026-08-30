@@ -27,6 +27,13 @@ from shared.allocator.models import (
     ResidencyState,
 )
 from shared.allocator.planner import PlannerPolicy
+from shared.allocator.scenario_oracle import (
+    MAX_ORACLE_MACHINES,
+    MAX_ORACLE_MINUTES,
+    MAX_ORACLE_MODELS,
+    OracleMinuteDemand,
+    run_small_fleet_oracle,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +44,7 @@ class ScenarioConfig:
     minutes: int = 30
     seed: int = 42
     workload_traces: tuple[tuple[str, str], ...] = ()
+    oracle: bool = False
 
     def __post_init__(self) -> None:
         bounds = {
@@ -50,6 +58,18 @@ class ScenarioConfig:
                 raise ValueError(f"{name} must be in [{minimum}, {maximum}]")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise ValueError("seed must be an integer")
+        if not isinstance(self.oracle, bool):
+            raise ValueError("oracle must be a boolean")
+        if self.oracle and (
+            self.machines > MAX_ORACLE_MACHINES
+            or self.models > MAX_ORACLE_MODELS
+            or self.minutes > MAX_ORACLE_MINUTES
+        ):
+            raise ValueError(
+                "oracle is bounded to "
+                f"{MAX_ORACLE_MACHINES} machines, {MAX_ORACLE_MODELS} models, and "
+                f"{MAX_ORACLE_MINUTES} minutes"
+            )
         seen: set[str] = set()
         for binding in self.workload_traces:
             if not isinstance(binding, tuple) or len(binding) != 2:
@@ -349,6 +369,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     memory_utilization: list[float] = []
     safety_violations: list[str] = []
     timeline: list[dict[str, Any]] = []
+    oracle_demands: list[OracleMinuteDemand] = []
     prior_phase = ""
     prior_states = {node.node_id: node.state for node in nodes}
     disk_available = {
@@ -475,6 +496,14 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             request_counts_by_user[persona.user_id] += count
             service_totals[features.workload] += count * persona.service_seconds
             direct_named_requests += count if explicit_model else 0
+
+        if config.oracle:
+            oracle_demands.append(
+                OracleMinuteDemand(
+                    requests=tuple(sorted(request_counts.items())),
+                    service_seconds=tuple(sorted(service_totals.items())),
+                )
+            )
 
         controller.tick(nodes, now=now + 30.0)
         plan = controller.last_plan
@@ -673,7 +702,19 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         prior_states = {node.node_id: node.state for node in nodes}
         prior_portfolio_selection = portfolio_selection
         prior_admission_states = admission_states
-        nodes = _materialize(plan.assignments, nodes, now + 45.0)
+        used_models = frozenset(
+            chosen
+            for workload, chosen in chosen_by_workload.items()
+            if chosen
+            and request_counts.get(workload, 0) > 0
+            and service_ratio_by_model.get(chosen, 0.0) > 0
+        )
+        nodes = _materialize(
+            plan.assignments,
+            nodes,
+            now + 45.0,
+            used_models=used_models,
+        )
 
     total_served = sum(served_by_workload.values())
     service_rates = [
@@ -785,6 +826,30 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         else "synthetic phase schedule"
     )
     configuration["mode"] = "deterministic planning simulation"
+    oracle_metrics: dict[str, object] | None = None
+    if config.oracle:
+        initial_nodes = tuple(machine.snapshot for machine in machines)
+        oracle_nodes_by_minute = tuple(
+            _evolve_nodes(
+                initial_nodes,
+                _phase(minute, config.minutes),
+                base_time + minute * 60.0,
+            )
+            for minute in range(config.minutes)
+        )
+        oracle_metrics = run_small_fleet_oracle(
+            nodes_by_minute=oracle_nodes_by_minute,
+            profiles=profiles,
+            demands=tuple(oracle_demands),
+            direct_models={
+                workload: model_id
+                for workload, model_id in _DIRECT_MODEL_BY_WORKLOAD.items()
+                if model_id in profile_by_id
+            },
+            artifact_sizes=artifact_by_id,
+            actual_served=total_served,
+            policy=planner_policy,
+        )
     return ScenarioReport(
         configuration=configuration,
         machines=machine_rows,
@@ -827,6 +892,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 for workload, blockers in sorted(admission_blocker_minutes.items())
             },
             "per_workload": per_workload,
+            "oracle": oracle_metrics,
         },
         safety={
             "passed": not safety_violations,
@@ -1146,6 +1212,8 @@ def _materialize(
     assignments: Iterable[Any],
     nodes: tuple[NodeSnapshot, ...],
     now: float,
+    *,
+    used_models: frozenset[str] = frozenset(),
 ) -> tuple[NodeSnapshot, ...]:
     by_node: defaultdict[str, list[ModelResidency]] = defaultdict(list)
     prior_by_pair = {
@@ -1165,7 +1233,16 @@ def _materialize(
                     if assignment.existing and prior is not None and prior.loaded_at
                     else now
                 ),
-                last_used_at=now,
+                # A planning tick is not evidence that a model served traffic. Preserve the
+                # engine-reported timestamp for an incumbent and advance it only when this
+                # scenario minute actually routed work to the model. Otherwise the modeled node
+                # would refresh every residency forever and defeat the production scale-down
+                # cooldown, making a demand-responsive allocator look artificially static.
+                last_used_at=(
+                    now
+                    if assignment.model_id in used_models
+                    else (prior.last_used_at if prior is not None else 0.0)
+                ),
             )
         )
     return tuple(

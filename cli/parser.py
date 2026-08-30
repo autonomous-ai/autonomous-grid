@@ -383,6 +383,13 @@ def _add_logical_test(sub) -> None:
         action="store_true",
         help="Print every placement-changing tick instead of notable events only.",
     )
+    scenario.add_argument(
+        "--oracle",
+        action="store_true",
+        help=(
+            "Exhaustively benchmark the observed trace on up to 4 machines and 9 models."
+        ),
+    )
     scenario.add_argument("--json", action="store_true", help="Emit the complete JSON report.")
     scenario.set_defaults(handler=cmd_test_scenario)
 

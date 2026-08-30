@@ -129,16 +129,27 @@ four-node fixture—the full demand-derived floor remains protected, preventing 
 When two or more workload classes are active, Grid no longer picks each model independently. It
 starts from the evidence-backed choices and runs a deterministic bounded coordinate search over
 complete workload-to-model maps, evaluating each candidate portfolio with the authoritative fleet
-planner. Configured baselines and direct demand are preserved first; then the search maximizes
-service-time-aware resource-pressure coverage, then request coverage, minimizes missing replicas,
-and compares measured utility and transition cost. Resource pressure uses offered concurrency—the
-arrival rate multiplied by measured service time, plus queued work—so a long image or video job is
-not incorrectly treated as cheaper than a short embedding call merely because fewer jobs arrive.
-The bounded coordinate search also visits workloads in offered-concurrency order, ensuring its
-finite evaluation budget is spent on the workloads consuming the most device time first.
-A shared generalist can therefore beat two slightly better specialists when
-only one model slot is available. Search considers at most four candidates
-per workload and 64 distinct portfolios, so catalog size cannot create an unbounded planning pass.
+planner. Configured baselines and direct demand are preserved first. When the configured workload
+catalog is larger than the nominal fleet's model-slot count, Grid additionally searches bounded
+admitted model subsets. A workload may be explicitly deferred instead of every active workload
+creating a desired replica and leaving accidental model ordering to choose the losers. The scarce
+fleet objective maximizes distinct admitted workload coverage, service-time-aware pressure and
+request coverage, preserves spare slots when two portfolios serve the same demand, minimizes
+missing replicas, and then compares measured utility and transition cost. Resource pressure uses
+offered concurrency—the arrival rate multiplied by measured service time, plus queued work—so a
+long image or video job is not incorrectly treated as cheaper than a short embedding call merely
+because fewer jobs arrive.
+
+The subset search is ranked by cheap set coverage before its candidates are verified by the real
+planner, letting it cross multi-change local optima such as consolidating marketing/sales on an
+already-required general model and research/coding on one code model to free an embedding slot.
+Validated alternatives do not consume the uncertainty budget merely because their configured
+suitability is below a specialist. Nominally roomy fleets keep the pressure-first fast path, and a
+temporary outage does not switch portfolio policy. A shared generalist can therefore beat two
+slightly better specialists when only one model slot is available. Search considers at most four
+candidates per workload and 64 distinct portfolios, so catalog size cannot create an unbounded
+planning pass.
+
 Each bounded workload set reserves representation for its exploitation leader and the broadest
 cross-workload candidate; a fifth-ranked generalist can therefore remain discoverable when four
 narrow specialists would make every independently preferred portfolio infeasible.
@@ -150,13 +161,17 @@ its safe victim transition. This prevents individually plausible swaps from beco
 set of simultaneous promises on a saturated fleet. Status
 shows the joint mapping, selected model set, and the model currently consuming that exploration
 slot. It also reports one admission row per active unbound workload using the authoritative plan
-and observed node state: `ready`, `starting`, `planned`, `undersupplied`, `capacity-contended`,
-`blocked-by-residency`, `infeasible`, or `awaiting-plan`. Each row includes the chosen model,
-offered concurrency, desired/planned/ready/missing replica counts, eligible hosts, startup estimate,
-and the concrete reason. These rows explain the existing decision; they do not run a second solver
-or alter router behavior. The controller snapshots bounded demand and outcome state under the telemetry mutex, releases
-it, and performs planner-backed search on that immutable snapshot; request completion telemetry is
-therefore not serialized behind portfolio optimization.
+and observed node state: `ready`, `starting`, `planned`, `undersupplied`, `deferred`,
+`capacity-contended`, `blocked-by-residency`, `infeasible`, or `awaiting-plan`. Each row includes
+the chosen model, offered concurrency, desired/planned/ready/missing replica counts, eligible hosts,
+startup estimate, and the concrete reason. An intentionally omitted model is reported as `deferred
+under current capacity`; its demand and concurrency remain visible. A safe preemption candidate may
+replace a sole speculative specialist when it continues every active workload that justified the
+victim, while direct, pinned, and minimum replicas remain hard blockers. These rows explain the
+existing decision; they do not run a second solver or alter router behavior. The controller snapshots
+bounded demand and outcome state under the telemetry mutex, releases it, and performs planner-backed
+search on that immutable snapshot; request completion telemetry is therefore not serialized behind
+portfolio optimization.
 
 Counterfactual portfolio demand is deliberately weaker than direct evidence: it may fill spare
 capacity but cannot evict a baseline or a directly demanded model. Workload-wide latency, queues,
@@ -920,6 +935,8 @@ uv run grid test scenario \
   --users 50 \
   --duration 30m \
   --seed 42
+uv run grid test scenario --machines 4 --models 8 --users 50 --duration 30m \
+  --seed 7 --oracle
 uv run grid test scenario --machines 16 --models 9 --users 500 --duration 2h --json
 uv run grid test scenario --machines 8 --models 8 --users 50 --duration 2h \
   --workload-trace coding=/path/to/trace.csv \
@@ -945,6 +962,18 @@ prints every changing tick; `--json` emits the complete stable report;
 reusing `--seed` reproduces the same run. Artifact disk constraints are translated into each
 one-model logical node's admission set, while the allocator's native runtime, backend, lifecycle,
 memory, headroom, and model-slot rules remain authoritative.
+
+`--oracle` adds a bounded exhaustive benchmark for at most four machines, nine models, and 240
+minutes. It replays the exact observed request trace with perfect future knowledge, exhaustively
+scores every runtime/backend/memory/node-state-compatible placement, enforces a two-minute-or-longer
+hold and one-minute load-to-ready timing, and minimizes mutations among service-maximizing
+schedules within a 256-state-per-block tie-search cap. The report shows the service ceiling,
+remaining potential gain, winning placement
+changes, states evaluated, and a cumulative artifact-disk audit. This is a development target, not
+a production policy: perfect foresight and optimal routing are intentionally optimistic, and the
+scale-down cooldown is treated as a tunable policy rather than a hard schedule fence. If artifact
+and startup audits pass, the measured gap is a hindsight placement opportunity independent of disk
+and startup limits; otherwise the report states that cache preparation is also required.
 
 For production-shaped replay, `--workload-trace WORKLOAD=CSV` accepts a headerless time series with
 timestamp seconds and request rate in its first two columns; additional distribution columns are

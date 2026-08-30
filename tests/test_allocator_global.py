@@ -4097,6 +4097,46 @@ def test_planner_does_not_relocate_without_demand_for_the_constrained_model():
     assert plan.preemptions == ()
 
 
+def test_planner_preserves_dormant_catalog_option_on_an_equivalent_empty_host():
+    planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
+    flexible = model(
+        "flexible",
+        256,
+        min_replicas=1,
+        max_replicas=1,
+        min_residency_seconds=0,
+        scale_down_cooldown_seconds=0,
+    )
+    dormant_specialist = model(
+        "dormant-specialist",
+        714,
+        min_replicas=0,
+        max_replicas=1,
+    )
+    machines = (
+        node(
+            "general-host",
+            1_000,
+            max_models=1,
+            allowed_models=("flexible",),
+        ),
+        node(
+            "specialized-host",
+            1_000,
+            max_models=1,
+            allowed_models=("flexible", "dormant-specialist"),
+            cached=("flexible",),
+        ),
+    )
+
+    plan = planner.plan(machines, (flexible, dormant_specialist), now=10)
+
+    assert plan.nodes_for("flexible") == ("general-host",)
+    assignment = plan.assignments[0]
+    assert "preserves scarce host for dormant-specialist" in assignment.reasons
+    assert plan.target_for("dormant-specialist") == 0
+
+
 def test_equal_scarcity_does_not_ping_pong_a_ready_flexible_model():
     planner = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0))
     flexible = model(

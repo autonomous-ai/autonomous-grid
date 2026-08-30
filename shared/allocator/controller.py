@@ -957,7 +957,9 @@ class AllocatorController:
                 self._last_plan,
                 self._last_result,
             )
-            selected_portfolio_models = sorted(set((portfolio_selection or {}).values()))
+            selected_portfolio_models = sorted(
+                {model_id for model_id in (portfolio_selection or {}).values() if model_id}
+            )
             exploration_models: set[str] = set()
             for row in portfolio_projections:
                 workload = str(row.get("workload") or "")
@@ -1010,9 +1012,9 @@ class AllocatorController:
                 "portfolio_policy": {
                     "joint": bool(portfolio_selection is not None),
                     "objective": (
-                        "preserve required service; maximize service-time-aware resource "
-                        "pressure coverage; maximize request coverage; minimize replica "
-                        "shortfall; maximize measured model utility"
+                        "preserve required service; maximize admitted workload coverage; "
+                        "maximize service-time-aware resource pressure and request coverage; "
+                        "minimize replica shortfall; maximize measured model utility"
                     ),
                     "workloads": len(portfolio_selection or {}),
                     "selected_models": selected_portfolio_models,
@@ -1283,6 +1285,32 @@ class AllocatorController:
                 str(candidate["model_id"]): candidate for candidate in selectable
             }
 
+        candidate_models = sorted(
+            {
+                model_id
+                for model_ids in options.values()
+                for model_id in model_ids
+            }
+        )
+        nominal_slot_budget = sum(
+            node.max_models if node.max_models is not None else len(candidate_models)
+            for node in nodes
+        )
+        slot_budget = min(
+            len(candidate_models),
+            8,
+            nominal_slot_budget,
+        )
+        workload_catalog_size = sum(
+            profile.max_replicas > 0 and bool(profile.workload_scores)
+            for profile in profiles
+        )
+        # Scarcity is a fleet/catalog property, not a transient active-row property. Using only
+        # today's mature workloads starts in the roomy objective, fills every slot with early
+        # traffic, then discovers scarcity too late to avoid residency lock-in. Likewise, a short
+        # node outage must not flip an otherwise roomy fleet into a different portfolio policy.
+        scarce_portfolio = nominal_slot_budget < workload_catalog_size
+
         # Begin from the exploitation-only portfolio. Coordinate descent may then spend the single
         # exploration slot where its optimism buys the most workload utility without ever entering
         # an invalid multi-experiment state that one-at-a-time moves cannot escape.
@@ -1290,6 +1318,9 @@ class AllocatorController:
         profile_by_id = {profile.model_id: profile for profile in profiles}
         baseline = self.planner.plan(nodes, profiles, direct, now=now)
         baseline_targets = dict(baseline.desired_replicas)
+        horizon_planner = PlacementPlanner(
+            replace(self.planner.policy, preserve_recent_residencies=False)
+        )
         evaluation_cache: dict[tuple[tuple[str, str], ...], tuple[float, ...]] = {}
 
         def metric(candidate_selection: Mapping[str, str]) -> tuple[float, ...]:
@@ -1300,7 +1331,26 @@ class AllocatorController:
             exploration_models = {
                 model_id
                 for workload, model_id in candidate_selection.items()
-                if model_id != exploitation_best[workload]
+                if model_id
+                and model_id != exploitation_best[workload]
+                and (
+                    not scarce_portfolio
+                    or (
+                        float(
+                            candidate_by_workload[workload][model_id]
+                            .get("evidence", {})
+                            .get("effective_requests")
+                            or 0.0
+                        )
+                        - float(
+                            candidate_by_workload[workload][model_id]
+                            .get("evidence", {})
+                            .get("effective_errors")
+                            or 0.0
+                        )
+                        < 0.5
+                    )
+                )
             }
             if len(exploration_models) > _MAX_JOINT_EXPLORATION_MODELS:
                 result = (float("-inf"),)
@@ -1309,7 +1359,8 @@ class AllocatorController:
             preemption_only_models = {
                 model_id
                 for workload, model_id in candidate_selection.items()
-                if (
+                if model_id
+                and (
                     candidate_by_workload[workload][model_id]
                     .get("placement", {})
                     .get("feasible_after_preemption")
@@ -1332,19 +1383,36 @@ class AllocatorController:
                 chosen_models=candidate_selection,
             )
             plan = self.planner.plan(nodes, profiles, forecasts, now=now)
+            # Current hysteresis is authoritative for the mutations issued on this tick, but it
+            # must not make a better stable portfolio invisible. Evaluate the same forecast after
+            # recent-residency holds expire; the live planner will reach that target safely over
+            # subsequent ticks instead of the selector repeatedly recommitting to incumbents just
+            # because they are incumbents.
+            horizon_plan = (
+                horizon_planner.plan(nodes, profiles, forecasts, now=now)
+                if scarce_portfolio
+                else plan
+            )
             placed: dict[str, int] = {}
             for assignment in plan.assignments:
                 placed[assignment.model_id] = placed.get(assignment.model_id, 0) + 1
-            authorized_preemption_models = {
-                item.for_model_id for item in plan.preemptions if item.for_model_id
+            horizon_placed: dict[str, int] = {}
+            for assignment in horizon_plan.assignments:
+                horizon_placed[assignment.model_id] = (
+                    horizon_placed.get(assignment.model_id, 0) + 1
+                )
+            horizon_authorized_preemption_models = {
+                item.for_model_id
+                for item in horizon_plan.preemptions
+                if item.for_model_id
             }
             # A placement hint proves only that some structurally safe transition exists. The
             # evaluated full-fleet plan is authoritative about whether that transition remains
             # safe alongside every other selected workload. Never credit a preemption-only model
             # unless this exact plan places it or explicitly stages a victim for it.
             if any(
-                placed.get(model_id, 0) == 0
-                and model_id not in authorized_preemption_models
+                horizon_placed.get(model_id, 0) == 0
+                and model_id not in horizon_authorized_preemption_models
                 for model_id in preemption_only_models
             ):
                 result = (float("-inf"),)
@@ -1356,10 +1424,20 @@ class AllocatorController:
                 for model_id, target in baseline_targets.items()
                 if target > 0 and model_id in profile_by_id
             )
+            horizon_baseline_coverage = sum(
+                min(horizon_placed.get(model_id, 0), target)
+                * (1.0 + profile_by_id[model_id].priority)
+                for model_id, target in baseline_targets.items()
+                if target > 0 and model_id in profile_by_id
+            )
             pressure_coverage = 0.0
             request_coverage = 0.0
+            current_pressure_coverage = 0.0
+            workload_coverage = 0.0
             utility = 0.0
             for workload, model_id in candidate_selection.items():
+                if not model_id:
+                    continue
                 row = row_by_workload[workload]
                 confidence_weight = (
                     0.5 + 0.5 * float(row.get("confidence") or 0.0)
@@ -1377,20 +1455,52 @@ class AllocatorController:
                     1e-6,
                     float(row.get("requests_per_minute") or 0.0),
                 ) * confidence_weight
-                desired = max(1, plan.target_for(model_id))
-                ratio = min(1.0, placed.get(model_id, 0) / desired)
+                desired = max(1, horizon_plan.target_for(model_id))
+                ratio = min(1.0, horizon_placed.get(model_id, 0) / desired)
+                current_desired = max(1, plan.target_for(model_id))
+                current_ratio = min(
+                    1.0,
+                    placed.get(model_id, 0) / current_desired,
+                )
+                # Admission comes before throughput optimization. In a scarce fleet, a broad
+                # already-resident model may cover several user needs well enough and free the
+                # last accelerator for a workload that otherwise receives zero service. Counting
+                # represented workloads here lets the joint search discover that consolidation;
+                # pressure and request volume still rank equally broad portfolios below.
+                workload_coverage += float(horizon_placed.get(model_id, 0) > 0)
                 pressure_coverage += pressure_weight * ratio
                 request_coverage += request_weight * ratio
+                current_pressure_coverage += pressure_weight * current_ratio
                 utility += pressure_weight * ratio * float(
                     candidate_by_workload[workload][model_id].get("score") or 0.0
                 )
             missing = sum(item.missing_replicas for item in plan.unsatisfied)
             result = (
-                baseline_coverage,
-                pressure_coverage,
-                request_coverage,
-                -float(missing),
-                utility,
+                (
+                    horizon_baseline_coverage,
+                    baseline_coverage,
+                    workload_coverage,
+                    pressure_coverage,
+                    request_coverage,
+                    -float(len(horizon_plan.assignments)),
+                    current_pressure_coverage,
+                    -float(
+                        sum(
+                            item.missing_replicas
+                            for item in horizon_plan.unsatisfied
+                        )
+                    ),
+                    -float(missing),
+                    utility,
+                )
+                if scarce_portfolio
+                else (
+                    baseline_coverage,
+                    pressure_coverage,
+                    request_coverage,
+                    -float(missing),
+                    utility,
+                )
             )
             evaluation_cache[key] = result
             return result
@@ -1409,6 +1519,102 @@ class AllocatorController:
             ),
         )
         best_metric = metric(selection)
+        def subset_selection(model_subset: frozenset[str]) -> dict[str, str]:
+            result: dict[str, str] = {}
+            for workload, candidates in candidate_by_workload.items():
+                admitted = [
+                    candidate
+                    for model_id, candidate in candidates.items()
+                    if model_id in model_subset
+                ]
+                if not admitted:
+                    # An explicit empty choice tells portfolio projection to defer this workload;
+                    # absence would fall back to its independent argmax and recreate an unbounded
+                    # desired portfolio.
+                    result[workload] = ""
+                    continue
+                chosen = max(
+                    admitted,
+                    key=lambda candidate: (
+                        float(candidate.get("exploitation_score") or 0.0),
+                        float(candidate.get("score") or 0.0),
+                        str(candidate.get("model_id") or ""),
+                    ),
+                )
+                result[workload] = str(chosen["model_id"])
+            return result
+
+        def cheap_subset_metric(model_subset: frozenset[str]) -> tuple[float, ...]:
+            covered = 0.0
+            pressure = 0.0
+            requests = 0.0
+            utility = 0.0
+            for workload, candidates in candidate_by_workload.items():
+                admitted = [
+                    candidate
+                    for model_id, candidate in candidates.items()
+                    if model_id in model_subset
+                ]
+                if not admitted:
+                    continue
+                row = row_by_workload[workload]
+                confidence = 0.5 + 0.5 * float(row.get("confidence") or 0.0)
+                covered += 1.0
+                pressure += confidence * float(row.get("offered_concurrency") or 0.0)
+                requests += confidence * float(row.get("requests_per_minute") or 0.0)
+                utility += max(float(item.get("score") or 0.0) for item in admitted)
+            marginal_models = sum(
+                model_id not in baseline_targets or baseline_targets.get(model_id, 0) <= 0
+                for model_id in model_subset
+            )
+            return (
+                covered,
+                pressure,
+                requests,
+                -float(marginal_models),
+                utility,
+            )
+
+        # On a small candidate catalog, explicitly search admitted model sets. This supplies the
+        # missing M1 decision: workloads with no selected resident model are deliberately deferred
+        # instead of all generating desired replicas and leaving accidental model-ordering to pick
+        # the losers. Larger catalogs use the same bounded top-64 set-cover candidates.
+        subsets: list[frozenset[str]] = []
+        if slot_budget < len(candidate_models):
+            beam = [frozenset()]
+            discovered: set[frozenset[str]] = set()
+            for _size in range(1, slot_budget + 1):
+                expanded = {
+                    frozenset((*model_subset, model_id))
+                    for model_subset in beam
+                    for model_id in candidate_models
+                    if model_id not in model_subset
+                }
+                beam = sorted(
+                    expanded,
+                    key=lambda model_subset: (
+                        cheap_subset_metric(model_subset),
+                        tuple(sorted(model_subset)),
+                    ),
+                    reverse=True,
+                )[:_MAX_JOINT_PORTFOLIO_EVALUATIONS]
+                discovered.update(beam)
+            subsets = list(discovered)
+        subsets.sort(
+            key=lambda model_subset: (
+                cheap_subset_metric(model_subset),
+                tuple(sorted(model_subset)),
+            ),
+            reverse=True,
+        )
+        for model_subset in subsets:
+            if len(evaluation_cache) >= _MAX_JOINT_PORTFOLIO_EVALUATIONS:
+                break
+            trial = subset_selection(model_subset)
+            trial_metric = metric(trial)
+            if trial_metric > best_metric:
+                selection = trial
+                best_metric = trial_metric
         shared_models = sorted(
             {
                 model_id
@@ -1417,17 +1623,21 @@ class AllocatorController:
                 if sum(model_id in choices for choices in options.values()) > 1
             }
         )
-        for model_id in shared_models:
-            if len(evaluation_cache) >= _MAX_JOINT_PORTFOLIO_EVALUATIONS:
-                break
-            trial = dict(selection)
-            for workload, model_ids in options.items():
-                if model_id in model_ids:
-                    trial[workload] = model_id
-            trial_metric = metric(trial)
-            if trial_metric > best_metric:
-                selection = trial
-                best_metric = trial_metric
+        if not subsets:
+            # When every candidate model can fit, the cheaper shared-model seeds retain the
+            # original bounded coordinate search. Scarce fleets use the explicit set-cover search
+            # above, which already crosses multi-move local optima.
+            for model_id in shared_models:
+                if len(evaluation_cache) >= _MAX_JOINT_PORTFOLIO_EVALUATIONS:
+                    break
+                trial = dict(selection)
+                for workload, model_ids in options.items():
+                    if model_id in model_ids:
+                        trial[workload] = model_id
+                trial_metric = metric(trial)
+                if trial_metric > best_metric:
+                    selection = trial
+                    best_metric = trial_metric
         for _pass in range(2):
             changed = False
             for workload in order:
@@ -2877,11 +3087,12 @@ def _portfolio_selection_hints(
                         and victim_profile.matches_artifact(residency)
                     ):
                         removed_ready[victim_id] += 1
-            return {
-                victim_id
-                for victim_id in victims
-                if victim_id in hard_protected_models
-                or (
+            blockers: set[str] = set()
+            for victim_id in victims:
+                if victim_id in hard_protected_models:
+                    blockers.add(victim_id)
+                    continue
+                removes_last_required_copy = (
                     victim_id in active_capable_models
                     and ready_replicas[victim_id] - removed_ready[victim_id]
                     < (
@@ -2890,7 +3101,25 @@ def _portfolio_selection_hints(
                         else max(1, demand_replica_floors.get(victim_id, 0))
                     )
                 )
-            }
+                if not removes_last_required_copy:
+                    continue
+                victim_workloads = {
+                    workload
+                    for workload, preferred_model in preferred_selection.items()
+                    if preferred_model == victim_id
+                }
+                # A sole speculative residency is not sacred when the proposed replacement can
+                # continue every active workload that justified it. This is the safe consolidation
+                # path from a narrow research model to a code model that serves both research and
+                # an emerging coding surge. Direct, pinned, and minimum replicas remain hard
+                # blockers above; the authoritative planner still stages make-before-break.
+                replacement_preserves_coverage = bool(victim_workloads) and all(
+                    profile.workload_score(workload) > 0
+                    for workload in victim_workloads
+                )
+                if not replacement_preserves_coverage:
+                    blockers.add(victim_id)
+            return blockers
 
         safe_path: dict[str, Any] | None = None
         all_blockers: set[str] = set()
@@ -3020,7 +3249,13 @@ def _portfolio_admissions(
             placement = dict(
                 (diagnostic_candidate or {}).get("placement") or {}
             )
-            if blocked_candidate is not None:
+            if projection.get("deferred") is True:
+                state = "deferred"
+                reason = str(
+                    projection.get("reason")
+                    or "joint portfolio deferred under current capacity"
+                )
+            elif blocked_candidate is not None:
                 state = "blocked-by-residency"
                 reason = str(
                     placement.get("reason")

@@ -608,9 +608,20 @@ class WorkloadIntelligence:
                         {
                             "workload": workload,
                             "requests_per_minute": forecast.requests_per_minute,
+                            "offered_concurrency": forecast.offered_concurrency,
                             "samples": forecast.sample_count,
+                            "confidence": forecast.confidence,
+                            "demand_correlation_sources": forecast.correlation_sources,
+                            "demand_correlation_confidence": (
+                                forecast.correlation_confidence
+                            ),
                             "chosen_model": "",
-                            "reason": "joint portfolio selection is no longer fleet-feasible",
+                            "deferred": forced_model_id == "",
+                            "reason": (
+                                "joint portfolio deferred under current capacity"
+                                if forced_model_id == ""
+                                else "joint portfolio selection is no longer fleet-feasible"
+                            ),
                             "candidates": _candidate_rows(
                                 configured_candidates,
                                 workload,

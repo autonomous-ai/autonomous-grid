@@ -516,7 +516,7 @@ def test_joint_portfolio_uses_service_time_aware_resource_pressure():
     status = controller.status((machine,), now=100)
 
     assert status["portfolio_selection"] == {
-        "embedding": "short-request-specialist",
+        "embedding": "",
         "video": "long-request-specialist",
     }
     assert controller.last_plan is not None
@@ -534,8 +534,100 @@ def test_joint_portfolio_uses_service_time_aware_resource_pressure():
         row["workload"]: row for row in status["portfolio_admissions"]
     }
     assert admissions["video"]["state"] == "starting"
-    assert admissions["embedding"]["state"] == "capacity-contended"
+    assert admissions["embedding"]["state"] == "deferred"
+    assert admissions["embedding"]["model_id"] == ""
+    assert admissions["embedding"]["reason"] == (
+        "joint portfolio deferred under current capacity"
+    )
     assert admissions["embedding"]["ready_replicas"] == 0
+
+
+def test_joint_portfolio_reuses_validated_baseline_to_admit_an_uncovered_workload():
+    controller = AllocatorController()
+    profiles = (
+        ModelProfile(
+            "general",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=1,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("general", 1.0), ("marketing", 0.6), ("sales", 0.6)),
+        ),
+        ModelProfile(
+            "creative",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("marketing", 1.0), ("sales", 1.0)),
+        ),
+        ModelProfile(
+            "embedding",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("embedding", 1.0),),
+        ),
+        ModelProfile(
+            "video",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("video", 1.0),),
+        ),
+    )
+    for candidate in profiles:
+        controller.put_profile(candidate)
+    for workload, seconds in (
+        ("marketing", 5),
+        ("sales", 4),
+        ("embedding", 1),
+        ("video", 45),
+    ):
+        for timestamp in (98, 99, 100):
+            controller.observe_lifecycle(
+                RequestFeatures("chat/completions", "auto", workload),
+                served_model=("general" if workload in {"marketing", "sales"} else ""),
+                service_seconds=seconds,
+                timestamp=timestamp,
+            )
+    machines = tuple(
+        NodeSnapshot(
+            f"node-{index}",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            last_heartbeat=100,
+        )
+        for index in range(3)
+    )
+
+    controller.tick(machines, now=100)
+    status = controller.status(machines, now=100)
+
+    assert status["portfolio_selection"] == {
+        "embedding": "embedding",
+        "marketing": "general",
+        "sales": "general",
+        "video": "video",
+    }
+    assert {item.model_id for item in controller.last_plan.assignments} == {
+        "embedding",
+        "general",
+        "video",
+    }
+    assert "creative" not in status["portfolio_policy"]["selected_models"]
 
 
 def test_weak_media_canary_requires_surplus_beyond_catalog_and_reserves():

@@ -62,6 +62,7 @@ def cmd_test_scenario(args: argparse.Namespace) -> int:
         minutes=args.duration,
         seed=args.seed,
         workload_traces=tuple(args.workload_trace),
+        oracle=args.oracle,
     )
     report = run_scenario(config)
     if args.json:
@@ -131,7 +132,7 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
             changes.append("nodes " + ", ".join(row["node_changes"]))
         if row.get("portfolio_changed") and row.get("portfolio_selection"):
             portfolio = ", ".join(
-                f"{workload}->{model_id}"
+                f"{workload}->{model_id or 'deferred'}"
                 for workload, model_id in sorted(row["portfolio_selection"].items())
             )
             changes.append("portfolio " + portfolio)
@@ -255,6 +256,27 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
         print(f"\nSafety: FAIL · {len(report.safety['violations'])} violation(s)")
         for violation in report.safety["violations"][:10]:
             print(f"  {violation}")
+    oracle = metrics.get("oracle")
+    if oracle:
+        print("\nClairvoyant small-fleet benchmark")
+        print(
+            f"  service ceiling              {oracle['service_ceiling_pct']:>7.2f}% · "
+            f"potential gain {oracle['potential_gain_pct_points']:.2f} points"
+        )
+        print(
+            f"  exhaustive search             {oracle['states_evaluated']} placements · "
+            f"{oracle['mutations']} lifecycle mutations"
+        )
+        print(
+            "  evidence                      "
+            + str(oracle["interpretation"])
+        )
+        if not oracle["artifact_feasible"]:
+            overage = ", ".join(
+                f"{node} +{amount / 1024:.1f} GiB"
+                for node, amount in oracle["artifact_overage_mb"].items()
+            )
+            print(f"  cache preparation needed      {overage}")
     print("JSON report: rerun with --json. Repeatability: use the same --seed.")
 
 
