@@ -7,8 +7,8 @@ The detailed physical artifacts are indexed in
 
 ## Tested code revisions
 
-- Public worker/CLI: `e160e7f1e8d915104dce0e7f5e6256d634056c2c`
-- Private relay: `5fbecb5c3ee1ce2941d946c6e7733e3fe6f63ebc`
+- Public worker/CLI: `51c010d8f29837a98ac0bc7bd88e112f0247e3bb`
+- Private relay: `7d268e66b48435ed8249622c8ca086f2122b425b`
 - Both `grid-goal-distributed` code revisions were clean and pushed when these gates completed.
   The public working tree contained only the documentation changes recorded by the following
   documentation-only commit; it changes no runtime or test code.
@@ -17,15 +17,15 @@ The detailed physical artifacts are indexed in
 
 | Gate | Result | What it proves |
 |---|---:|---|
-| Full public suite | 3,342 passed, 55 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
+| Full public suite | 3,342 passed, 57 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
 | Private runbook release bundle | 142 passed | Goal creation, claims, retries, pause/cancel races, budgets, subgoals, eval authority, retention, dead-branch pruning, inference attribution, capability matching, and recovery from a relay death during continuation preparation |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
-| Cross-repository distributed matrix | 17 passed | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
+| Cross-repository distributed matrix | 18 passed | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 
-The full public suite, private runbook bundle, migration suite, and 17-scenario matrix were each
+The full public suite, private runbook bundle, migration suite, and 18-scenario matrix were each
 run uninterrupted against the exact revisions above. The evaluator audit also proves that:
 
 - completion checks read the relay-resolved immutable result commit rather than a provider-supplied
@@ -53,9 +53,12 @@ run uninterrupted against the exact revisions above. The evaluator audit also pr
   pre-release `INTEGER` columns idempotently. Ten-million-token local-model Goals remain well inside
   that bound.
 
-The final 17-scenario matrix was run in one uninterrupted invocation against both candidate
+The final 18-scenario matrix was run in one uninterrupted invocation against both candidate
 revisions. It includes:
 
+- a real relay timer recovering the exact stale `preparing` row left by a continuation-preparation
+  crash, publishing one terminal event and creating one attempt-zero replacement without another
+  user mutation request;
 - three execution nodes completing one game across two abrupt lease reclaims;
 - Codex to Claude to Codex continuation from separate local roots;
 - a four-node Codex/Claude eval-repair flow that verifies Claude receives the exact immutable eval
@@ -77,7 +80,7 @@ final child validation/schema/yield fixes. The candidate removes the runtime-dep
 assumption: the event encoder now explicitly refuses excessive nesting, and its complete 59-test
 suite passes. The unrelated three domain fixtures remain historical baseline failures rather than a
 Goal release gate. The 684-test sweep ran at private revision `2bd0479`; later Goal-specific
-hardening is validated by the exact 142-test private release bundle and complete 17-scenario
+hardening is validated by the exact 142-test private release bundle and complete 18-scenario
 cross-repository matrix above.
 Other stale legacy tests on current `main` also independently fail against current contracts, such as
 constructing `AccountRow(node_id=...)` after the model moved to `user_id`. The dedicated Goal suite,

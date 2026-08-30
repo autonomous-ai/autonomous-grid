@@ -527,6 +527,7 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 | Goal | Execution | Harnesses | Injected failure | Independent eval |
 |---|---|---|---|---|
 | Root creation replay | Client -> relay -> queue | N/A before claim | First POST acknowledgement is replayed; changed body reuses key | One Goal id and one first turn; key conflict rejected |
+| Continuation-prepare crash | Relay timer | N/A before replacement claim | Relay dies after inserting the next turn but before its Git input becomes claimable | One failed abandoned row, one terminal event, and one queued attempt-zero replacement without a client cleanup request |
 | Model arrival | A polls; inference-only C joins | Codex on A | Requested model is absent for several polls | Same row stays at attempt 0; `READY.md`; first and only claim is attempt 1 |
 | Quota recovery | A polls; inference-only C stays registered | Codex on A | C advertises the model but reports `quota.serving: false` | Same row/evidence stay untouched until C's healthy heartbeat; first claim is attempt 1 |
 | Four-feature game | A -> B -> C | Codex -> Codex -> Codex | A dies in feature 2; B dies in 3–4 | HTML wiring, click/score behavior, styling and instructions |
