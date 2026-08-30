@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
+import pytest
 
 from remote import task_codex, task_codex_proxy, task_repo
 
@@ -38,6 +39,19 @@ class _FakeProcess:
 
     def kill(self):
         self.returncode = -9
+
+
+class _CreateRolloutOnActivation(_OpenStringIO):
+    def __init__(self, rollout: Path):
+        super().__init__()
+        self.rollout = rollout
+
+    def write(self, value):
+        written = super().write(value)
+        if '"method":"thread/goal/set"' in value and not self.rollout.exists():
+            self.rollout.parent.mkdir(parents=True, exist_ok=True)
+            self.rollout.write_text("{}\n", encoding="utf-8")
+        return written
 
 
 def _messages(rollout_path, status="complete"):
@@ -309,6 +323,84 @@ def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch)
     assert spawned["env"]["NO_PROXY"] == "internal.example,127.0.0.1,localhost"
     assert spawned["env"]["no_proxy"] == spawned["env"]["NO_PROXY"]
     assert events[-1][0] == "goal.slice.completed"
+
+
+def test_thread_start_may_promise_rollout_before_activation_creates_it(tmp_path, monkeypatch):
+    """Measured against Codex 0.150.1: thread/start returns a path that is not a file yet."""
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    rollout = (tmp_path / task_codex.AGENT_DIR / task_codex.HOME_DIR
+               / "sessions/fake/rollout-thread-portable.jsonl")
+    process = _FakeProcess(_messages(rollout))
+    process.stdin = _CreateRolloutOnActivation(rollout)
+
+    result = task_codex.run_slice(
+        _job(), tmp_path, inference=task_codex.GridInference("https://grid.test", "secret"),
+        executable="/fake/codex", timeout=30, publish=lambda *_args, **_kwargs: None,
+        process_factory=lambda _argv, _env, _cwd: process)
+
+    assert result.status == "complete"
+    assert rollout.is_file()
+
+
+def test_missing_pre_activation_rollout_restarts_only_uncompleted_native_thread(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    state_dir = tmp_path / task_codex.AGENT_DIR
+    state_dir.mkdir(parents=True)
+    (state_dir / task_codex.STATE_FILE).write_text(json.dumps({
+        "version": 2, "thread_id": "never-activated",
+        "rollout_relpath": "sessions/missing.jsonl", "status": "active",
+        "turns_completed": 0, "tokens_used": 0, "time_used_seconds": 0,
+    }), encoding="utf-8")
+    rollout = (state_dir / task_codex.HOME_DIR
+               / "sessions/fake/rollout-thread-portable.jsonl")
+    process = _FakeProcess(_messages(rollout))
+    process.stdin = _CreateRolloutOnActivation(rollout)
+
+    task_codex.run_slice(
+        _job(), tmp_path, inference=task_codex.GridInference("https://grid.test", "secret"),
+        executable="/fake/codex", timeout=30, publish=lambda *_args, **_kwargs: None,
+        process_factory=lambda _argv, _env, _cwd: process)
+
+    sent = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
+    assert any(row.get("method") == "thread/start" for row in sent)
+    assert not any(row.get("method") == "thread/resume" for row in sent)
+
+
+def test_missing_rollout_after_a_completed_turn_is_never_silently_restarted(
+        tmp_path, monkeypatch):
+    """Losing real native history must fail closed instead of fabricating a fresh thread."""
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    state_dir = tmp_path / task_codex.AGENT_DIR
+    state_dir.mkdir(parents=True)
+    (state_dir / task_codex.STATE_FILE).write_text(json.dumps({
+        "version": 2, "thread_id": "completed-on-worker-a",
+        "rollout_relpath": "sessions/missing.jsonl", "status": "active",
+        "turns_completed": 1, "tokens_used": 42, "time_used_seconds": 3,
+    }), encoding="utf-8")
+    process = _FakeProcess([{"id": 1, "result": {"userAgent": "codex"}}])
+
+    with pytest.raises(task_codex.MissingRollout, match="checkpoint rollout is missing"):
+        task_codex.run_slice(
+            _job(turns_completed=1), tmp_path,
+            inference=task_codex.GridInference("https://grid.test", "secret"),
+            executable="/fake/codex", timeout=30, publish=lambda *_args, **_kwargs: None,
+            process_factory=lambda _argv, _env, _cwd: process)
+
+    sent = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
+    assert not any(row.get("method") in {"thread/start", "thread/resume"} for row in sent)
+
+
+def test_promised_rollout_is_contained_before_it_exists(tmp_path):
+    home = tmp_path / "portable-home"
+    home.mkdir()
+    outside = tmp_path / "future-rollout.jsonl"
+
+    with pytest.raises(task_codex.CodexGoalError, match="outside the portable Codex home"):
+        task_codex._relative_rollout(home, str(outside), require_exists=False)
 
 
 def test_mid_slice_crash_still_publishes_a_portable_codex_thread_pointer(tmp_path, monkeypatch):

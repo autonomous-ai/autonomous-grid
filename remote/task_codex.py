@@ -156,6 +156,10 @@ class CodexProtocolError(CodexGoalError):
     """The installed app-server cannot safely execute Grid's native Goal contract."""
 
 
+class MissingRollout(CodexGoalError):
+    """A promised native thread has no portable rollout in the copied checkpoint."""
+
+
 @dataclass(frozen=True)
 class GoalSlice:
     status: str
@@ -385,8 +389,14 @@ def _write_state(workspace: Path, value: dict[str, Any]) -> None:
             pass
 
 
-def _relative_rollout(codex_home: Path, path: Any) -> str:
-    """Turn Codex's machine-local rollout path into a checkpoint-safe relative path."""
+def _relative_rollout(codex_home: Path, path: Any, *, require_exists: bool = True) -> str:
+    """Turn Codex's machine-local rollout path into a checkpoint-safe relative path.
+
+    Codex 0.150.1 returns the future JSONL path from ``thread/start`` before activation creates the
+    file.  Grid must persist that portable pointer before the turn runs (so a mid-turn kill can be
+    handed off), but must still require the promised file before accepting a completed slice.
+    Containment is checked both times, including after any parent symlinks have appeared.
+    """
     if not isinstance(path, str) or not path:
         raise CodexGoalError("Codex returned no rollout path for its distributed Goal thread")
     root = codex_home.resolve()
@@ -398,7 +408,7 @@ def _relative_rollout(codex_home: Path, path: Any) -> str:
         relative = candidate.relative_to(root)
     except ValueError:
         raise CodexGoalError("Codex stored its Goal rollout outside the portable Codex home") from None
-    if not candidate.is_file():
+    if require_exists and not candidate.is_file():
         raise CodexGoalError("Codex's distributed Goal rollout does not exist")
     return relative.as_posix()
 
@@ -417,7 +427,7 @@ def _resume_rollout(codex_home: Path, state: dict[str, Any], thread_id: str) -> 
             raise CodexGoalError(
                 "the distributed Codex checkpoint rollout escapes its Codex home") from None
         if not candidate.is_file():
-            raise CodexGoalError("the distributed Codex checkpoint rollout is missing")
+            raise MissingRollout("the distributed Codex checkpoint rollout is missing")
         return candidate
 
     # Compatibility for checkpoints written before rollout_relpath existed. The copied transcript
@@ -814,16 +824,27 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
         if thread_id:
             resume = dict(thread_params)
             resume.pop("dynamicTools", None)
-            resume["path"] = str(_resume_rollout(codex_home, state, thread_id))
-            thread_result = rpc.wait(
-                rpc.send("thread/resume", {"threadId": thread_id, **resume})) or {}
-        else:
+            try:
+                resume["path"] = str(_resume_rollout(codex_home, state, thread_id))
+            except MissingRollout:
+                # A process can die after thread/start promises its future path but before Codex
+                # activates the first turn and creates it. No native turn completed and therefore
+                # no model history exists to lose; restart the native thread over the Git worktree
+                # checkpoint instead of burning every distributed retry on the same absent file.
+                if turns_before:
+                    raise
+                thread_id = ""
+            if thread_id:
+                thread_result = rpc.wait(
+                    rpc.send("thread/resume", {"threadId": thread_id, **resume})) or {}
+        if not thread_id:
             thread_result = rpc.wait(rpc.send("thread/start", thread_params)) or {}
             thread_id = str((thread_result.get("thread") or {}).get("id") or "")
             if not thread_id:
                 raise CodexProtocolError("Codex thread/start returned no thread id")
+        rollout_path = (thread_result.get("thread") or {}).get("path")
         rollout_relpath = _relative_rollout(
-            codex_home, (thread_result.get("thread") or {}).get("path"))
+            codex_home, rollout_path, require_exists=False)
         # Persist the portable thread pointer BEFORE activating/running this slice. If the native
         # app-server dies halfway through the turn, `_push_result` can now publish a checkpoint that
         # another Codex machine resumes from the copied rollout instead of starting a new thread.
@@ -866,6 +887,10 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
         elapsed = round(time.monotonic() - started)
         measured_time = max(time_before + elapsed,
                             _counter(native_goal, "timeUsedSeconds", "native Codex Goal"))
+        # A successful native turn without its rollout cannot be resumed on another machine. The
+        # early check deliberately accepted Codex's promised future path; this is where that promise
+        # becomes mandatory, before Grid publishes a completed checkpoint.
+        rollout_relpath = _relative_rollout(codex_home, rollout_path, require_exists=True)
         result = GoalSlice(status, thread_id, turns_before + 1, measured_tokens, measured_time,
                            output=str(turn.get("output") or "") or None)
         _write_state(workspace, {
