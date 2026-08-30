@@ -88,6 +88,13 @@ observed demand has broader relocation and preemption authority. Every path stil
 the planner to prove victim priority, ownership, pins, active work, minimum residency, and capacity,
 and the reconciler drains before unloading. This bounded late binding lets a newly active workload
 replace an idle specialist instead of remaining permanently invisible behind a full model slot.
+When several occupied compatible hosts exist, the feasibility scan retains up to sixteen ranked
+preemption paths instead of treating the first host as the whole fleet. The controller selects the
+first path that preserves direct/baseline work and the active victim's required ready-replica floor.
+If a clean structural plan proves the recovered fleet can host one preferred model per active
+workload portfolio, one copy of each active model remains protected while an excess replica may be
+reclaimed to end whole-workload starvation. If that complete portfolio cannot fit—as on the scarce
+four-node fixture—the full demand-derived floor remains protected, preventing futile rotation.
 
 When two or more workload classes are active, Grid no longer picks each model independently. It
 starts from the evidence-backed choices and runs a deterministic bounded coordinate search over
@@ -861,9 +868,12 @@ creative campaign, thermal throttle, node outage, recovery, and cooldown. Every 
 the production workload intelligence and placement planner.
 
 The report explains joint portfolio changes, loads, unloads, node transitions, capacity shortfalls,
-demand served, least-user service and user/workload SLO attainment, portfolio suitability, memory use, cache locality,
+persistent workload-admission states, demand served, least-user service and user/workload SLO
+attainment, portfolio suitability, memory use, cache locality,
 persistent modeled disk consumption, cold starts, capacity recommendations, and
-safety invariants. It intentionally reports shortfalls instead of inventing capacity. `--timeline`
+safety invariants. Admission metrics separately count state and concrete blocking-model minutes, so
+an unselected workload cannot masquerade as a low replica shortfall. It intentionally reports
+shortfalls instead of inventing capacity. `--timeline`
 prints every changing tick; `--json` emits the complete stable report;
 reusing `--seed` reproduces the same run. Artifact disk constraints are translated into each
 one-model logical node's admission set, while the allocator's native runtime, backend, lifecycle,

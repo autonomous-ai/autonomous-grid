@@ -12,6 +12,7 @@ import math
 import threading
 import time
 import uuid
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -1096,6 +1097,8 @@ class AllocatorController:
             direct,
             intelligence,
             placement_hints,
+            node_list,
+            self.planner,
             now=now,
         )
         selection = self._joint_portfolio_selection(
@@ -2376,18 +2379,24 @@ def _portfolio_selection_hints(
     direct: Iterable[DemandForecast],
     intelligence: WorkloadIntelligence,
     placement_hints: Mapping[str, Mapping[str, Any]] | None,
+    nodes: Iterable[NodeSnapshot],
+    planner: PlacementPlanner,
     *,
     now: float,
 ) -> dict[str, dict[str, Any]]:
     """Fence speculative replacement against demand visible in the same snapshot.
 
     Fleet feasibility is occupancy-aware but intentionally demand-agnostic. Before portfolio
-    selection treats a safe-preemption path as selectable, protect every required baseline and every
-    victim that can serve an active workload or has direct model demand. The final planner remains
-    authoritative and can reject a path when full-fleet interactions reveal another conflict.
+    selection treats a safe-preemption path as selectable, protect every required baseline and
+    directly demanded model. Workload-capable victims retain the demand-derived replica target (and
+    at least one viable fallback), but a copy above that floor may be reclaimed for a missing
+    workload. The final planner remains authoritative and can reject a path when full-fleet
+    interactions reveal another conflict.
     """
 
     profile_list = tuple(profiles)
+    direct_list = tuple(direct)
+    node_list = tuple(nodes)
     if placement_hints is None:
         return {
             profile.model_id: {
@@ -2401,47 +2410,222 @@ def _portfolio_selection_hints(
             }
             for profile in profile_list
         }
+    if not any(
+        hint.get("feasible_after_preemption") is True
+        for hint in placement_hints.values()
+    ):
+        return {
+            profile.model_id: {
+                **dict(placement_hints.get(profile.model_id) or {}),
+                "portfolio_preemption_safe": False,
+                "portfolio_preemption_blockers": [],
+            }
+            for profile in profile_list
+        }
+    projections = intelligence.projections(profile_list, now=now)
     active_workloads = {
         str(row.get("workload") or "")
-        for row in intelligence.projections(profile_list, now=now)
+        for row in projections
         if int(row.get("samples") or 0) >= intelligence.portfolio_min_samples
         and float(row.get("requests_per_minute") or 0.0) > 0
     }
-    protected_models = {
-        profile.model_id
-        for profile in profile_list
-        if profile.min_replicas > 0
-        or profile.pinned_nodes
-        or any(profile.workload_score(workload) > 0 for workload in active_workloads)
+    preferred_selection = {
+        str(row.get("workload") or ""): str(row.get("chosen_model") or "")
+        for row in projections
+        if str(row.get("workload") or "") in active_workloads
+        and str(row.get("chosen_model") or "")
     }
-    for forecast in direct:
+    protection_forecasts = intelligence.portfolio_forecasts(
+        profile_list,
+        direct_list,
+        now=now,
+        chosen_models=preferred_selection,
+    )
+    protection_plan = planner.plan(
+        node_list,
+        profile_list,
+        protection_forecasts,
+        now=now,
+    )
+    demand_replica_floors = dict(protection_plan.desired_replicas)
+    preferred_models = frozenset(preferred_selection.values())
+
+    def has_direct_pressure(forecast: DemandForecast) -> bool:
         observed_rate = forecast.observed_requests_per_minute
         if not observed_rate and not forecast.correlation_sources:
             observed_rate = forecast.requests_per_minute
-        if (
+        return bool(
             observed_rate > 0
             or forecast.queue_depth > 0
             or forecast.p95_latency_ms > 0
             or forecast.error_rate > 0
             or (forecast.offered_concurrency > 0 and not forecast.correlation_sources)
+        )
+
+    structural_forecasts = {
+        forecast.model_id: forecast
+        for forecast in direct_list
+        if has_direct_pressure(forecast)
+    }
+    for model_id in preferred_models:
+        structural_forecasts.setdefault(
+            model_id,
+            DemandForecast(
+                model_id=model_id,
+                requests_per_minute=0.01,
+                observed_requests_per_minute=0.01,
+                offered_concurrency=0.01,
+                confidence=1.0,
+                sample_count=1,
+                updated_at=now,
+            ),
+        )
+    structural_planner = PlacementPlanner(
+        replace(planner.policy, preserve_recent_residencies=False)
+    )
+
+    def structural_node(node: NodeSnapshot) -> NodeSnapshot:
+        # Test whether the preferred one-copy portfolio fits after allocator-owned work may move.
+        # External inventory, pinned processes, and a manually managed host are not hypothetical
+        # free capacity and must remain occupied in this lower-bound proof.
+        retained = tuple(
+            residency
+            for residency in node.residencies
+            if node.manually_managed or not residency.managed or residency.pinned
+        )
+        return replace(node, residencies=retained)
+
+    structural_plan = structural_planner.plan(
+        tuple(structural_node(node) for node in node_list),
+        profile_list,
+        tuple(structural_forecasts.values()),
+        now=now,
+    )
+    complete_portfolio_feasible = all(
+        structural_plan.nodes_for(model_id) for model_id in preferred_models
+    )
+    hard_protected_models = {
+        profile.model_id
+        for profile in profile_list
+        if profile.min_replicas > 0
+        or profile.pinned_nodes
+    }
+    for forecast in direct_list:
+        if has_direct_pressure(forecast):
+            hard_protected_models.add(forecast.model_id)
+
+    active_capable_models = {
+        profile.model_id
+        for profile in profile_list
+        if any(profile.workload_score(workload) > 0 for workload in active_workloads)
+    }
+    profile_by_id = {profile.model_id: profile for profile in profile_list}
+    ready_replicas: Counter[str] = Counter()
+    for node in node_list:
+        age = now - node.last_heartbeat
+        if (
+            node.state not in (NodeState.ACCEPTING, NodeState.THROTTLED)
+            or age < -planner.policy.max_future_clock_skew_seconds
+            or age > planner.policy.node_ttl_seconds
         ):
-            protected_models.add(forecast.model_id)
+            continue
+        for residency in node.residencies:
+            profile = profile_by_id.get(residency.model_id)
+            if (
+                profile is not None
+                and residency.state == ResidencyState.READY
+                and profile.matches_artifact(residency)
+            ):
+                ready_replicas[residency.model_id] += 1
 
     guarded: dict[str, dict[str, Any]] = {}
     for profile in profile_list:
         hint = dict(placement_hints.get(profile.model_id) or {})
-        victims = {str(item) for item in hint.get("preemption_victims") or ()}
-        blockers = sorted(victims.intersection(protected_models))
+        paths = [dict(path) for path in hint.get("preemption_paths") or ()]
+        if hint.get("feasible_after_preemption") is True and not paths:
+            paths = [
+                {
+                    key: hint.get(key)
+                    for key in (
+                        "startup_seconds",
+                        "host_priority",
+                        "best_node_id",
+                        "preemption_victims",
+                        "relocation_targets",
+                    )
+                }
+            ]
+
+        def path_blockers(path: Mapping[str, Any]) -> set[str]:
+            victims = tuple(
+                str(item) for item in path.get("preemption_victims") or ()
+            )
+            victim_node = next(
+                (
+                    node
+                    for node in node_list
+                    if node.node_id == str(path.get("best_node_id") or "")
+                ),
+                None,
+            )
+            removed_ready: Counter[str] = Counter()
+            if victim_node is not None:
+                for victim_id in set(victims):
+                    residency = victim_node.residency(victim_id)
+                    victim_profile = profile_by_id.get(victim_id)
+                    if (
+                        residency is not None
+                        and victim_profile is not None
+                        and residency.state == ResidencyState.READY
+                        and victim_profile.matches_artifact(residency)
+                    ):
+                        removed_ready[victim_id] += 1
+            return {
+                victim_id
+                for victim_id in victims
+                if victim_id in hard_protected_models
+                or (
+                    victim_id in active_capable_models
+                    and ready_replicas[victim_id] - removed_ready[victim_id]
+                    < (
+                        1
+                        if complete_portfolio_feasible
+                        else max(1, demand_replica_floors.get(victim_id, 0))
+                    )
+                )
+            }
+
+        safe_path: dict[str, Any] | None = None
+        all_blockers: set[str] = set()
+        for path in paths:
+            blockers = path_blockers(path)
+            all_blockers.update(blockers)
+            if not blockers:
+                safe_path = path
+                break
+        if safe_path is not None:
+            for key in (
+                "startup_seconds",
+                "host_priority",
+                "best_node_id",
+                "preemption_victims",
+                "relocation_targets",
+            ):
+                hint[key] = safe_path.get(key)
+            sorted_blockers: list[str] = []
+        else:
+            sorted_blockers = sorted(all_blockers)
         preemption_safe = bool(
-            hint.get("feasible_after_preemption") is True and not blockers
+            hint.get("feasible_after_preemption") is True and safe_path is not None
         )
         hint["portfolio_preemption_safe"] = preemption_safe
-        hint["portfolio_preemption_blockers"] = blockers
-        if hint.get("feasible_after_preemption") is True and blockers:
+        hint["portfolio_preemption_blockers"] = sorted_blockers
+        hint["portfolio_complete_feasible"] = complete_portfolio_feasible
+        if hint.get("feasible_after_preemption") is True and sorted_blockers:
             hint["reason"] = (
                 str(hint.get("reason") or "planner-authorized preemption path")
                 + "; protected by current workload demand: "
-                + ", ".join(blockers)
+                + ", ".join(sorted_blockers)
             )
         guarded[profile.model_id] = hint
     return guarded
@@ -2553,7 +2737,11 @@ def _portfolio_admissions(
                 missing_replicas=0,
                 eligible_nodes=int(placement.get("eligible_nodes") or 0),
                 startup_seconds=float(placement.get("startup_seconds") or 0.0),
-                blocking_models=list(placement.get("preemption_victims") or ()),
+                blocking_models=list(
+                    placement.get("portfolio_preemption_blockers")
+                    or placement.get("preemption_victims")
+                    or ()
+                ),
             )
             rows.append(base)
             continue
@@ -2589,7 +2777,11 @@ def _portfolio_admissions(
             missing_replicas=missing,
             eligible_nodes=int(placement.get("eligible_nodes") or 0),
             startup_seconds=float(placement.get("startup_seconds") or 0.0),
-            blocking_models=list(placement.get("preemption_victims") or ()),
+            blocking_models=list(
+                placement.get("portfolio_preemption_blockers")
+                or placement.get("preemption_victims")
+                or ()
+            ),
         )
         if plan is None or (desired == 0 and planned == 0):
             base.update(

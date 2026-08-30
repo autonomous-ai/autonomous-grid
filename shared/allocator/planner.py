@@ -107,6 +107,7 @@ _SCARCE_HOST_OPPORTUNITY_PENALTY = 200_000.0
 # over an immediately usable host. Candidate scores already account for load/warm time, live
 # traffic, hardware, and fit; this guard prevents marginal score noise from causing churn.
 _PROACTIVE_REPACK_SCORE_MARGIN = 500.0
+_MAX_PORTFOLIO_PREEMPTION_PATHS = 16
 
 
 @dataclass(slots=True)
@@ -390,7 +391,8 @@ class PlacementPlanner:
                     "reason": "fleet-feasible",
                 }
             elif preemptible:
-                startup_seconds, host_priority, node_id, victims, relocations = min(preemptible)
+                ordered_paths = sorted(preemptible)
+                startup_seconds, host_priority, node_id, victims, relocations = ordered_paths[0]
                 hints[model.model_id] = {
                     "model_id": model.model_id,
                     # Preserve the old field as current-headroom feasibility. Callers must opt in
@@ -408,6 +410,25 @@ class PlacementPlanner:
                     "relocation_targets": [
                         {"model_id": victim, "node_id": destination}
                         for victim, destination in relocations
+                    ],
+                    "preemption_paths": [
+                        {
+                            "startup_seconds": path_startup,
+                            "host_priority": path_priority,
+                            "best_node_id": path_node,
+                            "preemption_victims": list(path_victims),
+                            "relocation_targets": [
+                                {"model_id": victim, "node_id": destination}
+                                for victim, destination in path_relocations
+                            ],
+                        }
+                        for (
+                            path_startup,
+                            path_priority,
+                            path_node,
+                            path_victims,
+                            path_relocations,
+                        ) in ordered_paths[:_MAX_PORTFOLIO_PREEMPTION_PATHS]
                     ],
                     "reason": "fleet-feasible after planner-authorized relocation/preemption",
                 }

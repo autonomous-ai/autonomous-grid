@@ -342,6 +342,9 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     direct_named_requests = 0
     joint_portfolio_ticks = 0
     portfolio_changes = 0
+    admission_state_minutes: Counter[str] = Counter()
+    admission_by_workload: defaultdict[str, Counter[str]] = defaultdict(Counter)
+    admission_blocker_minutes: defaultdict[str, Counter[str]] = defaultdict(Counter)
     suitability_weight = 0.0
     memory_utilization: list[float] = []
     safety_violations: list[str] = []
@@ -402,6 +405,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     prior_phase = "bootstrap"
     prior_states = {node.node_id: node.state for node in nodes}
     prior_portfolio_selection: dict[str, str] = {}
+    prior_admission_states: dict[str, str] = {}
 
     for minute in range(config.minutes):
         now = base_time + minute * 60.0
@@ -530,8 +534,20 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         portfolio_admissions = tuple(
             dict(row) for row in allocator_status["portfolio_admissions"]
         )
+        for admission in portfolio_admissions:
+            workload = str(admission.get("workload") or "unknown")
+            state = str(admission.get("state") or "unknown")
+            admission_state_minutes[state] += 1
+            admission_by_workload[workload][state] += 1
+            for blocker in admission.get("blocking_models") or ():
+                admission_blocker_minutes[workload][str(blocker)] += 1
         joint_portfolio_ticks += int(allocator_status["portfolio_policy"]["joint"])
         portfolio_changed = portfolio_selection != prior_portfolio_selection
+        admission_states = {
+            str(row.get("workload") or "unknown"): str(row.get("state") or "unknown")
+            for row in portfolio_admissions
+        }
+        admission_changed = admission_states != prior_admission_states
         portfolio_changes += int(portfolio_changed)
         projection_by_workload = {
             row["workload"]: row
@@ -620,6 +636,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             or plan.unsatisfied
             or state_changes
             or portfolio_changed
+            or admission_changed
         ):
             timeline.append(
                 {
@@ -639,6 +656,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     "node_changes": state_changes,
                     "portfolio_selection": dict(sorted(portfolio_selection.items())),
                     "portfolio_admissions": portfolio_admissions,
+                    "admission_changed": admission_changed,
                     "portfolio_changed": portfolio_changed,
                     "unsatisfied": [
                         {
@@ -653,6 +671,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         prior_phase = phase
         prior_states = {node.node_id: node.state for node in nodes}
         prior_portfolio_selection = portfolio_selection
+        prior_admission_states = admission_states
         nodes = _materialize(plan.assignments, nodes, now + 45.0)
 
     total_served = sum(served_by_workload.values())
@@ -797,6 +816,15 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             "direct_named_requests": direct_named_requests,
             "joint_portfolio_ticks": joint_portfolio_ticks,
             "portfolio_changes": portfolio_changes,
+            "admission_state_minutes": dict(sorted(admission_state_minutes.items())),
+            "admission_by_workload": {
+                workload: dict(sorted(states.items()))
+                for workload, states in sorted(admission_by_workload.items())
+            },
+            "admission_blocker_minutes": {
+                workload: dict(sorted(blockers.items()))
+                for workload, blockers in sorted(admission_blocker_minutes.items())
+            },
             "per_workload": per_workload,
         },
         safety={

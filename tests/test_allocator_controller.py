@@ -770,6 +770,290 @@ def test_late_binding_does_not_replace_a_model_for_an_active_workload():
     assert not any(action.kind == ActionKind.DRAIN for action in result.actions)
 
 
+def test_late_binding_can_reclaim_only_an_excess_active_replica():
+    controller = AllocatorController(
+        planner_policy=PlannerPolicy(memory_headroom_fraction=0)
+    )
+    controller.put_profile(
+        ModelProfile(
+            "coding-model",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=2,
+            replica_concurrency=10,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=0,
+            workload_scores=(("coding", 1.0),),
+        )
+    )
+    controller.put_profile(
+        ModelProfile(
+            "video-model",
+            8_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            min_replicas=0,
+            max_replicas=1,
+            replica_concurrency=10,
+            min_residency_seconds=0,
+            scale_down_cooldown_seconds=0,
+            workload_scores=(("video", 1.0),),
+        )
+    )
+    for workload, endpoint in (
+        ("coding", "chat/completions"),
+        ("video", "videos/generations"),
+    ):
+        for timestamp in (98, 99, 100):
+            controller.observe_lifecycle(
+                RequestFeatures(endpoint, "auto", workload),
+                served_model="coding-model" if workload == "coding" else "",
+                service_seconds=1,
+                timestamp=timestamp,
+            )
+
+    machines = tuple(
+        NodeSnapshot(
+            f"node-{index}",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            residencies=(
+                ModelResidency(
+                    "coding-model",
+                    8_000,
+                    ResidencyState.READY,
+                    loaded_at=1,
+                    last_used_at=100,
+                    managed=True,
+                ),
+            ),
+            last_heartbeat=100,
+        )
+        for index in (1, 2)
+    )
+
+    result = controller.tick(machines, now=100)
+    status = controller.status(machines, now=100)
+    video_projection = next(
+        row for row in status["portfolio_projections"] if row["workload"] == "video"
+    )
+    video_candidate = next(
+        row
+        for row in video_projection["candidates"]
+        if row["model_id"] == "video-model"
+    )
+
+    assert video_projection["chosen_model"] == "video-model"
+    assert video_candidate["selectable"] is True
+    assert video_candidate["placement"]["portfolio_preemption_blockers"] == []
+    assert controller.last_plan is not None
+    assert controller.last_plan.target_for("coding-model") == 1
+    assert controller.last_plan.target_for("video-model") == 1
+    assert len(controller.last_plan.preemptions) == 1
+    assert controller.last_plan.preemptions[0].model_id == "coding-model"
+    assert controller.last_plan.preemptions[0].for_model_id == "video-model"
+    assert any(
+        action.kind == ActionKind.DRAIN and action.model_id == "coding-model"
+        for action in result.actions
+    )
+
+
+def test_late_binding_uses_safe_alternative_instead_of_first_protected_host():
+    controller = AllocatorController(
+        planner_policy=PlannerPolicy(memory_headroom_fraction=0)
+    )
+    for model_id, workload, replicas in (
+        ("research-model", "research", 1),
+        ("coding-model", "coding", 2),
+        ("video-model", "video", 1),
+    ):
+        controller.put_profile(
+            ModelProfile(
+                model_id,
+                8_000,
+                runtimes=("llama.cpp",),
+                backends=("metal",),
+                min_replicas=0,
+                max_replicas=replicas,
+                replica_concurrency=10,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=0,
+                workload_scores=((workload, 1.0),),
+            )
+        )
+        for timestamp in (98, 99, 100):
+            controller.observe_lifecycle(
+                RequestFeatures("chat/completions", "auto", workload),
+                served_model=model_id if model_id != "video-model" else "",
+                service_seconds=1,
+                timestamp=timestamp,
+            )
+
+    def occupied_node(
+        node_id: str,
+        model_id: str,
+        *,
+        allowed_models: tuple[str, ...],
+        host_priority: int,
+    ) -> NodeSnapshot:
+        return NodeSnapshot(
+            node_id,
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            allowed_models=allowed_models,
+            host_priority=host_priority,
+            max_models=1,
+            residencies=(
+                ModelResidency(
+                    model_id,
+                    8_000,
+                    ResidencyState.READY,
+                    loaded_at=1,
+                    last_used_at=100,
+                    managed=True,
+                ),
+            ),
+            last_heartbeat=100,
+        )
+
+    machines = (
+        occupied_node(
+            "node-1",
+            "research-model",
+            allowed_models=("research-model", "video-model"),
+            host_priority=0,
+        ),
+        occupied_node(
+            "node-2",
+            "coding-model",
+            allowed_models=("coding-model", "video-model"),
+            host_priority=2,
+        ),
+        occupied_node(
+            "node-3",
+            "coding-model",
+            allowed_models=("coding-model",),
+            host_priority=0,
+        ),
+    )
+
+    result = controller.tick(machines, now=100)
+    status = controller.status(machines, now=100)
+    video_projection = next(
+        row for row in status["portfolio_projections"] if row["workload"] == "video"
+    )
+    video_candidate = next(
+        row
+        for row in video_projection["candidates"]
+        if row["model_id"] == "video-model"
+    )
+    placement = video_candidate["placement"]
+
+    assert video_projection["chosen_model"] == "video-model"
+    assert placement["best_node_id"] == "node-2"
+    assert placement["preemption_victims"] == ["coding-model"]
+    assert placement["portfolio_preemption_blockers"] == []
+    assert placement["portfolio_complete_feasible"] is True
+    assert len(placement["preemption_paths"]) == 2
+    assert controller.last_plan is not None
+    assert {
+        (item.node_id, item.model_id, item.for_model_id)
+        for item in controller.last_plan.preemptions
+    } == {("node-2", "coding-model", "video-model")}
+    assert any(
+        action.kind == ActionKind.DRAIN
+        and action.node_id == "node-2"
+        and action.model_id == "coding-model"
+        for action in result.actions
+    )
+
+
+def test_complete_portfolio_proof_does_not_count_external_occupancy_as_free():
+    controller = AllocatorController(
+        planner_policy=PlannerPolicy(memory_headroom_fraction=0)
+    )
+    for model_id, workload in (
+        ("coding-model", "coding"),
+        ("video-model", "video"),
+    ):
+        controller.put_profile(
+            ModelProfile(
+                model_id,
+                8_000,
+                runtimes=("llama.cpp",),
+                backends=("metal",),
+                min_replicas=0,
+                max_replicas=1,
+                min_residency_seconds=0,
+                workload_scores=((workload, 1.0),),
+            )
+        )
+        for timestamp in (98, 99, 100):
+            controller.observe_lifecycle(
+                RequestFeatures("chat/completions", "auto", workload),
+                served_model="coding-model" if workload == "coding" else "",
+                service_seconds=1,
+                timestamp=timestamp,
+            )
+    machines = (
+        NodeSnapshot(
+            "managed",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            residencies=(
+                ModelResidency(
+                    "coding-model",
+                    8_000,
+                    ResidencyState.READY,
+                    managed=True,
+                ),
+            ),
+            last_heartbeat=100,
+        ),
+        NodeSnapshot(
+            "external",
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            max_models=1,
+            residencies=(
+                ModelResidency(
+                    "outside-grid-model",
+                    8_000,
+                    ResidencyState.READY,
+                    managed=False,
+                ),
+            ),
+            last_heartbeat=100,
+        ),
+    )
+
+    controller.tick(machines, now=100)
+    status = controller.status(machines, now=100)
+    video_projection = next(
+        row for row in status["portfolio_projections"] if row["workload"] == "video"
+    )
+    video_candidate = next(
+        row
+        for row in video_projection["candidates"]
+        if row["model_id"] == "video-model"
+    )
+    placement = video_candidate["placement"]
+
+    assert placement["portfolio_complete_feasible"] is False
+    assert placement["portfolio_preemption_safe"] is False
+    assert placement["portfolio_preemption_blockers"] == ["coding-model"]
+    assert controller.last_plan is not None
+    assert controller.last_plan.preemptions == ()
+
+
 def test_portfolio_admission_reports_ready_but_undersupplied_capacity():
     controller = AllocatorController()
     controller.put_profile(

@@ -189,6 +189,17 @@ def test_portfolio_hint_accepts_candidate_after_safe_incumbent_relocation():
     assert hint["relocation_targets"] == [
         {"model_id": "baseline", "node_id": "small"}
     ]
+    assert hint["preemption_paths"] == [
+        {
+            "startup_seconds": hint["startup_seconds"],
+            "host_priority": hint["host_priority"],
+            "best_node_id": "large",
+            "preemption_victims": ["baseline"],
+            "relocation_targets": [
+                {"model_id": "baseline", "node_id": "small"}
+            ],
+        }
+    ]
 
 
 def test_scale_down_cooldown_does_not_preserve_a_policy_ineligible_residency():

@@ -216,6 +216,15 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
         f"  joint portfolio optimizer     {metrics['joint_portfolio_ticks']} ticks · "
         f"{metrics['portfolio_changes']} selection changes"
     )
+    admission_states = metrics.get("admission_state_minutes") or {}
+    if admission_states:
+        print(
+            "  workload admission time       "
+            + " · ".join(
+                f"{state} {minutes}m"
+                for state, minutes in sorted(admission_states.items())
+            )
+        )
 
     weakest = sorted(
         metrics["per_workload"].items(),
