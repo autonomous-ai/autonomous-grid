@@ -53,6 +53,79 @@ def test_configure_exposes_automation_bundle_parameter_with_warning():
     assert "shell history/process listings" in help_text
 
 
+def test_configure_exposes_private_bundle_file_and_refuses_both_inputs():
+    parser = lab.build_parser()
+    args = parser.parse_args(["configure", "--bundle-file", "/tmp/private-pairing"])
+
+    assert args.bundle is None
+    assert args.bundle_file == "/tmp/private-pairing"
+    help_text = parser._subparsers._group_actions[0].choices["configure"].format_help()
+    assert "--bundle-file BUNDLE_FILE" in help_text
+    assert "owner-only" in help_text and "0600 file" in help_text
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "configure", "--bundle", "visible", "--bundle-file", "/tmp/private-pairing",
+        ])
+
+
+def test_configure_reads_private_bundle_file_without_printing_secret(
+        tmp_path, monkeypatch, capsys):
+    expiry = int(time.time()) + 3600
+    bundle = lab.encode_pair(
+        url="http://192.0.2.44:8090",
+        token=lab.issue_token(
+            "secret-padded-past-thirty-two-bytes", user_id="one-owner",
+            node_id="goal-file", expires_at=expiry),
+        node_id="goal-file", expires_at=expiry,
+    )
+    path = tmp_path / "pairing.txt"
+    path.write_text(bundle + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    captured = {}
+    monkeypatch.setattr(lab, "configure_home", lambda home, pair: captured.update(
+        home=home, node=pair["node_id"]))
+
+    result = lab.cmd_configure(argparse.Namespace(
+        bundle=None, bundle_file=str(path), home=str(tmp_path / "home"), replace=False))
+
+    assert result == 0
+    assert captured == {"home": (tmp_path / "home").resolve(), "node": "goal-file"}
+    assert bundle not in capsys.readouterr().out
+
+
+def test_configure_refuses_group_readable_bundle_file(tmp_path):
+    path = tmp_path / "pairing.txt"
+    path.write_text("credential", encoding="utf-8")
+    path.chmod(0o640)
+
+    with pytest.raises(SystemExit, match="owner-only"):
+        lab.cmd_configure(argparse.Namespace(
+            bundle=None, bundle_file=str(path), home=str(tmp_path / "home"), replace=False))
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform has no no-follow open flag")
+def test_configure_never_follows_a_pairing_bundle_symlink(tmp_path):
+    target = tmp_path / "pairing-target.txt"
+    target.write_text("credential", encoding="utf-8")
+    target.chmod(0o600)
+    link = tmp_path / "pairing-link.txt"
+    link.symlink_to(target)
+
+    with pytest.raises(SystemExit, match="Could not read private pairing bundle file"):
+        lab.cmd_configure(argparse.Namespace(
+            bundle=None, bundle_file=str(link), home=str(tmp_path / "home"), replace=False))
+
+
+def test_configure_bounds_bundle_file_size(tmp_path):
+    path = tmp_path / "pairing.txt"
+    path.write_bytes(b"x" * (lab.MAX_PAIR_BYTES + 1))
+    path.chmod(0o600)
+
+    with pytest.raises(SystemExit, match="exceeds"):
+        lab.cmd_configure(argparse.Namespace(
+            bundle=None, bundle_file=str(path), home=str(tmp_path / "home"), replace=False))
+
+
 def test_relay_restart_can_suppress_pairing_credential_output():
     parser = lab.build_parser()
     args = parser.parse_args([
@@ -145,6 +218,8 @@ def test_prepare_relay_mints_distinct_machine_identities_and_private_files(
     assert metadata["url"] == "http://192.0.2.88:8090"
     assert worker_claims["user_id"] == b_claims["user_id"]
     assert worker_claims["node_id"] != b_claims["node_id"]
+    assert metadata["worker_node_id"] == worker_claims["node_id"]
+    assert metadata["relay_node_id"] == b_claims["node_id"]
     assert env["TASK_REPO_ROOT"] == str(root / "projects")
     assert env["GRID_MODE"] == "false"
     identity = lab.json.loads((root / "identity.json").read_text(encoding="utf-8"))
@@ -152,6 +227,48 @@ def test_prepare_relay_mints_distinct_machine_identities_and_private_files(
     assert metadata["relay_home"] == str(root / "grid-home-relay")
     assert stat.S_IMODE((root / "jwt-secret").stat().st_mode) == 0o600
     assert stat.S_IMODE((root / "joining-worker-pairing.txt").stat().st_mode) == 0o600
+
+
+def test_relay_banner_prints_both_distinct_nonsecret_node_ids(tmp_path, monkeypatch, capsys):
+    """A copied GRID_HOME can make two process names overwrite one signed node registration.
+
+    The acceptance operator needs the credential-bound ids before any worker starts; hostnames and
+    ``--name`` labels cannot prove two nodes.  The banner may print those ids but never the bundle
+    when ``--no-print-bundle`` is selected.
+    """
+    class RelayProcess:
+        returncode = None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    secret_bundle = "pairing-secret-must-stay-hidden"
+    monkeypatch.setattr(lab, "prepare_relay", lambda _args: (
+        tmp_path,
+        {},
+        lab.json.dumps({
+            "url": "http://192.0.2.88:8090",
+            "worker_pair": secret_bundle,
+            "worker_node_id": "goal-worker-distinct",
+            "relay_node_id": "goal-relay-distinct",
+            "relay_home": str(tmp_path / "grid-home-relay"),
+            "server_dir": str(tmp_path),
+            "python": "/fake/python",
+            "relay_revision": "abc123",
+        }),
+    ))
+    monkeypatch.setattr(lab.subprocess, "Popen", lambda *_args, **_kwargs: RelayProcess())
+    monkeypatch.setattr(lab, "_wait_for_health", lambda *_args, **_kwargs: None)
+
+    assert lab.cmd_relay(argparse.Namespace(
+        bind_host="0.0.0.0", port=8090, no_print_bundle=True)) == 0
+    out = capsys.readouterr().out
+    assert "relay id:    goal-relay-distinct" in out
+    assert "worker id:   goal-worker-distinct" in out
+    assert secret_bundle not in out
 
 
 def test_prepare_relay_reuses_legacy_ab_identity_by_role(tmp_path, monkeypatch):

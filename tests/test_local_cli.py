@@ -23537,6 +23537,46 @@ def test_task_follow_json_still_carries_the_whole_tree(monkeypatch, tmp_path, ca
     assert first["event"]["paths"] == ["a.py", "b.py"]
 
 
+def test_task_follow_ctrl_c_stops_only_the_watcher_without_a_traceback(
+        monkeypatch, tmp_path, capsys):
+    """A physical Goal operator uses Ctrl-C to detach from a long stream, not to cancel its task.
+
+    ``KeyboardInterrupt`` is a ``BaseException``, so the follower's relay-error guards do not catch
+    it.  Letting it escape prints a traceback and makes a healthy distributed task look crashed.
+    Code 130 preserves the conventional shell signal while the message states the key invariant.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    from cli import remote_task
+
+    monkeypatch.setattr(
+        remote_task, "_follow_stream",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    assert cli.main(["task", "follow", "T1"]) == 130
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Stopped watching task T1" in captured.err
+    assert "not cancelled" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_task_create_follow_ctrl_c_does_not_claim_the_created_task_failed(
+        monkeypatch, capsys):
+    """The create-and-follow shortcut uses the identical interrupt boundary."""
+    from cli import remote_task
+
+    monkeypatch.setattr(
+        remote_task, "_follow_stream",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    assert remote_task._follow_created(
+        "https://relay.example", "token", "T-created", as_json=True) == 130
+    captured = capsys.readouterr()
+    assert "not cancelled" in captured.err
+    assert "still running" not in captured.err
+
+
 def test_task_follow_survives_a_tree_event_with_nothing_in_it(monkeypatch, tmp_path, capsys):
     """The event came off the wire. A relay that is newer, older, or simply wrong must not be able to
     turn `grid task follow` into a traceback — the same rule every other branch here follows."""

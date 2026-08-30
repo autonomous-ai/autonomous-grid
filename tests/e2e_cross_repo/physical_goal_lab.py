@@ -19,8 +19,8 @@ Joining worker (the other physical machine)::
 The relay command discovers the relay host's LAN address, prints a short-lived pairing bundle, and
 keeps the relay in the foreground. Paste that bundle at the joining worker's hidden prompt. The
 physical A/B labels are intentionally absent: either machine may host the relay. The hidden prompt
-is safest, but automation may pass the disposable credential with ``--bundle`` when accepting its
-visibility in shell history and the local process list.
+is safest. Automation should use an owner-only ``--bundle-file``; ``--bundle`` is retained for
+disposable environments that accept exposure in shell history and the local process list.
 """
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ import os
 import secrets
 import signal
 import socket
+import stat
 import subprocess
 import time
 import uuid
@@ -48,6 +49,7 @@ NETWORK_NAME = "goal-physical"
 PAIR_VERSION = 1
 DEFAULT_PORT = 8090
 DEFAULT_TOKEN_HOURS = 48
+MAX_PAIR_BYTES = 16_384
 SCOPES = [
     "inference:create",
     "inference:models",
@@ -139,7 +141,7 @@ def encode_pair(*, url: str, token: str, node_id: str, expires_at: int) -> str:
 
 
 def decode_pair(bundle: str, *, now: int | None = None) -> dict[str, Any]:
-    if len(bundle) > 16_384:
+    if len(bundle) > MAX_PAIR_BYTES:
         raise ValueError("pairing bundle is unexpectedly large")
     try:
         value = json.loads(_unb64("".join(bundle.split())))
@@ -330,6 +332,8 @@ def prepare_relay(args: argparse.Namespace) -> tuple[Path, dict[str, str], str]:
     metadata = {
         "url": url,
         "worker_pair": worker_pair,
+        "worker_node_id": worker_node,
+        "relay_node_id": relay_node,
         "relay_home": str(root / "grid-home-relay"),
         "server_dir": str(server_dir),
         "python": str(relay_python),
@@ -368,11 +372,15 @@ def cmd_relay(args: argparse.Namespace) -> int:
         print("\nGrid Goal physical relay is ready (no SSH):", flush=True)
         print(f"  relay:       {metadata['url']}", flush=True)
         print(f"  relay node:  GRID_HOME={metadata['relay_home']}", flush=True)
+        print(f"  relay id:    {metadata['relay_node_id']}", flush=True)
+        print(f"  worker id:   {metadata['worker_node_id']}", flush=True)
         print(f"  relay state: {root}", flush=True)
         print(f"  relay SHA:   {metadata['relay_revision']}", flush=True)
         if args.no_print_bundle:
             print("\nPairing bundle suppressed; already-paired workers can reconnect.", flush=True)
         else:
+            print("\nThe relay id and worker id above must be different. Record both; node names "
+                  "alone are not identity evidence.", flush=True)
             print("\nOn the joining worker, run:", flush=True)
             print("  uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \\", flush=True)
             print("    --home /private/tmp/grid-goal-worker", flush=True)
@@ -394,6 +402,38 @@ def cmd_relay(args: argparse.Namespace) -> int:
 
 def cmd_configure(args: argparse.Namespace) -> int:
     raw = args.bundle
+    if raw is None and args.bundle_file is not None:
+        # Keep the supplied filesystem object intact until ``open``: resolving first would follow a
+        # symlink before O_NOFOLLOW had a chance to reject it. Pairing data is a bearer credential,
+        # so validate and read one already-open inode rather than stat/path/read (a replacement race).
+        path = Path(os.path.abspath(os.fspath(Path(args.bundle_file).expanduser())))
+        fd = -1
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("not a regular file")
+            if os.name == "posix" and info.st_mode & 0o077:
+                raise OSError("permissions must be owner-only (0600)")
+            if info.st_size > MAX_PAIR_BYTES:
+                raise OSError(f"file exceeds {MAX_PAIR_BYTES} bytes")
+            chunks: list[bytes] = []
+            remaining = MAX_PAIR_BYTES + 1
+            while remaining:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            if len(payload) > MAX_PAIR_BYTES:
+                raise OSError(f"file exceeds {MAX_PAIR_BYTES} bytes")
+            raw = payload.decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise SystemExit(f"Could not read private pairing bundle file {path}: {exc}") from None
+        finally:
+            if fd >= 0:
+                os.close(fd)
     if raw is None:
         raw = getpass.getpass("Paste joining-worker pairing bundle (input hidden): ")
     try:
@@ -439,9 +479,15 @@ def build_parser() -> argparse.ArgumentParser:
     configure = actions.add_parser("configure", help="Pair this joining worker with the relay")
     configure.add_argument("--home", default="/private/tmp/grid-goal-worker",
                            help="Fresh isolated GRID_HOME")
-    configure.add_argument("--bundle", default=None,
-                           help=("Disposable pairing bundle (automation only; visible in shell "
-                                 "history/process listings). Omit for a hidden prompt."))
+    pairing_input = configure.add_mutually_exclusive_group()
+    pairing_input.add_argument(
+        "--bundle", default=None,
+        help=("Disposable pairing bundle (automation only; visible in shell "
+              "history/process listings). Omit for a hidden prompt."))
+    pairing_input.add_argument(
+        "--bundle-file", default=None,
+        help=("Read the disposable pairing bundle from an owner-only 0600 file without exposing "
+              "it in shell history or the process list."))
     configure.add_argument("--replace", action="store_true",
                            help="Replace an existing disposable Grid home")
     configure.set_defaults(func=cmd_configure)

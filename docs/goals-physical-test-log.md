@@ -142,3 +142,52 @@ suite passed 355 tests before the live rerun.
   ```
 
   Evidence snapshot: `6f01972c2339307e5eb9fb302036f300055ddc961dc074d16fcca2ea6185dba3`.
+
+## 2026-08-30 — native Codex → Claude → Codex retry chain
+
+This run proves mixed native harness continuation and fail-closed evaluation behavior across
+distinct relay-signed Grid node identities. Both task workers happened to run on the relay-host
+Mac because the second physical computer was offline, so this supplements rather than satisfies
+the final two-physical-machine mixed-harness gate.
+
+### Topology and workload
+
+- Public worker commit: `fce01c2`; private relay commit: `7f16213`.
+- Project: `72453d13-64ac-49a2-9194-b1fc1995eed7`.
+- Goal: `46fa2a0b-4723-4bdd-aa69-11d4934c4344`.
+- Exact Grid model: `Qwen3.6-35B-A3B`; inference node:
+  `goal-b-c19853f3-8a8f-4a8d-a961-87e79b087a99`.
+- Codex execution identity: `goal-machine-b-48759900-4980-4b1a-ae6b-926e62ddd835`.
+- Claude execution identity: `goal-a-e1891074-24d0-4d3e-a67a-dba33e3eb377`.
+- Objective: produce three ordered handoff phase files and a summary, with four immutable
+  commit-pinned file evals.
+
+### Handoff and failure sequence
+
+- Codex completed turn `67ec49aa-e85d-493a-96bb-50789a6319ba` at commit
+  `bb9cbdebaba4f3883ccd8444174944b4d227444b`; the Goal remained active.
+- Codex claimed follow-up turn `b6bd871c-4a40-4be0-8ee7-03da30dc8ce2`, then its worker was
+  stopped. The relay recorded attempt 1 as `lease_expired`. Its uncommitted files did not leak into
+  the next attempt; Claude started from the last durable project commit.
+- Claude reclaimed the same turn as attempt 2 and continued from Codex's committed phase. Claude's
+  native `/goal` sentinel was present, but that run exited without a terminal native evaluator
+  attachment. Grid therefore refused to accept Claude's self-reported completion and requeued with
+  `native_harness_failure`.
+- Before requeue, Grid preserved Claude's worktree commit
+  `eb06c4b43272e13a2b72dcd0f393fbed476cde3f` and transcript commit
+  `4ae649a0bd17cc7d9c3c3c7afc13453dbd087d20`.
+- Codex reclaimed attempt 3, fetched both checkpoints, and completed at commit
+  `497806ce1a401344d0f70746c3feb7cba0a92f14`. Evidence proves both checkpoint commits are ancestors
+  of their corresponding final commits.
+
+### Result and eval evidence
+
+- Status: `complete`; two settled native Goal turns; 251,826 accounted Goal tokens.
+- Evidence records all three attempts and both harnesses, plus four Grid-attributed inference
+  summaries for Codex attempt 1, interrupted Codex attempt 1 of the follow-up, Claude attempt 2,
+  and completing Codex attempt 3.
+- The relay independently evaluated the exact final commit. All four checks scored `1.0`, were
+  accepted, and verified the phase markers and final summary.
+- The run exposed two operator hardening items now covered by regression tests: Ctrl-C on
+  `grid task follow` must detach cleanly without a traceback or cancellation, and physical-lab
+  preflight must compare signed node IDs rather than process names.

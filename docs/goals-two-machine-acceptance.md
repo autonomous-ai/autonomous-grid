@@ -79,7 +79,8 @@ normally needed. If it has several network interfaces and discovery chooses one 
 cannot reach, pass `--advertise-host <reachable-LAN-or-VPN-address>` explicitly. The helper starts
 the relay, creates distinct short-lived identities for the relay node and joining worker, writes the
 relay node's isolated Grid home, and prints one disposable pairing bundle for the joining worker.
-It never copies a task root.
+It never copies a task root. Record the printed `relay id` and `worker id` and require them to differ.
+These credential-bound IDs—not `--name` labels or temporary directory names—prove two Grid nodes.
 
 On the joining worker, from the same public commit:
 
@@ -99,7 +100,9 @@ joining worker: /private/tmp/grid-goal-worker
 For a non-interactive test runner, `configure` also accepts `--bundle <value>`. This exposes the
 short-lived credential in shell history and possibly the local process list; use it only on this
 disposable acceptance Grid and remove the command from retained logs. It is not a production
-pairing pattern.
+pairing pattern. Prefer writing the bundle to an owner-only file and passing
+`--bundle-file <path>`; the helper refuses files readable by group or other users, and the secret
+then never appears in the command line.
 
 Verify both machines through Grid itself:
 
@@ -117,6 +120,10 @@ this document must use that machine's isolated `GRID_HOME` prefix and the Grid n
 `goal-physical`. Do not run `grid login` or `grid use` inside these homes; pairing already wrote the
 exact disposable Grid record. Model inference must still be provided by an engine joined to this
 test Grid—running the relay does not make the relay an inference engine.
+
+After both providers join, `grid engines goal-physical --json` must contain both recorded signed
+node IDs. Stop if one identity is missing: two differently named processes using a copied
+credential are one Grid node, and the newer registration can overwrite the older role.
 
 On machine A:
 
