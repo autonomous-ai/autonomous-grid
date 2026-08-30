@@ -418,6 +418,10 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
     })
     assert any("has no immutable run id" in failure for failure in goal._verify_evidence(record))
 
+    record["turns"][0]["id"] = ["not", "hashable"]
+    assert any("duplicate or malformed turn identities" in failure
+               for failure in goal._verify_evidence(record))
+
 
 def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
     from cli import goal

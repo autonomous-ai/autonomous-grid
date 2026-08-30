@@ -182,8 +182,13 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     if not turns:
         failures.append("no Goal turns were recorded")
         return failures
-    recorded_turn_ids = [turn.get("id") for turn in turns if isinstance(turn, dict)]
-    if len(recorded_turn_ids) != len(turns) or len(set(recorded_turn_ids)) != len(turns):
+    recorded_turn_ids: list[str] = []
+    for turn in turns:
+        turn_id = turn.get("id") if isinstance(turn, dict) else None
+        if isinstance(turn_id, str) and turn_id:
+            recorded_turn_ids.append(turn_id)
+    turn_ids = set(recorded_turn_ids)
+    if len(recorded_turn_ids) != len(turns) or len(turn_ids) != len(turns):
         failures.append("Goal evidence contains duplicate or malformed turn identities")
     export = record.get("export")
     if export is not None:
@@ -321,7 +326,9 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
 
     execution_nodes = {
         turn.get("provider_node_id") for turn in turns
-        if isinstance(turn, dict) and turn.get("provider_node_id")
+        if (isinstance(turn, dict)
+            and isinstance(turn.get("provider_node_id"), str)
+            and turn.get("provider_node_id"))
     }
 
     first = turns[0] if isinstance(turns[0], dict) else {}
@@ -379,10 +386,12 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     requested_model = goal.get("model")
     routed_model = (isinstance(requested_model, str)
                     and (requested_model == "auto" or requested_model.startswith("auto/")))
-    turn_ids = {turn.get("id") for turn in turns if isinstance(turn, dict)}
     valid_inference_identity: set[int] = set()
     for index, item in enumerate(inference, 1):
-        if not isinstance(item, dict) or item.get("turn_id") not in turn_ids:
+        inference_turn_id = item.get("turn_id") if isinstance(item, dict) else None
+        if (not isinstance(inference_turn_id, str)
+                or inference_turn_id not in turn_ids):
+            failures.append(f"inference record {index} names an unknown or malformed Goal turn")
             continue
         attempt = item.get("goal_attempt")
         executor = item.get("goal_executor_node_id")
@@ -412,7 +421,8 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             valid_inference_identity.add(index)
     if isinstance(requested_model, str) and requested_model and not routed_model:
         for item in inference:
-            if (isinstance(item, dict) and item.get("turn_id") in turn_ids
+            item_turn_id = item.get("turn_id") if isinstance(item, dict) else None
+            if (isinstance(item_turn_id, str) and item_turn_id in turn_ids
                     and item.get("model") != requested_model):
                 failures.append(
                     f"turn {item.get('turn_id')} used Grid model {item.get('model')!r}, not the "
@@ -466,7 +476,7 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         previous_provider = event.get("previous_provider_id")
         previous_agent = event.get("previous_agent_kind")
         valid = True
-        if turn_id not in turn_ids:
+        if not isinstance(turn_id, str) or turn_id not in turn_ids:
             failures.append(f"retry event names unknown turn {turn_id!r}")
             valid = False
         if (not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0):
@@ -534,8 +544,13 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"turn {retry.get('turn_id')} final transcript does not contain its accepted "
                 f"retry checkpoint: {check.get('transcript_error') or 'the commits are unrelated'}")
-    turns_by_id = {turn.get("id"): turn for turn in turns if isinstance(turn, dict)}
-    for turn_id in {retry.get("turn_id") for retry in native_retries}:
+    turns_by_id = {
+        turn["id"]: turn for turn in turns
+        if isinstance(turn, dict) and isinstance(turn.get("id"), str) and turn.get("id")}
+    native_retry_turn_ids = {
+        retry.get("turn_id") for retry in native_retries
+        if isinstance(retry.get("turn_id"), str)}
+    for turn_id in native_retry_turn_ids:
         retries = sorted(
             (retry for retry in native_retries if retry.get("turn_id") == turn_id),
             key=lambda item: item.get("seq") if isinstance(item.get("seq"), int) else -1)
