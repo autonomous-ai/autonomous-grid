@@ -3897,6 +3897,8 @@ def test_join_at_writes_record_and_spawns_detached(monkeypatch, tmp_path):
     assert records["mac"]["models"] == ["llama3"]
     assert records["mac"]["pid"] == 4321
     assert spawned["cmd"][-3:] == ["__engine", cfg["grid_id"], "mac"]
+    from shared import process_home
+    assert spawned["cmd"][-4] == process_home.own_tag_arg()
     assert spawned["kwargs"]["start_new_session"] is True
 
 
@@ -6356,6 +6358,98 @@ def test_sweep_orphans_spares_a_child_that_belongs_to_another_grid_home(monkeypa
     assert "222" in err and "/root/.grid-provider3" in err  # never silent: it names pid AND home
 
 
+def test_sweep_orphans_uses_argv_home_tag_on_every_platform(monkeypatch, capsys):
+    """A current-version child is isolated without reading its environment.
+
+    This is the physical macOS failure: two task workers serve the same network under one uid, and
+    ``home_of`` is unknowable for both. The canonical-home digest in argv is enough to reap ours and
+    spare the neighbour on macOS/Windows as well as Linux.
+    """
+    from shared import orphan_sweep, process_home
+
+    monkeypatch.setenv("GRID_HOME", "/root/.grid-provider")
+    mine = process_home.own_tag_arg()
+    other_tag = process_home.tag_for_home("/root/.grid-provider3")
+    other = process_home.HOME_TAG_ARG_PREFIX + other_tag
+    monkeypatch.setattr(
+        orphan_sweep,
+        "_process_table_output",
+        lambda: "\n".join([
+            f"  111 /bin/grid {mine} __remote-engine n1 codex",
+            f"  222 /bin/grid {other} __remote-engine n1 claude",
+            f"  333 /bin/grid {other} __remote-engine n2 claude",  # another grid, not ours to report
+            f"  444 /bin/grid {other} __remote-engine n1 claude extra",  # bystander shape
+        ]),
+    )
+    monkeypatch.setattr(process_home, "home_of", lambda pid: None)
+    killed = []
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", lambda pid: not killed.append(pid))
+
+    result = orphan_sweep.sweep_orphans("__remote-engine", "n1")
+
+    assert killed == [111]
+    assert result.reaped == (111,) and result.survivors == ()
+    err = capsys.readouterr().err
+    assert "222" in err and other_tag[:12] in err and "left it alone" in err
+    assert "333" not in err and "444" not in err
+
+
+def test_sweep_orphans_rejects_malformed_home_tag_instead_of_treating_it_as_legacy(monkeypatch):
+    """Corrupting one digest character cannot erase the installation safety boundary."""
+    from shared import orphan_sweep, process_home
+
+    malformed = process_home.HOME_TAG_ARG_PREFIX + ("0" * 63) + "z"
+    monkeypatch.setattr(
+        orphan_sweep,
+        "_process_table_output",
+        lambda: f"  111 /bin/grid {malformed} __remote-engine n1 codex",
+    )
+    monkeypatch.setattr(
+        orphan_sweep.run_records,
+        "terminate_pid",
+        lambda pid: pytest.fail(f"malformed tagged child must not be signalled: {pid}"),
+    )
+
+    assert orphan_sweep.sweep_orphans("__remote-engine", "n1").reaped == ()
+
+
+def test_grid_home_tag_is_canonical_fixed_width_and_contains_no_path(monkeypatch, tmp_path):
+    from shared import process_home
+
+    real = tmp_path / "real-home"
+    real.mkdir()
+    alias = tmp_path / "alias-home"
+    alias.symlink_to(real, target_is_directory=True)
+    monkeypatch.setenv("GRID_HOME", str(alias))
+
+    token = process_home.own_tag_arg()
+    digest = process_home.tag_from_arg(token)
+
+    assert digest == process_home.tag_for_home(str(real))
+    assert len(digest) == 64 and set(digest) <= set("0123456789abcdef")
+    assert str(real) not in token and str(alias) not in token
+
+
+def test_internal_engine_dispatch_accepts_only_its_own_grid_home_tag(monkeypatch):
+    from cli import _main
+    from remote import serve
+    from shared import process_home
+
+    monkeypatch.setenv("GRID_HOME", "/root/.grid-provider")
+    called = []
+    monkeypatch.setattr(serve, "run_remote_engine_from_record",
+                        lambda grid_id, engine_id: called.append((grid_id, engine_id)) or 17)
+
+    assert _main._maybe_internal([
+        process_home.own_tag_arg(), "__remote-engine", "n1", "remote"
+    ]) == 17
+    assert called == [("n1", "remote")]
+
+    wrong = process_home.HOME_TAG_ARG_PREFIX + process_home.tag_for_home("/root/someone-else")
+    with pytest.raises(SystemExit, match="GRID_HOME identity does not match"):
+        _main._maybe_internal([wrong, "__remote-engine", "n1", "remote"])
+
+
 def test_sweep_orphans_still_reaps_a_child_whose_home_it_cannot_read(monkeypatch):
     """The positive control that keeps the fix from becoming a bigger bug than E-03.
 
@@ -7326,6 +7420,8 @@ def test_remote_join_serve_writes_record_and_spawns_remote_engine(monkeypatch, t
     assert record["models"] == ["m"] and record["endpoint_url"] is None and record["grid_id"] == "n1"
     assert "access_token" not in record  # the token stays in credentials.toml, never the run record
     assert spawned["cmd"][-3:] == ["__remote-engine", "n1", engine_id]
+    from shared import process_home
+    assert spawned["cmd"][-4] == process_home.own_tag_arg()
 
 
 def test_remote_join_at_serves_external_engine(monkeypatch, tmp_path):

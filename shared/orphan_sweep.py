@@ -7,8 +7,9 @@ every child whose argv carries the exact marker+token of the grid being left —
 the record-pid kills, and the only thing that reaps a record-less orphan (a bare ``grid leave``).
 
 Both spawn argvs have the same shape, which is why one matcher serves both modes: a remote serve
-child is ``<cli> __remote-engine <network_id> <engine_id>`` and a local engine child is
-``<cli> __engine <grid_id> <engine_id>``. Callers pass the ``marker`` and however many leading
+child is ``<cli> --grid-home-tag=<digest> __remote-engine <network_id> <engine_id>`` and a local
+engine child is ``<cli> --grid-home-tag=<digest> __engine <grid_id> <engine_id>``. Callers pass the
+``marker`` and however many leading
 positionals they want pinned — remote pins the network id, a local whole-grid leave pins the grid id,
 and a local ``--engine`` leave pins the grid id *and* the engine id so a sibling engine's child on the
 same grid is never touched. Matching is by exact argv tokens *and their count* (the marker must be
@@ -17,14 +18,15 @@ id), unrelated commands (no marker), a bystander that merely mentions the marker
 ``pgrep``/``watch``/wrapper — one token after it), and the leave process itself (own pid, via
 ``exclude_pids``) are never touched.
 
-What the argv cannot say is **which installation** a child belongs to, and that gap is not pedantic:
+The installation tag says **which installation** a new child belongs to, closing a gap that is not
+pedantic:
 a network id is *shared by design*, so two accounts serving one grid from one provider box spawn
 children agreeing in every token, and one operator's leave reaped the other's provider in silence
-(dev-VM finding E-03). ``shared.process_home`` supplies the missing discriminator — the child's own
-``GRID_HOME`` — and every match it can **prove** belongs to another one is dropped from the scan
-before anything is signalled, naming what it spared. It answers *unknown* off Linux and for anything
-it cannot pin down, and unknown is treated as ours, so this can only ever narrow a sweep, never widen
-one.
+(dev-VM finding E-03). ``shared.process_home`` supplies that tag and, for pre-tag legacy children on
+Linux, the child's own ``GRID_HOME`` from its environment. Every tagged child of another
+installation is excluded on all platforms; every legacy match Linux can prove belongs elsewhere is
+excluded too. Legacy children remain sweepable where their environment is unknowable so upgrades do
+not permanently strand record-less workers, but every child spawned by this version is unambiguous.
 
 It lives in ``shared/`` rather than under one mode because both modes' leave uses it, exactly as
 ``shared.run_records`` holds the record format and teardown they share.
@@ -243,6 +245,22 @@ _WIN_PROCESS_LIST_SCRIPT = (
 _DISPATCH_ARITY = 2
 
 
+class _EngineMatches(dict[int, str]):
+    """Ordinary ``pid -> engine`` matches plus tagged children from another installation.
+
+    A dict subclass preserves the small matcher seam while carrying exclusions to
+    ``_drop_other_homes``, where they can be reported. They do not enter the mapping: callers such as
+    ``launcher_ancestors`` intentionally use the raw matcher, and a foreign launcher must be
+    invisible there too.
+    """
+
+    other_tags: dict[int, str]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.other_tags = {}
+
+
 def _match_engine_children(
     table_output: str, marker: str, *pinned: str, exclude_pids: set[int] | frozenset[int]
 ) -> dict[int, str]:
@@ -275,7 +293,8 @@ def _match_engine_children(
     if not pinned:
         raise ValueError(f"a {marker!r} sweep must pin at least the grid id; matching on the marker "
                          "alone would reach every grid's engine children")
-    matched: dict[int, str] = {}
+    matched = _EngineMatches()
+    own_tag = process_home.own_tag()
     for line in table_output.splitlines():
         parts = line.split(None, 1)  # split off exactly the pid; robust to a space-padded pid column
         # ``isdecimal`` rather than ``isdigit``: the latter is True for characters ``int()`` rejects
@@ -320,6 +339,20 @@ def _match_engine_children(
             continue
         if list(pinned) != tokens[at + 1 : at + 1 + len(pinned)]:
             continue
+        # New children place one fixed-width tag immediately before the marker. A well-formed tag
+        # belonging to another canonical GRID_HOME is never a match — this is the cross-platform
+        # discriminator macOS/Windows process APIs cannot provide. A malformed would-be tag is also
+        # rejected rather than treated as legacy; otherwise one corrupted hex digit would erase the
+        # safety boundary. Truly absent tags retain rolling-upgrade compatibility. This check comes
+        # after the grid/arity checks so a different grid or a bystander is not falsely reported as
+        # another installation of the grid being left.
+        if at > 0 and tokens[at - 1].startswith(process_home.HOME_TAG_ARG_PREFIX):
+            child_tag = process_home.tag_from_arg(tokens[at - 1])
+            if child_tag is None:
+                continue
+            if own_tag is None or child_tag != own_tag:
+                matched.other_tags[pid] = child_tag
+                continue
         matched[pid] = tokens[at + _DISPATCH_ARITY]
     return matched
 
@@ -352,9 +385,16 @@ def _drop_other_homes(matched: dict[int, str]) -> dict[int, str]:
     leave, the remote leave and ``grid logout`` cannot disagree about it — the drift ``caveats``
     documents one screen up.
     """
+    tagged_others = getattr(matched, "other_tags", {})
     others = process_home.other_home_pids(matched)
-    if not others:
+    if not tagged_others and not others:
         return matched
+    for pid, tag in sorted(tagged_others.items()):
+        print(
+            f"Note: engine child pid {pid} serves this grid from a different Grid installation "
+            f"(GRID_HOME identity {tag[:12]}); left it alone.",
+            file=sys.stderr,
+        )
     for pid, home in sorted(others.items()):
         print(
             f"Note: engine child pid {pid} serves this grid from a different installation "

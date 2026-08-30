@@ -8,7 +8,7 @@ from datetime import datetime
 
 from local import config
 from local import runtime
-from shared import logging_setup, paths
+from shared import logging_setup, paths, process_home, run_records
 from . import json_error
 from .dispatch import dispatch, resolve_override, split_forwarded
 from .parser import build_parser
@@ -160,6 +160,19 @@ def main(argv: list[str] | None = None) -> int:
 def _maybe_internal(argv: list[str]) -> int | None:
     if not argv:
         return None
+    # Detached engine children carry their GRID_HOME identity before the dispatch marker so a
+    # process-table sweep can separate two installations serving the same grid on one machine.
+    # Validate it in the child too: a copied/stale argv under a different environment must fail
+    # closed instead of starting a process its installation can no longer identify safely.
+    engine_markers = {run_records.LOCAL_ENGINE_MARKER, run_records.REMOTE_ENGINE_MARKER}
+    if len(argv) >= 2 and argv[1] in engine_markers and argv[0].startswith(
+        process_home.HOME_TAG_ARG_PREFIX
+    ):
+        supplied = process_home.tag_from_arg(argv[0])
+        expected = process_home.own_tag()
+        if supplied is None or expected is None or supplied != expected:
+            raise SystemExit("Detached Grid engine GRID_HOME identity does not match this process.")
+        argv = argv[1:]
     if argv[0] == "__server":
         parser = argparse.ArgumentParser(prog="grid __server")
         parser.add_argument("grid_id")
@@ -206,5 +219,4 @@ def _maybe_internal(argv: list[str]) -> int | None:
         args = parser.parse_args(argv[1:])
         return run_remote_engine_from_record(args.grid_id, args.engine_id)
     return None
-
 

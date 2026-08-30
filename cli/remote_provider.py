@@ -27,7 +27,7 @@ from typing import NamedTuple
 import uuid
 from typing import TYPE_CHECKING
 
-from shared import logging_setup, orphan_sweep, paths, run_records
+from shared import logging_setup, orphan_sweep, paths, process_home, run_records
 from shared.filelock import file_lock
 from shared.models import api_catalog
 
@@ -1509,7 +1509,8 @@ def _spawn_remote_engine(
     paths.ensure_dir(log_path.parent)
     log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
     return subprocess.Popen(
-        runtime.cli_command() + [run_records.REMOTE_ENGINE_MARKER, network_id, engine_id],
+        runtime.cli_command()
+        + [process_home.own_tag_arg(), run_records.REMOTE_ENGINE_MARKER, network_id, engine_id],
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
