@@ -773,6 +773,46 @@ class Rpc:
             self.publish("goal.codex.event", method=method)
 
 
+def _continuation_prompt(job: dict[str, Any], turns_before: int) -> str | None:
+    """Return relay guidance with the exact failed eval contracts attached.
+
+    New relays include these contracts in the prompt directly. Reconstructing them from the
+    signed Goal metadata keeps an upgraded worker safe when it is paired to an older relay and
+    prevents a model from guessing paths after receiving only a human-readable failure.
+    """
+    raw = job.get("prompt")
+    if not turns_before or not isinstance(raw, str) or not raw.strip():
+        return None
+    prompt = raw.strip()
+    if "Exact immutable check:" in prompt:
+        return prompt
+    goal = job.get("goal")
+    if not isinstance(goal, dict):
+        return prompt
+    last_eval = goal.get("last_eval")
+    evals = goal.get("evals")
+    if not isinstance(last_eval, dict) or not isinstance(evals, list):
+        return prompt
+    failed_ids = {
+        item.get("id") for item in last_eval.get("results", [])
+        if isinstance(item, dict) and item.get("passed") is False
+        and isinstance(item.get("id"), str)
+    }
+    contracts = [
+        spec for spec in evals if isinstance(spec, dict)
+        and spec.get("definition_id") in failed_ids
+    ]
+    if not contracts:
+        return prompt
+    lines = [prompt, "", "Exact immutable contracts for the failed Grid checks:"]
+    for spec in contracts:
+        # definition_id/hash identify the contract but are not actionable completion criteria.
+        contract = {key: value for key, value in spec.items()
+                    if key not in ("definition_id", "definition_hash")}
+        lines.append("- " + json.dumps(contract, sort_keys=True, ensure_ascii=False))
+    return "\n".join(lines)
+
+
 def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
               executable: str, timeout: float, publish: Callable[..., None],
               on_spawn: Callable[[ProcessLike], None] | None = None,
@@ -819,10 +859,7 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
         process = process_factory([executable, "app-server", "--listen", "stdio://"], env, workspace)
         if on_spawn is not None:
             on_spawn(process)
-        continuation = job.get("prompt")
-        continuation = (continuation.strip()
-                        if turns_before and isinstance(continuation, str)
-                        and continuation.strip() else None)
+        continuation = _continuation_prompt(job, turns_before)
         rpc = Rpc(process, timeout=timeout, tools=tools, publish=publish,
                   continuation=continuation)
         rpc.wait(rpc.send("initialize", {

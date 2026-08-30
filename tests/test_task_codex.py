@@ -96,6 +96,34 @@ def _job(**changes):
     return value
 
 
+def test_continuation_adds_exact_failed_eval_contracts_from_goal_metadata():
+    job = _job(prompt="Grid evaluation failed: instructions are absent")
+    job["goal"]["evals"] = [
+        {"type": "file", "name": "instructions", "path": "README.md", "exists": True,
+         "definition_id": "eval-readme", "definition_hash": "hash-readme"},
+        {"type": "file", "name": "game", "path": "game.js", "exists": True,
+         "definition_id": "eval-game", "definition_hash": "hash-game"},
+    ]
+    job["goal"]["last_eval"] = {"results": [
+        {"id": "eval-readme", "passed": False},
+        {"id": "eval-game", "passed": True},
+    ]}
+
+    prompt = task_codex._continuation_prompt(job, 1)
+
+    assert prompt is not None
+    assert "Grid evaluation failed" in prompt
+    assert '"path": "README.md"' in prompt
+    assert '"path": "game.js"' not in prompt
+    assert "definition_id" not in prompt
+
+
+def test_continuation_does_not_duplicate_relay_supplied_exact_contracts():
+    prompt = "Failure\nExact immutable check: {\"path\": \"README.md\"}"
+    job = _job(prompt=prompt)
+    assert task_codex._continuation_prompt(job, 1) == prompt
+
+
 def test_goal_inference_proxy_attributes_requests_to_durable_turn_and_conversation():
     class Handler:
         headers = Message()
