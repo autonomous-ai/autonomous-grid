@@ -18,9 +18,9 @@ Joining worker (the other physical machine)::
 
 The relay command discovers the relay host's LAN address, prints a short-lived pairing bundle, and
 keeps the relay in the foreground. Paste that bundle at the joining worker's hidden prompt. The
-physical A/B labels are intentionally absent: either machine may host the relay. The bundle is a
-disposable credential, so the script never asks the operator to put it in a command-line argument
-or shell history.
+physical A/B labels are intentionally absent: either machine may host the relay. The hidden prompt
+is safest, but automation may pass the disposable credential with ``--bundle`` when accepting its
+visibility in shell history and the local process list.
 """
 from __future__ import annotations
 
@@ -435,7 +435,8 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("--home", default="/private/tmp/grid-goal-worker",
                            help="Fresh isolated GRID_HOME")
     configure.add_argument("--bundle", default=None,
-                           help=argparse.SUPPRESS)  # tests only; secrets should not enter history
+                           help=("Disposable pairing bundle (automation only; visible in shell "
+                                 "history/process listings). Omit for a hidden prompt."))
     configure.add_argument("--replace", action="store_true",
                            help="Replace an existing disposable Grid home")
     configure.set_defaults(func=cmd_configure)

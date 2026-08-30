@@ -96,6 +96,11 @@ relay host:     /private/tmp/grid-goal-physical/grid-home-relay
 joining worker: /private/tmp/grid-goal-worker
 ```
 
+For a non-interactive test runner, `configure` also accepts `--bundle <value>`. This exposes the
+short-lived credential in shell history and possibly the local process list; use it only on this
+disposable acceptance Grid and remove the command from retained logs. It is not a production
+pairing pattern.
+
 Verify both machines through Grid itself:
 
 ```bash

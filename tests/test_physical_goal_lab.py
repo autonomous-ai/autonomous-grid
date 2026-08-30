@@ -43,6 +43,16 @@ def test_pairing_round_trip_pins_relay_node_owner_and_expiry():
     assert set(lab.SCOPES).issubset(claims["scopes"])
 
 
+def test_configure_exposes_automation_bundle_parameter_with_warning():
+    parser = lab.build_parser()
+    args = parser.parse_args(["configure", "--bundle", "disposable"])
+
+    assert args.bundle == "disposable"
+    help_text = parser._subparsers._group_actions[0].choices["configure"].format_help()
+    assert "--bundle BUNDLE" in help_text
+    assert "shell history/process listings" in help_text
+
+
 def test_pairing_refuses_expiry_identity_mismatch_and_oversize():
     expired = int(time.time()) - 1
     token = lab.issue_token(
