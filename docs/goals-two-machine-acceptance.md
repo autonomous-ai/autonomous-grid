@@ -47,9 +47,13 @@ after the matching relay is hosted, skip that subsection and use the hosted Grid
 
 ### Pre-merge relay, without SSH
 
-Machine B runs the matching relay checkout locally and stays awake. This is an acceptance-test
-topology, not a production deployment and not a replacement for the hosted relay. On B, in a
-separate clean private-repository checkout:
+Either physical machine may be the **relay host**. The other is the **joining worker**. These
+network roles are independent of the later A/B execution order: machine A is whichever task node
+claims the first Goal slice, and machine B is whichever task node performs the handoff. Record the
+mapping before the run instead of inferring it from a temporary path name.
+
+This is an acceptance-test topology, not a production deployment and not a replacement for the
+hosted relay. On the relay host, in a separate clean private-repository checkout:
 
 ```bash
 git clone --branch grid-goal-distributed \
@@ -59,8 +63,8 @@ cd /private/tmp/autonomous-grid-cli-goal-relay
 uv sync
 ```
 
-Then, from B's clean public `autonomous-grid` worktree, start the test relay in a terminal that will
-remain open:
+Then, from the relay host's clean public `autonomous-grid` worktree, start the test relay in a
+terminal that will remain open:
 
 ```bash
 uv run python tests/e2e_cross_repo/physical_goal_lab.py relay \
@@ -68,40 +72,41 @@ uv run python tests/e2e_cross_repo/physical_goal_lab.py relay \
   --root /private/tmp/grid-goal-physical
 ```
 
-The helper discovers B's reachable address itself; no IP lookup and no remote login is normally
-needed. If B has several network interfaces and discovery chooses one A cannot reach, pass
-`--advertise-host <reachable-LAN-or-VPN-address>` explicitly. The helper starts the relay, creates
-distinct short-lived identities for A and B, writes B's isolated Grid home, and prints one
-disposable pairing bundle for A. It never copies a task root.
+The helper discovers the relay host's reachable address itself; no IP lookup and no remote login is
+normally needed. If it has several network interfaces and discovery chooses one the joining worker
+cannot reach, pass `--advertise-host <reachable-LAN-or-VPN-address>` explicitly. The helper starts
+the relay, creates distinct short-lived identities for the relay node and joining worker, writes the
+relay node's isolated Grid home, and prints one disposable pairing bundle for the joining worker.
+It never copies a task root.
 
-On A, from the same public commit:
+On the joining worker, from the same public commit:
 
 ```bash
 uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \
-  --home /private/tmp/grid-goal-lab-a
+  --home /private/tmp/grid-goal-worker
 ```
 
-Paste B's pairing bundle at the hidden prompt. It does not enter shell history. The two isolated
-Grid homes for the rest of this run are:
+Paste the relay host's pairing bundle at the hidden prompt. It does not enter shell history. The
+two isolated Grid homes for the rest of this run are:
 
 ```text
-A: /private/tmp/grid-goal-lab-a
-B: /private/tmp/grid-goal-physical/grid-home-b
+relay host:     /private/tmp/grid-goal-physical/grid-home-relay
+joining worker: /private/tmp/grid-goal-worker
 ```
 
 Verify both machines through Grid itself:
 
 ```bash
-# A
-GRID_HOME=/private/tmp/grid-goal-lab-a uv run grid goal list --all --json
-
-# B
-GRID_HOME=/private/tmp/grid-goal-physical/grid-home-b \
+# relay host
+GRID_HOME=/private/tmp/grid-goal-physical/grid-home-relay \
   uv run grid goal list --all --json
+
+# joining worker
+GRID_HOME=/private/tmp/grid-goal-worker uv run grid goal list --all --json
 ```
 
-Both calls must return the same Goal table. Keep B's relay terminal open. All later commands in
-this document must use the machine's isolated `GRID_HOME` prefix and the Grid name
+Both calls must return the same Goal table. Keep the relay terminal open. All later commands in
+this document must use that machine's isolated `GRID_HOME` prefix and the Grid name
 `goal-physical`. Do not run `grid login` or `grid use` inside these homes; pairing already wrote the
 exact disposable Grid record. Model inference must still be provided by an engine joined to this
 test Grid—running the relay does not make the relay an inference engine.

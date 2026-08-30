@@ -75,7 +75,7 @@ def test_pairing_refuses_non_root_or_credential_bearing_relay_urls(url):
 
 
 def test_configure_home_writes_an_isolated_remote_grid(tmp_path, monkeypatch):
-    home = tmp_path / "machine-a"
+    home = tmp_path / "joining-worker"
     original = os.environ.get("GRID_HOME")
     lab.configure_home(home, _pair())
 
@@ -111,18 +111,49 @@ def test_prepare_relay_mints_distinct_machine_identities_and_private_files(
 
     prepared_root, env, raw = lab.prepare_relay(args)
     metadata = lab.json.loads(raw)
-    a = lab.decode_pair(metadata["pair_a"])
-    monkeypatch.setenv("GRID_HOME", metadata["home_b"])
+    worker = lab.decode_pair(metadata["worker_pair"])
+    monkeypatch.setenv("GRID_HOME", metadata["relay_home"])
     from remote import credentials
     b_token = credentials.load_credentials()["networks"][0]["access_token"]
     b_claims = lab.token_claims(b_token)
-    a_claims = lab.token_claims(a["access_token"])
+    worker_claims = lab.token_claims(worker["access_token"])
 
     assert prepared_root == root
     assert metadata["url"] == "http://192.0.2.88:8090"
-    assert a_claims["user_id"] == b_claims["user_id"]
-    assert a_claims["node_id"] != b_claims["node_id"]
+    assert worker_claims["user_id"] == b_claims["user_id"]
+    assert worker_claims["node_id"] != b_claims["node_id"]
     assert env["TASK_REPO_ROOT"] == str(root / "projects")
     assert env["GRID_MODE"] == "false"
+    identity = lab.json.loads((root / "identity.json").read_text(encoding="utf-8"))
+    assert set(identity) == {"user_id", "worker_node_id", "relay_node_id"}
+    assert metadata["relay_home"] == str(root / "grid-home-relay")
     assert stat.S_IMODE((root / "jwt-secret").stat().st_mode) == 0o600
-    assert stat.S_IMODE((root / "machine-a-pairing.txt").stat().st_mode) == 0o600
+    assert stat.S_IMODE((root / "joining-worker-pairing.txt").stat().st_mode) == 0o600
+
+
+def test_prepare_relay_reuses_legacy_ab_identity_by_role(tmp_path, monkeypatch):
+    relay_repo = tmp_path / "private-relay"
+    (relay_repo / "grid_cli" / "private_server").mkdir(parents=True)
+    relay_python = relay_repo / ".venv" / "bin" / "python"
+    relay_python.parent.mkdir(parents=True)
+    relay_python.write_text("", encoding="utf-8")
+    root = tmp_path / "legacy-state"
+    root.mkdir()
+    (root / "jwt-secret").write_text("secret-padded-past-thirty-two-bytes", encoding="utf-8")
+    (root / "identity.json").write_text(lab.json.dumps({
+        "user_id": "legacy-owner", "node_a": "legacy-worker", "node_b": "legacy-relay",
+    }), encoding="utf-8")
+    monkeypatch.setattr(lab, "discover_lan_host", lambda: "192.0.2.88")
+
+    _, _, raw = lab.prepare_relay(argparse.Namespace(
+        root=str(root), relay_repo=str(relay_repo), reuse=True, advertise_host=None,
+        port=8090, token_hours=48, lease_seconds=120, reaper_seconds=5,
+        claim_timeout_seconds=30))
+
+    metadata = lab.json.loads(raw)
+    worker = lab.decode_pair(metadata["worker_pair"])
+    monkeypatch.setenv("GRID_HOME", metadata["relay_home"])
+    from remote import credentials
+    relay_claims = lab.token_claims(credentials.load_credentials()["networks"][0]["access_token"])
+    assert worker["node_id"] == "legacy-worker"
+    assert relay_claims["node_id"] == "legacy-relay"

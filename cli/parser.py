@@ -1076,10 +1076,10 @@ def _add_goal(sub) -> None:
     run.add_argument("--model", required=True, help="Grid model used by Codex.")
     run.add_argument("--token-budget", type=int, default=100_000,
                      help="Maximum cumulative tokens (default 100000).")
-    run.add_argument("--tools", default=None, metavar="JSON",
-                     help="Observe/act HTTP capability manifest.")
-    run.add_argument("--evals", default=None, metavar="JSON",
-                     help="Independent evaluation manifest checked against result commits.")
+    run.add_argument("--tools", default=None, metavar="FILE",
+                     help="JSON file containing the observe/act HTTP capability manifest.")
+    run.add_argument("--evals", default=None, metavar="FILE",
+                     help="JSON file containing independent evals checked against result commits.")
     run.add_argument("--agent", choices=("codex", "claude", "auto"), default="codex",
                      help="Allowed native Goal harness (default: codex; auto allows both).")
     run.add_argument("--require", action="append", default=[], metavar="CAPABILITY",

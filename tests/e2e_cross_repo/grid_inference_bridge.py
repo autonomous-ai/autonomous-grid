@@ -189,11 +189,20 @@ def run(args: argparse.Namespace) -> int:
     if not (target_home / "credentials.toml").is_file():
         raise SystemExit(f"Target lab GRID_HOME is not configured: {target_home}")
     tasks_root = Path(args.tasks_root).expanduser().resolve()
+    from cli import main as grid_main
+
+    # A bridge endpoint exists only for this process's lifetime. A prior Ctrl-C or crash can leave
+    # the detached provider advertising that now-dead loopback URL. `join --respawn` merges engine
+    # definitions, so it would otherwise keep routing the model to the stale first endpoint. Own
+    # this disposable target identity exclusively: unregister any prior provider before joining.
+    with _target_home(target_home):
+        if grid_main(["leave", args.target_grid]) != 0:
+            raise SystemExit(f"Could not clear the previous {args.target_grid} bridge provider")
+
     bridge = Bridge(source, args.port)
     bridge.start()
+    joined = False
     try:
-        from cli import main as grid_main
-
         with _target_home(target_home):
             result = grid_main([
                 "join", args.target_grid, "--at", bridge.base_url, "-m", model,
@@ -202,16 +211,24 @@ def run(args: argparse.Namespace) -> int:
             ])
         if result != 0:
             return int(result)
+        joined = True
         print("\nGrid inference bridge is ready:", flush=True)
         print(f"  source: {args.source_grid} / {model}", flush=True)
         print(f"  target: {args.target_grid} / {args.name}", flush=True)
         print(f"  local:  {bridge.base_url}", flush=True)
         print("  bearer: retained inside this process", flush=True)
-        print("Keep this terminal open. Ctrl-C stops only the inference bridge.", flush=True)
+        print("Keep this terminal open. Ctrl-C stops the bridge and unregisters this lab node.",
+              flush=True)
         threading.Event().wait()
     except KeyboardInterrupt:
         return 130
     finally:
+        if joined:
+            with _target_home(target_home):
+                # Best effort during shutdown: the important invariant is that a normal Ctrl-C
+                # never leaves a detached provider pointing at a dead loopback bridge.
+                with contextlib.suppress(Exception):
+                    grid_main(["leave", args.target_grid])
         bridge.stop()
     return 0
 

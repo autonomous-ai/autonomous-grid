@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -54,3 +55,42 @@ def test_bridge_is_loopback_and_exposes_only_needed_routes():
             "/responses", "/chat/completions", "/completions", "/models"}
     finally:
         server.server.server_close()
+
+
+def test_bridge_replaces_stale_provider_and_unregisters_on_normal_exit(tmp_path, monkeypatch):
+    target_home = tmp_path / "target-home"
+    target_home.mkdir()
+    (target_home / "credentials.toml").write_text("paired", encoding="utf-8")
+    calls = []
+    stopped = []
+
+    class FakeBridge:
+        base_url = "http://127.0.0.1:54321/v1"
+
+        def __init__(self, _source, _port):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            stopped.append(True)
+
+    monkeypatch.setattr(bridge, "_source_grid", lambda _name: bridge.SourceGrid(
+        "https://source.test/relay/v1", "secret"))
+    monkeypatch.setattr(bridge, "require_exact_model", lambda _source, model: model)
+    monkeypatch.setattr(bridge, "Bridge", FakeBridge)
+    monkeypatch.setattr(bridge.threading, "Event", lambda: SimpleNamespace(wait=lambda: None))
+    import cli
+    monkeypatch.setattr(cli, "main", lambda argv: calls.append(argv) or 0)
+
+    result = bridge.run(SimpleNamespace(
+        source_grid="source", target_grid="goal-physical", target_home=str(target_home),
+        model="Exact-Model", name="relay-host", tasks_root=str(tmp_path / "tasks"),
+        max_tasks=1, port=0))
+
+    assert result == 0
+    assert calls[0] == ["leave", "goal-physical"]
+    assert calls[1][:2] == ["join", "goal-physical"]
+    assert calls[2] == ["leave", "goal-physical"]
+    assert stopped == [True]

@@ -277,31 +277,38 @@ def prepare_relay(args: argparse.Namespace) -> tuple[Path, dict[str, str], str]:
         secret = secret_path.read_text(encoding="utf-8")
         identity = json.loads(identity_path.read_text(encoding="utf-8"))
         user_id = str(identity["user_id"])
-        node_a = str(identity["node_a"])
-        node_b = str(identity["node_b"])
+        # Accept roots created by the first lab helper, whose A/B names encoded one arbitrary
+        # topology. New roots persist role names so either physical machine can host the relay.
+        worker_node = str(identity.get("worker_node_id") or identity["node_a"])
+        relay_node = str(identity.get("relay_node_id") or identity["node_b"])
     elif secret_path.exists() or identity_path.exists():
         raise SystemExit(f"Lab root {root} is incomplete; use a new root instead of reusing it")
     else:
         secret = secrets.token_urlsafe(48)
         user_id = f"goal-lab-{uuid.uuid4()}"
-        node_a = f"goal-a-{uuid.uuid4()}"
-        node_b = f"goal-b-{uuid.uuid4()}"
+        worker_node = f"goal-worker-{uuid.uuid4()}"
+        relay_node = f"goal-relay-{uuid.uuid4()}"
         _write_secret(secret_path, secret)
         _write_private(identity_path, json.dumps({
-            "user_id": user_id, "node_a": node_a, "node_b": node_b,
+            "user_id": user_id,
+            "worker_node_id": worker_node,
+            "relay_node_id": relay_node,
         }, indent=2) + "\n")
 
     host = args.advertise_host or discover_lan_host()
     url = relay_url(host, args.port)
     expires_at = int(time.time()) + int(args.token_hours * 3600)
-    token_a = issue_token(secret, user_id=user_id, node_id=node_a, expires_at=expires_at)
-    token_b = issue_token(secret, user_id=user_id, node_id=node_b, expires_at=expires_at)
-    pair_a = encode_pair(url=url, token=token_a, node_id=node_a, expires_at=expires_at)
-    pair_b = decode_pair(encode_pair(
-        url=url, token=token_b, node_id=node_b, expires_at=expires_at))
-    configure_home(root / "grid-home-b", pair_b)
-    pair_path = root / "machine-a-pairing.txt"
-    _write_private(pair_path, pair_a + "\n")
+    worker_token = issue_token(
+        secret, user_id=user_id, node_id=worker_node, expires_at=expires_at)
+    relay_token = issue_token(
+        secret, user_id=user_id, node_id=relay_node, expires_at=expires_at)
+    worker_pair = encode_pair(
+        url=url, token=worker_token, node_id=worker_node, expires_at=expires_at)
+    relay_pair = decode_pair(encode_pair(
+        url=url, token=relay_token, node_id=relay_node, expires_at=expires_at))
+    configure_home(root / "grid-home-relay", relay_pair)
+    pair_path = root / "joining-worker-pairing.txt"
+    _write_private(pair_path, worker_pair + "\n")
 
     revision = subprocess.run(
         ["git", "-C", str(relay_repo), "rev-parse", "HEAD"], capture_output=True,
@@ -322,8 +329,8 @@ def prepare_relay(args: argparse.Namespace) -> tuple[Path, dict[str, str], str]:
     }
     metadata = {
         "url": url,
-        "pair_a": pair_a,
-        "home_b": str(root / "grid-home-b"),
+        "worker_pair": worker_pair,
+        "relay_home": str(root / "grid-home-relay"),
         "server_dir": str(server_dir),
         "python": str(relay_python),
         "relay_revision": revision,
@@ -360,14 +367,14 @@ def cmd_relay(args: argparse.Namespace) -> int:
         _wait_for_health(proc, metadata["url"])
         print("\nGrid Goal physical relay is ready (no SSH):", flush=True)
         print(f"  relay:       {metadata['url']}", flush=True)
-        print(f"  relay node:  GRID_HOME={metadata['home_b']}", flush=True)
+        print(f"  relay node:  GRID_HOME={metadata['relay_home']}", flush=True)
         print(f"  relay state: {root}", flush=True)
         print(f"  relay SHA:   {metadata['relay_revision']}", flush=True)
         print("\nOn the joining worker, run:", flush=True)
         print("  uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \\", flush=True)
         print("    --home /private/tmp/grid-goal-worker", flush=True)
         print("\nThen paste this disposable bundle at its hidden prompt:", flush=True)
-        print(metadata["pair_a"], flush=True)
+        print(metadata["worker_pair"], flush=True)
         print("\nKeep this terminal open. Ctrl-C stops only the disposable relay.", flush=True)
         return proc.wait()
     except KeyboardInterrupt:

@@ -28,6 +28,20 @@ def test_goal_run_parser_requires_a_measurable_condition_and_model():
     assert evidence.require_inference is True
 
 
+def test_goal_run_help_calls_manifest_arguments_files(capsys):
+    """Do not advertise inline JSON when the command intentionally reads a file path."""
+    from cli.parser import build_parser
+
+    with pytest.raises(SystemExit) as stopped:
+        build_parser().parse_args(["goal", "run", "--help"])
+
+    assert stopped.value.code == 0
+    output = capsys.readouterr().out
+    assert "--tools FILE" in output
+    assert "--evals FILE" in output
+    assert "JSON file containing independent evals" in output
+
+
 def test_goal_run_loads_tools_and_posts_the_resolved_project(monkeypatch, tmp_path, capsys):
     from cli import goal, remote_task
     from remote import relay
