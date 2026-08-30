@@ -277,6 +277,52 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
             return "complete", "C completed the parent after optional child failure", 200
         raise RuntimeError(f"unexpected optional subgoal turn on {node}: {history!r}")
 
+    if scenario == "subgoal_mixed_retry":
+        if node == "A" and not history:
+            if call_tool is None:
+                raise RuntimeError("mixed-retry subgoal scenario received no dynamic tool bridge")
+            result = call_tool("grid_spawn_subgoal", {
+                "objective": "Build the crash-safe child artifact",
+                "done_when": "CHILD_DONE.md proves the child resumed across native harnesses",
+                "model": "fake-grid-child-model",
+                "agents": ["codex", "claude"],
+                "evals": [{
+                    "type": "file", "name": "mixed child completion", "path": "CHILD_DONE.md",
+                    "max_bytes": 2_000, "contains": ["Claude C", "Codex B checkpoint"],
+                }],
+                "token_budget": 3_000,
+            })
+            envelope = json.loads(
+                ((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+            child_id = ((envelope.get("body") or {}).get("id"))
+            if not result.get("success") or not child_id:
+                raise RuntimeError(f"mixed-retry child creation failed: {result!r}")
+            history.append({"node": "A", "spawned_mixed_child": child_id})
+            save_history(history)
+            return "active", f"A spawned mixed-harness child Goal {child_id}", 100
+        if node == "B" and not history:
+            (cwd / "CHILD_PARTIAL.md").write_text(
+                "# Codex B checkpoint\n\nCodex B wrote this before its native harness failed.\n")
+            history.append({"node": "B", "child_checkpoint": "CHILD_PARTIAL.md"})
+            save_history(history)
+            # The child stays one logical relay turn. Grid must publish both checkpoint refs and
+            # let a Claude-capable machine reclaim attempt 2 rather than opening a new child turn.
+            raise RuntimeError("simulated Codex child harness failure after partial work")
+        if (node == "D" and len(history) == 1
+                and history[0].get("node") == "A"):
+            partial = cwd / "CHILD_PARTIAL.md"
+            completed = cwd / "CHILD_DONE.md"
+            if (not partial.is_file() or "Codex B checkpoint" not in partial.read_text()
+                    or not completed.is_file() or "Claude C" not in completed.read_text()):
+                raise RuntimeError("parent D resumed without the mixed child fan-in")
+            (cwd / "FINAL.md").write_text(
+                "# Parent complete\n\nCodex B checkpointed the child, Claude C resumed it, "
+                "and Codex D received the independently evaluated fan-in.\n")
+            history.append({"node": "D", "fan_in": "mixed-child"})
+            save_history(history)
+            return "complete", "D completed the parent after mixed child recovery", 200
+        raise RuntimeError(f"unexpected mixed-retry subgoal turn on {node}: {history!r}")
+
     if scenario == "subgoal":
         if node == "A" and not history:
             if call_tool is None:

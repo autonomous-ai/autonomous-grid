@@ -291,13 +291,30 @@ def main() -> int:
         with (transcript / f"{session}.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"sessionId": session, "prompt": prompt}) + "\n")
 
-    if os.environ.get("GRID_E2E_GOAL_SCENARIO") in ("subgoal", "subgoal_retry"):
+    if os.environ.get("GRID_E2E_GOAL_SCENARIO") in (
+            "subgoal", "subgoal_retry", "subgoal_mixed_retry"):
+        scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
         node = os.environ.get("GRID_E2E_GOAL_NODE")
-        expected_node = ("C" if os.environ.get("GRID_E2E_GOAL_SCENARIO") == "subgoal_retry"
-                         else "B")
+        expected_node = "C" if scenario in ("subgoal_retry", "subgoal_mixed_retry") else "B"
         if node != expected_node or not prompt.startswith("/goal ") or resume is not None:
             sys.stderr.write("fake Claude received an invalid child Goal assignment\n")
             return 2
+        if scenario == "subgoal_mixed_retry":
+            partial = pathlib.Path("CHILD_PARTIAL.md")
+            if (not partial.is_file() or "Codex B checkpoint" not in partial.read_text()
+                    or "Grid retry handoff:" not in prompt):
+                sys.stderr.write(
+                    "Claude C did not receive Codex B's same-turn child checkpoint\n")
+                return 2
+            pathlib.Path("CHILD_DONE.md").write_text(
+                "# Mixed child complete\n\nClaude C resumed the exact Codex B checkpoint.\n")
+            _emit({"type": "assistant", "message": {"usage": {
+                "input_tokens": 20, "output_tokens": 12}, "content": [
+                {"type": "text", "text": "Claude resumed Codex's child checkpoint"}]}})
+            _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": True,
+                   "reason": "CHILD_DONE.md proves the mixed-harness child recovery",
+                   "iterations": 2, "tokens": 32}})
+            return 0
         pathlib.Path("README.md").write_text(
             "# Child instructions\n\nOpen the finished parent artifact and follow the guide.\n")
         _emit({"type": "assistant", "message": {"usage": {

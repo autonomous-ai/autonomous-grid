@@ -1386,6 +1386,102 @@ def test_parent_codex_spawns_claude_child_then_codex_fans_it_in(
     assert result["result"]["body"]["id"] == child_id
 
 
+def test_child_goal_reclaims_same_turn_codex_to_claude_then_fans_in_to_codex(
+        relay, owner_token, spawn_goal_provider, tmp_path):
+    """Compose hierarchy, same-turn checkpoint recovery, mixed harnesses and fan-in."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-subgoal-mixed-retry")['id']
+    H.seed_trunk(relay, owner_token, project_id)
+    node_a = spawn_goal_provider(
+        "A", agent_kinds="codex", scenario="subgoal_mixed_retry",
+        disk_label="child-mix-A", one_task=True)
+    parent = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Delegate a child that survives a Codex-to-Claude machine handoff",
+        done_when="The recovered child is evaluated, merged, and FINAL.md records the chain",
+        model="fake-grid-model", token_budget=10_000, tools=[], agents=["codex"],
+        allow_subgoals=True,
+        evals=[
+            {"type": "file", "name": "Codex child checkpoint", "path": "CHILD_PARTIAL.md",
+             "max_bytes": 2_000, "contains": ["Codex B checkpoint"]},
+            {"type": "file", "name": "Claude child completion", "path": "CHILD_DONE.md",
+             "max_bytes": 2_000, "contains": ["Claude C", "Codex B checkpoint"]},
+            {"type": "file", "name": "parent fan-in", "path": "FINAL.md",
+             "max_bytes": 2_000, "contains": ["Codex D", "independently evaluated fan-in"]},
+        ])
+
+    waiting = H.wait_for(lambda: (lambda goal: goal if goal.get("status") == "waiting_children"
+                                  else None)(relay_client.get_goal(
+                                      relay, owner_token, parent["id"])), timeout=30)
+    assert waiting, f"parent never yielded to its child; A output:\n{node_a.output()}"
+    assert len(waiting["children"]) == 1
+    child_id = waiting["children"][0]["id"]
+    assert H.wait_for(lambda: node_a.proc.poll() is not None, timeout=15), node_a.output()
+
+    # B starts the child on Codex and fails after writing both its native and worktree checkpoint.
+    node_b = spawn_goal_provider(
+        "B", agent_kinds="codex", scenario="subgoal_mixed_retry",
+        disk_label="child-mix-B", one_task=True)
+    assert H.wait_for(lambda: node_b.proc.poll() is not None, timeout=30), node_b.output()
+    after_b = _tasks(relay, owner_token, project_id, child_id)
+    assert len(after_b) == 1 and after_b[0]["state"] == "queued", after_b
+    child_turn_id = after_b[0]["id"]
+    assert after_b[0]["attempt"] == 1 and after_b[0]["checkpoint_commit"], after_b
+    assert after_b[0]["agent_kind"] == "codex"
+
+    # C has a separate disk and only Claude. It must reclaim B's exact row at attempt 2 and start a
+    # native Claude /goal over the accepted Codex checkpoint, not create a fresh child turn.
+    node_c = spawn_goal_provider(
+        "C", agent_kinds="claude", scenario="subgoal_mixed_retry",
+        disk_label="child-mix-C", one_task=True)
+    child_done = H.wait_for(lambda: (lambda goal: goal if goal.get("status") == "complete"
+                                    else None)(relay_client.get_goal(
+                                        relay, owner_token, child_id)), timeout=60)
+    assert child_done, f"Claude did not recover the Codex child:\n{node_c.output()}"
+    child_turns = _tasks(relay, owner_token, project_id, child_id)
+    assert len(child_turns) == 1 and child_turns[0]["id"] == child_turn_id, child_turns
+    assert child_turns[0]["attempt"] == 2
+    assert child_turns[0]["provider_id"] == node_c.node_id
+    assert child_turns[0]["agent_kind"] == "claude"
+    child_evidence = relay_client.get_goal_evidence(relay, owner_token, child_id)
+    retry = [item for item in child_evidence["attempt_events"]
+             if item["event"].get("type") == "task.retry"]
+    assert len(retry) == 1
+    assert retry[0]["event"]["previous_provider_id"] == node_b.node_id
+    assert retry[0]["event"]["previous_agent_kind"] == "codex"
+    from cli.goal import _verify_evidence
+    assert _verify_evidence(child_evidence, min_execution_nodes=2) == []
+
+    # D can run only the Codex parent. Its independent disk receives the evaluated child branch
+    # through relay-owned fan-in, then it completes the second parent turn.
+    node_d = spawn_goal_provider(
+        "D", agent_kinds="codex", scenario="subgoal_mixed_retry",
+        disk_label="child-mix-D", one_task=True)
+    complete = H.wait_for(lambda: _completed_goal(
+        relay, owner_token, parent["id"]), timeout=60)
+    assert complete, f"Codex D did not complete the fanned-in parent:\n{node_d.output()}"
+    assert complete["children"][0]["id"] == child_id
+    assert complete["children"][0]["merge_state"] == "merged"
+    parent_turns = _tasks(relay, owner_token, project_id, parent["id"])
+    assert [row["provider_id"] for row in parent_turns] == [node_a.node_id, node_d.node_id]
+    assert [row["agent_kind"] for row in parent_turns] == ["codex", "codex"]
+
+    destination = tmp_path / "subgoal-mixed-retry-result"
+    destination.mkdir()
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=parent_turns[-1]["branch"], commit=parent_turns[-1]["result_commit"],
+        project_id=project_id)
+    assert {"CHILD_PARTIAL.md", "CHILD_DONE.md", "FINAL.md"} <= {
+        path.name for path in destination.iterdir()}
+    parent_evidence = relay_client.get_goal_evidence(relay, owner_token, parent["id"])
+    _assert_transcript_chain(parent_evidence, 2, min_nodes=2)
+    assert all(run["passed"] and run["accepted"] for run in parent_evidence["eval_runs"])
+
+
 def test_replacement_parent_reconstructs_one_child_after_spawn_failure(
         relay, owner_token, spawn_goal_provider, tmp_path):
     """A different Codex session may restate child policy, but it must replay one child identity."""

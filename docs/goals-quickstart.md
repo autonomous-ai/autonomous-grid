@@ -546,6 +546,7 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 | Image artifact | B polls; A executes | Claude rejected; Codex selected | Capability mismatch | PNG file and size |
 | Support reply | A polls; B -> C execute | Codex | B dies after API commit; first eval fails | `DONE.md`; JSON outcome; one API side effect |
 | Required child | A parent; B child; C parent | Codex -> Claude -> Codex | Parent moves while child runs | Child and parent files |
+| Mixed child reclaim | A parent -> B child -> C child -> D parent | Codex -> Codex -> Claude -> Codex | B's native child harness fails after partial work | Same child turn at attempt 2; accepted child eval; one fan-in; completed parent |
 | Optional child | A parent; B child; C parent | Codex | Child fails | Parent file; child failure retained |
 
 Every agent-running scenario except Model arrival and Quota recovery uses `fake-grid-model` (the
