@@ -444,6 +444,76 @@ def test_joint_portfolio_uses_service_time_aware_resource_pressure():
     assert admissions["embedding"]["ready_replicas"] == 0
 
 
+def test_weak_media_canary_requires_surplus_beyond_catalog_and_reserves():
+    def build_controller() -> AllocatorController:
+        controller = AllocatorController()
+        controller.put_profile(
+            ModelProfile(
+                "image-model",
+                8_000,
+                runtimes=("comfyui",),
+                backends=("mps",),
+                min_replicas=0,
+                max_replicas=2,
+                min_residency_seconds=0,
+                workload_scores=(("image", 1.0),),
+                replica_concurrency=1,
+            )
+        )
+        for index in range(7):
+            controller.put_profile(
+                ModelProfile(
+                    f"catalog-{index}",
+                    8_000,
+                    runtimes=("comfyui",),
+                    backends=("mps",),
+                    min_replicas=0,
+                    max_replicas=1,
+                    min_residency_seconds=0,
+                )
+            )
+        controller.observe_lifecycle(
+            RequestFeatures("images/generations", "auto", "image"),
+            service_seconds=20,
+            queue_depth=1,
+            timestamp=100,
+        )
+        return controller
+
+    def fleet(size: int, *, heartbeat: float = 100) -> tuple[NodeSnapshot, ...]:
+        return tuple(
+            NodeSnapshot(
+                f"media-{index}",
+                16_000,
+                runtimes=("comfyui",),
+                backends=("mps",),
+                max_models=1,
+                last_heartbeat=heartbeat,
+            )
+            for index in range(size)
+        )
+
+    saturated = build_controller()
+    saturated.tick(fleet(8), now=100)
+    roomy = build_controller()
+    roomy.tick(fleet(12), now=100)
+    stale = build_controller()
+    stale.tick(fleet(12, heartbeat=1), now=100)
+
+    assert saturated.last_plan is not None
+    assert saturated.last_plan.target_for("image-model") == 0
+    assert roomy.last_plan is not None
+    assert roomy.last_plan.target_for("image-model") == 1
+    assert stale.last_plan is not None
+    assert stale.last_plan.target_for("image-model") == 0
+    forecast = next(
+        row
+        for row in roomy.status(fleet(12), now=100)["forecasts"]
+        if row["model_id"] == "image-model"
+    )
+    assert forecast["canary_only"] is True
+
+
 def test_joint_portfolio_spends_bounded_search_on_highest_device_time(monkeypatch):
     # The evaluation cap is deliberately tiny: after scoring the exploitation baseline, the search
     # can examine only one alternative. Raw request order would spend it on embedding; device-time

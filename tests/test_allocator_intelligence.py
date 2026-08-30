@@ -134,6 +134,116 @@ def test_long_sparse_job_crosses_device_time_evidence_gate_before_cheap_call():
     assert [forecast.model_id for forecast in projected] == ["video-model"]
     assert projected[0].sample_count == 1
     assert projected[0].offered_concurrency == pytest.approx(2.0)
+    assert projected[0].canary_only is False
+
+
+def test_weak_device_pressure_gets_one_canary_only_when_spare_placement_is_proven():
+    intelligence = WorkloadIntelligence(
+        portfolio_min_samples=3,
+        portfolio_min_offered_concurrency=1.5,
+    )
+    intelligence.observe(
+        RequestFeatures("videos/generations", "auto", "video"),
+        portfolio_unbound=True,
+        service_seconds=20,
+        queue_depth=1,
+        timestamp=100,
+    )
+    candidate = profile("video-model", 2_000, ("video", 1.0))
+
+    assert intelligence.portfolio_forecasts((candidate,), (), now=100) == ()
+    projected = intelligence.portfolio_forecasts(
+        (candidate,),
+        (),
+        now=100,
+        placement_hints={
+            "video-model": {
+                "feasible": True,
+                "feasible_now": True,
+                "spare_canary_allowed": True,
+            },
+        },
+    )
+
+    assert len(projected) == 1
+    assert projected[0].offered_concurrency == pytest.approx(4 / 3)
+    assert projected[0].canary_only is True
+
+
+def test_real_model_demand_lifts_weak_workload_canary_cap():
+    intelligence = WorkloadIntelligence(
+        portfolio_min_samples=3,
+        portfolio_min_offered_concurrency=1.5,
+    )
+    intelligence.observe(
+        RequestFeatures("videos/generations", "auto", "video"),
+        portfolio_unbound=True,
+        service_seconds=20,
+        timestamp=100,
+    )
+    direct = DemandForecast(
+        "video-model",
+        requests_per_minute=1,
+        observed_requests_per_minute=1,
+        offered_concurrency=0.1,
+        sample_count=1,
+        updated_at=100,
+    )
+
+    projected = intelligence.portfolio_forecasts(
+        (profile("video-model", 2_000, ("video", 1.0)),),
+        (direct,),
+        now=100,
+        placement_hints={
+            "video-model": {
+                "feasible": True,
+                "feasible_now": True,
+                "spare_canary_allowed": True,
+            },
+        },
+    )
+
+    assert projected[0].observed_requests_per_minute == 1
+    assert projected[0].canary_only is False
+
+
+def test_successful_canary_response_lifts_weak_workload_scale_out_cap():
+    intelligence = WorkloadIntelligence(
+        portfolio_min_samples=3,
+        portfolio_min_offered_concurrency=1.5,
+    )
+    features = RequestFeatures("videos/generations", "auto", "video")
+    intelligence.observe(
+        features,
+        portfolio_unbound=True,
+        service_seconds=20,
+        queue_depth=1,
+        timestamp=100,
+    )
+    intelligence.observe(
+        features,
+        served_model="video-model",
+        portfolio_unbound=True,
+        service_seconds=0,
+        quality=0.9,
+        timestamp=101,
+    )
+
+    projected = intelligence.portfolio_forecasts(
+        (profile("video-model", 2_000, ("video", 1.0)),),
+        (),
+        now=101,
+        placement_hints={
+            "video-model": {
+                "feasible": True,
+                "feasible_now": True,
+                "spare_canary_allowed": True,
+            },
+        },
+    )
+
+    assert projected[0].sample_count == 2
+    assert projected[0].canary_only is False
 
 
 def test_portfolio_device_time_evidence_configuration_round_trips_and_validates():

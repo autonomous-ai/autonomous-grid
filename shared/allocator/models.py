@@ -624,10 +624,13 @@ class DemandForecast:
     sample_count: int = 0
     updated_at: float = 0.0
     observed_requests_per_minute: float = 0.0
+    canary_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.model_id:
             raise ValueError("model_id is required")
+        if not isinstance(self.canary_only, bool):
+            raise ValueError("canary_only must be a boolean")
         for name in (
             "requests_per_minute",
             "offered_concurrency",

@@ -43,6 +43,7 @@ _OUTCOME_HALF_LIFE_SECONDS = 7 * 24 * 60 * 60.0
 _OUTCOME_FULL_CONFIDENCE_REQUESTS = 20.0
 _QUALITY_FULL_CONFIDENCE_SAMPLES = 8.0
 _MAX_EXPLORATION_BONUS = 0.06
+_SPARE_CAPACITY_EVIDENCE_CONCURRENCY = 1.0
 _KEYWORDS = {
     "coding": frozenset(
         {
@@ -306,12 +307,28 @@ class WorkloadIntelligence:
         self,
         sample_count: int,
         offered_concurrency: float,
+        *,
+        immediately_feasible: bool = False,
     ) -> bool:
-        """Admit repeated cheap work or one replica-equivalent of device pressure."""
+        """Admit repeated work, strong pressure, or safe spare-capacity pressure.
+
+        A long image/video request can occupy one whole device before three requests accumulate.
+        Treat one replica-equivalent as enough only when placement proves the chosen model fits
+        current spare capacity; a candidate that needs preemption retains the stronger ordinary
+        evidence gate.
+        """
 
         return bool(
             sample_count >= self.portfolio_min_samples
             or offered_concurrency >= self.portfolio_min_offered_concurrency
+            or (
+                immediately_feasible
+                and offered_concurrency
+                >= min(
+                    self.portfolio_min_offered_concurrency,
+                    _SPARE_CAPACITY_EVIDENCE_CONCURRENCY,
+                )
+            )
         )
 
     def clear(self) -> None:
@@ -384,10 +401,7 @@ class WorkloadIntelligence:
         )
         for workload in workload_keys:
             forecast = self.unbound_demand.forecast(workload, now=now)
-            if not self.portfolio_evidence_ready(
-                forecast.sample_count,
-                forecast.offered_concurrency,
-            ) or forecast.requests_per_minute <= 0:
+            if forecast.requests_per_minute <= 0:
                 continue
             candidates = [
                 profile
@@ -427,6 +441,36 @@ class WorkloadIntelligence:
                         profile.model_id,
                     ),
                 )
+            ordinary_evidence = self.portfolio_evidence_ready(
+                forecast.sample_count,
+                forecast.offered_concurrency,
+            )
+            spare_capacity_evidence = bool(
+                not ordinary_evidence
+                and workload in {"image", "video"}
+                and _placement_spare_canary_allowed(
+                    chosen.model_id,
+                    placement_hints,
+                )
+                and self.portfolio_evidence_ready(
+                    forecast.sample_count,
+                    forecast.offered_concurrency,
+                    immediately_feasible=True,
+                )
+            )
+            if not ordinary_evidence and not spare_capacity_evidence:
+                continue
+            chosen_evidence = self._outcome_evidence(
+                chosen.model_id,
+                workload,
+                artifact_sha256=chosen.artifact_sha256,
+                now=now,
+            )
+            canary_validated = (
+                chosen_evidence["effective_requests"]
+                - chosen_evidence["effective_errors"]
+                >= 0.5
+            )
             projected = replace(
                 forecast,
                 model_id=chosen.model_id,
@@ -441,6 +485,10 @@ class WorkloadIntelligence:
                 correlated_requests_per_minute=forecast.requests_per_minute,
                 correlation_confidence=forecast.confidence,
                 correlation_sources=(f"workload:{workload}",),
+                # One long image/video request is enough to justify trying a model on genuinely
+                # spare capacity, but not enough to infer the entire scale-out target. The first
+                # canary's real request/outcome evidence removes this cap on the next plan.
+                canary_only=spare_capacity_evidence and not canary_validated,
             )
             merged[chosen.model_id] = _merge_forecasts(
                 merged.get(chosen.model_id), projected
@@ -551,6 +599,11 @@ class WorkloadIntelligence:
                     "offered_concurrency": forecast.offered_concurrency,
                     "samples": forecast.sample_count,
                     "confidence": forecast.confidence,
+                    "successful_outcome_evidence": max(
+                        0.0,
+                        chosen_evidence["effective_requests"]
+                        - chosen_evidence["effective_errors"],
+                    ),
                     "chosen_model": chosen.model_id,
                     "score": self._portfolio_score_with_placement(
                         chosen,
@@ -887,6 +940,15 @@ def _placement_feasible(
     )
 
 
+def _placement_spare_canary_allowed(
+    model_id: str,
+    placement_hints: Mapping[str, Mapping[str, Any]] | None,
+) -> bool:
+    if placement_hints is None:
+        return False
+    return (placement_hints.get(model_id) or {}).get("spare_canary_allowed") is True
+
+
 def _placement_transition_penalty(hint: Mapping[str, Any]) -> float:
     """Penalize avoidable model churn using the best current startup path.
 
@@ -1051,6 +1113,15 @@ def _merge_forecasts(
 ) -> DemandForecast:
     if direct is None:
         return projected
+    direct_has_evidence = bool(
+        direct.sample_count
+        or direct.requests_per_minute
+        or direct.offered_concurrency
+        or direct.queue_depth
+        or direct.p95_latency_ms
+        or direct.error_rate
+        or direct.correlation_sources
+    )
     direct_count = direct.sample_count
     projected_count = projected.sample_count
     total_count = direct_count + projected_count
@@ -1081,4 +1152,11 @@ def _merge_forecasts(
         ),
         sample_count=total_count,
         updated_at=max(direct.updated_at, projected.updated_at),
+        # An empty direct forecast is routinely present for every configured model and must not
+        # erase the workload canary marker. Any real direct/strong projection lifts the cap.
+        canary_only=(
+            projected.canary_only
+            if not direct_has_evidence
+            else direct.canary_only and projected.canary_only
+        ),
     )

@@ -2568,6 +2568,11 @@ def desired_replica_count(
             or forecast.error_rate
         ):
             target = min(model.max_replicas, target + 1)
+        if forecast.canary_only:
+            # Weak, placement-safe portfolio evidence earns one real experiment, not an unchecked
+            # scale-out across every currently free accelerator. Direct demand or stronger
+            # workload evidence clears this marker before the next plan can grow the model.
+            target = min(target, 1)
         target = max(model.min_replicas, target)
 
     # Recently-used ready replicas are retained even after a traffic dip.  This is the global
@@ -3734,6 +3739,7 @@ def _input_digest(
                     "correlation_confidence": item.correlation_confidence,
                     "correlation_sources": item.correlation_sources,
                     "observed_requests_per_minute": item.observed_requests_per_minute,
+                    "canary_only": item.canary_only,
                     "sample_count": item.sample_count,
                     "updated_at": item.updated_at,
                 }

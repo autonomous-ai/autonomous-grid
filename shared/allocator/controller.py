@@ -56,6 +56,7 @@ _MAX_JOINT_PORTFOLIO_CANDIDATES = 4
 _MAX_JOINT_PORTFOLIO_EVALUATIONS = 64
 _MAX_JOINT_EXPLORATION_MODELS = 1
 _MAX_JOINT_PREEMPTION_MODELS = 1
+_SPARE_CANARY_RESERVE_SLOTS = 2
 
 
 class AllocatorController:
@@ -1149,6 +1150,16 @@ class AllocatorController:
             self.planner,
             now=now,
         )
+        if node_list:
+            selection_hints = _spare_canary_hints(
+                profiles,
+                direct,
+                intelligence,
+                selection_hints,
+                node_list,
+                self.planner,
+                now=now,
+            )
         selection = self._joint_portfolio_selection(
             profiles,
             direct,
@@ -1192,12 +1203,22 @@ class AllocatorController:
             now=now,
             placement_hints=placement_hints,
         )
+        exclusive_device_models = {
+            profile.model_id for profile in profiles if profile.replica_concurrency == 1
+        }
         active_rows = [
             row
             for row in projections
             if intelligence.portfolio_evidence_ready(
                 int(row.get("samples") or 0),
                 float(row.get("offered_concurrency") or 0.0),
+                immediately_feasible=(
+                    str(row.get("workload") or "") in {"image", "video"}
+                    and str(row.get("chosen_model") or "")
+                    in exclusive_device_models
+                    and (row.get("placement") or {}).get("spare_canary_allowed")
+                    is True
+                ),
             )
             and float(row.get("requests_per_minute") or 0.0) > 0
             and any(candidate.get("selectable") for candidate in row.get("candidates") or ())
@@ -2467,6 +2488,182 @@ def _failure_backoff_seconds(policy: ReconcilePolicy, failures: int) -> float:
     if not math.isfinite(delay):
         return policy.failure_backoff_max_seconds
     return min(policy.failure_backoff_max_seconds, delay)
+
+
+def _spare_canary_hints(
+    profiles: Iterable[ModelProfile],
+    direct: Iterable[DemandForecast],
+    intelligence: WorkloadIntelligence,
+    placement_hints: Mapping[str, Mapping[str, Any]],
+    nodes: Iterable[NodeSnapshot],
+    planner: PlacementPlanner,
+    *,
+    now: float,
+) -> dict[str, dict[str, Any]]:
+    """Authorize weak media canaries only after proving fleet-level spare capacity.
+
+    Per-model feasibility answers whether a model fits *somewhere*. It cannot prove that the same
+    slot is not already needed by stronger demand elsewhere in the portfolio. Plan every ordinary
+    workload first, preserve finite slots for one unseen workload and one node failure, and require
+    another compatible placement for the canary. A model already selected by ordinary evidence
+    may be reused without spending another speculative slot.
+    """
+
+    profile_list = tuple(profiles)
+    direct_list = tuple(direct)
+    node_list = tuple(nodes)
+    result = {
+        profile.model_id: {
+            **dict(placement_hints.get(profile.model_id) or {}),
+            "spare_canary_allowed": False,
+            "spare_canary_reason": "fleet-level spare capacity not proven",
+        }
+        for profile in profile_list
+    }
+    projections = intelligence.projections(
+        profile_list,
+        now=now,
+        placement_hints=result,
+    )
+    ordinary_rows = tuple(
+        row
+        for row in projections
+        if float(row.get("requests_per_minute") or 0.0) > 0
+        and intelligence.portfolio_evidence_ready(
+            int(row.get("samples") or 0),
+            float(row.get("offered_concurrency") or 0.0),
+        )
+        and str(row.get("chosen_model") or "")
+    )
+    ordinary_selection = {
+        str(row["workload"]): str(row["chosen_model"]) for row in ordinary_rows
+    }
+    ordinary_forecasts = intelligence.portfolio_forecasts(
+        profile_list,
+        direct_list,
+        now=now,
+        placement_hints=result,
+        chosen_models=ordinary_selection,
+    )
+    ordinary_plan = planner.plan(
+        node_list,
+        profile_list,
+        ordinary_forecasts,
+        now=now,
+    )
+    ordinary_models = {assignment.model_id for assignment in ordinary_plan.assignments}
+    for model_id in ordinary_models:
+        if model_id in result:
+            result[model_id]["spare_canary_allowed"] = True
+            result[model_id]["spare_canary_reason"] = (
+                "reuses capacity already selected by stronger evidence"
+            )
+
+    # Unknown slot limits do not count as hypothetical free capacity. A stale or non-accepting node
+    # contributes nothing: its old residencies are observations, not operational reserve.
+    finite_slots = 0
+    for node in node_list:
+        live_slots = sum(
+            residency.state != ResidencyState.CACHED
+            and not (
+                residency.state == ResidencyState.FAILED and not residency.managed
+            )
+            for residency in node.residencies
+        )
+        heartbeat_age = now - node.last_heartbeat
+        heartbeat_fresh = bool(
+            node.last_heartbeat > 0
+            and heartbeat_age >= -planner.policy.max_future_clock_skew_seconds
+            and (
+                not planner.policy.node_ttl_seconds
+                or heartbeat_age <= planner.policy.node_ttl_seconds
+            )
+        )
+        if (
+            node.state in (NodeState.ACCEPTING, NodeState.THROTTLED)
+            and not node.manually_managed
+            and heartbeat_fresh
+            and node.max_models is not None
+        ):
+            finite_slots += max(live_slots, node.max_models)
+        elif (
+            node.state in (NodeState.ACCEPTING, NodeState.THROTTLED)
+            and not node.manually_managed
+            and heartbeat_fresh
+        ):
+            finite_slots += live_slots
+    spare_slots = max(0, finite_slots - len(ordinary_plan.assignments))
+    compatible_catalog_models = sum(
+        profile.max_replicas > 0
+        and (
+            result[profile.model_id].get("hard_compatible") is True
+            or result[profile.model_id].get("feasible_now") is True
+        )
+        for profile in profile_list
+    )
+    catalog_surplus = max(0, finite_slots - compatible_catalog_models)
+    # Keep one slot for an unseen workload class and one for a node failure. Spending either on a
+    # weak signal turns exploration into an availability regression on small fleets. Also require
+    # surplus beyond one feasible copy of every configured model: when M can already fill N, the
+    # allocator has a model-selection problem rather than genuinely spare exploration capacity.
+    speculative_budget = max(
+        0,
+        min(spare_slots, catalog_surplus) - _SPARE_CANARY_RESERVE_SLOTS,
+    )
+    if ordinary_plan.unsatisfied:
+        speculative_budget = 0
+
+    profile_by_id = {profile.model_id: profile for profile in profile_list}
+    weak_rows = sorted(
+        (
+            row
+            for row in projections
+            if str(row.get("workload") or "") in {"image", "video"}
+            and float(row.get("requests_per_minute") or 0.0) > 0
+            and not intelligence.portfolio_evidence_ready(
+                int(row.get("samples") or 0),
+                float(row.get("offered_concurrency") or 0.0),
+            )
+            and intelligence.portfolio_evidence_ready(
+                int(row.get("samples") or 0),
+                float(row.get("offered_concurrency") or 0.0),
+                immediately_feasible=True,
+            )
+        ),
+        key=lambda row: (
+            -float(row.get("offered_concurrency") or 0.0),
+            str(row.get("workload") or ""),
+        ),
+    )
+    authorized_new_models: set[str] = set()
+    for row in weak_rows:
+        model_id = str(row.get("chosen_model") or "")
+        profile = profile_by_id.get(model_id)
+        hint = result.get(model_id)
+        if profile is None or hint is None:
+            continue
+        successful_evidence = float(row.get("successful_outcome_evidence") or 0.0)
+        if successful_evidence >= 0.5:
+            hint["spare_canary_allowed"] = True
+            hint["spare_canary_reason"] = "a recent successful canary validated the model"
+            continue
+        if model_id in ordinary_models:
+            continue
+        if (
+            profile.replica_concurrency != 1
+            or hint.get("feasible_now") is not True
+            or int(hint.get("eligible_nodes") or 0) < 2
+            or speculative_budget <= 0
+        ):
+            continue
+        hint["spare_canary_allowed"] = True
+        hint["spare_canary_reason"] = (
+            "ordinary demand fits with workload, failure, and compatible reserves"
+        )
+        if model_id not in authorized_new_models:
+            speculative_budget -= 1
+            authorized_new_models.add(model_id)
+    return result
 
 
 def _portfolio_selection_hints(

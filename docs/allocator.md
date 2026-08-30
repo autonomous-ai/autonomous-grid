@@ -61,6 +61,18 @@ already enough pressure to justify one candidate. A queued minute-long video job
 start its model immediately, while one short text request remains below the gate. Both thresholds
 are persisted and reported by allocator status.
 
+Image and video work between 1.0 and 1.5 offered-concurrency units may earn an earlier
+**canary-only** placement, but only after a fleet-level spare-capacity proof. The controller first
+plans direct and ordinary-evidence workloads, treats unknown model-slot limits as having no
+hypothetical headroom, preserves slots for one unseen workload and one node failure, requires a
+second compatible host, and requires capacity beyond one feasible copy of every enabled catalog
+model. This distinguishes “the model fits on a host” from “the fleet can safely explore it.” Weak
+evidence is capped at one replica even when the raw concurrency calculation asks for more. A fresh
+successful response from that exact model/workload/artifact validates the canary and removes the
+cap; direct demand or the ordinary evidence threshold does the same. Saturated fleets retain the
+normal evidence gate, while genuinely overprovisioned fleets can react to a long sparse job one
+planning interval earlier.
+
 Measured model/workload outcomes use confidence that reaches full weight after twenty fresh
 requests; separately labeled quality reaches full weight after eight fresh evaluations. Both decay
 with independent seven-day half-lives: a fresh latency-only request cannot revive stale quality.

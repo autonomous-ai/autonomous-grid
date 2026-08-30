@@ -2249,6 +2249,24 @@ def test_replica_count_scales_for_queue_latency_and_errors():
     assert desired_replica_count(profile, forecast, now=100) >= 6
 
 
+def test_weak_portfolio_evidence_caps_spare_capacity_scale_out_to_one_canary():
+    profile = model(
+        min_replicas=0,
+        max_replicas=10,
+        target_utilization=0.5,
+    )
+    forecast = DemandForecast(
+        "qwen",
+        requests_per_minute=10,
+        offered_concurrency=4,
+        correlated_requests_per_minute=10,
+        correlation_sources=("workload:video",),
+        canary_only=True,
+    )
+
+    assert desired_replica_count(profile, forecast, now=100) == 1
+
+
 def test_historical_error_rate_does_not_ratchet_one_replica_per_tick():
     profile = model(
         min_replicas=1,
