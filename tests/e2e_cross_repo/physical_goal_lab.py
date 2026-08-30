@@ -5,21 +5,22 @@ has the feature branch, one of the two test machines can run the matching privat
 in the foreground.  The other machine joins it through ordinary Grid HTTP/Git traffic; nobody
 logs into the other machine and no task workspace is copied.
 
-Machine B::
+Relay host (either physical machine)::
 
     uv run python tests/e2e_cross_repo/physical_goal_lab.py relay \
       --relay-repo /private/tmp/autonomous-grid-cli-goal-relay \
       --root /private/tmp/grid-goal-physical
 
-Machine A::
+Joining worker (the other physical machine)::
 
     uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \
-      --home /private/tmp/grid-goal-lab-a
+      --home /private/tmp/grid-goal-worker
 
-The relay command discovers B's LAN address, prints a short-lived pairing bundle, and keeps the
-relay in the foreground.  Paste that bundle at A's hidden prompt.  The bundle is a disposable
-credential, so the script never asks the operator to put it in a command-line argument or shell
-history.
+The relay command discovers the relay host's LAN address, prints a short-lived pairing bundle, and
+keeps the relay in the foreground. Paste that bundle at the joining worker's hidden prompt. The
+physical A/B labels are intentionally absent: either machine may host the relay. The bundle is a
+disposable credential, so the script never asks the operator to put it in a command-line argument
+or shell history.
 """
 from __future__ import annotations
 
@@ -225,7 +226,8 @@ def discover_lan_host() -> str:
         if candidate and candidate not in ("127.0.0.1", "::1"):
             return candidate
     raise SystemExit(
-        "Could not discover a LAN address. Pass --advertise-host with an address machine A can reach.")
+        "Could not discover a LAN address. Pass --advertise-host with an address the joining "
+        "worker can reach.")
 
 
 def _safe_root(raw: str) -> Path:
@@ -358,12 +360,12 @@ def cmd_relay(args: argparse.Namespace) -> int:
         _wait_for_health(proc, metadata["url"])
         print("\nGrid Goal physical relay is ready (no SSH):", flush=True)
         print(f"  relay:       {metadata['url']}", flush=True)
-        print(f"  machine B:   GRID_HOME={metadata['home_b']}", flush=True)
+        print(f"  relay node:  GRID_HOME={metadata['home_b']}", flush=True)
         print(f"  relay state: {root}", flush=True)
         print(f"  relay SHA:   {metadata['relay_revision']}", flush=True)
-        print("\nOn machine A, run:", flush=True)
+        print("\nOn the joining worker, run:", flush=True)
         print("  uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \\", flush=True)
-        print("    --home /private/tmp/grid-goal-lab-a", flush=True)
+        print("    --home /private/tmp/grid-goal-worker", flush=True)
         print("\nThen paste this disposable bundle at its hidden prompt:", flush=True)
         print(metadata["pair_a"], flush=True)
         print("\nKeep this terminal open. Ctrl-C stops only the disposable relay.", flush=True)
@@ -383,7 +385,7 @@ def cmd_relay(args: argparse.Namespace) -> int:
 def cmd_configure(args: argparse.Namespace) -> int:
     raw = args.bundle
     if raw is None:
-        raw = getpass.getpass("Paste machine A pairing bundle (input hidden): ")
+        raw = getpass.getpass("Paste joining-worker pairing bundle (input hidden): ")
     try:
         pairing = decode_pair(raw)
     except ValueError as exc:
@@ -392,7 +394,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
     if home.exists() and any(home.iterdir()) and not args.replace:
         raise SystemExit(f"Grid home is not empty: {home}. Use a new path or pass --replace.")
     configure_home(home, pairing)
-    print("Machine A is paired without SSH.")
+    print("Joining worker is paired without SSH.")
     print(f"  GRID_HOME={home}")
     print(f"  relay={pairing['relay_url']}")
     print(f"  node={pairing['node_id']}")
@@ -404,7 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="No-SSH physical Grid Goal acceptance lab")
     actions = parser.add_subparsers(dest="action", required=True)
 
-    relay = actions.add_parser("relay", help="Run the disposable Goal relay on machine B")
+    relay = actions.add_parser("relay", help="Run the disposable Goal relay on this host")
     relay.add_argument("--relay-repo", required=True,
                        help="Matching autonomous-grid-cli feature-branch checkout")
     relay.add_argument("--root", default="/private/tmp/grid-goal-physical",
@@ -412,7 +414,7 @@ def build_parser() -> argparse.ArgumentParser:
     relay.add_argument("--bind-host", default="0.0.0.0",
                        help="Listener address (default: all interfaces)")
     relay.add_argument("--advertise-host", default=None,
-                       help="Address machine A can reach (default: discover automatically)")
+                       help="Address the joining worker can reach (default: discover automatically)")
     relay.add_argument("--port", type=int, default=DEFAULT_PORT)
     relay.add_argument("--token-hours", type=float, default=DEFAULT_TOKEN_HOURS)
     relay.add_argument("--lease-seconds", type=int, default=120)
@@ -422,8 +424,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Reuse this lab identity/database after a relay restart")
     relay.set_defaults(func=cmd_relay)
 
-    configure = actions.add_parser("configure", help="Pair machine A with the relay")
-    configure.add_argument("--home", default="/private/tmp/grid-goal-lab-a",
+    configure = actions.add_parser("configure", help="Pair this joining worker with the relay")
+    configure.add_argument("--home", default="/private/tmp/grid-goal-worker",
                            help="Fresh isolated GRID_HOME")
     configure.add_argument("--bundle", default=None,
                            help=argparse.SUPPRESS)  # tests only; secrets should not enter history
