@@ -4,6 +4,38 @@ This is the release gate for multi-machine Goal failover. The single-host E2E su
 protocol coverage, but it does not prove networking, laptop sleep, process supervision, or clean
 reconstruction on another computer.
 
+## Reviewer preflight
+
+Run these from clean checkouts of the matching `grid-goal-distributed` branches. `GRID_SRC_REPO`
+must name the relay/private-server checkout; do not let the E2E suite silently import an installed
+or unrelated copy.
+
+```bash
+# autonomous-grid
+uv run pytest -q tests/test_task_agent.py tests/test_task_claude_goal.py tests/test_goal_cli.py
+GRID_SRC_REPO=/path/to/autonomous-grid-cli uv run pytest -q tests/e2e_cross_repo/e2e_goal.py
+
+# autonomous-grid-cli
+uv run pytest -q grid_cli/private_server/tests/test_goals.py \
+  grid_cli/private_server/tests/test_task_reclaim.py::TestADeadTaskBranchIsEventuallyPruned \
+  grid_cli/private_server/tests/test_transcript_ref.py::TestRetentionIsKeyedOnTheConversationNotOnATurnEnding
+```
+
+Before physical acceptance, a reviewer should confirm all of the following:
+
+- Both worktrees are clean, their feature branches are pushed, and the exact SHAs are recorded.
+- The public unit/integration bundle, private relay bundle, and complete cross-repository E2E file
+  each pass in one uninterrupted run. Do not assemble a green result from individually retried
+  scenarios.
+- Every Goal mutation, Git operation, inference request, subgoal reservation, action, and eval
+  settlement is fenced by the relay-issued claim generation—not only by node id.
+- Evidence verifies the immutable commit and eval hashes, a continuous worktree/transcript chain,
+  execution and inference node attribution, and one consistent pagination snapshot.
+- Live, paused, blocked, and waiting-child trajectories are retained; the Goal retention clock
+  begins only after the entire Goal reaches a terminal state.
+- The physical three-machine procedure below passes from distinct local disks. Passing the
+  single-host process suite does not waive this final hardware/network gate.
+
 ## Topology
 
 - One reachable Grid relay and project with an initialized trunk.
