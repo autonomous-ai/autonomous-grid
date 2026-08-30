@@ -10,6 +10,14 @@ import pytest
 
 from remote import task_agent, task_codex, task_stream, tasks
 
+_REAL_REQUIRE_DISTRIBUTED_GOAL = task_agent.require_distributed_goal
+
+
+@pytest.fixture(autouse=True)
+def _measured_native_goal_binary(monkeypatch):
+    """Most runner tests use /fake/claude; isolate the admission gate to its own tests."""
+    monkeypatch.setattr(task_agent, "require_distributed_goal", lambda binary: binary)
+
 
 def _attachment(*, met: bool, reason: str, **counters):
     return json.dumps({
@@ -37,6 +45,19 @@ def test_goal_stream_distinguishes_set_check_and_completion():
     assert completed.goal_met
     assert (completed.goal_iterations, completed.goal_duration_ms, completed.goal_tokens) == (
         3, 1200, 456)
+
+
+def test_goal_stream_rejects_a_contradictory_terminal_attachment():
+    translated = task_stream.GoalStreamTranslator()
+    translated.feed(json.dumps({
+        "type": "attachment", "attachment": {
+            "type": "goal_status", "met": True, "impossible": True,
+            "reason": "contradictory future protocol",
+        },
+    }) + "\n")
+
+    assert translated.goal_evaluated
+    assert "both met and impossible" in str(translated.goal_protocol_error)
 
 
 def test_child_is_interrupted_only_after_an_unmet_native_evaluation():
@@ -178,6 +199,41 @@ def test_post_spawn_claude_harness_failures_are_retryable(tmp_path, monkeypatch,
     }, inference=task_codex.GridInference("https://grid.example/relay/v1", "secret"))
 
     assert outcome.state == "failed" and outcome.retryable is True
+
+
+def test_missing_claude_goal_attachment_quarantines_only_that_binary_revision(
+        tmp_path, monkeypatch):
+    binary = tmp_path / "claude"
+    binary.write_text("future claude revision\n")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "tasks"))
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude")
+    monkeypatch.setattr(task_agent, "_DISTRIBUTED_GOAL_FAILURES", {})
+    monkeypatch.setattr(task_agent, "_binary_version", lambda _binary: (999, 0, 0))
+    monkeypatch.setattr(task_agent, "require_distributed_goal", _REAL_REQUIRE_DISTRIBUTED_GOAL)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: str(binary))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "link_transcript", lambda *_args: tmp_path / "transcript")
+    monkeypatch.setattr(task_agent, "resumable_session", lambda *_args: task_agent.ResumeDecision())
+    monkeypatch.setattr(task_agent, "child_env", lambda **_kwargs: {"PATH": os.environ["PATH"]})
+    monkeypatch.setattr(task_agent, "agent_argv", lambda *_args, **_kwargs: [str(binary)])
+    monkeypatch.setattr(tasks, "_run_child", lambda *_args, **_kwargs: (0, ""))
+    monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "stop", lambda self: None)
+
+    outcome = tasks.run_task({
+        "task_id": "turn-1", "conversation_id": "goal-1", "project_id": "project-1",
+        "member_key": "member-1", "agent_kind": "claude", "prompt": "continue",
+        "goal": {"objective": "Build it", "done_when": "tests pass", "model": "grid-model"},
+    }, inference=task_codex.GridInference("https://grid.example/relay/v1", "secret"))
+
+    assert outcome.retryable is True
+    assert "without a native evaluator checkpoint" in str(outcome.error)
+    assert task_agent.distributed_goal_available() is False
+    # Claude remains an ordinary task harness, but its scheduler profile loses native_goal.
+    assert tasks._agent_profiles() == ({"kind": "claude", "capabilities": []},)
+
+    binary.chmod(0o755)
+    assert task_agent.distributed_goal_available() is True
 
 
 def test_native_claude_impossible_verdict_remains_terminal(tmp_path, monkeypatch):

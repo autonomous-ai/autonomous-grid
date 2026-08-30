@@ -297,6 +297,7 @@ class GoalStreamTranslator(StreamTranslator):
         self.goal_iterations: int | None = None
         self.goal_duration_ms: int | None = None
         self.goal_tokens: int | None = None
+        self.goal_protocol_error: str | None = None
         self.observed_tokens = 0
         self.last_output: str | None = None
 
@@ -334,6 +335,8 @@ class GoalStreamTranslator(StreamTranslator):
         reason = attachment.get("reason")
         impossible = attachment.get("impossible") is True or attachment.get("failed") is True
         met = attachment.get("met") is True
+        if met and impossible:
+            self.goal_protocol_error = "Claude Goal attachment marked the condition both met and impossible"
         if not isinstance(reason, str) and not (met or impossible):
             return []
         self.goal_evaluated = True
@@ -353,6 +356,7 @@ class GoalStreamTranslator(StreamTranslator):
             "iterations": self.goal_iterations,
             "duration_ms": self.goal_duration_ms,
             "tokens": self.goal_tokens,
+            "protocol_error": self.goal_protocol_error,
         })]
 
 

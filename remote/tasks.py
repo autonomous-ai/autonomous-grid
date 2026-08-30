@@ -762,6 +762,11 @@ def run_task(job: dict[str, Any],
         # provider with no Claude Code installed must fail before it fetches anything, not after.
         binary = (task_codex.resolve_binary() if agent_kind == "codex"
                   else task_agent.resolve_binary())
+        if is_claude_goal:
+            # Recheck after the claim as well as in the advertised profile. A binary can be
+            # downgraded, replaced or runtime-quarantined while another worker's long poll is open;
+            # stale scheduling authority must not start a native Goal it cannot resume.
+            task_agent.require_distributed_goal(binary)
         # And the rest of what the argv and the child's environment need, for the same reason: they
         # are built AFTER the checkout and outside these guards, so a provider misconfiguration
         # would arrive as "task runner raised" having already fetched the repository. Here it is an
@@ -989,9 +994,17 @@ def run_task(job: dict[str, Any],
                 proxy.stop()
             except (Exception, SystemExit):
                 pass
+        if translator.goal_protocol_error:
+            reason = translator.goal_protocol_error
+            task_agent.remember_distributed_goal_failure(binary, reason)
+            return failed(reason, retryable=True)
         if not translator.goal_evaluated:
-            return failed(
-                "Claude Goal exited without a native evaluator checkpoint", retryable=True)
+            reason = "Claude Goal exited without a native evaluator checkpoint"
+            # Exit zero with no goal_status attachment is deterministic protocol drift: model/API
+            # failures take the nonzero/timeout paths above. Stop this exact revision advertising
+            # native_goal so another harness/machine receives the retry instead of burning the cap.
+            task_agent.remember_distributed_goal_failure(binary, reason)
+            return failed(reason, retryable=True)
 
         def goal_counter(name: str) -> int:
             value = goal.get(name)

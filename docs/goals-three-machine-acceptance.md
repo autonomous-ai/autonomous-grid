@@ -31,7 +31,9 @@ On A and C, `grid agent status` must report Codex installed. This is not a file/
 it generates the exact installed app-server's experimental schema in a temporary home and verifies
 the Goal, resume, event and dynamic-tool methods Grid invokes. A schema-incompatible Codex must
 report `Goal upgrade required` and must not advertise `native_goal`. On B, `claude --version` must
-succeed; the Claude-only canary below is the authoritative native-Goal wiring check. Stop every
+succeed and report `2.1.239` or newer; because Claude publishes no static `/goal` protocol schema,
+the Claude-only canary below is the authoritative native-Goal attachment and resume check. A clean
+exit without its evaluator attachment quarantines that exact revision from `native_goal`. Stop every
 other task-serving provider for this project during the run; inference-only engines may stay
 online. The three intended task nodes must use distinct node ids and the expected harness allowlist
 below.

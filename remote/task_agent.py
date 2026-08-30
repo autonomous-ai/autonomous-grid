@@ -689,16 +689,22 @@ _VERSION_PATTERN = re.compile(r"\A(\d+)\.(\d+)\.(\d+)")
 # direction that decides this is the dangerous one: a downgrade remembered as new enough would run
 # every task unconfined for the life of the process, which is precisely what the gate exists to stop.
 # A `stat` costs microseconds; a process launch does not.
-_VERSION_CACHE: dict[tuple[str, int, int], tuple[int, int, int]] = {}
+BinaryRevision = tuple[str, int, int, int, int, int, int]
+_VERSION_CACHE: dict[BinaryRevision, tuple[int, int, int]] = {}
+# A binary can satisfy the measured version floor yet change the undocumented stream attachment
+# used by native /goal.  Quarantine only that exact executable revision after deterministic runtime
+# drift; ordinary Claude tasks remain available and replacing/repairing the binary clears the key.
+_DISTRIBUTED_GOAL_FAILURES: dict[BinaryRevision, str] = {}
 
 
-def _version_cache_key(binary: str) -> tuple[str, int, int] | None:
-    """`(path, mtime, size)`, or `None` when the file cannot be stat'd and nothing may be cached."""
+def _version_cache_key(binary: str) -> BinaryRevision | None:
+    """Exact executable revision, or ``None`` when nothing may be cached."""
     try:
         info = os.stat(binary)  # follows the installer's symlink to the version actually installed
     except OSError:
         return None
-    return (binary, info.st_mtime_ns, info.st_size)
+    return (binary, info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _binary_version(binary: str) -> tuple[int, int, int]:
@@ -751,12 +757,37 @@ def resolve_binary() -> str:
     )
 
 
+def require_distributed_goal(binary: str) -> str:
+    """Refuse a Claude revision that cannot safely own a distributed native Goal turn."""
+    version = _binary_version(binary)
+    if version < MIN_DISTRIBUTED_GOAL_VERSION:
+        found = ".".join(str(part) for part in version)
+        required = ".".join(str(part) for part in MIN_DISTRIBUTED_GOAL_VERSION)
+        raise RuntimeError(
+            f"Claude Code {found} cannot resume distributed native Goals; install {required} or "
+            "newer")
+    key = _version_cache_key(binary)
+    reason = _DISTRIBUTED_GOAL_FAILURES.get(key) if key is not None else None
+    if reason:
+        raise RuntimeError(
+            f"this Claude Code revision was quarantined from native Goals: {reason}")
+    return binary
+
+
+def remember_distributed_goal_failure(binary: str, reason: str) -> None:
+    """Withdraw native_goal after deterministic attachment drift, until the binary changes."""
+    key = _version_cache_key(binary)
+    if key is not None:
+        _DISTRIBUTED_GOAL_FAILURES[key] = reason
+
+
 def distributed_goal_available() -> bool:
     """Whether this provider can resume Claude's native `/goal` without a known route gap."""
     try:
-        return _binary_version(resolve_binary()) >= MIN_DISTRIBUTED_GOAL_VERSION
+        require_distributed_goal(resolve_binary())
     except (Exception, SystemExit):
         return False
+    return True
 
 
 def preflight() -> None:

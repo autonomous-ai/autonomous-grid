@@ -38,6 +38,14 @@ reruns the probe; a running Codex-only task poller backs off while quarantined a
 rejoins when that repaired revision passes, without taking Grid inference offline. `grid agent
 status` must say `Codex: installed` before physical acceptance.
 
+Claude Goal workers require Claude Code `2.1.239` or newer, the first measured release that restores
+an active native `/goal` through every `--resume` route Grid uses. Claude exposes no equivalent
+machine-readable Goal schema, so Grid combines that measured floor with runtime fail-closed
+validation: a cleanly exited slice must emit the native `goal_status` evaluator attachment, and a
+terminal attachment cannot say the condition is both met and impossible. Deterministic attachment
+drift quarantines only that executable revision from `native_goal`; the same Claude installation
+can still claim ordinary tasks, and replacing or repairing it automatically reruns admission.
+
 The provider advertises each native Goal harness it can actually run. Restrict a node explicitly
 with `GRID_TASK_AGENT_KINDS=codex` or `GRID_TASK_AGENT_KINDS=claude` when desired.
 An empty, unsupported, or unavailable-only policy fails closed: the node retires task serving

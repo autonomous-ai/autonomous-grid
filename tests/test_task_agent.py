@@ -516,6 +516,22 @@ def test_the_cached_version_does_not_survive_the_binary_changing_underneath_it(
     assert "2.0.9" in str(excinfo.value)
 
 
+def test_distributed_claude_goal_requires_measured_resume_version_and_tracks_replacement(
+        monkeypatch, tmp_path):
+    from remote import task_agent
+
+    monkeypatch.setattr(task_agent, "_DISTRIBUTED_GOAL_FAILURES", {})
+    binary, _ = _claude_reporting(tmp_path, "2.1.238 (Claude Code)", name="goal-claude")
+    _resolving_to(monkeypatch, binary)
+
+    assert task_agent.distributed_goal_available() is False
+    with pytest.raises(RuntimeError, match="install 2.1.239 or newer"):
+        task_agent.require_distributed_goal(binary)
+
+    _claude_reporting(tmp_path, "2.1.239 (Claude Code)", name="goal-claude")
+    assert task_agent.distributed_goal_available() is True
+
+
 def test_a_version_that_cannot_be_read_is_refused_rather_than_assumed_good(monkeypatch, tmp_path):
     """A third-party wrapper on `PATH` is a supported install (`claude_install.resolve` says so
     deliberately), and one that does not answer `--version` in the vendor's shape cannot be assumed
