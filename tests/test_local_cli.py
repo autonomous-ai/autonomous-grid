@@ -21321,6 +21321,28 @@ def test_remote_models_json_carries_per_engine_responses_flag(monkeypatch, tmp_p
     assert {"model": "qwen-3", "engine": "MLX", "node": "mac-studio", "responses": False} in payload
 
 
+def test_remote_models_restores_case_before_matching_responses_subset(
+        monkeypatch, tmp_path, capsys):
+    """The relay normalizes node arrays but its top-level model list retains request-safe case."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    overview = {
+        "models": [{"id": "Qwen3.6-35B-A3B"}],
+        "nodes": [{
+            "name": "relay-host", "engine": "external",
+            "models": ["qwen3.6-35b-a3b"],
+            "responses_models": ["qwen3.6-35b-a3b"], "online": True,
+        }],
+    }
+    _mock_overview(monkeypatch, overview)
+
+    assert cli.main(["models", "--json"]) == 0
+
+    assert json.loads(capsys.readouterr().out) == [{
+        "model": "Qwen3.6-35B-A3B", "engine": "external",
+        "node": "relay-host", "responses": True,
+    }]
+
+
 def test_remote_models_verbose_degrades_when_responses_field_absent(monkeypatch, tmp_path, capsys):
     # An older master's overview omits responses_models entirely → nothing annotated, no crash.
     _seed_running_remote_grid(monkeypatch, tmp_path)

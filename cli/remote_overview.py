@@ -133,15 +133,22 @@ def _node_models(node: dict[str, Any], overview: dict[str, Any] | None = None) -
     return [case_map.get(str(model).lower(), str(model)) for model in models]
 
 
-def _node_responses_models(node: dict[str, Any]) -> set[str]:
+def _node_responses_models(
+    node: dict[str, Any], overview: dict[str, Any] | None = None
+) -> set[str]:
     """The subset of a node's served models that serve the Responses dialect (issue 10), read from
     the overview's ``responses_models`` and str-coerced to match ``_node_models``' ids. Defends
     against a non-list field, non-string items, and an older master that omits it entirely — each
-    yields an empty set, so a capability is never falsely shown (graceful degradation, fail-closed)."""
+    yields an empty set, so a capability is never falsely shown (graceful degradation, fail-closed).
+
+    Node arrays are normalized lowercase by the relay while `_node_models` restores the canonical
+    display case from the overview. Restore this subset through the same map before membership is
+    tested; otherwise a capable `qwen...` route is falsely shown as incapable beside `Qwen...`."""
     models = node.get("responses_models")
     if not isinstance(models, list):
         return set()
-    return {str(model) for model in models}
+    case_map = _model_case_map(overview) if overview is not None else {}
+    return {case_map.get(str(model).lower(), str(model)) for model in models}
 
 
 def cmd_remote_engines(args: argparse.Namespace) -> int:
@@ -201,7 +208,8 @@ def cmd_remote_models(args: argparse.Namespace) -> int:
     for node in nodes:
         engine = str(node.get("engine") or "")
         name = str(node.get("name") or "")
-        capable = _node_responses_models(node)  # resolved once per node, not per served model
+        capable = _node_responses_models(
+            node, overview)  # resolved once per node, not per served model
         for model in _node_models(node, overview):
             rows.append((model, engine, name, model in capable))
     # When auto routing is enabled, advertise the reserved `auto` model FIRST — same as the relay's
