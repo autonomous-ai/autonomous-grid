@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import string
 import subprocess
 import sys
 import tempfile
@@ -207,8 +208,25 @@ def workspace_root():
 
 @pytest.fixture(scope="session")
 def goal_workspace_root():
-    """Three disjoint provider disks; no Goal worker can read another worker's checkout."""
-    root = Path(tempfile.mkdtemp(prefix="ggoal-e2e-", dir="/private/tmp"))
+    """Three disjoint provider disks under a genuinely short macOS-safe task root.
+
+    The task runner warns above 31 characters because macOS sandbox profiles flatten the path into
+    process arguments.  A conventional ``mkdtemp`` root already consumed that entire budget before
+    this suite appended its human-readable per-provider disk label.  Reserve one otherwise-unused
+    single-character directory atomically instead: the longest current root is then 30 characters,
+    while the labels that make cross-machine assertions readable remain unchanged.
+    """
+    root = None
+    for suffix in string.ascii_letters + string.digits:
+        candidate = Path("/private/tmp") / suffix
+        try:
+            candidate.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        root = candidate
+        break
+    if root is None:
+        raise RuntimeError("no short /private/tmp task root is available for Goal E2E")
     try:
         yield root
     finally:
@@ -316,6 +334,9 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
                claude_capabilities: str = "", tool_origins: str = "",
                one_task: bool = False, task_workers: int = 1):
         node_id, node_token = provider_nodes[label]
+        task_root = goal_workspace_root / (disk_label or label)
+        assert len(str(task_root)) <= 31, (
+            f"Goal E2E task root exceeds the measured macOS safety budget: {task_root}")
         # This process emulates only the task/agent plane.  The separate registration emulates a
         # compatible Grid inference route and refreshes its heartbeat before each scenario; the
         # model-readiness scheduler must not infer model capacity merely from a task poller.
@@ -329,7 +350,7 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
             "GRID_NODE_ID": node_id,
             "GRID_TOKEN": node_token,
             "GRID_RENEW_SECONDS": str(H.RENEW_SECONDS),
-            "GRID_TASK_ROOT": str(goal_workspace_root / (disk_label or label)),
+            "GRID_TASK_ROOT": str(task_root),
             "GRID_TASK_TIMEOUT_SECONDS": "120",
             "GRID_E2E_GOAL_NODE": label,
             "GRID_E2E_GOAL_SCENARIO": scenario,
