@@ -136,6 +136,10 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
                 for workload, model_id in sorted(row["portfolio_selection"].items())
             )
             changes.append("portfolio " + portfolio)
+        if row.get("prefetches"):
+            changes.append("prefetch " + ", ".join(row["prefetches"][:3]))
+            if len(row["prefetches"]) > 3:
+                changes[-1] += f" +{len(row['prefetches']) - 3}"
         if row["loads"]:
             changes.append("load " + ", ".join(row["loads"][:3]))
             if len(row["loads"]) > 3:
@@ -210,6 +214,14 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
     print(
         f"  artifact downloads            {metrics['artifact_download_mb'] / 1024:.1f} GiB · "
         f"minimum disk remaining {metrics['minimum_remaining_disk_mb'] / 1024:.1f} GiB"
+    )
+    print(
+        f"  predictive cache          prefetch {metrics['predictive_prefetches']} · "
+        f"hits {metrics['predictive_prefetch_hits']} "
+        f"({metrics['predictive_prefetch_hit_rate_pct']:.2f}%) · "
+        f"unused {metrics['unused_predictive_prefetches']} · "
+        f"saved {metrics['predictive_cold_start_seconds_avoided']:.1f}s startup · "
+        f"avg lead {metrics['average_predictive_prefetch_lead_minutes']:.1f}m"
     )
     print(
         f"  capacity shortfall            {metrics['unsatisfied_replica_minutes']} "
@@ -304,6 +316,7 @@ def _notable_timeline(rows: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any],
             or row["node_changes"]
             or row["loads"]
             or row["unloads"]
+            or row.get("prefetches")
             or row.get("overloaded_models")
         ):
             selected.append(row)

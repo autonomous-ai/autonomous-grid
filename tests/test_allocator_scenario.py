@@ -8,7 +8,12 @@ import pytest
 import cli
 from shared.allocator import scenario as scenario_module
 from shared.allocator.scenario import ScenarioConfig, run_scenario
-from shared.allocator.models import ModelResidency, NodeSnapshot, ResidencyState
+from shared.allocator.models import (
+    ModelProfile,
+    ModelResidency,
+    NodeSnapshot,
+    ResidencyState,
+)
 
 
 @pytest.fixture(scope="module")
@@ -104,12 +109,25 @@ def test_scenario_materialization_advances_only_models_that_served_requests():
         memory_mb=8_000,
         existing=True,
     )
+    profiles = {
+        "model-a": ModelProfile(
+            "model-a",
+            8_000,
+            runtimes=("llama.cpp",),
+        )
+    }
 
-    idle = scenario_module._materialize((assignment,), (node,), 100)
+    idle = scenario_module._materialize(
+        (assignment,),
+        (node,),
+        100,
+        profiles=profiles,
+    )
     used = scenario_module._materialize(
         (assignment,),
         idle,
         101,
+        profiles=profiles,
         used_models=frozenset({"model-a"}),
     )
 
@@ -199,6 +217,27 @@ def test_production_controller_admits_persistent_new_media_workload():
     assert report.metrics["unsatisfied_replica_minutes"] < 10
 
 
+def test_scenario_measures_a_learned_predictive_cache_hit_before_real_demand():
+    report = run_scenario(
+        ScenarioConfig(machines=8, models=8, users=50, minutes=120, seed=144)
+    )
+
+    assert report.safety["passed"] is True
+    assert report.metrics["predictive_prefetches"] >= 1
+    assert report.metrics["predictive_prefetch_hits"] >= 1
+    assert report.metrics["predictive_cold_start_seconds_avoided"] > 0
+    assert report.metrics["average_predictive_prefetch_lead_minutes"] > 0
+    prefetch_events = [row for row in report.timeline if row.get("prefetches")]
+    assert prefetch_events
+    assert any(
+        prefetched in later["loads"]
+        for event in prefetch_events
+        for prefetched in event["prefetches"]
+        for later in report.timeline
+        if later["minute"] > event["minute"]
+    )
+
+
 def test_scenario_checks_real_planner_safety_and_persistent_disk(representative_report):
     report = representative_report
 
@@ -206,6 +245,9 @@ def test_scenario_checks_real_planner_safety_and_persistent_disk(representative_
     assert report.safety["violations"] == ()
     assert report.metrics["minimum_remaining_disk_mb"] >= 0
     assert report.metrics["artifact_download_mb"] >= 0
+    assert report.metrics["predictive_prefetches"] >= 0
+    assert report.metrics["predictive_prefetch_hits"] >= 0
+    assert 0 <= report.metrics["predictive_prefetch_hit_rate_pct"] <= 100
     assert 0 <= report.metrics["service_rate_pct"] <= 100
     assert 0 <= report.metrics["minimum_user_service_pct"] <= 100
     assert 0 <= report.metrics["user_slo_attainment_pct"] <= 100
@@ -380,6 +422,7 @@ def test_scenario_cli_prints_human_scorecard(capsys):
     assert "Scorecard" in output
     assert "least-served user" in output
     assert "joint portfolio optimizer" in output
+    assert "predictive cache" in output
     assert "served=" in output
     assert "portfolio " in output
     assert " via " in output

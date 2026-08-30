@@ -990,7 +990,10 @@ coding, research, marketing, sales, design, image, video, embedding, and general
 real bounded request classifier; operations traffic also names the baseline model so direct demand
 and autonomous portfolio demand compete in the same run. A seeded workday includes a coding surge,
 creative campaign, thermal throttle, node outage, recovery, and cooldown. Every planning tick uses
-the production workload intelligence and placement planner.
+the production workload intelligence and placement planner. Personas are grouped into bounded
+synthetic projects whose request timestamps follow stable work stages while request counts remain
+independently sampled. The production learner must discover those sequences from observations; the
+scenario never inserts a forecast directly.
 
 The report explains joint portfolio changes, loads, unloads, node transitions, capacity shortfalls,
 persistent workload-admission states, demand served, least-user service and user/workload SLO
@@ -1008,6 +1011,10 @@ prints every changing tick; `--json` emits the complete stable report;
 reusing `--seed` reproduces the same run. Artifact disk constraints are translated into each
 one-model logical node's admission set, while the allocator's native runtime, backend, lifecycle,
 memory, headroom, and model-slot rules remain authoritative.
+Scenario artifacts carry deterministic immutable identities and sources. A learned correlation-only
+prefetch therefore consumes modeled disk without consuming a model slot, and a later placement
+records a real cache hit. The scorecard reports prefetch downloads, hits, unused predictions,
+lead time, and avoided load seconds so a predictor that merely fills disk cannot look successful.
 
 `--oracle` adds a bounded exhaustive benchmark for at most four machines, nine models, and 240
 minutes. It replays the exact observed request trace with perfect future knowledge, exhaustively

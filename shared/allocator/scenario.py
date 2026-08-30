@@ -9,6 +9,7 @@ claiming that modeled CUDA, MPS, disk, or VRAM telemetry is physically present.
 from __future__ import annotations
 
 import csv
+import hashlib
 import math
 import random
 from bisect import bisect_right
@@ -90,6 +91,7 @@ class ScenarioConfig:
 @dataclass(frozen=True, slots=True)
 class Persona:
     user_id: str
+    workflow_id: str
     role: str
     workload: str
     requests_per_minute: float
@@ -154,6 +156,22 @@ _MAX_TRACE_BYTES = 5 * 1024 * 1024
 _MAX_TRACE_ROWS = 100_000
 
 _DIRECT_MODEL_BY_WORKLOAD = {"general": "general-assistant"}
+
+# Users are grouped into synthetic project workflows. Requests retain their independently sampled
+# counts, but when several roles contribute during one minute their timestamps follow a stable
+# project-stage order. This gives the production sequence learner honest repeated transitions to
+# discover without injecting forecast rows or revealing future demand directly.
+_WORKFLOW_STAGE_OFFSETS = {
+    "general": 1.0,
+    "research": 4.0,
+    "coding": 7.0,
+    "embedding": 10.0,
+    "marketing": 13.0,
+    "sales": 16.0,
+    "design": 19.0,
+    "image": 22.0,
+    "video": 25.0,
+}
 
 _MODEL_BLUEPRINTS = (
     {
@@ -356,6 +374,12 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     cache_loads = 0
     cold_start_seconds = 0.0
     artifact_download_mb = 0
+    predictive_prefetches = 0
+    predictive_prefetch_hits = 0
+    predictive_prefetch_download_mb = 0
+    predictive_cold_start_seconds_avoided = 0.0
+    predictive_prefetch_lead_minutes: list[int] = []
+    predictively_cached_at: dict[tuple[str, str], int] = {}
     overloaded_model_minutes = 0
     peak_modeled_queue_depth = 0
     realized_failure_observations = 0
@@ -406,7 +430,12 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             disk_available[assignment.node_id] -= artifact_by_id[assignment.model_id]
             artifact_download_mb += artifact_by_id[assignment.model_id]
         bootstrap_loads.append(f"{assignment.model_id}@{assignment.node_id}")
-    nodes = _materialize(bootstrap.assignments, nodes, base_time - 15.0)
+    nodes = _materialize(
+        bootstrap.assignments,
+        nodes,
+        base_time - 15.0,
+        profiles=profile_by_id,
+    )
     if bootstrap_loads:
         timeline.append(
             {
@@ -419,6 +448,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 "served_equivalent": 0.0,
                 "service_rate_pct": 0.0,
                 "overloaded_models": {},
+                "prefetches": [],
                 "loads": sorted(bootstrap_loads),
                 "unloads": [],
                 "node_changes": [],
@@ -517,7 +547,12 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 (
                     persona,
                     features,
-                    tuple(now + rng.random() * 30.0 for _ in range(count)),
+                    tuple(
+                        now
+                        + _WORKFLOW_STAGE_OFFSETS[features.workload]
+                        + rng.random() * 2.0
+                        for _ in range(count)
+                    ),
                     served_model,
                     capability,
                 )
@@ -563,7 +598,29 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 default=0,
             ),
         )
-        for persona, features, timestamps, served_model, capability in observation_batches:
+        chronological_observations = sorted(
+            (
+                (
+                    observation_timestamp,
+                    persona.user_id,
+                    persona,
+                    features,
+                    served_model,
+                    capability,
+                )
+                for persona, features, timestamps, served_model, capability in observation_batches
+                for observation_timestamp in timestamps
+            ),
+            key=lambda item: (item[0], item[1]),
+        )
+        for (
+            observation_timestamp,
+            _user_id,
+            persona,
+            features,
+            served_model,
+            capability,
+        ) in chronological_observations:
             service_ratio = service_ratio_by_model.get(served_model, 0.0)
             queue_depth = queue_by_model.get(served_model, 1 if not served_model else 0)
             capacity = capacity_by_model.get(served_model, 0.0)
@@ -572,29 +629,26 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 if served_model and capacity > 0
                 else 1.0
             )
-            for observation_timestamp in timestamps:
-                succeeded = bool(
-                    served_model and outcome_rng.random() < service_ratio
-                )
-                realized_failure_observations += int(not succeeded)
-                controller.observe_lifecycle(
-                    features,
-                    served_model=served_model,
-                    service_seconds=persona.service_seconds,
-                    latency_ms=persona.service_seconds * 1_000.0 * pressure,
-                    queue_depth=queue_depth,
-                    error=not succeeded,
-                    output_units=(
-                        128 if features.workload not in {"image", "video"} else 1
-                    ),
-                    quality=(
-                        max(0.0, min(1.0, capability * 0.95))
-                        if succeeded
-                        else None
-                    ),
-                    workflow_key=persona.user_id,
-                    timestamp=observation_timestamp,
-                )
+            succeeded = bool(served_model and outcome_rng.random() < service_ratio)
+            realized_failure_observations += int(not succeeded)
+            controller.observe_lifecycle(
+                features,
+                served_model=served_model,
+                service_seconds=persona.service_seconds,
+                latency_ms=persona.service_seconds * 1_000.0 * pressure,
+                queue_depth=queue_depth,
+                error=not succeeded,
+                output_units=(
+                    128 if features.workload not in {"image", "video"} else 1
+                ),
+                quality=(
+                    max(0.0, min(1.0, capability * 0.95))
+                    if succeeded
+                    else None
+                ),
+                workflow_key=persona.workflow_id,
+                timestamp=observation_timestamp,
+            )
 
         if config.oracle:
             oracle_demands.append(
@@ -633,10 +687,38 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             profile = profile_by_id[model_id]
             cached = model_id in node.cached_models
             cache_loads += int(cached)
+            if (node_id, model_id) in predictively_cached_at:
+                predictive_prefetch_hits += 1
+                predictive_cold_start_seconds_avoided += profile.load_seconds
+                predictive_prefetch_lead_minutes.append(
+                    minute - predictively_cached_at.pop((node_id, model_id))
+                )
             cold_start_seconds += profile.warm_seconds + (0.0 if cached else profile.load_seconds)
             if not cached:
                 disk_available[node_id] -= artifact_by_id[model_id]
                 artifact_download_mb += artifact_by_id[model_id]
+        prefetched_pairs: set[tuple[str, str]] = set()
+        prefetch_labels: list[str] = []
+        for prefetch in plan.artifact_prefetches:
+            pair = (prefetch.node_id, prefetch.model_id)
+            profile = profile_by_id[prefetch.model_id]
+            required_disk = (
+                profile.artifact_size_mb
+                + planner_policy.predictive_artifact_disk_reserve_mb
+            )
+            if required_disk > disk_available[prefetch.node_id]:
+                safety_violations.append(
+                    f"minute {minute}: predictive artifact disk overcommit for "
+                    f"{prefetch.model_id} on {prefetch.node_id}"
+                )
+                continue
+            disk_available[prefetch.node_id] -= profile.artifact_size_mb
+            artifact_download_mb += profile.artifact_size_mb
+            predictive_prefetch_download_mb += profile.artifact_size_mb
+            predictive_prefetches += 1
+            predictively_cached_at[pair] = minute
+            prefetched_pairs.add(pair)
+            prefetch_labels.append(f"{prefetch.model_id}@{prefetch.node_id}")
         before_nodes: defaultdict[str, set[str]] = defaultdict(set)
         after_nodes: defaultdict[str, set[str]] = defaultdict(set)
         for node_id, model_id in before_pairs:
@@ -721,6 +803,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             or removed
             or plan.unsatisfied
             or state_changes
+            or prefetch_labels
             or portfolio_changed
             or admission_changed
             or overloaded_models
@@ -739,6 +822,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                         2,
                     ),
                     "overloaded_models": overloaded_models,
+                    "prefetches": sorted(prefetch_labels),
                     "loads": [f"{model}@{node}" for node, model in sorted(added)],
                     "unloads": [f"{model}@{node}" for node, model in sorted(removed)],
                     "node_changes": state_changes,
@@ -771,6 +855,8 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             plan.assignments,
             nodes,
             now + 45.0,
+            profiles=profile_by_id,
+            prefetched_pairs=frozenset(prefetched_pairs),
             used_models=used_models,
         )
 
@@ -932,6 +1018,32 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             "cache_hit_rate_pct": round(100.0 * cache_loads / loads, 2) if loads else 100.0,
             "modeled_cold_start_seconds": round(cold_start_seconds, 2),
             "artifact_download_mb": artifact_download_mb,
+            "predictive_prefetches": predictive_prefetches,
+            "predictive_prefetch_hits": predictive_prefetch_hits,
+            "predictive_prefetch_hit_rate_pct": (
+                round(100.0 * predictive_prefetch_hits / predictive_prefetches, 2)
+                if predictive_prefetches
+                else 0.0
+            ),
+            "unused_predictive_prefetches": len(predictively_cached_at),
+            "predictive_prefetch_download_mb": predictive_prefetch_download_mb,
+            "predictive_cold_start_seconds_avoided": round(
+                predictive_cold_start_seconds_avoided,
+                2,
+            ),
+            "average_predictive_prefetch_lead_minutes": (
+                round(
+                    sum(predictive_prefetch_lead_minutes)
+                    / len(predictive_prefetch_lead_minutes),
+                    2,
+                )
+                if predictive_prefetch_lead_minutes
+                else 0.0
+            ),
+            "maximum_predictive_prefetch_lead_minutes": max(
+                predictive_prefetch_lead_minutes,
+                default=0,
+            ),
             "overloaded_model_minutes": overloaded_model_minutes,
             "peak_modeled_queue_depth": peak_modeled_queue_depth,
             "realized_failure_observations": realized_failure_observations,
@@ -1000,6 +1112,10 @@ def _build_catalog(count: int, machines: int) -> tuple[CatalogModel, ...]:
             scale_down_cooldown_seconds=120,
             min_failure_domains=1,
             artifact_size_mb=artifact_size_mb,
+            artifact_sha256=hashlib.sha256(
+                f"scenario-artifact:{model_id}".encode()
+            ).hexdigest(),
+            artifact_source=f"scenario://artifacts/{model_id}",
             max_colocated_models=1,
             workload_scores=tuple(source["scores"]),
         )
@@ -1057,6 +1173,16 @@ def _build_machines(
             allowed_models=allowed,
             tags=("logical-scenario",),
             max_models=1,
+            residencies=tuple(
+                ModelResidency(
+                    item.profile.model_id,
+                    item.profile.memory_for(source["runtimes"]),
+                    ResidencyState.CACHED,
+                    artifact_sha256=item.profile.artifact_sha256,
+                )
+                for item in compatible
+                if item.profile.model_id in cached
+            ),
             cached_models=tuple(cached),
             max_concurrency=int(source["concurrency"]),
             memory_bandwidth_gbps=100.0 + index * 20.0,
@@ -1086,6 +1212,9 @@ def _build_personas(count: int, rng: random.Random) -> tuple[Persona, ...]:
         result.append(
             Persona(
                 user_id=f"user-{index + 1:05d}",
+                workflow_id=(
+                    f"workflow-{index // len(_PERSONA_BLUEPRINTS) + 1:05d}"
+                ),
                 role=role,
                 workload=workload,
                 requests_per_minute=rate * rng.uniform(0.75, 1.25),
@@ -1274,6 +1403,8 @@ def _materialize(
     nodes: tuple[NodeSnapshot, ...],
     now: float,
     *,
+    profiles: dict[str, ModelProfile],
+    prefetched_pairs: frozenset[tuple[str, str]] = frozenset(),
     used_models: frozenset[str] = frozenset(),
 ) -> tuple[NodeSnapshot, ...]:
     by_node: defaultdict[str, list[ModelResidency]] = defaultdict(list)
@@ -1284,6 +1415,7 @@ def _materialize(
     }
     for assignment in assignments:
         prior = prior_by_pair.get((assignment.node_id, assignment.model_id))
+        profile = profiles[assignment.model_id]
         by_node[assignment.node_id].append(
             ModelResidency(
                 model_id=assignment.model_id,
@@ -1304,19 +1436,48 @@ def _materialize(
                     if assignment.model_id in used_models
                     else (prior.last_used_at if prior is not None else 0.0)
                 ),
+                artifact_sha256=profile.artifact_sha256,
             )
         )
-    return tuple(
-        replace(
-            node,
-            residencies=tuple(by_node[node.node_id]),
-            cached_models=tuple(
-                sorted({*node.cached_models, *(item.model_id for item in by_node[node.node_id])})
+    result: list[NodeSnapshot] = []
+    for node in nodes:
+        cached_models = {
+            *node.cached_models,
+            *(item.model_id for item in by_node[node.node_id]),
+            *(
+                model_id
+                for node_id, model_id in prefetched_pairs
+                if node_id == node.node_id
             ),
-            last_heartbeat=now,
+        }
+        ready_models = {item.model_id for item in by_node[node.node_id]}
+        cached_residencies = []
+        for model_id in sorted(cached_models - ready_models):
+            profile = profiles.get(model_id)
+            if profile is None:
+                continue
+            prior = prior_by_pair.get((node.node_id, model_id))
+            cached_residencies.append(
+                ModelResidency(
+                    model_id,
+                    profile.memory_for(node.runtimes),
+                    ResidencyState.CACHED,
+                    loaded_at=prior.loaded_at if prior is not None else 0.0,
+                    last_used_at=prior.last_used_at if prior is not None else 0.0,
+                    artifact_sha256=profile.artifact_sha256,
+                )
+            )
+        result.append(
+            replace(
+                node,
+                residencies=tuple(
+                    [*by_node[node.node_id], *cached_residencies]
+                ),
+                cached_models=tuple(sorted(cached_models)),
+                last_heartbeat=now,
+            )
         )
-        for node in nodes
-    )
+    return tuple(result)
 
 
 def _refresh_disk_admission(
@@ -1370,6 +1531,7 @@ def _validate_plan(
     violations: list[str] = []
     node_by_id = {node.node_id: node for node in nodes}
     assigned_by_node: defaultdict[str, list[Any]] = defaultdict(list)
+    artifact_download_by_node: Counter[str] = Counter()
     for assignment in assignments:
         assigned_by_node[assignment.node_id].append(assignment)
     for node_id, rows in assigned_by_node.items():
@@ -1394,6 +1556,12 @@ def _validate_plan(
                 violations.append(f"backend mismatch for {assignment.model_id} on {node_id}")
             if node.allowed_models and assignment.model_id not in node.allowed_models:
                 violations.append(f"disk/admission mismatch for {assignment.model_id} on {node_id}")
-            if assignment.model_id not in node.cached_models and artifact_sizes[assignment.model_id] > disk_available[node_id]:
-                violations.append(f"artifact disk overcommit for {assignment.model_id} on {node_id}")
+            if assignment.model_id not in node.cached_models:
+                artifact_download_by_node[node_id] += artifact_sizes[assignment.model_id]
+    for node_id, required in artifact_download_by_node.items():
+        if required > disk_available[node_id]:
+            violations.append(
+                f"cumulative artifact disk overcommit on {node_id}: "
+                f"{required}>{disk_available[node_id]}"
+            )
     return tuple(violations)
