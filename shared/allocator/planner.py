@@ -766,6 +766,12 @@ class PlacementPlanner:
         scarce_host_claims: dict[tuple[str, str], tuple[str, ...]] = {}
         scarce_host_excess_claims: dict[tuple[str, str], int] = {}
         scarce_host_preservations: dict[tuple[str, str], tuple[str, ...]] = {}
+        eligible_models_by_node: dict[str, list[str]] = {
+            node.node_id: [] for node in node_list
+        }
+        for model_id, eligible_nodes in future_eligible_nodes.items():
+            for node_id in eligible_nodes:
+                eligible_models_by_node[node_id].append(model_id)
         for candidate_model in model_list:
             candidate_nodes = future_eligible_nodes.get(candidate_model.model_id, frozenset())
             if len(candidate_nodes) <= 1:
@@ -774,18 +780,37 @@ class PlacementPlanner:
                 constrained = tuple(
                     sorted(
                         other_model_id
-                        for other_model_id, other_nodes in future_eligible_nodes.items()
+                        for other_model_id in eligible_models_by_node[node_id]
                         if other_model_id != candidate_model.model_id
-                        and node_id in other_nodes
-                        and len(other_nodes) < len(candidate_nodes)
-                        and any(
-                            alternative not in other_nodes
-                            for alternative in candidate_nodes
-                        )
+                        and len(future_eligible_nodes[other_model_id])
+                        < len(candidate_nodes)
                     )
                 )
                 if constrained:
                     scarce_host_claims[(candidate_model.model_id, node_id)] = constrained
+            # For a proposed alternative host, the preserved models are exactly the narrower
+            # peers that overlap at least one of this model's other hosts but cannot use the
+            # alternative itself. The former host-pair expansion computed the same union once per
+            # scarce host, turning a set relationship into O(models² × hosts²) repeated scans.
+            narrower_overlapping = tuple(
+                (other_model_id, other_nodes)
+                for other_model_id, other_nodes in future_eligible_nodes.items()
+                if other_model_id != candidate_model.model_id
+                and len(other_nodes) < len(candidate_nodes)
+                and not candidate_nodes.isdisjoint(other_nodes)
+            )
+            for alternative_node_id in candidate_nodes:
+                preserved = tuple(
+                    sorted(
+                        other_model_id
+                        for other_model_id, other_nodes in narrower_overlapping
+                        if alternative_node_id not in other_nodes
+                    )
+                )
+                if preserved:
+                    scarce_host_preservations[
+                        (candidate_model.model_id, alternative_node_id)
+                    ] = preserved
         # Scarcity is relative. If every feasible host for a flexible model protects one equally
         # constrained peer, moving a healthy incumbent preserves nothing and merely changes which
         # peer names the penalty. Normalize by the least-scarce feasible alternative so only a real
@@ -804,30 +829,6 @@ class PlacementPlanner:
                 )
                 if excess > 0:
                     scarce_host_excess_claims[(candidate_model_id, node_id)] = excess
-        for (candidate_model_id, scarce_node_id), constrained in scarce_host_claims.items():
-            for alternative_node_id in future_eligible_nodes[candidate_model_id]:
-                if alternative_node_id == scarce_node_id:
-                    continue
-                preserved = tuple(
-                    model_id
-                    for model_id in constrained
-                    if alternative_node_id
-                    not in future_eligible_nodes.get(model_id, frozenset())
-                )
-                if preserved:
-                    scarce_host_preservations[
-                        (candidate_model_id, alternative_node_id)
-                    ] = tuple(
-                        sorted(
-                            {
-                                *scarce_host_preservations.get(
-                                    (candidate_model_id, alternative_node_id), ()
-                                ),
-                                *preserved,
-                            }
-                        )
-                    )
-
         def snapshot_placement_state() -> tuple[
             list[PlacementAssignment],
             set[tuple[str, str]],

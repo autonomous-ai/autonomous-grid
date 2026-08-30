@@ -158,6 +158,9 @@ An immediately repeated read-only status query reuses that portfolio bundle only
 node snapshots, model profiles, and the telemetry revision are identical. Status exposes the hit,
 and any new request or evaluation forces a fresh solve; reconciliation, admissions, commands, and
 lifecycle history remain live on every response.
+Fleet-wide topology option value is computed with host-to-model indexes and direct eligible-set
+intersections. This preserves the same constrained-host penalties without expanding every
+candidate/scarce-host/alternative-host triple on large 32–64 node planning passes.
 
 Each bounded workload set reserves representation for its exploitation leader and the broadest
 cross-workload candidate; a fifth-ranked generalist can therefore remain discoverable when four
