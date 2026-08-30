@@ -1633,6 +1633,147 @@ class PlacementPlanner:
                 item.model_id == model.model_id for item in assignments
             )
 
+        def preserve_healthy_incumbents() -> None:
+            """Seed the plan with still-wanted live placements before opening new slots.
+
+            The current desired placement is itself a feasibility witness. Rebuilding entirely
+            from a greedy order can fragment a heterogeneous fleet even when every healthy
+            incumbent remains wanted, producing an avoidable unload/reload wave and a plan with
+            fewer replicas than the state it just observed. Pins are already reserved above; this
+            phase retains the best remaining live replicas up to each model's target, while normal
+            placement and bounded preemption still handle new demand and genuine conflicts.
+            """
+
+            incumbent_nodes_by_model: dict[str, list[NodeSnapshot]] = {}
+            incumbent_residency_by_pair: dict[
+                tuple[str, str], ModelResidency
+            ] = {}
+            for node in node_list:
+                for residency in node.residencies:
+                    if residency.state in (
+                        ResidencyState.LOADING,
+                        ResidencyState.WARMING,
+                        ResidencyState.READY,
+                    ):
+                        incumbent_nodes_by_model.setdefault(
+                            residency.model_id, []
+                        ).append(node)
+                        incumbent_residency_by_pair[
+                            (node.node_id, residency.model_id)
+                        ] = residency
+
+            # When every target already has enough healthy live replicas, the observed placement
+            # is a complete feasibility witness. In that case soft scarcity improvements must not
+            # dismantle it and then discover that the greedy rebuild cannot put all pieces back.
+            # A missing or newly demanded replica disables this shortcut, preserving the ordinary
+            # relocation behavior that opens a scarce host for real new work.
+            complete_live_witness = all(
+                sum(
+                    model.matches_artifact(
+                        incumbent_residency_by_pair[(node.node_id, model.model_id)]
+                    )
+                    and compatibility(node, model, for_new=False) is None
+                    for node in incumbent_nodes_by_model.get(model.model_id, ())
+                )
+                >= placement_goal(model)
+                for model in order
+            )
+
+            for model in order:
+                goal = placement_goal(model)
+                domains = assigned_domains.setdefault(model.model_id, set())
+                placed = sum(
+                    item.model_id == model.model_id for item in assignments
+                )
+                while placed < goal:
+                    candidates: list[
+                        tuple[float, str, NodeSnapshot, tuple[str, ...]]
+                    ] = []
+                    for node in incumbent_nodes_by_model.get(model.model_id, ()):
+                        if (model.model_id, node.node_id) in assigned_pairs:
+                            continue
+                        residency = incumbent_residency_by_pair[
+                            (node.node_id, model.model_id)
+                        ]
+                        residency_age = (
+                            timestamp - residency.loaded_at
+                            if residency.loaded_at
+                            else math.inf
+                        )
+                        recently_loaded = (
+                            -self.policy.max_future_clock_skew_seconds
+                            <= residency_age
+                            < model.min_residency_seconds
+                        )
+                        hard_scarcity_blocker = any(
+                            len(future_eligible_nodes.get(other_model_id, ())) == 1
+                            for other_model_id in scarce_host_claims.get(
+                                (model.model_id, node.node_id), ()
+                            )
+                        )
+                        if (
+                            (
+                                not complete_live_witness
+                                and scarce_host_excess_claims.get(
+                                    (model.model_id, node.node_id)
+                                )
+                                and (not recently_loaded or hard_scarcity_blocker)
+                            )
+                            or not model.matches_artifact(residency)
+                            or compatibility(node, model, for_new=False) is not None
+                            or not fits_node(node, model)
+                        ):
+                            continue
+                        score, reasons = score_candidate(
+                            node,
+                            model,
+                            capacity[node.node_id],
+                            domains,
+                            need_new_domain=(
+                                len(domains)
+                                < min(model.min_failure_domains, goal)
+                            ),
+                        )
+                        candidates.append((score, node.node_id, node, reasons))
+                    if not candidates:
+                        break
+                    needed_domains = min(model.min_failure_domains, goal)
+                    if len(domains) < needed_domains:
+                        diverse = [
+                            candidate
+                            for candidate in candidates
+                            if (
+                                candidate[2].failure_domain
+                                or candidate[2].node_id
+                            )
+                            not in domains
+                        ]
+                        if diverse:
+                            candidates = diverse
+                    score, _, selected, reasons = min(
+                        candidates,
+                        key=lambda item: (-item[0], item[1]),
+                    )
+                    _place(
+                        _assignment(
+                            model,
+                            selected,
+                            index=placed,
+                            score=score,
+                            reasons=(*reasons, "preserved healthy incumbent"),
+                        ),
+                        selected,
+                        assignments,
+                        assigned_pairs,
+                        domains,
+                        capacity,
+                        occupied_models,
+                        desired_model_slots,
+                        desired_memory,
+                    )
+                    placed += 1
+
+        preserve_healthy_incumbents()
         for model in order:
             place_isolated_replicas(model, live_incumbents=True)
 

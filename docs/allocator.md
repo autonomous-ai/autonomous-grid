@@ -236,9 +236,14 @@ immediate capacity, which bounds churn.
 Ready, loading, and warming incumbents on full one-model hosts are indexed and ranked in one pass
 when their failure domains are independent. Treating an in-progress incumbent as occupied prevents
 the empty-host fast path from starting a duplicate cold load while its heartbeat is still
-converging. The same optimization applies to empty one-model hosts only when one model remains in
-its priority class, preserving equal-priority sharing. Both cases preserve the general scorer's
-exact result while avoiding a fleet-wide rescan for every replica on large networks.
+converging. Before opening new slots, the planner also seeds each target with healthy live
+incumbents. If every target is already satisfied, that complete current placement is treated as a
+feasibility witness: soft scarcity scoring cannot dismantle it and then return a less complete
+greedy rebuild. A genuinely missing replica, hard policy change, or sole-host conflict still uses
+ordinary relocation and bounded preemption. The same optimization applies to empty one-model hosts
+only when one model remains in its priority class, preserving equal-priority sharing. Both cases
+preserve the general scorer's exact result while avoiding a fleet-wide rescan for every replica on
+large networks.
 When several equal-priority models share an otherwise uniform empty fleet, Grid caches each static
 candidate order but still consumes it one replica per model per allocation round; any shared-host or
 domain interaction falls back to complete rescoring and bounded repacking.

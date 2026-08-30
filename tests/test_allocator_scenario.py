@@ -110,6 +110,17 @@ def test_capacity_sweep_keeps_the_same_seeded_users_and_requests():
     )
 
 
+def test_roomy_fleet_does_not_dismantle_a_complete_feasible_placement():
+    report = run_scenario(
+        ScenarioConfig(machines=12, models=8, users=50, minutes=30, seed=42)
+    )
+    coding_surge = next(row for row in report.timeline if row["minute"] == 7)
+
+    assert coding_surge["unloads"] == []
+    assert coding_surge["unsatisfied"] == []
+    assert coding_surge["service_rate_pct"] > 95
+
+
 def test_production_controller_admits_persistent_new_media_workload():
     report = run_scenario(
         ScenarioConfig(machines=8, models=8, users=50, minutes=30, seed=42)
