@@ -33,6 +33,7 @@ HOME_DIR = "home"
 _MAX_TOOL_RESULT = 64 * 1024
 _MAX_TOOL_ARGUMENT_BYTES = 64 * 1024
 _MAX_TOOL_HTTP_BYTES = 64 * 1024
+_MAX_TOOL_JSON_DEPTH = 64
 _MAX_ALLOWED_TOOL_ORIGINS = 32
 _MAX_RECORDED_TOOL_VALUE = 24 * 1024
 _SECRET_FIELD_PARTS = ("authorization", "api_key", "apikey", "password", "secret", "token")
@@ -56,6 +57,25 @@ _REQUIRED_PROTOCOL_METHODS = frozenset({
 })
 _PROTOCOL_CACHE: dict[BinaryRevision, tuple[bool, str]] = {}
 _INTERNAL_GOAL_TOOLS = frozenset({"grid_spawn_subgoal"})
+
+
+def _tool_json_depth_is_safe(value: Any) -> bool:
+    """Bound recursive JSON before serializers/redaction can exhaust the worker's Python stack."""
+    # Root container is level one. This makes the constant match how people count JSON nesting and
+    # avoids an off-by-one where 65 nested arrays were admitted under a 64-level ceiling.
+    stack = [(value, 1)]
+    seen: set[int] = set()
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, (dict, list, tuple)):
+            if depth > _MAX_TOOL_JSON_DEPTH or id(item) in seen:
+                # Aliases and cycles cannot arrive through JSON-RPC. Rejecting both keeps this
+                # boundary total for direct callers too, without maintaining an active-path DFS.
+                return False
+            seen.add(id(item))
+            children = item.values() if isinstance(item, dict) else item
+            stack.extend((child, depth + 1) for child in children)
+    return True
 
 
 def _http_origin(value: str) -> str | None:
@@ -456,11 +476,15 @@ class ToolExecutor:
         tool = self.tools.get(name)
         if tool is None or not isinstance(arguments, dict):
             return self._result(False, {"error": "tool is not allowed or arguments are not an object"})
+        if not _tool_json_depth_is_safe(arguments):
+            return self._result(False, {
+                "error": f"tool arguments exceed {_MAX_TOOL_JSON_DEPTH} levels",
+            })
         try:
             encoded_arguments = json.dumps(
                 arguments, sort_keys=True, separators=(",", ":"),
-                ensure_ascii=False).encode("utf-8")
-        except (TypeError, ValueError):
+                ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError, RecursionError):
             return self._result(False, {"error": "tool arguments are not valid JSON"})
         if len(encoded_arguments) > _MAX_TOOL_ARGUMENT_BYTES:
             return self._result(False, {
@@ -523,7 +547,8 @@ class ToolExecutor:
             # their lease fence and child-spawn ownership are explicitly tied to one turn.
             action_scope = self.turn_scope if internal else self.scope
             canonical = json.dumps([action_scope, name, arguments], sort_keys=True,
-                                   separators=(",", ":"), ensure_ascii=False).encode()
+                                   separators=(",", ":"), ensure_ascii=False,
+                                   allow_nan=False).encode()
             headers["Idempotency-Key"] = "grid-goal-" + hashlib.sha256(canonical).hexdigest()
         raw_timeout = http.get("timeout_seconds", 30)
         if (isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float))
@@ -573,7 +598,9 @@ class ToolExecutor:
                 raw_body = b"".join(chunks)
                 try:
                     body: Any = json.loads(raw_body) if raw_body else None
-                except (UnicodeDecodeError, ValueError):
+                    if not _tool_json_depth_is_safe(body):
+                        raise ValueError("tool response JSON is nested too deeply")
+                except (UnicodeDecodeError, ValueError, RecursionError):
                     body = raw_body.decode("utf-8", "replace")
                 result = {"status_code": status_code, "body": body}
                 success = 200 <= status_code < 300

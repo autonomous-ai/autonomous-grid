@@ -437,6 +437,10 @@ same mutation after either worker failure or an independent-eval retry. Relay-in
 turn-scoped because their authorization is tied to that lease. Grid credentials are never placed in
 Codex's environment or stored in Git.
 
+Tool JSON is limited to 64 nesting levels. Non-finite or deeper action arguments are rejected before
+the request audit and before any HTTP call; a deeply nested response is retained as bounded text so
+it cannot crash the Goal worker or erase the result-side durability fence.
+
 Tool request and result events are durability fences, not buffered console progress. Grid flushes
 the request record before contacting the API. If that record cannot land, it does not make the
 call. It flushes the result before returning it to Codex; if the API may have committed but the

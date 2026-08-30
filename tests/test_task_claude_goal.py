@@ -569,6 +569,77 @@ def test_tool_arguments_and_response_bodies_are_hard_bounded(monkeypatch):
     assert calls[0]["follow_redirects"] is False
 
 
+def test_tool_rejects_nonfinite_or_deep_arguments_before_a_side_effect(monkeypatch):
+    monkeypatch.setenv("GRID_GOAL_TOOL_ORIGINS", "https://support.example")
+    calls = []
+    events = []
+    monkeypatch.setattr(
+        task_codex.httpx, "Client", lambda **_kwargs: calls.append("constructed"))
+    executor = task_codex.ToolExecutor([{
+        "name": "send_reply", "mode": "act",
+        "http": {"method": "POST", "url": "https://support.example/reply"},
+    }], publish=lambda event, **_fields: events.append(event),
+        inference=task_codex.GridInference("https://grid.example", "secret"), scope="goal:1")
+
+    nonfinite = executor.call("send_reply", {"score": float("nan")}, "call-1")
+    nested = {}
+    cursor = nested
+    for _ in range(task_codex._MAX_TOOL_JSON_DEPTH + 1):
+        cursor["next"] = {}
+        cursor = cursor["next"]
+    too_deep = executor.call("send_reply", nested, "call-2")
+
+    assert nonfinite["success"] is False and "not valid JSON" in repr(nonfinite)
+    assert too_deep["success"] is False and "exceed" in repr(too_deep)
+    assert calls == [] and events == []
+
+
+def test_deep_tool_response_is_bounded_without_crashing_or_losing_result_audit(monkeypatch):
+    monkeypatch.setenv("GRID_GOAL_TOOL_ORIGINS", "https://support.example")
+    events = []
+
+    class Response:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def iter_bytes():
+            depth = task_codex._MAX_TOOL_JSON_DEPTH + 1
+            yield b"[" * depth + b"0" + b"]" * depth
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(task_codex.httpx, "Client", Client)
+    executor = task_codex.ToolExecutor([{
+        "name": "read_ticket", "mode": "observe", "record": "full",
+        "http": {"method": "GET", "url": "https://support.example/ticket"},
+    }], publish=lambda event, **fields: events.append((event, fields)) or True,
+        inference=task_codex.GridInference("https://grid.example", "secret"), scope="goal:1")
+
+    result = executor.call("read_ticket", {"ticket_id": "T-1"}, "call-1")
+
+    assert result["success"] is True
+    assert [event for event, _fields in events] == [
+        "goal.observe.request", "goal.observe.result"]
+    assert isinstance(events[1][1]["result"]["body"], str)
+
+
 def test_tool_does_not_act_until_its_request_audit_is_durable(monkeypatch):
     monkeypatch.setenv("GRID_GOAL_TOOL_ORIGINS", "https://support.example")
     calls = []
