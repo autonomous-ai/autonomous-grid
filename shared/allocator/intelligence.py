@@ -458,6 +458,16 @@ class WorkloadIntelligence:
             forecast = prepared_workload_forecasts[workload]
             if forecast.requests_per_minute <= 0:
                 continue
+            # DemandTracker's offered concurrency includes the current queue so direct model
+            # demand can react immediately to backlog. A workload projection is different: the
+            # chosen model has not necessarily served that queue, and copying the combined value
+            # while clearing ``queue_depth`` can promote one unroutable request into several
+            # counterfactual replicas. Preserve arrival/device-time pressure until this exact
+            # model has proved it can serve the workload.
+            arrival_concurrency = max(
+                0.0,
+                forecast.offered_concurrency - float(forecast.queue_depth),
+            )
             candidates = [
                 profile
                 for profile in profile_list
@@ -496,10 +506,15 @@ class WorkloadIntelligence:
                         profile.model_id,
                     ),
                 )
+            arrival_evidence = self.portfolio_evidence_ready(
+                forecast.sample_count,
+                arrival_concurrency,
+            )
             ordinary_evidence = self.portfolio_evidence_ready(
                 forecast.sample_count,
                 forecast.offered_concurrency,
             )
+            queue_promoted_evidence = ordinary_evidence and not arrival_evidence
             spare_capacity_evidence = bool(
                 not ordinary_evidence
                 and workload in {"image", "video"}
@@ -507,10 +522,13 @@ class WorkloadIntelligence:
                     chosen.model_id,
                     placement_hints,
                 )
-                and self.portfolio_evidence_ready(
-                    forecast.sample_count,
-                    forecast.offered_concurrency,
-                    immediately_feasible=True,
+                and (
+                    forecast.queue_depth > 0
+                    or self.portfolio_evidence_ready(
+                        forecast.sample_count,
+                        arrival_concurrency,
+                        immediately_feasible=True,
+                    )
                 )
             )
             if not ordinary_evidence and not spare_capacity_evidence:
@@ -533,6 +551,7 @@ class WorkloadIntelligence:
                 # this counterfactual model is slow or failing. Model-specific pressure begins only
                 # after the canary actually serves work; retaining these fields would promote a
                 # speculative projection into the planner's direct-evidence urgency tier.
+                offered_concurrency=arrival_concurrency,
                 queue_depth=0,
                 p95_latency_ms=0.0,
                 error_rate=0.0,
@@ -549,7 +568,8 @@ class WorkloadIntelligence:
                 # One long image/video request is enough to justify trying a model on genuinely
                 # spare capacity, but not enough to infer the entire scale-out target. The first
                 # canary's real request/outcome evidence removes this cap on the next plan.
-                canary_only=spare_capacity_evidence and not canary_validated,
+                canary_only=(spare_capacity_evidence or queue_promoted_evidence)
+                and not canary_validated,
             )
             merged[chosen.model_id] = _merge_forecasts(
                 merged.get(chosen.model_id), projected

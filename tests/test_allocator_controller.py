@@ -700,6 +700,53 @@ def test_weak_media_canary_requires_surplus_beyond_catalog_and_reserves():
     assert forecast["canary_only"] is True
 
 
+def test_unserved_workload_queue_admits_one_canary_without_replica_fanout():
+    controller = AllocatorController()
+    controller.put_profile(
+        ModelProfile(
+            "video-model",
+            8_000,
+            runtimes=("comfyui",),
+            backends=("mps",),
+            min_replicas=0,
+            max_replicas=4,
+            min_residency_seconds=0,
+            workload_scores=(("video", 1.0),),
+            replica_concurrency=1,
+        )
+    )
+    controller.observe_lifecycle(
+        RequestFeatures("videos/generations", "auto", "video"),
+        service_seconds=60,
+        queue_depth=1,
+        timestamp=100,
+    )
+    machines = tuple(
+        NodeSnapshot(
+            f"media-{index}",
+            16_000,
+            runtimes=("comfyui",),
+            backends=("mps",),
+            max_models=1,
+            last_heartbeat=100,
+        )
+        for index in range(4)
+    )
+
+    controller.tick(machines, now=100)
+
+    assert controller.last_plan is not None
+    assert controller.last_plan.target_for("video-model") == 1
+    assert len(controller.last_plan.nodes_for("video-model")) == 1
+    forecast = next(
+        row
+        for row in controller.status(machines, now=100)["forecasts"]
+        if row["model_id"] == "video-model"
+    )
+    assert forecast["offered_concurrency"] == pytest.approx(1.0)
+    assert forecast["canary_only"] is True
+
+
 def test_joint_portfolio_spends_bounded_search_on_highest_device_time(monkeypatch):
     # The evaluation cap is deliberately tiny: after scoring the exploitation baseline, the search
     # can examine only one alternative. Raw request order would spend it on embedding; device-time

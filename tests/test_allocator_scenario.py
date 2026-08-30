@@ -168,9 +168,11 @@ def test_capacity_sweep_keeps_the_same_seeded_users_and_requests():
     }
     assert roomy.metrics["service_rate_pct"] > scarce.metrics["service_rate_pct"]
     assert roomy.metrics["overall_score"] > scarce.metrics["overall_score"]
+    # A scarcity-aware portfolio may avoid asking for impossible speculative replicas entirely;
+    # more hardware must never increase shortfall, but zero on both fleets is a valid improvement.
     assert (
         roomy.metrics["unsatisfied_replica_minutes"]
-        < scarce.metrics["unsatisfied_replica_minutes"]
+        <= scarce.metrics["unsatisfied_replica_minutes"]
     )
 
 

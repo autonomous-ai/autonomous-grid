@@ -155,7 +155,7 @@ def test_prepared_workload_forecasts_are_reused_without_reserializing_demand(mon
     ) == expected_projections
 
 
-def test_long_sparse_job_crosses_device_time_evidence_gate_before_cheap_call():
+def test_long_sparse_job_gets_one_queue_promoted_canary_before_cheap_call():
     intelligence = WorkloadIntelligence(
         portfolio_min_samples=3,
         portfolio_min_offered_concurrency=1.5,
@@ -186,8 +186,8 @@ def test_long_sparse_job_crosses_device_time_evidence_gate_before_cheap_call():
 
     assert [forecast.model_id for forecast in projected] == ["video-model"]
     assert projected[0].sample_count == 1
-    assert projected[0].offered_concurrency == pytest.approx(2.0)
-    assert projected[0].canary_only is False
+    assert projected[0].offered_concurrency == pytest.approx(1.0)
+    assert projected[0].canary_only is True
 
 
 def test_weak_device_pressure_gets_one_canary_only_when_spare_placement_is_proven():
@@ -219,7 +219,7 @@ def test_weak_device_pressure_gets_one_canary_only_when_spare_placement_is_prove
     )
 
     assert len(projected) == 1
-    assert projected[0].offered_concurrency == pytest.approx(4 / 3)
+    assert projected[0].offered_concurrency == pytest.approx(1 / 3)
     assert projected[0].canary_only is True
 
 
@@ -296,6 +296,7 @@ def test_successful_canary_response_lifts_weak_workload_scale_out_cap():
     )
 
     assert projected[0].sample_count == 2
+    assert projected[0].offered_concurrency == pytest.approx(1 / 3)
     assert projected[0].canary_only is False
 
 

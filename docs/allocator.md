@@ -149,6 +149,11 @@ utility and transition cost. Resource pressure uses
 offered concurrency—the arrival rate multiplied by measured service time, plus queued work—so a
 long image or video job is not incorrectly treated as cheaper than a short embedding call merely
 because fewer jobs arrive.
+For an unbound workload, however, the queue has not yet been served by the counterfactual model.
+It can admit one policy-safe canary, but it is removed from that model's projected concurrency so
+one unroutable request cannot be counted both as workload backlog and as several speculative
+replicas. Repeated arrival/device-time evidence lifts the canary cap, while queue-driven scale-out
+comes from model-specific observations after real traffic reaches the selected model.
 
 The subset search is ranked by cheap set coverage before its candidates are verified by the real
 planner, letting it cross multi-change local optima such as consolidating marketing/sales on an
