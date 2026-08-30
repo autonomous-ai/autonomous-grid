@@ -1349,6 +1349,10 @@ def test_allocator_models_validate_impossible_values():
         PlannerPolicy(max_predictive_artifact_prefetches=-1)
     with pytest.raises(ValueError, match="max_predictive_artifact_prefetches"):
         PlannerPolicy(max_predictive_artifact_prefetches=True)
+    with pytest.raises(ValueError, match="predictive_artifact_disk_reserve_mb"):
+        PlannerPolicy(predictive_artifact_disk_reserve_mb=-1)
+    with pytest.raises(ValueError, match="predictive_artifact_disk_reserve_mb"):
+        PlannerPolicy(predictive_artifact_disk_reserve_mb=True)
     with pytest.raises(ValueError, match="non-negative"):
         PlannerPolicy(max_predictive_lookahead_seconds=-1)
     with pytest.raises(ValueError, match="predictive_growth_limit"):
@@ -5631,6 +5635,50 @@ def test_correlation_only_demand_prefetches_exact_artifact_without_eviction():
     )
     assert disabled.artifact_prefetches == ()
 
+    reserve_protected = planner.plan(
+        (replace(machine, disk_available_mb=14_000),),
+        (baseline, predicted),
+        (forecast,),
+        now=10,
+    )
+    assert reserve_protected.artifact_prefetches == ()
+    unknown_disk = planner.plan(
+        (
+            replace(
+                machine,
+                disk_capacity_mb=None,
+                disk_available_mb=None,
+            ),
+        ),
+        (baseline, predicted),
+        (forecast,),
+        now=10,
+    )
+    assert unknown_disk.artifact_prefetches == ()
+
+    directly_demanded = planner.plan(
+        (
+            replace(
+                machine,
+                residencies=(),
+                disk_available_mb=predicted.artifact_size_mb,
+            ),
+        ),
+        (predicted,),
+        (
+            replace(
+                forecast,
+                observed_requests_per_minute=forecast.requests_per_minute,
+                correlated_requests_per_minute=0,
+                correlation_confidence=0,
+                correlation_sources=(),
+            ),
+        ),
+        now=10,
+    )
+    assert directly_demanded.nodes_for("predicted") == ("scarce",)
+    assert directly_demanded.artifact_prefetches == ()
+
     higher_pressure = model(
         "higher-pressure",
         8_000,
@@ -5652,6 +5700,7 @@ def test_correlation_only_demand_prefetches_exact_artifact_without_eviction():
         PlannerPolicy(
             memory_headroom_fraction=0,
             max_predictive_artifact_prefetches=2,
+            predictive_artifact_disk_reserve_mb=0,
         )
     ).plan(
         (replace(machine, disk_available_mb=10_000),),

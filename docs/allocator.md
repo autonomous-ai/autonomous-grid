@@ -70,7 +70,10 @@ operator-authorized source, SHA-256, declared artifact size, authenticated free 
 `load` capability. Reconciliation downloads and verifies the artifact but never warms it, consumes
 VRAM, or drains an incumbent; direct and baseline demand therefore keep all serving and eviction
 authority. A later real-demand placement can reuse the cache and skip the network-transfer phase.
-Counterfactual portfolio evaluations do not emit these operational advisories.
+By default, speculative transfers must leave at least 10 GiB free; operators can tune or disable
+that planner reserve. Missing free-disk telemetry never authorizes a predictive transfer. Demanded
+placements retain their ordinary disk-admission policy, so this safety floor cannot block real
+work. Counterfactual portfolio evaluations do not emit these operational advisories.
 
 Portfolio admission normally requires three observations, preventing a cheap one-off request from
 churning a large model into memory. Device-time evidence can cross the gate earlier: at least 1.5

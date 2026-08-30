@@ -17,6 +17,7 @@ from itertools import combinations
 
 from shared.allocator.models import (
     MAX_COUNTER,
+    MAX_MEMORY_MB,
     ArtifactPrefetch,
     DemandForecast,
     ModelProfile,
@@ -51,6 +52,7 @@ class PlannerPolicy:
     preserve_recent_residencies: bool = True
     max_staged_preemptions: int = 64
     max_predictive_artifact_prefetches: int = 1
+    predictive_artifact_disk_reserve_mb: int = 10_240
 
     def __post_init__(self) -> None:
         if not 0 <= self.memory_headroom_fraction < 1:
@@ -96,6 +98,15 @@ class PlannerPolicy:
             raise ValueError(
                 "max_predictive_artifact_prefetches must be in "
                 f"[0, {MAX_COUNTER}]"
+            )
+        if (
+            isinstance(self.predictive_artifact_disk_reserve_mb, bool)
+            or not isinstance(self.predictive_artifact_disk_reserve_mb, int)
+            or not 0 <= self.predictive_artifact_disk_reserve_mb <= MAX_MEMORY_MB
+        ):
+            raise ValueError(
+                "predictive_artifact_disk_reserve_mb must be in "
+                f"[0, {MAX_MEMORY_MB}]"
             )
         if (
             not math.isfinite(self.latency_pressure_limit)
@@ -2383,10 +2394,10 @@ class PlacementPlanner:
                 if (
                     pair not in assignment_pairs
                     and not artifact_present
-                    and (
-                        remaining_disk is None
-                        or model.artifact_size_mb <= remaining_disk
-                    )
+                    and remaining_disk is not None
+                    and model.artifact_size_mb
+                    + self.policy.predictive_artifact_disk_reserve_mb
+                    <= remaining_disk
                 ):
                     candidates.append(node)
             if not candidates:
