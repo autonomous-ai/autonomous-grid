@@ -34,7 +34,9 @@ If a method nevertheless returns JSON-RPC `method not found`, or Codex reports a
 Grid cannot interpret, that executable revision is quarantined in the provider process: the leased
 turn is handed back through the bounded retry path and the node stops advertising `native_goal`
 before it can consume the remaining attempts. Updating the executable creates a new revision and
-reruns the probe. `grid agent status` must say `Codex: installed` before physical acceptance.
+reruns the probe; a running Codex-only task poller backs off while quarantined and automatically
+rejoins when that repaired revision passes, without taking Grid inference offline. `grid agent
+status` must say `Codex: installed` before physical acceptance.
 
 The provider advertises each native Goal harness it can actually run. Restrict a node explicitly
 with `GRID_TASK_AGENT_KINDS=codex` or `GRID_TASK_AGENT_KINDS=claude` when desired.
