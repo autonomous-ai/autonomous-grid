@@ -101,6 +101,64 @@ def test_root_goal_create_replay_returns_one_durable_identity(relay, owner_token
         relay_client.control_goal(relay, owner_token, first["id"], "cancel")
 
 
+def test_relay_timer_recovers_a_goal_abandoned_while_preparing_continuation(
+        relay, relay_db, owner_token):
+    """The durable post-response crash state recovers without another client request.
+
+    Fault injection writes the shape left after a continuation row commits but before its Git
+    preparation reaches ``queued``. From that point on this test uses only the real relay process:
+    its periodic sweep must atomically terminate the abandoned row, wake its SSE stream, and let
+    Goal reconciliation create exactly one replacement. Calling a create/commit endpoint here
+    would exercise the older request-triggered cleanup and leave the actual crash backstop unproven.
+    """
+    import sqlite3
+
+    from remote import relay as relay_client
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-goal-abandoned-continuation")['id']
+    H.seed_trunk(relay, owner_token, project_id)
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Recover work after the relay dies while preparing the next Goal turn",
+        done_when="RECOVERED.md exists", model="fake-grid-model", token_budget=10_000,
+        evals=[{"type": "file", "name": "recovered", "path": "RECOVERED.md"}])
+
+    try:
+        # The real endpoint already proved it can insert and prepare this row. Rewind only the
+        # durable fields that distinguish the crash window, age it beyond the private relay's
+        # configured prepare ceiling, and make no further mutation request.
+        with sqlite3.connect(relay_db, timeout=10) as db:
+            updated = db.execute(
+                "UPDATE turns SET state='preparing', created_at=datetime('now', '-10 minutes'), "
+                "base_commit=NULL, input_commit=NULL WHERE id=? AND state='queued'",
+                (goal["turn_id"],),
+            ).rowcount
+        assert updated == 1
+
+        def recovered():
+            rows = _tasks(relay, owner_token, project_id, goal["id"])
+            return rows if (len(rows) == 2
+                            and rows[0]["id"] == goal["turn_id"]
+                            and rows[0]["state"] == "failed"
+                            and rows[0]["error"] == "prepare_abandoned"
+                            and rows[1]["state"] == "queued"
+                            and rows[1]["attempt"] == 0) else None
+
+        rows = H.wait_for(recovered, timeout=15)
+        assert rows, _tasks(relay, owner_token, project_id, goal["id"])
+        events = list(relay_client.stream_task_events(
+            relay, owner_token, goal["turn_id"]))
+        terminal = [payload for _seq, payload in events
+                    if payload.get("type") == "task.terminal"]
+        assert terminal == [{
+            "type": "task.terminal", "state": "failed", "error": "prepare_abandoned",
+        }]
+        assert len(_tasks(relay, owner_token, project_id, goal["id"])) == 2
+    finally:
+        relay_client.control_goal(relay, owner_token, goal["id"], "cancel")
+
+
 def test_same_node_reclaim_rejects_the_old_process_on_every_goal_plane(
         relay, owner_token, provider_nodes, advertise_goal_models):
     """A→A is still a handoff: a reusable node identity is not a lease generation."""
