@@ -60,6 +60,7 @@ interactive JSON-RPC fixture then proves those declared methods during execution
 | Quota recovery | A Codex polls; inference-only C heartbeats | Route exists but its subscription seat reports `serving: false` | No attempt/evidence during withdrawal; same row wakes on C's healthy heartbeat |
 | Four-feature game | A Codex -> B Codex -> C Codex | A and B are killed mid-turn | Same rows are reclaimed; commit-pinned wiring/click/score/style evals pass |
 | Native crash checkpoint | A Codex -> B Codex | A's app-server fails after partial work | Same turn immediately requeues; B restores partial tree/thread and behavior evals pass |
+| Claude protocol drift | A Claude -> B Codex | A exits zero without its native evaluator attachment | A is quarantined from Goals but stays online; same turn/checkpoint moves to B and evals pass |
 | Native crash after API commit | A Codex -> B Codex | A's app-server fails after a successful business mutation | Stable key yields one side effect; both attempts retain request/result evidence |
 | Mixed game | A Codex -> B Claude -> C Codex | Two machine losses across unlike harnesses | Shared continuity plus commit-pinned behavior evals across harnesses |
 | Cross-harness eval repair | A Codex -> B Claude -> C Codex -> D Claude | C nominates plausible but broken interaction | D restores B's Claude session across Codex, consumes failed eval evidence, and repairs it |

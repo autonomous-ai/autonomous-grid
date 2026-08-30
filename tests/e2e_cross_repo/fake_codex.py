@@ -65,6 +65,19 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
         save_history(history)
         return "complete", "A completed the first attempt after model recovery", 100
 
+    if scenario == "claude_protocol_drift":
+        if node != "B" or history:
+            raise RuntimeError(
+                f"Claude protocol-drift handoff reached the wrong Codex state: {node}, {history!r}")
+        partial = cwd / "PARTIAL.md"
+        if not partial.is_file() or "Claude A" not in partial.read_text():
+            raise RuntimeError("Codex B did not receive Claude A's accepted partial worktree")
+        (cwd / "DONE.md").write_text(
+            "# Recovered\n\nCodex B finished the same Goal turn after Claude protocol drift.\n")
+        history.append({"node": "B", "after": "claude-protocol-drift"})
+        save_history(history)
+        return "complete", "Codex B recovered Claude A's protocol-drift checkpoint", 200
+
     if scenario == "graceful_crash":
         if node == "A" and not history:
             (cwd / "index.html").write_text(

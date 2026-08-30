@@ -564,6 +564,90 @@ def test_native_codex_crash_immediately_checkpoints_same_turn_to_another_machine
     assert _verify_evidence(evidence, min_execution_nodes=2) == []
 
 
+def test_claude_protocol_drift_quarantines_node_and_hands_same_turn_to_codex(
+        relay, owner_token, spawn_goal_provider, goal_workspace_root, tmp_path):
+    """A clean exit without Claude's evaluator attachment must not consume every attempt."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-claude-protocol-drift")['id']
+    H.seed_trunk(relay, owner_token, project_id)
+    node_a = spawn_goal_provider(
+        "A", agent_kinds="claude", scenario="claude_protocol_drift",
+        disk_label="claude-drift-A")
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Recover a partial artifact when one native Goal protocol changes",
+        done_when="PARTIAL.md and DONE.md prove a cross-harness same-turn recovery",
+        model="fake-grid-model", token_budget=3_000, tools=[],
+        agents=["claude", "codex"],
+        evals=[
+            {"type": "file", "name": "accepted Claude checkpoint", "path": "PARTIAL.md",
+             "max_bytes": 2_000, "contains": ["Claude A"]},
+            {"type": "file", "name": "Codex recovery", "path": "DONE.md",
+             "max_bytes": 2_000, "contains": ["Codex B", "same Goal turn"]},
+        ])
+
+    # A remains alive. Its child exited zero, but without the native evaluator attachment; the
+    # supervisor must publish a coherent checkpoint and immediately requeue the same row. Its next
+    # claim profile no longer carries native_goal, so A cannot take its own retry.
+    def queued_after_drift():
+        rows = _tasks(relay, owner_token, project_id, goal["id"])
+        return bool(rows and rows[0]["state"] == "queued" and rows[0]["attempt"] == 1)
+
+    assert H.wait_for(queued_after_drift, timeout=30), node_a.output()
+    assert node_a.proc.poll() is None, "Claude A exited instead of remaining an ordinary task node"
+    queued = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(queued) == 1 and queued[0]["id"] == goal["turn_id"], queued
+    # The list surface exposes the worktree checkpoint; the transcript checkpoint is intentionally
+    # an evidence-only field and is asserted against the relay-authored retry below.
+    assert queued[0]["checkpoint_commit"]
+
+    node_b = spawn_goal_provider(
+        "B", agent_kinds="codex", scenario="claude_protocol_drift",
+        disk_label="claude-drift-B", one_task=True)
+    complete = H.wait_for(
+        lambda: _completed_goal(relay, owner_token, goal["id"]), timeout=45)
+    assert complete, f"Codex B did not recover Claude protocol drift:\n{node_b.output()}"
+    rows = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(rows) == 1 and rows[0]["id"] == goal["turn_id"], rows
+    assert rows[0]["attempt"] == 2 and rows[0]["provider_id"] == node_b.node_id
+    assert rows[0]["agent_kind"] == "codex"
+
+    destination = tmp_path / "claude-protocol-drift-result"
+    destination.mkdir()
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=rows[0]["branch"], commit=rows[0]["result_commit"], project_id=project_id)
+    assert {"PARTIAL.md", "DONE.md"} <= {path.name for path in destination.iterdir()}
+
+    # B's empty machine fetched both opaque harness namespaces: Claude's transcript checkpoint and
+    # the Codex rollout/history it created while finishing. No direct copy from A is available.
+    files = list((goal_workspace_root / "claude-drift-B").rglob("*"))
+    assert any(path.name == "fake-history.json" for path in files)
+    claude_records = []
+    for path in files:
+        if path.suffix != ".jsonl" or not path.is_file():
+            continue
+        try:
+            records = [json.loads(line) for line in path.read_text().splitlines() if line]
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if records and all("sessionId" in row for row in records):
+            claude_records.extend(records)
+    assert claude_records and any(record["sessionId"] for record in claude_records)
+
+    evidence = relay_client.get_goal_evidence(relay, owner_token, goal["id"])
+    retry = next(item["event"] for item in evidence["attempt_events"]
+                 if item["event"].get("type") == "task.retry")
+    assert retry["reason"] == "native_harness_failure"
+    assert retry["previous_provider_id"] == node_a.node_id
+    assert retry["previous_agent_kind"] == "claude"
+    assert retry["checkpoint_commit"] and retry["transcript_checkpoint_commit"]
+    _assert_transcript_chain(evidence, 1, min_nodes=2)
+
+
 def test_committed_business_action_survives_immediate_native_checkpoint_handoff(
         relay, owner_token, spawn_goal_provider, goal_workspace_root, business_api, tmp_path):
     """A's API write commits, its harness crashes, and B replays one accepted checkpoint safely."""

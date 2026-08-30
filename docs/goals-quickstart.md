@@ -449,6 +449,7 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 | Mixed game | A -> B -> C | Codex -> Claude -> Codex | A and B die mid-feature | HTML wiring, click/score behavior, styling and instructions |
 | Eval-repair game | A -> B -> C -> D | Codex -> Claude -> Codex -> Claude | A/B die; C nominates broken behavior | Failed C score plus passing D repair on exact commits |
 | Crash-safe game | A -> B | Codex -> Codex | A's native harness crashes after writing partial work | HTML wiring, click/score behavior, styling and instructions |
+| Claude protocol drift | A -> B | Claude -> Codex | A exits cleanly without its native evaluator attachment | A stays online without `native_goal`; B receives the same turn and accepted Git/transcript pins |
 | Crash-safe business action | A -> B | Codex -> Codex | API commits, then A's native harness crashes | One side effect; stable key; complete action evidence; passing proof |
 | Image artifact | B polls; A executes | Claude rejected; Codex selected | Capability mismatch | PNG file and size |
 | Support reply | A polls; B -> C execute | Codex | B dies after API commit; first eval fails | `DONE.md`; JSON outcome; one API side effect |

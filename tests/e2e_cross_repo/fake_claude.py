@@ -309,6 +309,20 @@ def main() -> int:
     # the provider must select Claude through the real capability claim, build `/goal` on the first
     # slice, and `--resume` the session on the next. No test helper calls this behavior directly.
     scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
+    if scenario == "claude_protocol_drift":
+        node = os.environ.get("GRID_E2E_GOAL_NODE")
+        if node != "A" or resume is not None or not prompt.startswith("/goal "):
+            sys.stderr.write("fake Claude protocol drift reached an invalid assignment\n")
+            return 2
+        pathlib.Path("PARTIAL.md").write_text(
+            "# Claude checkpoint\n\nClaude A wrote this before its Goal attachment disappeared.\n")
+        _emit({"type": "assistant", "message": {"usage": {
+            "input_tokens": 12, "output_tokens": 8}, "content": [
+            {"type": "text", "text": "Claude wrote a partial artifact before protocol drift"}]}})
+        # Exit zero without goal_status. Grid must classify this as deterministic native protocol
+        # drift, quarantine this exact Claude revision, and hand its Git/transcript checkpoint to a
+        # different harness instead of accepting success or letting A consume another attempt.
+        return 0
     if scenario in ("mixed", "mixed_eval_repair"):
         node = os.environ.get("GRID_E2E_GOAL_NODE")
         if node not in ("B", "D"):
