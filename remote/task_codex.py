@@ -42,7 +42,8 @@ _SECRET_FIELD_PARTS = ("authorization", "api_key", "apikey", "password", "secret
 MIN_DISTRIBUTED_GOAL_VERSION = (0, 150, 1)
 _VERSION_PATTERN = re.compile(r"\Acodex-cli (\d+)\.(\d+)\.(\d+)")
 _VERSION_TIMEOUT_SECONDS = 10
-_VERSION_CACHE: dict[tuple[str, int, int], tuple[int, int, int]] = {}
+BinaryRevision = tuple[str, int, int, int, int, int, int]
+_VERSION_CACHE: dict[BinaryRevision, tuple[int, int, int]] = {}
 _PROTOCOL_TIMEOUT_SECONDS = 15
 _PROTOCOL_SCHEMA_MAX_BYTES = 2 * 1024 * 1024
 # These are the exact request/notification methods used below.  Codex app-server is explicitly
@@ -53,7 +54,7 @@ _REQUIRED_PROTOCOL_METHODS = frozenset({
     "thread/goal/get", "thread/tokenUsage/updated", "turn/started", "turn/completed",
     "item/tool/call",
 })
-_PROTOCOL_CACHE: dict[tuple[str, int, int], tuple[bool, str]] = {}
+_PROTOCOL_CACHE: dict[BinaryRevision, tuple[bool, str]] = {}
 _INTERNAL_GOAL_TOOLS = frozenset({"grid_spawn_subgoal"})
 
 
@@ -183,12 +184,16 @@ def _spawn(argv: list[str], env: dict[str, str], cwd: Path) -> ProcessLike:
         text=True, bufsize=1, cwd=cwd, env=env, start_new_session=True)
 
 
-def _version_cache_key(binary: str) -> tuple[str, int, int] | None:
+def _version_cache_key(binary: str) -> BinaryRevision | None:
     try:
         info = os.stat(binary)
     except OSError:
         return None
-    return (binary, info.st_mtime_ns, info.st_size)
+    # Include identity, permissions and ctime as well as content-shaped fields.  An operator fixing
+    # execute permissions must clear a cached probe failure even though chmod preserves mtime/size;
+    # an atomic package-manager replacement must do the same even if it preserves timestamps.
+    return (binary, info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _binary_version(binary: str) -> tuple[int, int, int]:

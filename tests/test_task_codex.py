@@ -201,6 +201,11 @@ def test_codex_protocol_schema_probe_checks_every_method_and_caches_failures(
     assert first[0] is False and "item/tool/call" in first[1]
     assert len(calls) == 1, "a cached incompatible binary was probed on every claim poll"
 
+    binary.chmod(0o755)
+    third = task_codex._protocol_capability(str(binary))
+    assert third[0] is False
+    assert len(calls) == 2, "repairing executable permissions did not invalidate the failed probe"
+
 
 def test_runtime_method_drift_quarantines_codex_before_another_goal_claim(
         tmp_path, monkeypatch):
