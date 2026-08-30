@@ -192,6 +192,9 @@ consistent state/pass/score tuple; fail if an unrelated accepted row rides besid
 witness. A row with
 `accepted: false` proves only that a stale provider evaluated something after losing its lease; it
 must remain in the audit record and must not be counted toward completion or future training data.
+Start one evaluation while A owns the lease, reclaim the turn onto B, then release A's evaluator:
+A may leave one rejected audit row but must receive 403 at settlement. By contrast, a node that
+submits only after B owns the lease must receive 403 before evaluation and create no eval row.
 `grid goal evidence --verify` also recomputes each exported definition hash. The release fails if a
 file evaluator names anything other than the relay evaluator, even when its score says it passed.
 

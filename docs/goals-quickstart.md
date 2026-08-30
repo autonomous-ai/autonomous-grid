@@ -352,6 +352,10 @@ re-blessing a stale passing label. Parseable cached evidence is also rejected wh
 definition identity, relay provenance, state, pass label, score, and error marker disagree. If an
 eligible run disappears or changes between evaluation and terminal settlement, the whole terminal
 transaction rolls back; the provider's ordinary result retry recreates and accepts exact evidence.
+Result settlement also checks the live provider lease before resolving Git or starting an evaluator,
+then checks it again in the terminal transaction. An unrelated or already-stale node therefore
+cannot manufacture audit rows or amplify bounded content checks; a legitimate worker that loses its
+lease during evaluation may leave an inspectable but unaccepted verdict.
 Offline verification checks the converse of final-pass proof as well: every `accepted: true` run
 must belong to the immutable manifest, score its own completed turn commit, carry a consistent
 binary verdict, and be relay-authored. An extra accepted label cannot hide beside a valid witness.
