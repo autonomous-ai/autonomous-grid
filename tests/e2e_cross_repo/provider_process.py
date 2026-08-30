@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from pathlib import Path
 
 sys.path.insert(0, os.environ["GRID_REPO"])
 
@@ -92,6 +93,25 @@ def main() -> int:
         tasks.task_loop(state)
         return 0
 
+    # Make the concurrency precondition observable to the driver. Merely starting two threads does
+    # not prove both parked a claim with the old capability snapshot before the Goal was created;
+    # without this marker the protocol-drift race test could pass while exercising one worker.
+    real_claim = tasks.relay.claim_task
+    entered_lock = threading.Lock()
+    entered = 0
+
+    def observed_claim(*args, **kwargs):
+        nonlocal entered
+        with entered_lock:
+            entered += 1
+            ordinal = entered
+        print(f"claim poll entered {ordinal}", file=sys.stderr, flush=True)
+        marker = os.environ.get("GRID_E2E_CLAIM_MARKER")
+        if marker:
+            Path(marker).touch()
+        return real_claim(*args, **kwargs)
+
+    tasks.relay.claim_task = observed_claim
     threads = [threading.Thread(target=tasks.task_loop, args=(state,), daemon=True)
                for _ in range(workers)]
     for thread in threads:

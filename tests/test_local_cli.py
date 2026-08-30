@@ -28485,6 +28485,92 @@ def test_runtime_harness_quarantine_backs_off_and_recovers_without_hot_spinning(
     assert "task claims suspended" in capsys.readouterr().err
 
 
+def test_task_loop_declines_stale_goal_claim_before_attempt_start(monkeypatch, capsys):
+    """A second parked worker must not spend retry budget on a just-quarantined executable."""
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=threading.Event(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    job = {
+        "task_id": "T1", "attempt": 2,
+        "lease_expires_at": "2030-01-01T00:00:00+00:00",
+        "agent_kind": "codex", "goal": {
+            "objective": "continue", "required_capabilities": ["image_generation"],
+        },
+    }
+    claims = iter([job])
+    monkeypatch.setattr(tasks, "claim_once", lambda _state: next(claims))
+    profiles = iter([
+        ({"kind": "codex", "capabilities": [
+            "native_goal", "image_generation"]},),  # loop admission
+        ({"kind": "codex", "capabilities": ["native_goal"]},),  # stale at delivery
+    ])
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: next(profiles))
+    declined = []
+
+    def decline(_state, task_id, **identity):
+        declined.append((task_id, identity))
+        state.tasks_stop.set()
+        return {"state": "queued", "attempt": 1}
+
+    monkeypatch.setattr(tasks, "decline_claim_once", decline)
+    monkeypatch.setattr(
+        tasks, "_run_and_report",
+        lambda *_args: pytest.fail("stale native Goal harness was allowed to start"))
+
+    tasks.task_loop(state)
+
+    assert declined == [("T1", {
+        "attempt": 2, "lease_expires_at": "2030-01-01T00:00:00+00:00",
+    })]
+    assert "without spending retry budget" in capsys.readouterr().err
+
+
+def test_goal_claim_revalidation_is_backward_compatible_with_missing_requirements(monkeypatch):
+    """An older relay omits the additive list; native_goal remains the minimum safe contract."""
+    from remote import tasks
+
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: ({
+        "kind": "claude", "capabilities": ["native_goal"],
+    },))
+    assert tasks._claim_supported_now({
+        "agent_kind": "claude", "goal": {"objective": "continue"},
+    }) is True
+    assert tasks._claim_supported_now({
+        "agent_kind": "codex", "goal": {"objective": "continue"},
+    }) is False
+
+
+def test_goal_claim_decline_refreshes_an_expired_token_exactly_once(monkeypatch):
+    from remote import relay, tasks
+
+    current = {"token": "expired"}
+    refreshes = []
+    calls = []
+    state = SimpleNamespace(
+        signaling_url="https://relay.example", token=lambda: current["token"],
+        refresh=lambda stale_token=None: (
+            refreshes.append(stale_token), current.update(token="fresh"), True)[-1],
+    )
+
+    def decline(_url, token, task_id, **claim):
+        calls.append((token, task_id, claim))
+        if token == "expired":
+            raise relay.RelayUnauthorized()
+        return {"state": "queued", "attempt": 0}
+
+    monkeypatch.setattr(tasks.relay, "decline_task_claim", decline)
+    answer = tasks.decline_claim_once(
+        state, "T1", attempt=1, lease_expires_at="2030-01-01T00:00:00+00:00")
+
+    assert answer == {"state": "queued", "attempt": 0}
+    assert refreshes == ["expired"]
+    assert [call[0] for call in calls] == ["expired", "fresh"]
+
+
 def test_native_goal_impossible_checkpoint_is_reported_not_retried(monkeypatch):
     """A harness crash and the native Goal's own terminal verdict are intentionally different."""
     tasks, state, fake_claim = _task_loop_state([{

@@ -86,6 +86,24 @@ This is deliberately separate from powering off A: an abruptly lost machine cann
 that the relay never accepted. After abrupt loss, replacement workers must ignore unacknowledged
 partial pushes and resume only the prior accepted checkpoint.
 
+## Multi-worker stale-claim scenario
+
+Run this on a disposable harness shim, never by modifying the system Codex/Claude installation:
+
+1. Start A with `GRID_MAX_TASKS=2` and a temporary Codex executable path. Confirm both task workers
+   have entered claim long-polls, then make only that temporary executable unavailable.
+2. Create a Codex-only Goal. A parked poll may receive the Goal using its earlier capability
+   snapshot, but Grid must revalidate before `task.attempt_started`, process spawn, model inference,
+   or tool execution.
+3. Confirm A logs an immediate stale-claim decline and the same row returns to `queued`, unassigned,
+   at `attempt: 0`, with no attempt-start, retry, inference, tool, or eval evidence.
+4. Restore or atomically replace the temporary executable. Confirm the running provider discovers
+   the new executable revision without restarting inference, claims the same row as attempt 1, and
+   completes normally.
+
+Repeat with a Claude-only temporary shim. A release fails if either stale delivery consumes an
+attempt, starts a harness, or can be replayed later to revoke the restored claim.
+
 ## Model-outage and harness-dialect scenario
 
 Run this separately to prove task capacity never substitutes for inference readiness:
@@ -142,6 +160,7 @@ not accepted from screenshots alone.
 | Native path portability | B and C resume Codex using rollout paths beneath their own distinct task roots; A's absolute path is never reused |
 | Codex protocol preflight | A/C versions and `grid agent status`; both exact executable schemas pass before either node polls |
 | Detected harness crash | Retry reason is `native_harness_failure`; accepted worktree/transcript checkpoint pins become attempt 2 inputs |
+| Multi-worker stale claim | Two claim polls observed; exact stale lease declined; row remains attempt 0 with no execution/eval evidence; restored executable starts attempt 1 |
 | Evaluation | each definition hash, evaluator node, exact result commit, score and evidence |
 | Terminal state | Goal `complete`; zero queued/running turns for its conversation |
 

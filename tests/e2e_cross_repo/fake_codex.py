@@ -474,6 +474,21 @@ def main() -> int:
                         "turn": {"status": "failed", "error": str(exc)}}})
         elif method == "thread/goal/get":
             if os.environ.get("GRID_E2E_GOAL_SCENARIO") == "codex_protocol_drift":
+                # Hold the disappearing method until another worker has entered a NEW claim poll
+                # with this still-admitted executable revision. Removing the marker prevents an
+                # old/expired poll from satisfying the proof; the next provider poll recreates it.
+                marker_value = os.environ.get("GRID_E2E_CLAIM_MARKER")
+                if marker_value:
+                    marker = Path(marker_value)
+                    marker.unlink(missing_ok=True)
+                    deadline = time.monotonic() + 10
+                    while not marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    if not marker.exists():
+                        emit({"id": request["id"], "error": {
+                            "code": -32000,
+                            "message": "no concurrent stale claim poll entered before drift"}})
+                        continue
                 emit({"id": request["id"], "error": {
                     "code": -32601, "message": "thread/goal/get removed after schema generation"}})
             else:

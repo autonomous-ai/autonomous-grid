@@ -319,6 +319,20 @@ def main() -> int:
         _emit({"type": "assistant", "message": {"usage": {
             "input_tokens": 12, "output_tokens": 8}, "content": [
             {"type": "text", "text": "Claude wrote a partial artifact before protocol drift"}]}})
+        # Synchronize the race proof with a NEW claim poll, not merely a second thread that once
+        # polled before this child started. The relay's E2E claim timeout is intentionally short;
+        # removing the marker forces us to observe another worker enter a fresh long-poll while
+        # this executable is still advertised, then the protocol disappears immediately.
+        marker_value = os.environ.get("GRID_E2E_CLAIM_MARKER")
+        if marker_value:
+            marker = pathlib.Path(marker_value)
+            marker.unlink(missing_ok=True)
+            deadline = time.monotonic() + 10
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            if not marker.exists():
+                sys.stderr.write("no concurrent stale claim poll entered before Claude drift\n")
+                return 2
         # Exit zero without goal_status. Grid must classify this as deterministic native protocol
         # drift, quarantine this exact Claude revision, and hand its Git/transcript checkpoint to a
         # different harness instead of accepting success or letting A consume another attempt.

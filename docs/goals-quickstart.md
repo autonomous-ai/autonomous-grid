@@ -46,6 +46,15 @@ terminal attachment cannot say the condition is both met and impossible. Determi
 drift quarantines only that executable revision from `native_goal`; the same Claude installation
 can still claim ordinary tasks, and replacing or repairing it automatically reruns admission.
 
+Capability admission is rechecked after claim delivery and before Grid records
+`task.attempt_started`. This matters when one node runs several task workers: a second long-poll may
+still hold the capability snapshot from just before its sibling quarantined Codex or Claude. Grid
+declines that exact delivered lease, identified by attempt plus lease expiry, and the relay returns
+the turn to the queue with its attempt counter restored. No checkout, native process, model request,
+tool call, or business action starts. A delayed duplicate cannot revoke a newer lease, and a decline
+is refused once attempt-start exists; failures after that fence use the ordinary checkpoint/retry
+protocol instead.
+
 The provider advertises each native Goal harness it can actually run. Restrict a node explicitly
 with `GRID_TASK_AGENT_KINDS=codex` or `GRID_TASK_AGENT_KINDS=claude` when desired.
 An empty, unsupported, or unavailable-only policy fails closed: the node retires task serving
@@ -305,6 +314,12 @@ capability advertisement or a local permission fault) follows the same bounded r
 of terminally failing the Goal on one computer. If every capable node fails, the existing attempt
 cap ends the Goal as `retries_exhausted` rather than retrying forever.
 
+A delivered claim whose harness became ineligible while its long-poll was waiting is earlier than
+that failure boundary: the provider revalidates the relay-supplied required capabilities before
+attempt-start and returns the untouched lease immediately. That delivery race consumes no attempt.
+During a provider-first rolling upgrade, an older relay may not yet expose the decline route; the
+worker still starts no agent and safely falls back to lease-expiry recovery.
+
 When Codex marks the Goal complete, the last task becomes terminal and no next task is queued. The
 Goal disappears from the default `grid goal list`, while its Goal row, task attempts, events,
 trajectory and counters remain available for audit and future `grid train` datasets. Unlike
@@ -449,8 +464,8 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 | Mixed game | A -> B -> C | Codex -> Claude -> Codex | A and B die mid-feature | HTML wiring, click/score behavior, styling and instructions |
 | Eval-repair game | A -> B -> C -> D | Codex -> Claude -> Codex -> Claude | A/B die; C nominates broken behavior | Failed C score plus passing D repair on exact commits |
 | Crash-safe game | A -> B | Codex -> Codex | A's native harness crashes after writing partial work | HTML wiring, click/score behavior, styling and instructions |
-| Claude protocol drift | A -> B | Claude -> Codex | A exits cleanly without its native evaluator attachment | A stays online without `native_goal`; B receives the same turn and accepted Git/transcript pins |
-| Codex protocol drift | A -> B | Codex -> Claude | A's schema passes but a required runtime method disappears | A stays online without `native_goal`; B receives the same turn and accepted Git/transcript pins |
+| Claude protocol drift | A (2 workers) -> B | Claude -> Codex | A exits cleanly without its native evaluator attachment while worker 2 holds a stale claim poll | Worker 2 declines the delivered retry without spending an attempt; A stays online without `native_goal`; B receives attempt 2 and accepted Git/transcript pins |
+| Codex protocol drift | A (2 workers) -> B | Codex -> Claude | A's schema passes but a required runtime method disappears while worker 2 holds a stale claim poll | Worker 2 declines the delivered retry without spending an attempt; A stays online without `native_goal`; B receives attempt 2 and accepted Git/transcript pins |
 | Crash-safe business action | A -> B | Codex -> Codex | API commits, then A's native harness crashes | One side effect; stable key; complete action evidence; passing proof |
 | Image artifact | B polls; A executes | Claude rejected; Codex selected | Capability mismatch | PNG file and size |
 | Support reply | A polls; B -> C execute | Codex | B dies after API commit; first eval fails | `DONE.md`; JSON outcome; one API side effect |

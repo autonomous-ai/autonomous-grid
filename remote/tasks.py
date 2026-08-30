@@ -288,6 +288,22 @@ def checkpoint_retry_once(serve_state: Any, task_id: str, **checkpoint: Any) -> 
             serve_state.signaling_url, serve_state.token(), task_id, **checkpoint)
 
 
+def decline_claim_once(serve_state: Any, task_id: str, *, attempt: int,
+                       lease_expires_at: str) -> dict[str, Any]:
+    """Return one unstarted stale Goal claim; refresh a rotated credential exactly once."""
+    token = serve_state.token()
+    try:
+        return relay.decline_task_claim(
+            serve_state.signaling_url, token, task_id,
+            attempt=attempt, lease_expires_at=lease_expires_at)
+    except relay.RelayUnauthorized:
+        if not serve_state.refresh(stale_token=token):
+            raise
+        return relay.decline_task_claim(
+            serve_state.signaling_url, serve_state.token(), task_id,
+            attempt=attempt, lease_expires_at=lease_expires_at)
+
+
 def _agent_kinds() -> tuple[str, ...]:
     """Harnesses this process can really execute; never advertise Codex optimistically."""
     configured = (os.getenv("GRID_TASK_AGENT_KINDS") or "claude,codex").replace(",", " ").split()
@@ -344,6 +360,62 @@ def _agent_profiles() -> tuple[dict[str, Any], ...]:
                                    | _declared_capabilities("GRID_CODEX_GOAL_CAPABILITIES")),
         })
     return tuple(profiles)
+
+
+def _claim_supported_now(job: dict[str, Any]) -> bool:
+    """Revalidate a delivered Goal against the live harness profile before attempt-start.
+
+    A claim long-poll advertises once and can wait while another worker quarantines the exact Codex
+    or Claude executable revision. The relay correctly selected against the request it received,
+    but that answer can be obsolete by delivery. Ordinary tasks preserve their established
+    behavior; only native Goals have a capability policy and the decline protocol.
+    """
+    goal = job.get("goal")
+    if not isinstance(goal, dict):
+        return True
+    kind = job.get("agent_kind")
+    if kind not in ("claude", "codex"):
+        return False
+    required = goal.get("required_capabilities", [])
+    if (not isinstance(required, list)
+            or any(not isinstance(value, str) or not _CAPABILITY.fullmatch(value)
+                   for value in required)):
+        return False
+    needed = {"native_goal", *required}
+    for profile in _agent_profiles():
+        if profile.get("kind") != kind:
+            continue
+        capabilities = profile.get("capabilities")
+        return isinstance(capabilities, list) and needed <= set(capabilities)
+    return False
+
+
+def _decline_stale_goal_claim(state: Any, job: dict[str, Any]) -> None:
+    """Best-effort safe release of a claim that must never reach its native harness."""
+    task_id = job.get("task_id")
+    attempt = job.get("attempt")
+    lease_expires_at = job.get("lease_expires_at")
+    if (not isinstance(task_id, str) or not task_id
+            or not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1
+            or not isinstance(lease_expires_at, str) or not lease_expires_at):
+        _warn(
+            "a delivered Goal claim no longer matches this node's live harness capabilities, but "
+            "its relay payload lacks the claim identity needed for an immediate safe decline; no "
+            "agent will start and the lease will expire for bounded recovery")
+        return
+    try:
+        decline_claim_once(
+            state, task_id, attempt=attempt, lease_expires_at=lease_expires_at)
+        _warn(
+            f"declined stale Goal claim {task_id} attempt {attempt} before attempt-start; the "
+            "relay returned it to the distributed queue without spending retry budget")
+    except (Exception, SystemExit) as exc:
+        # Safety does not depend on this endpoint being present during a rolling upgrade: the
+        # provider still refuses to start. An older relay reclaims the untouched lease through its
+        # existing bounded reaper path, at the cost of that old relay counting the delivery.
+        _warn(
+            f"could not immediately decline stale Goal claim {task_id} attempt {attempt} "
+            f"({exc!r}); no agent will start and lease-expiry recovery remains active")
 
 
 class _Collected:
@@ -1220,6 +1292,14 @@ def task_loop(state: Any, capacity: Any = None) -> None:
             continue
 
         agent_claims_suspended = False
+        if not _claim_supported_now(job):
+            # The long-poll that returned this job may have been waiting with a capability snapshot
+            # from before another worker quarantined the exact harness revision. Recheck BEFORE
+            # `_publisher_for` records attempt-start and before checkout, process spawn, or any
+            # business action. The relay's decline fence makes this a delivery race rather than a
+            # consumed Goal attempt; on an older relay the untouched lease still expires safely.
+            _decline_stale_goal_claim(state, job)
+            continue
         _run_and_report(state, job, capacity)
 
 

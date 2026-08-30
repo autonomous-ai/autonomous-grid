@@ -298,7 +298,7 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
     def _spawn(label: str, *, agent_kinds: str = "codex", scenario: str = "codex",
                disk_label: str | None = None, codex_capabilities: str = "",
                claude_capabilities: str = "", tool_origins: str = "",
-               one_task: bool = False):
+               one_task: bool = False, task_workers: int = 1):
         node_id, node_token = provider_nodes[label]
         # This process emulates only the task/agent plane.  The separate registration emulates a
         # compatible Grid inference route and refreshes its heartbeat before each scenario; the
@@ -318,6 +318,7 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
             "GRID_E2E_GOAL_NODE": label,
             "GRID_E2E_GOAL_SCENARIO": scenario,
             "GRID_E2E_ONE_TASK": "1" if one_task else "0",
+            "GRID_E2E_TASK_WORKERS": str(task_workers),
             "GRID_TASK_AGENT_KINDS": agent_kinds,
             "GRID_CODEX_GOAL_CAPABILITIES": codex_capabilities,
             "GRID_CLAUDE_TASK_CAPABILITIES": claude_capabilities,
@@ -327,6 +328,9 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
             "GRID_TASK_ENV_PASSTHROUGH": "GRID_E2E_GOAL_NODE,GRID_E2E_GOAL_SCENARIO",
         }
         log_path = tmp_path_factory.mktemp(f"goal-provider-{label}") / "provider.log"
+        claim_marker = log_path.parent / "claim-poll-entered"
+        env["GRID_E2E_CLAIM_MARKER"] = str(claim_marker)
+        env["GRID_TASK_ENV_PASSTHROUGH"] += ",GRID_E2E_CLAIM_MARKER"
         handle = open(log_path, "w", buffering=1)
         handles.append(handle)
         proc = subprocess.Popen(

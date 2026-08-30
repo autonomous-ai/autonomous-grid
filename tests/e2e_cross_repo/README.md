@@ -60,8 +60,8 @@ interactive JSON-RPC fixture then proves those declared methods during execution
 | Quota recovery | A Codex polls; inference-only C heartbeats | Route exists but its subscription seat reports `serving: false` | No attempt/evidence during withdrawal; same row wakes on C's healthy heartbeat |
 | Four-feature game | A Codex -> B Codex -> C Codex | A and B are killed mid-turn | Same rows are reclaimed; commit-pinned wiring/click/score/style evals pass |
 | Native crash checkpoint | A Codex -> B Codex | A's app-server fails after partial work | Same turn immediately requeues; B restores partial tree/thread and behavior evals pass |
-| Claude protocol drift | A Claude -> B Codex | A exits zero without its native evaluator attachment | A is quarantined from Goals but stays online; same turn/checkpoint moves to B and evals pass |
-| Codex protocol drift | A Codex -> B Claude | Schema passes, then `thread/goal/get` returns method-not-found | A is quarantined from Goals but stays online; same turn/checkpoint moves to B and evals pass |
+| Claude protocol drift | A Claude (2 workers) -> B Codex | A exits zero without its native evaluator attachment while worker 2 has a stale capability poll | Worker 2 visibly declines the delivery without spending an attempt; A stays online; same turn/checkpoint moves to B and evals pass |
+| Codex protocol drift | A Codex (2 workers) -> B Claude | Schema passes, then `thread/goal/get` returns method-not-found while worker 2 has a stale capability poll | Worker 2 visibly declines the delivery without spending an attempt; A stays online; same turn/checkpoint moves to B and evals pass |
 | Native crash after API commit | A Codex -> B Codex | A's app-server fails after a successful business mutation | Stable key yields one side effect; both attempts retain request/result evidence |
 | Mixed game | A Codex -> B Claude -> C Codex | Two machine losses across unlike harnesses | Shared continuity plus commit-pinned behavior evals across harnesses |
 | Cross-harness eval repair | A Codex -> B Claude -> C Codex -> D Claude | C nominates plausible but broken interaction | D restores B's Claude session across Codex, consumes failed eval evidence, and repairs it |
@@ -73,6 +73,13 @@ interactive JSON-RPC fixture then proves those declared methods during execution
 The native-crash case starts each provider in one-claim mode so A withdraws after handing off its
 checkpoint and cannot race B for its own immediate retry. This changes only the test process
 lifecycle; production claim, checkpoint, retry, and settlement code remains untouched.
+
+The two protocol-drift cases do the opposite: A runs two real task-loop threads. The fake native
+harness removes a synchronization marker and waits until the second thread enters a fresh claim
+long-poll with the pre-quarantine profile, then triggers drift. The test does not start B until A's
+log proves that stale delivery was declined and the relay again shows the same turn queued at
+attempt 1. B must therefore receive attempt 2; a lucky race by B or a hidden retry-budget burn
+cannot make either case pass.
 The full matrix also leaves providers long-polling immediately before fixture teardown. The relay
 checks socket disconnects on both sides of assignment and returns any response that cannot be
 delivered to the queue without consuming an attempt; otherwise an orphan request from one scenario
