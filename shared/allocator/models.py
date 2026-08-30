@@ -630,6 +630,12 @@ class DemandForecast:
     updated_at: float = 0.0
     observed_requests_per_minute: float = 0.0
     canary_only: bool = False
+    # The controller proved a specific planner-discovered replacement path against current
+    # baseline, direct-demand, active-workload, and replica-floor guards. This upgrades one
+    # portfolio canary from spare-only placement to bounded preemption authority.
+    preemption_authorized: bool = False
+    preemption_node_id: str = ""
+    preemption_victims: tuple[str, ...] = ()
     # Known time until correlation-only demand is expected. ``None`` means the predictor has no
     # calibrated timing evidence; zero is a real prediction that demand is already due.
     prediction_lead_seconds: float | None = None
@@ -639,6 +645,24 @@ class DemandForecast:
             raise ValueError("model_id is required")
         if not isinstance(self.canary_only, bool):
             raise ValueError("canary_only must be a boolean")
+        if not isinstance(self.preemption_authorized, bool):
+            raise ValueError("preemption_authorized must be a boolean")
+        if (
+            len(self.preemption_node_id) > MAX_ID_LENGTH
+            or any(not value or len(value) > MAX_ID_LENGTH for value in self.preemption_victims)
+        ):
+            raise ValueError("preemption authorization path is invalid")
+        if self.preemption_authorized != bool(
+            self.preemption_node_id and self.preemption_victims
+        ):
+            raise ValueError(
+                "preemption authorization requires an exact node and victim set"
+            )
+        object.__setattr__(
+            self,
+            "preemption_victims",
+            _canonical_set(self.preemption_victims),
+        )
         if self.prediction_lead_seconds is not None:
             if isinstance(self.prediction_lead_seconds, bool):
                 raise ValueError(

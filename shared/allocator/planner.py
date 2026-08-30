@@ -2060,6 +2060,7 @@ class PlacementPlanner:
                 beneficiary,
                 forecast_by_model.get(beneficiary.model_id),
             )
+            beneficiary_forecast = forecast_by_model.get(beneficiary.model_id)
             placed = sum(item.model_id == beneficiary.model_id for item in assignments)
             if beneficiary_urgency == 0 or (beneficiary_urgency == 1 and placed > 0):
                 # Speculation may acquire one fair canary by replacing only stale speculation or
@@ -2078,6 +2079,16 @@ class PlacementPlanner:
             ]
             if beneficiary_urgency == 1:
                 preemption_targets = preemption_targets[:1]
+            authorized_victims: frozenset[str] | None = None
+            if (
+                beneficiary_forecast is not None
+                and beneficiary_forecast.preemption_authorized
+                and not pending_pins
+            ):
+                preemption_targets = [beneficiary_forecast.preemption_node_id]
+                authorized_victims = frozenset(
+                    beneficiary_forecast.preemption_victims
+                )
             preemption_cache = (
                 _PreemptionSearchCache()
                 if not pending_pins and beneficiary.min_failure_domains <= 1
@@ -2116,6 +2127,7 @@ class PlacementPlanner:
                     max_victims=(self.policy.max_staged_preemptions - len(preemptions)),
                     assignments_by_node=assignments_by_node,
                     candidate_cache=preemption_cache,
+                    required_victim_ids=authorized_victims,
                 )
                 if not staged:
                     break
@@ -2411,6 +2423,11 @@ class PlacementPlanner:
         assignment_pairs = {
             (item.node_id, item.model_id) for item in assignments
         }
+        preemption_beneficiary_pairs = {
+            (item.node_id, item.for_model_id)
+            for item in preemptions
+            if item.for_model_id
+        }
         placed_by_model = Counter(item.model_id for item in assignments)
         # Begin after every uncached desired assignment has reserved its artifact bytes. A
         # speculative transfer must not race a real load for the same free-disk observation.
@@ -2472,6 +2489,7 @@ class PlacementPlanner:
                 )
                 if (
                     pair not in assignment_pairs
+                    and pair not in preemption_beneficiary_pairs
                     and not predictive_artifact_present(node, model)
                     # Predictive provenance and bounded cleanup arrived with the EVICT actuator.
                     # Legacy nodes may still receive ordinary/preemption LOAD work, but must not
@@ -3019,6 +3037,8 @@ def _placement_demand_urgency(
         return 3
     if forecast is None:
         return 0
+    if forecast.preemption_authorized:
+        return 2
     observed_rate = forecast.observed_requests_per_minute
     # Forecasts supplied by older peers/tests predate the explicit observed field. No correlation
     # lineage means their ordinary request rate is direct evidence, preserving wire compatibility.
@@ -3667,6 +3687,7 @@ def _priority_preemption_candidates(
     load_seconds: Mapping[tuple[str, str], float],
     *,
     required_node_id: str | None,
+    required_victim_ids: frozenset[str] | None,
     excluded_nodes: set[str],
 ) -> list[_PreemptionCandidate]:
     """Prove every currently independent node-local victim set in one fleet scan."""
@@ -3890,6 +3911,12 @@ def _priority_preemption_candidates(
                     displaced_assignments=displaced_assignments,
                 )
             )
+            if (
+                required_victim_ids is not None
+                and frozenset(item.model_id for item in selected)
+                != required_victim_ids
+            ):
+                candidates.pop()
             break
     return candidates
 
@@ -3919,6 +3946,7 @@ def _stage_priority_preemption(
     max_victims: int,
     assignments_by_node: dict[str, list[PlacementAssignment]],
     candidate_cache: _PreemptionSearchCache | None,
+    required_victim_ids: frozenset[str] | None,
 ) -> tuple[str, tuple[ModelResidency, ...]] | None:
     """Prove a lower-priority/evidence eviction path, then return its bounded next wave."""
 
@@ -3946,6 +3974,7 @@ def _stage_priority_preemption(
             startup_seconds,
             load_seconds,
             required_node_id=required_node_id,
+            required_victim_ids=required_victim_ids,
             excluded_nodes=excluded_nodes,
         )
         if candidate_cache is not None:
@@ -4475,6 +4504,9 @@ def _input_digest(
                     "prediction_lead_seconds": item.prediction_lead_seconds,
                     "observed_requests_per_minute": item.observed_requests_per_minute,
                     "canary_only": item.canary_only,
+                    "preemption_authorized": item.preemption_authorized,
+                    "preemption_node_id": item.preemption_node_id,
+                    "preemption_victims": item.preemption_victims,
                     "sample_count": item.sample_count,
                     "updated_at": item.updated_at,
                 }

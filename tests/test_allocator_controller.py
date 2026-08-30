@@ -21,6 +21,7 @@ from shared.allocator.models import (
     ModelResidency,
     MutationAction,
     NodeSnapshot,
+    PlacementPreemption,
     PlacementPlan,
     ResidencyState,
 )
@@ -1430,6 +1431,83 @@ def test_late_binding_does_not_replace_a_model_for_an_active_workload():
     assert controller.last_plan is not None
     assert controller.last_plan.preemptions == ()
     assert not any(action.kind == ActionKind.DRAIN for action in result.actions)
+
+
+def test_scarce_portfolio_rebalances_a_speculative_slot_for_dominant_pressure():
+    controller = AllocatorController(
+        planner_policy=PlannerPolicy(memory_headroom_fraction=0)
+    )
+    for model_id, workload in (
+        ("incumbent", "embedding"),
+        ("challenger", "coding"),
+    ):
+        controller.put_profile(
+            ModelProfile(
+                model_id,
+                8_000,
+                runtimes=("llama.cpp",),
+                backends=("metal",),
+                min_replicas=0,
+                max_replicas=1,
+                replica_concurrency=10,
+                min_residency_seconds=0,
+                scale_down_cooldown_seconds=0,
+                workload_scores=((workload, 1.0),),
+            )
+        )
+    for timestamp in (95, 96, 97):
+        controller.observe_lifecycle(
+            RequestFeatures("embeddings", "auto", "embedding"),
+            served_model="incumbent",
+            service_seconds=1,
+            timestamp=timestamp,
+        )
+    for timestamp in (98, 99, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("chat/completions", "auto", "coding"),
+            service_seconds=60,
+            queue_depth=3,
+            timestamp=timestamp,
+        )
+    saturated = NodeSnapshot(
+        "one-slot",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        max_models=1,
+        residencies=(
+            ModelResidency(
+                "incumbent",
+                8_000,
+                ResidencyState.READY,
+                loaded_at=1,
+                last_used_at=100,
+                managed=True,
+            ),
+        ),
+        last_heartbeat=100,
+    )
+
+    result = controller.tick((saturated,), now=100)
+    status = controller.status((saturated,), now=100)
+    coding = next(
+        row for row in status["portfolio_projections"] if row["workload"] == "coding"
+    )
+    challenger = next(
+        row for row in coding["candidates"] if row["model_id"] == "challenger"
+    )
+
+    assert challenger["selectable"] is True
+    assert challenger["placement"]["portfolio_complete_feasible"] is False
+    assert challenger["placement"]["portfolio_preemption_blockers"] == []
+    assert controller.last_plan is not None
+    assert controller.last_plan.preemptions == (
+        PlacementPreemption("one-slot", "incumbent", "challenger"),
+    )
+    assert any(
+        action.kind == ActionKind.DRAIN and action.model_id == "incumbent"
+        for action in result.actions
+    )
 
 
 def test_late_binding_can_reclaim_only_an_excess_active_replica():

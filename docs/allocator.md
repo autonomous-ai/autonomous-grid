@@ -134,7 +134,13 @@ first path that preserves direct/baseline work and the active victim's required 
 If a clean structural plan proves the recovered fleet can host one preferred model per active
 workload portfolio, one copy of each active model remains protected while an excess replica may be
 reclaimed to end whole-workload starvation. If that complete portfolio cannot fit—as on the scarce
-four-node fixture—the full demand-derived floor remains protected, preventing futile rotation.
+four-node fixture—the allocator normally retains the demand-derived floor. A mature beneficiary
+with at least 1.5× the incumbent's confidence-weighted device-time pressure may instead use one
+exact planner-proved replacement path. Pinned models, configured minimum replicas, and directly
+named demand remain absolute fences. The controller carries this authorization explicitly into the
+forecast, and an unvalidated replacement is capped at one canary. The portfolio evaluator counts
+the staged beneficiary as future service only when the authoritative plan names its preemption;
+intended capacity is never treated as physically free.
 
 When two or more workload classes are active, Grid no longer picks each model independently. It
 starts from the evidence-backed choices and runs a deterministic bounded coordinate search over
@@ -986,6 +992,9 @@ uv run grid test scenario --machines 16 --models 9 --users 500 --duration 2h --j
 uv run grid test scenario --machines 8 --models 8 --users 50 --duration 2h \
   --workload-trace coding=/path/to/trace.csv \
   --workload-trace image=/path/to/image-trace.csv
+uv run grid test scenario --machines 4 --models 8 --users 50 --duration 2h \
+  --seed 144 --strategy greedy
+uv run grid test graduate --machines 2,4,8 --seeds 42,144 --duration 2h
 ```
 
 The lab creates logical Apple/Metal, ComfyUI/MPS, and NVIDIA/vLLM/ComfyUI configurations with
@@ -1015,6 +1024,31 @@ prints every changing tick; `--json` emits the complete stable report;
 reusing `--seed` reproduces the same run. Artifact disk constraints are translated into each
 one-model logical node's admission set, while the allocator's native runtime, backend, lifecycle,
 memory, headroom, and model-slot rules remain authoritative.
+The simulator also applies the reconciler's minimum-residency fence before materializing a desired
+removal. Deferred drains remain physically resident and appear in the timeline, so an aggressive
+plan cannot earn fake service or churn credit for a transition the real node would refuse.
+
+The overall score keeps raw served demand, suitability, SLO attainment, lifecycle efficiency, and
+safety, but evaluates minimum-user and SLO terms over structurally allocatable workloads. A
+runtime/backend-incompatible video request still lowers raw fleet service and appears as a capacity
+gap; it does not make every allocator tie at zero on decision quality. A normalized logarithmic
+feasible-workload coverage term makes abandoning an entire supported user need visible while still
+rewarding improvements near full service.
+`--strategy` runs the exact same topology, user population, arrival trace, failures, routing
+physics, and one-tick startup delay under one of four controls. `smart` is the production workload
+intelligence and planner. `reactive` removes workflow correlation, lookahead, and predictive cache
+work. `greedy` maps only the current minute's visible workload to its highest-suitability feasible
+model and uses the ordinary constrained placement planner. `static` receives the declared user
+population's average workload mix once, fixes that host/model map, and never reschedules around a
+failure. These are deliberately competent baselines; they do not receive future request arrivals.
+
+`grid test graduate` runs all four strategies for every requested fleet size and seed. It refuses
+to graduate on a single attractive score: the machine-readable gates require zero smart-policy
+safety violations, identical demand traces, bounded score and service regressions, a material
+median service gain over static placement, substantially less churn than minute-greedy control,
+competitive least-workload service on the largest fleet, and measured predictive startup savings
+over reactive-only control. A failed gate is the work queue for the next allocator improvement;
+passing the matrix is the feature-freeze criterion for the logical-machine phase.
 Scenario artifacts carry deterministic immutable identities and sources. A learned correlation-only
 prefetch therefore consumes modeled disk without consuming a model slot, and a later placement
 records a real cache hit. The scorecard reports prefetch downloads, hits, unused predictions,

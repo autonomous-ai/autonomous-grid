@@ -623,8 +623,10 @@ process actuation:
 
 ```
 grid test scenario [--machines N] [--models N] [--users N]
-    [--duration 30m|2h] [--seed N]
+    [--duration 30m|2h] [--seed N] [--strategy smart|reactive|greedy|static]
     [--workload-trace WORKLOAD=CSV]... [--oracle] [--timeline] [--json]
+grid test graduate [--machines N,N,...] [--seeds N,N,...]
+    [--models N] [--users N] [--duration 30m|2h] [--json]
 grid test start [--machines N] [--candidate-model GGUF]...
     [--workload-model WORKLOAD=GGUF]...
     [--include-comfyui --media-bundle z_image]
@@ -646,6 +648,9 @@ workload's original mean demand, so it compares burst shapes without silently ch
 and 240 minutes. It reports the clairvoyant service ceiling, potential placement gain,
 minimum-churn winning schedule, and artifact/startup feasibility; it remains a planning benchmark
 and starts no engines.
+`test graduate` replays identical traces through smart, reactive-only, current-demand greedy, and
+fixed static strategies. It prints per-case score, service, and churn comparisons plus explicit
+pass/fail gates; a failing gate exits nonzero and identifies the next allocator weakness to fix.
 `--workload-model` gives the real test
 Grid explicit model capabilities such as `coding=qwen-coder.gguf` or
 `research=qwen-instruct.gguf`; several workloads may share one model. With those bindings,

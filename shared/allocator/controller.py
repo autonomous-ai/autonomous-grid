@@ -12,7 +12,7 @@ import math
 import threading
 import time
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
@@ -61,6 +61,9 @@ _MAX_JOINT_PORTFOLIO_EVALUATIONS = 64
 _MAX_JOINT_EXPLORATION_MODELS = 1
 _MAX_JOINT_PREEMPTION_MODELS = 1
 _SPARE_CANARY_RESERVE_SLOTS = 2
+_SCARCE_REBALANCE_MIN_PRESSURE_GAIN = 1.5
+_PORTFOLIO_FAILURE_HYSTERESIS_STEP = 0.5
+_PORTFOLIO_PRESSURE_HYSTERESIS_STEP = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1076,6 +1079,7 @@ class AllocatorController:
                     "objective": (
                         "preserve required service; maximize admitted workload coverage; "
                         "restore recently failing workloads among equally broad portfolios; "
+                        "cross material failure/pressure bands before changing a stable portfolio; "
                         "maximize service-time-aware resource pressure and request coverage; "
                         "minimize replica shortfall; maximize measured model utility"
                     ),
@@ -1408,6 +1412,37 @@ class AllocatorController:
             compute_input_digest=False,
         )
         baseline_targets = dict(baseline.desired_replicas)
+        direct_by_model = {forecast.model_id: forecast for forecast in direct}
+
+        def direct_pressure(forecast: DemandForecast | None) -> bool:
+            if forecast is None:
+                return False
+            observed_rate = forecast.observed_requests_per_minute
+            if not observed_rate and not forecast.correlation_sources:
+                observed_rate = forecast.requests_per_minute
+            return bool(
+                observed_rate > 0
+                or forecast.queue_depth > 0
+                or forecast.p95_latency_ms > 0
+                or forecast.error_rate > 0
+                or (
+                    forecast.offered_concurrency > 0
+                    and not forecast.correlation_sources
+                )
+            )
+
+        baseline_floor_targets = {
+            model_id: min(
+                target,
+                max(
+                    profile_by_id[model_id].min_replicas,
+                    len(profile_by_id[model_id].pinned_nodes),
+                    int(direct_pressure(direct_by_model.get(model_id))),
+                ),
+            )
+            for model_id, target in baseline_targets.items()
+            if target > 0 and model_id in profile_by_id
+        }
         horizon_planner = PlacementPlanner(
             replace(self.planner.policy, preserve_recent_residencies=False)
         )
@@ -1509,6 +1544,22 @@ class AllocatorController:
                 for item in horizon_plan.preemptions
                 if item.for_model_id
             }
+            horizon_service_replicas = dict(horizon_placed)
+            horizon_staged_replicas: Counter[str] = Counter()
+            for node_id, model_id in {
+                (item.node_id, item.for_model_id)
+                for item in horizon_plan.preemptions
+                if item.for_model_id
+            }:
+                if not any(
+                    assignment.node_id == node_id
+                    and assignment.model_id == model_id
+                    for assignment in horizon_plan.assignments
+                ):
+                    horizon_staged_replicas[model_id] += 1
+                    horizon_service_replicas[model_id] = (
+                        horizon_service_replicas.get(model_id, 0) + 1
+                    )
             # A placement hint proves only that some structurally safe transition exists. The
             # evaluated full-fleet plan is authoritative about whether that transition remains
             # safe alongside every other selected workload. Never credit a preemption-only model
@@ -1521,17 +1572,29 @@ class AllocatorController:
                 result = (float("-inf"),)
                 evaluation_cache[key] = result
                 return result
-            baseline_coverage = sum(
+            baseline_target_coverage = sum(
                 min(placed.get(model_id, 0), target)
                 * (1.0 + profile_by_id[model_id].priority)
                 for model_id, target in baseline_targets.items()
                 if target > 0 and model_id in profile_by_id
             )
-            horizon_baseline_coverage = sum(
-                min(horizon_placed.get(model_id, 0), target)
+            horizon_baseline_target_coverage = sum(
+                min(horizon_service_replicas.get(model_id, 0), target)
                 * (1.0 + profile_by_id[model_id].priority)
                 for model_id, target in baseline_targets.items()
                 if target > 0 and model_id in profile_by_id
+            )
+            baseline_floor_coverage = sum(
+                min(placed.get(model_id, 0), target)
+                * (1.0 + profile_by_id[model_id].priority)
+                for model_id, target in baseline_floor_targets.items()
+                if target > 0
+            )
+            horizon_baseline_floor_coverage = sum(
+                min(horizon_service_replicas.get(model_id, 0), target)
+                * (1.0 + profile_by_id[model_id].priority)
+                for model_id, target in baseline_floor_targets.items()
+                if target > 0
             )
             pressure_coverage = 0.0
             request_coverage = 0.0
@@ -1560,7 +1623,10 @@ class AllocatorController:
                     float(row.get("requests_per_minute") or 0.0),
                 ) * confidence_weight
                 desired = max(1, horizon_plan.target_for(model_id))
-                ratio = min(1.0, horizon_placed.get(model_id, 0) / desired)
+                ratio = min(
+                    1.0,
+                    horizon_service_replicas.get(model_id, 0) / desired,
+                )
                 current_desired = max(1, plan.target_for(model_id))
                 current_ratio = min(
                     1.0,
@@ -1571,7 +1637,9 @@ class AllocatorController:
                 # last accelerator for a workload that otherwise receives zero service. Counting
                 # represented workloads here lets the joint search discover that consolidation;
                 # pressure and request volume still rank equally broad portfolios below.
-                workload_coverage += float(horizon_placed.get(model_id, 0) > 0)
+                workload_coverage += float(
+                    horizon_service_replicas.get(model_id, 0) > 0
+                )
                 # Among portfolios that admit the same number of distinct workloads, restore
                 # service to demand that is measurably failing before optimizing aggregate
                 # throughput. This is a bounded-window signal, not durable service debt: hard
@@ -1586,19 +1654,57 @@ class AllocatorController:
                     candidate_by_workload[workload][model_id].get("score") or 0.0
                 )
             missing = sum(item.missing_replicas for item in plan.unsatisfied)
+            current_service_pairs = {
+                (node.node_id, residency.model_id)
+                for node in nodes
+                for residency in node.residencies
+                if residency.state == ResidencyState.READY
+                and residency.model_id in profile_by_id
+                and profile_by_id[residency.model_id].matches_artifact(residency)
+            }
+            horizon_service_pairs = {
+                (item.node_id, item.model_id) for item in horizon_plan.assignments
+            }
+            horizon_service_pairs.update(
+                (item.node_id, item.for_model_id)
+                for item in horizon_plan.preemptions
+                if item.for_model_id
+            )
+            transition_changes = len(
+                current_service_pairs.symmetric_difference(horizon_service_pairs)
+            )
+            failure_band = math.floor(
+                failing_workload_coverage
+                / _PORTFOLIO_FAILURE_HYSTERESIS_STEP
+                + 1e-9
+            )
+            pressure_band = math.floor(
+                pressure_coverage
+                / _PORTFOLIO_PRESSURE_HYSTERESIS_STEP
+                + 1e-9
+            )
             result = (
                 (
-                    horizon_baseline_coverage,
-                    baseline_coverage,
+                    horizon_baseline_floor_coverage,
+                    baseline_floor_coverage,
                     workload_coverage,
+                    float(failure_band),
+                    float(pressure_band),
+                    -float(transition_changes),
                     failing_workload_coverage,
                     pressure_coverage,
                     request_coverage,
-                    -float(len(horizon_plan.assignments)),
+                    -float(sum(horizon_service_replicas.values())),
                     current_pressure_coverage,
+                    horizon_baseline_target_coverage,
+                    baseline_target_coverage,
                     -float(
                         sum(
-                            item.missing_replicas
+                            max(
+                                0,
+                                item.missing_replicas
+                                - horizon_staged_replicas[item.model_id],
+                            )
                             for item in horizon_plan.unsatisfied
                         )
                     ),
@@ -1607,7 +1713,7 @@ class AllocatorController:
                 )
                 if scarce_portfolio
                 else (
-                    baseline_coverage,
+                    baseline_target_coverage,
                     pressure_coverage,
                     request_coverage,
                     -float(missing),
@@ -3099,6 +3205,26 @@ def _portfolio_selection_hints(
         if str(row.get("workload") or "") in active_workloads
         and str(row.get("chosen_model") or "")
     }
+    projection_by_workload = {
+        str(row.get("workload") or ""): row for row in projections
+    }
+
+    def workload_rebalance_pressure(workload: str) -> float:
+        row = projection_by_workload.get(workload) or {}
+        confidence = 0.5 + 0.5 * float(row.get("confidence") or 0.0)
+        # Device-time pressure is the primary resource signal. Give current failures bounded
+        # urgency so a missing high-cost workload can displace a healthy low-cost speculative
+        # residency, but never manufacture authority over direct, pinned, or baseline service.
+        failure_multiplier = 1.0 + float(row.get("error_rate") or 0.0)
+        return (
+            max(1e-6, float(row.get("offered_concurrency") or 0.0))
+            * confidence
+            * failure_multiplier
+        )
+
+    pressure_by_preferred_model: defaultdict[str, float] = defaultdict(float)
+    for workload, model_id in preferred_selection.items():
+        pressure_by_preferred_model[model_id] += workload_rebalance_pressure(workload)
     protection_forecasts = intelligence.portfolio_forecasts(
         profile_list,
         direct_list,
@@ -3277,7 +3403,15 @@ def _portfolio_selection_hints(
                     profile.workload_score(workload) > 0
                     for workload in victim_workloads
                 )
-                if not replacement_preserves_coverage:
+                beneficiary_pressure = pressure_by_preferred_model[profile.model_id]
+                victim_pressure = pressure_by_preferred_model[victim_id]
+                pressure_rebalance = bool(
+                    not complete_portfolio_feasible
+                    and beneficiary_pressure
+                    >= max(1e-6, victim_pressure)
+                    * _SCARCE_REBALANCE_MIN_PRESSURE_GAIN
+                )
+                if not replacement_preserves_coverage and not pressure_rebalance:
                     blockers.add(victim_id)
             return blockers
 
@@ -3307,6 +3441,31 @@ def _portfolio_selection_hints(
         hint["portfolio_preemption_safe"] = preemption_safe
         hint["portfolio_preemption_blockers"] = sorted_blockers
         hint["portfolio_complete_feasible"] = complete_portfolio_feasible
+        beneficiary_pressure = pressure_by_preferred_model[profile.model_id]
+        victim_ids = sorted(
+            {
+                str(victim)
+                for path in paths
+                for victim in path.get("preemption_victims") or ()
+            }
+        )
+        hint["portfolio_rebalance_pressure"] = round(beneficiary_pressure, 6)
+        hint["portfolio_rebalance_required_pressure"] = round(
+            min(
+                (
+                    pressure_by_preferred_model[victim_id]
+                    * _SCARCE_REBALANCE_MIN_PRESSURE_GAIN
+                    for victim_id in victim_ids
+                    if victim_id not in hard_protected_models
+                ),
+                default=0.0,
+            ),
+            6,
+        )
+        hint["portfolio_rebalance_victim_pressures"] = {
+            victim_id: round(pressure_by_preferred_model[victim_id], 6)
+            for victim_id in victim_ids
+        }
         if hint.get("feasible_after_preemption") is True and sorted_blockers:
             hint["reason"] = (
                 str(hint.get("reason") or "planner-authorized preemption path")
@@ -3448,6 +3607,12 @@ def _portfolio_admissions(
                     placement.get("portfolio_preemption_blockers")
                     or placement.get("preemption_victims")
                     or ()
+                ),
+                rebalance_pressure=float(
+                    placement.get("portfolio_rebalance_pressure") or 0.0
+                ),
+                rebalance_required_pressure=float(
+                    placement.get("portfolio_rebalance_required_pressure") or 0.0
                 ),
             )
             rows.append(base)

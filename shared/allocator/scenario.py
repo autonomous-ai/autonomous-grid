@@ -21,13 +21,17 @@ from typing import Any, Iterable
 from shared.allocator.controller import AllocatorController
 from shared.allocator.intelligence import classify_request
 from shared.allocator.models import (
+    DemandForecast,
     ModelProfile,
     ModelResidency,
     NodeSnapshot,
     NodeState,
+    PlacementAssignment,
+    PlacementPlan,
     ResidencyState,
+    UnsatisfiedConstraint,
 )
-from shared.allocator.planner import PlannerPolicy
+from shared.allocator.planner import PlacementPlanner, PlannerPolicy
 from shared.allocator.scenario_oracle import (
     MAX_ORACLE_MACHINES,
     MAX_ORACLE_MINUTES,
@@ -46,6 +50,7 @@ class ScenarioConfig:
     seed: int = 42
     workload_traces: tuple[tuple[str, str], ...] = ()
     oracle: bool = False
+    strategy: str = "smart"
 
     def __post_init__(self) -> None:
         bounds = {
@@ -61,6 +66,10 @@ class ScenarioConfig:
             raise ValueError("seed must be an integer")
         if not isinstance(self.oracle, bool):
             raise ValueError("oracle must be a boolean")
+        if self.strategy not in SCENARIO_STRATEGIES:
+            raise ValueError(
+                "strategy must be one of " + ", ".join(SCENARIO_STRATEGIES)
+            )
         if self.oracle and (
             self.machines > MAX_ORACLE_MACHINES
             or self.models > MAX_ORACLE_MODELS
@@ -152,6 +161,7 @@ _REQUESTS: dict[str, tuple[str, str]] = {
 }
 
 SCENARIO_WORKLOADS = tuple(_REQUESTS)
+SCENARIO_STRATEGIES = ("smart", "reactive", "greedy", "static")
 _MAX_TRACE_BYTES = 5 * 1024 * 1024
 _MAX_TRACE_ROWS = 100_000
 
@@ -354,7 +364,8 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     machines = _build_machines(config.machines, catalog, topology_rng)
     personas = _build_personas(config.users, persona_rng)
     trace_curves = _load_trace_curves(config)
-    planner_policy = PlannerPolicy(memory_headroom_fraction=0.05, node_ttl_seconds=180)
+    planner_policy = _scenario_planner_policy(config.strategy)
+    baseline_planner = PlacementPlanner(planner_policy)
     controller = AllocatorController(planner_policy=planner_policy)
     profiles = tuple(item.profile for item in catalog)
     for profile in profiles:
@@ -393,6 +404,8 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     direct_named_requests = 0
     joint_portfolio_ticks = 0
     portfolio_changes = 0
+    rapid_lifecycle_reversals = 0
+    last_lifecycle_change: dict[tuple[str, str], tuple[int, str]] = {}
     admission_state_minutes: Counter[str] = Counter()
     admission_by_workload: defaultdict[str, Counter[str]] = defaultdict(Counter)
     admission_blocker_minutes: defaultdict[str, Counter[str]] = defaultdict(Counter)
@@ -412,9 +425,29 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
 
     base_time = 1_000_000.0
     nodes = _refresh_disk_admission(nodes, catalog, disk_available)
-    controller.tick(nodes, now=base_time - 30.0)
-    bootstrap = controller.last_plan
-    assert bootstrap is not None
+    if config.strategy == "static":
+        bootstrap = baseline_planner.plan(
+            nodes,
+            profiles,
+            _static_forecasts(
+                personas,
+                nodes,
+                profiles,
+                planner=baseline_planner,
+                now=base_time - 30.0,
+            ),
+            now=base_time - 30.0,
+        )
+    elif config.strategy == "greedy":
+        bootstrap = baseline_planner.plan(
+            nodes,
+            profiles,
+            now=base_time - 30.0,
+        )
+    else:
+        controller.tick(nodes, now=base_time - 30.0)
+        bootstrap = controller.last_plan
+        assert bootstrap is not None
     bootstrap_violations = _validate_plan(
         bootstrap.assignments,
         nodes,
@@ -441,6 +474,17 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         nodes,
         base_time - 15.0,
         profiles=profile_by_id,
+    )
+    frozen_static_plan = (
+        replace(
+            bootstrap,
+            assignments=tuple(replace(item, existing=True) for item in bootstrap.assignments),
+            artifact_prefetches=(),
+            artifact_evictions=(),
+            preemptions=(),
+        )
+        if config.strategy == "static"
+        else None
     )
     if bootstrap_loads:
         timeline.append(
@@ -638,24 +682,27 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             )
             succeeded = bool(served_model and outcome_rng.random() < service_ratio)
             realized_failure_observations += int(not succeeded)
-            controller.observe_lifecycle(
-                features,
-                served_model=served_model,
-                service_seconds=persona.service_seconds,
-                latency_ms=persona.service_seconds * 1_000.0 * pressure,
-                queue_depth=queue_depth,
-                error=not succeeded,
-                output_units=(
-                    128 if features.workload not in {"image", "video"} else 1
-                ),
-                quality=(
-                    max(0.0, min(1.0, capability * 0.95))
-                    if succeeded
-                    else None
-                ),
-                workflow_key=persona.workflow_id,
-                timestamp=observation_timestamp,
-            )
+            if config.strategy in {"smart", "reactive"}:
+                controller.observe_lifecycle(
+                    features,
+                    served_model=served_model,
+                    service_seconds=persona.service_seconds,
+                    latency_ms=persona.service_seconds * 1_000.0 * pressure,
+                    queue_depth=queue_depth,
+                    error=not succeeded,
+                    output_units=(
+                        128 if features.workload not in {"image", "video"} else 1
+                    ),
+                    quality=(
+                        max(0.0, min(1.0, capability * 0.95))
+                        if succeeded
+                        else None
+                    ),
+                    workflow_key=(
+                        persona.workflow_id if config.strategy == "smart" else ""
+                    ),
+                    timestamp=observation_timestamp,
+                )
 
         if config.oracle:
             oracle_demands.append(
@@ -665,9 +712,39 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 )
             )
 
-        controller.tick(nodes, now=now + 30.0)
-        plan = controller.last_plan
-        assert plan is not None
+        if config.strategy in {"smart", "reactive"}:
+            controller.tick(nodes, now=now + 30.0)
+            plan = controller.last_plan
+            assert plan is not None
+        elif config.strategy == "greedy":
+            plan = baseline_planner.plan(
+                nodes,
+                profiles,
+                _greedy_forecasts(
+                    request_counts,
+                    service_totals,
+                    nodes,
+                    profiles,
+                    planner=baseline_planner,
+                    now=now + 30.0,
+                ),
+                now=now + 30.0,
+            )
+        else:
+            assert frozen_static_plan is not None
+            plan = _available_static_plan(
+                frozen_static_plan,
+                nodes,
+                profiles=profile_by_id,
+                policy=planner_policy,
+                now=now + 30.0,
+            )
+        plan, mutation_deferrals = _apply_scenario_mutation_guards(
+            plan,
+            nodes,
+            profiles=profile_by_id,
+            now=now + 30.0,
+        )
         violations = _validate_plan(
             plan.assignments,
             nodes,
@@ -689,6 +766,18 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         removed = before_pairs - after_pairs
         loads += len(added)
         unloads += len(removed)
+        for pair, direction in (
+            *((pair, "load") for pair in added),
+            *((pair, "unload") for pair in removed),
+        ):
+            prior_change = last_lifecycle_change.get(pair)
+            if (
+                prior_change is not None
+                and prior_change[1] != direction
+                and minute - prior_change[0] <= 5
+            ):
+                rapid_lifecycle_reversals += 1
+            last_lifecycle_change[pair] = (minute, direction)
         for node_id, model_id in added:
             node = next(item for item in nodes if item.node_id == node_id)
             profile = profile_by_id[model_id]
@@ -780,14 +869,21 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 item.missing_replicas,
             )
 
-        allocator_status = controller.status(nodes, now=now + 30.0)
-        portfolio_selection = {
-            str(workload): str(model_id)
-            for workload, model_id in allocator_status["portfolio_selection"].items()
-        }
-        portfolio_admissions = tuple(
-            dict(row) for row in allocator_status["portfolio_admissions"]
-        )
+        if config.strategy in {"smart", "reactive"}:
+            allocator_status = controller.status(nodes, now=now + 30.0)
+            portfolio_selection = {
+                str(workload): str(model_id)
+                for workload, model_id in allocator_status["portfolio_selection"].items()
+            }
+            portfolio_admissions = tuple(
+                dict(row) for row in allocator_status["portfolio_admissions"]
+            )
+            joint_portfolio_ticks += int(
+                allocator_status["portfolio_policy"]["joint"]
+            )
+        else:
+            portfolio_selection = dict(sorted(routed_by_workload.items()))
+            portfolio_admissions = ()
         for admission in portfolio_admissions:
             workload = str(admission.get("workload") or "unknown")
             state = str(admission.get("state") or "unknown")
@@ -795,7 +891,6 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             admission_by_workload[workload][state] += 1
             for blocker in admission.get("blocking_models") or ():
                 admission_blocker_minutes[workload][str(blocker)] += 1
-        joint_portfolio_ticks += int(allocator_status["portfolio_policy"]["joint"])
         portfolio_changed = portfolio_selection != prior_portfolio_selection
         admission_states = {
             str(row.get("workload") or "unknown"): str(row.get("state") or "unknown")
@@ -851,6 +946,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             or portfolio_changed
             or admission_changed
             or overloaded_models
+            or mutation_deferrals
         ):
             timeline.append(
                 {
@@ -883,6 +979,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                         }
                         for item in plan.unsatisfied
                     ],
+                    "mutation_deferrals": mutation_deferrals,
                 }
             )
         prior_phase = phase
@@ -907,6 +1004,23 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         )
 
     total_served = sum(served_by_workload.values())
+    structural_hints = baseline_planner.portfolio_placement_hints(
+        tuple(machine.snapshot for machine in machines),
+        profiles,
+        now=base_time,
+    )
+    allocatable_workloads = {
+        workload
+        for workload in requested_by_workload
+        if any(
+            profile.workload_score(workload) > 0
+            and bool(structural_hints.get(profile.model_id, {}).get("hard_compatible"))
+            for profile in profiles
+        )
+    }
+    structurally_infeasible_workloads = sorted(
+        set(requested_by_workload) - allocatable_workloads
+    )
     service_rates = [
         served_by_workload[workload] / requested
         for workload, requested in requested_by_workload.items()
@@ -917,7 +1031,22 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         for user_id, requested in requested_by_user.items()
         if requested > 0
     ]
+    allocatable_service_rates = [
+        served_by_workload[workload] / requested_by_workload[workload]
+        for workload in sorted(allocatable_workloads)
+        if requested_by_workload[workload] > 0
+    ]
+    allocatable_user_service_rates = [
+        served_by_user[persona.user_id] / requested_by_user[persona.user_id]
+        for persona in personas
+        if persona.workload in allocatable_workloads
+        and requested_by_user[persona.user_id] > 0
+    ]
     minimum_user_service = min(user_service_rates, default=1.0)
+    allocatable_minimum_user_service = min(
+        allocatable_user_service_rates,
+        default=1.0,
+    )
     workload_slo_attainment = (
         sum(rate >= 0.90 for rate in service_rates) / len(service_rates)
         if service_rates
@@ -928,17 +1057,39 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         if user_service_rates
         else 1.0
     )
+    allocatable_workload_slo_attainment = (
+        sum(rate >= 0.90 for rate in allocatable_service_rates)
+        / len(allocatable_service_rates)
+        if allocatable_service_rates
+        else 1.0
+    )
+    allocatable_user_slo_attainment = (
+        sum(rate >= 0.90 for rate in allocatable_user_service_rates)
+        / len(allocatable_user_service_rates)
+        if allocatable_user_service_rates
+        else 1.0
+    )
+    # A logarithmic coverage utility preserves raw throughput differences near full service while
+    # making an entirely abandoned feasible workload visible. It is normalized to [0, 1], with
+    # 10% service worth roughly half credit and 100% worth full credit.
+    workload_coverage_utility = (
+        sum(math.log1p(99.0 * rate) / math.log(100.0) for rate in allocatable_service_rates)
+        / len(allocatable_service_rates)
+        if allocatable_service_rates
+        else 1.0
+    )
     churn = loads + unloads
     service_rate = total_served / total_requests if total_requests else 1.0
     suitability = suitability_weight / total_requests if total_requests else 1.0
     churn_efficiency = max(0.0, 1.0 - churn / max(1.0, config.minutes * config.machines))
     safety_rate = 1.0 if not safety_violations else 0.0
     overall = 100.0 * (
-        0.35 * service_rate
-        + 0.10 * minimum_user_service
+        0.20 * service_rate
+        + 0.10 * allocatable_minimum_user_service
         + 0.10 * suitability
-        + 0.10 * workload_slo_attainment
-        + 0.10 * user_slo_attainment
+        + 0.10 * allocatable_workload_slo_attainment
+        + 0.10 * allocatable_user_slo_attainment
+        + 0.15 * workload_coverage_utility
         + 0.05 * churn_efficiency
         + 0.20 * safety_rate
     )
@@ -1052,8 +1203,25 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             "served_equivalent": round(total_served, 2),
             "service_rate_pct": round(100.0 * service_rate, 2),
             "minimum_user_service_pct": round(100.0 * minimum_user_service, 2),
+            "allocatable_minimum_user_service_pct": round(
+                100.0 * allocatable_minimum_user_service,
+                2,
+            ),
             "user_slo_attainment_pct": round(100.0 * user_slo_attainment, 2),
             "workload_slo_attainment_pct": round(100.0 * workload_slo_attainment, 2),
+            "allocatable_user_slo_attainment_pct": round(
+                100.0 * allocatable_user_slo_attainment,
+                2,
+            ),
+            "allocatable_workload_slo_attainment_pct": round(
+                100.0 * allocatable_workload_slo_attainment,
+                2,
+            ),
+            "workload_coverage_utility_pct": round(
+                100.0 * workload_coverage_utility,
+                2,
+            ),
+            "structurally_infeasible_workloads": structurally_infeasible_workloads,
             "minimum_workload_service_pct": round(100.0 * min(service_rates, default=1.0), 2),
             "portfolio_suitability_pct": round(100.0 * suitability, 2),
             "average_memory_utilization_pct": round(100.0 * sum(memory_utilization) / len(memory_utilization), 2),
@@ -1107,6 +1275,11 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             "direct_named_requests": direct_named_requests,
             "joint_portfolio_ticks": joint_portfolio_ticks,
             "portfolio_changes": portfolio_changes,
+            "rapid_lifecycle_reversals": rapid_lifecycle_reversals,
+            "lifecycle_changes_per_node_hour": round(
+                60.0 * churn / max(1.0, config.minutes * config.machines),
+                2,
+            ),
             "admission_state_minutes": dict(sorted(admission_state_minutes.items())),
             "admission_by_workload": {
                 workload: dict(sorted(states.items()))
@@ -1131,6 +1304,208 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 "desired/preemption disjointness",
             ),
         },
+    )
+
+
+def _scenario_planner_policy(strategy: str) -> PlannerPolicy:
+    common = {
+        "memory_headroom_fraction": 0.05,
+        "node_ttl_seconds": 180,
+    }
+    if strategy == "smart":
+        return PlannerPolicy(**common)
+    # Baselines may react to demand and reuse an existing cache, but they receive no trend
+    # lookahead, workflow prediction, cache-only prefetch, or predictive eviction. This keeps the
+    # physical placement constraints identical while isolating the value of proactive control.
+    return PlannerPolicy(
+        **common,
+        max_predictive_lookahead_seconds=0.0,
+        max_predictive_artifact_prefetches=0,
+        max_predictive_artifact_evictions=0,
+    )
+
+
+def _baseline_model_by_workload(
+    nodes: tuple[NodeSnapshot, ...],
+    profiles: tuple[ModelProfile, ...],
+    *,
+    planner: PlacementPlanner,
+    now: float,
+) -> dict[str, ModelProfile]:
+    hints = planner.portfolio_placement_hints(nodes, profiles, now=now)
+    selected: dict[str, ModelProfile] = {}
+    for workload in SCENARIO_WORKLOADS:
+        candidates = [
+            profile
+            for profile in profiles
+            if profile.workload_score(workload) > 0
+            and bool(hints.get(profile.model_id, {}).get("hard_compatible"))
+        ]
+        if not candidates:
+            continue
+        # This is intentionally a transparent greedy rule, not the production joint portfolio:
+        # take configured suitability first, then the smaller artifact/model for equal quality.
+        selected[workload] = max(
+            candidates,
+            key=lambda profile: (
+                profile.workload_score(workload),
+                -profile.maximum_memory_mb,
+                -profile.artifact_size_mb,
+                profile.model_id,
+            ),
+        )
+    return selected
+
+
+def _forecasts_for_workload_totals(
+    requests_by_workload: dict[str, float],
+    service_seconds_by_workload: dict[str, float],
+    selected: dict[str, ModelProfile],
+    *,
+    now: float,
+) -> tuple[DemandForecast, ...]:
+    requests_by_model: defaultdict[str, float] = defaultdict(float)
+    concurrency_by_model: defaultdict[str, float] = defaultdict(float)
+    samples_by_model: Counter[str] = Counter()
+    for workload, requests in requests_by_workload.items():
+        profile = selected.get(workload)
+        if profile is None or requests <= 0:
+            continue
+        requests_by_model[profile.model_id] += requests
+        concurrency_by_model[profile.model_id] += (
+            service_seconds_by_workload.get(workload, 0.0) / 60.0
+        )
+        samples_by_model[profile.model_id] += max(1, math.ceil(requests))
+    return tuple(
+        DemandForecast(
+            model_id=model_id,
+            requests_per_minute=requests,
+            observed_requests_per_minute=requests,
+            offered_concurrency=concurrency_by_model[model_id],
+            confidence=1.0,
+            sample_count=samples_by_model[model_id],
+            updated_at=now,
+        )
+        for model_id, requests in sorted(requests_by_model.items())
+    )
+
+
+def _static_forecasts(
+    personas: tuple[Persona, ...],
+    nodes: tuple[NodeSnapshot, ...],
+    profiles: tuple[ModelProfile, ...],
+    *,
+    planner: PlacementPlanner,
+    now: float,
+) -> tuple[DemandForecast, ...]:
+    """Build a strong fixed baseline from declared population averages, not future arrivals."""
+
+    requests: defaultdict[str, float] = defaultdict(float)
+    service: defaultdict[str, float] = defaultdict(float)
+    for persona in personas:
+        requests[persona.workload] += persona.requests_per_minute
+        service[persona.workload] += (
+            persona.requests_per_minute * persona.service_seconds
+        )
+    selected = _baseline_model_by_workload(
+        nodes,
+        profiles,
+        planner=planner,
+        now=now,
+    )
+    return _forecasts_for_workload_totals(
+        requests,
+        service,
+        selected,
+        now=now,
+    )
+
+
+def _greedy_forecasts(
+    request_counts: Counter[str],
+    service_totals: defaultdict[str, float],
+    nodes: tuple[NodeSnapshot, ...],
+    profiles: tuple[ModelProfile, ...],
+    *,
+    planner: PlacementPlanner,
+    now: float,
+) -> tuple[DemandForecast, ...]:
+    """Map only this minute's visible demand to each workload's best feasible model."""
+
+    selected = _baseline_model_by_workload(
+        nodes,
+        profiles,
+        planner=planner,
+        now=now,
+    )
+    return _forecasts_for_workload_totals(
+        dict(request_counts),
+        dict(service_totals),
+        selected,
+        now=now,
+    )
+
+
+def _available_static_plan(
+    frozen: PlacementPlan,
+    nodes: tuple[NodeSnapshot, ...],
+    *,
+    profiles: dict[str, ModelProfile],
+    policy: PlannerPolicy,
+    now: float,
+) -> PlacementPlan:
+    """Keep a fixed host/model map, withdrawing unavailable hosts without rescheduling."""
+
+    node_by_id = {node.node_id: node for node in nodes}
+    assignments = []
+    available_by_model: Counter[str] = Counter()
+    for assignment in frozen.assignments:
+        node = node_by_id.get(assignment.node_id)
+        if node is None or node.state not in (NodeState.ACCEPTING, NodeState.THROTTLED):
+            continue
+        multiplier = (
+            policy.throttled_capacity_fraction
+            if node.state == NodeState.THROTTLED
+            else 1.0
+        )
+        if assignment.memory_mb > math.floor(node.usable_capacity_mb * multiplier):
+            continue
+        profile = profiles[assignment.model_id]
+        residency = node.residency(assignment.model_id)
+        assignments.append(
+            replace(
+                assignment,
+                existing=(
+                    residency is not None
+                    and residency.state == ResidencyState.READY
+                    and profile.matches_artifact(residency)
+                ),
+                reasons=(*assignment.reasons, "fixed static baseline"),
+            )
+        )
+        available_by_model[assignment.model_id] += 1
+    unsatisfied = list(frozen.unsatisfied)
+    for model_id, desired in frozen.desired_replicas:
+        missing = max(0, desired - available_by_model[model_id])
+        if missing:
+            unsatisfied.append(
+                UnsatisfiedConstraint(
+                    model_id=model_id,
+                    code="static_host_unavailable",
+                    message="fixed static placement does not reschedule unavailable capacity",
+                    missing_replicas=missing,
+                )
+            )
+    return replace(
+        frozen,
+        generation=f"static-{int(now)}",
+        created_at=now,
+        assignments=tuple(assignments),
+        unsatisfied=tuple(unsatisfied),
+        preemptions=(),
+        artifact_prefetches=(),
+        artifact_evictions=(),
+        input_digest="",
     )
 
 
@@ -1160,8 +1535,8 @@ def _build_catalog(count: int, machines: int) -> tuple[CatalogModel, ...]:
             # One simulated minute of placement stickiness is enough to expose useful repacking
             # while preventing adjacent-tick reversals. Production profiles default to a longer
             # hold; the planner honors each model's configured value.
-            min_residency_seconds=60,
-            scale_down_cooldown_seconds=120,
+            min_residency_seconds=300,
+            scale_down_cooldown_seconds=180,
             min_failure_domains=1,
             artifact_size_mb=artifact_size_mb,
             artifact_sha256=hashlib.sha256(
@@ -1449,6 +1824,88 @@ def _best_ready_model(
     if not candidates:
         return ""
     return max(candidates, key=lambda item: (item.workload_score(workload), item.model_id)).model_id
+
+
+def _apply_scenario_mutation_guards(
+    plan: PlacementPlan,
+    nodes: tuple[NodeSnapshot, ...],
+    *,
+    profiles: dict[str, ModelProfile],
+    now: float,
+) -> tuple[PlacementPlan, tuple[str, ...]]:
+    """Model reconciler residency deferrals before materializing desired state."""
+
+    assignments = list(plan.assignments)
+    desired_pairs = {(item.node_id, item.model_id) for item in assignments}
+    guarded_pairs: set[tuple[str, str]] = set()
+    deferrals: list[str] = []
+    for node in nodes:
+        if node.state not in (NodeState.ACCEPTING, NodeState.THROTTLED):
+            continue
+        for residency in node.residencies:
+            pair = (node.node_id, residency.model_id)
+            profile = profiles.get(residency.model_id)
+            if (
+                pair in desired_pairs
+                or profile is None
+                or residency.state != ResidencyState.READY
+                or not residency.managed
+            ):
+                continue
+            age = (
+                now - residency.loaded_at
+                if 0 < residency.loaded_at <= now
+                else 0.0
+            )
+            if age >= profile.min_residency_seconds:
+                continue
+            guarded_pairs.add(pair)
+            # Desired-state planning stages preemption before replacement, so this normally has no
+            # competing assignment. If a future planner does propose one, retain physical truth:
+            # the guarded process still owns this one-model logical slot.
+            assignments = [
+                item
+                for item in assignments
+                if item.node_id != node.node_id or item.model_id == residency.model_id
+            ]
+            assignments.append(
+                PlacementAssignment(
+                    model_id=residency.model_id,
+                    node_id=node.node_id,
+                    memory_mb=residency.memory_mb,
+                    replica_index=sum(
+                        item.model_id == residency.model_id for item in assignments
+                    ),
+                    score=0.0,
+                    existing=True,
+                    reasons=("minimum residency deferred physical removal",),
+                )
+            )
+            remaining = max(0.0, profile.min_residency_seconds - age)
+            deferrals.append(
+                f"{residency.model_id}@{node.node_id} minimum-residency {remaining:.0f}s"
+            )
+    if not guarded_pairs:
+        return plan, ()
+    assignments.sort(key=lambda item: (item.model_id, item.replica_index, item.node_id))
+    return (
+        replace(
+            plan,
+            assignments=tuple(assignments),
+            preemptions=tuple(
+                item
+                for item in plan.preemptions
+                if (item.node_id, item.model_id) not in guarded_pairs
+            ),
+            artifact_evictions=tuple(
+                item
+                for item in plan.artifact_evictions
+                if (item.node_id, item.model_id) not in guarded_pairs
+            ),
+            input_digest="",
+        ),
+        tuple(sorted(deferrals)),
+    )
 
 
 def _materialize(

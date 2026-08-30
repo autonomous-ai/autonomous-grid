@@ -12,6 +12,7 @@ from shared.allocator.models import (
     ModelProfile,
     ModelResidency,
     NodeSnapshot,
+    PlacementPlan,
     ResidencyState,
 )
 
@@ -135,6 +136,51 @@ def test_scenario_materialization_advances_only_models_that_served_requests():
     assert used[0].residencies[0].last_used_at == 101
 
 
+def test_scenario_models_reconciler_minimum_residency_before_materialization():
+    profile = ModelProfile(
+        "model-a",
+        8_000,
+        runtimes=("llama.cpp",),
+        min_replicas=0,
+        max_replicas=1,
+        min_residency_seconds=180,
+    )
+    node = NodeSnapshot(
+        "node-1",
+        16_000,
+        runtimes=("llama.cpp",),
+        residencies=(
+            ModelResidency(
+                "model-a",
+                8_000,
+                ResidencyState.READY,
+                loaded_at=100,
+                managed=True,
+            ),
+        ),
+        last_heartbeat=100,
+    )
+    empty = PlacementPlan("generation", 150)
+
+    guarded, deferrals = scenario_module._apply_scenario_mutation_guards(
+        empty,
+        (node,),
+        profiles={"model-a": profile},
+        now=150,
+    )
+    removable, later_deferrals = scenario_module._apply_scenario_mutation_guards(
+        empty,
+        (node,),
+        profiles={"model-a": profile},
+        now=300,
+    )
+
+    assert guarded.desired_pairs == frozenset({("node-1", "model-a")})
+    assert deferrals == ("model-a@node-1 minimum-residency 130s",)
+    assert removable.assignments == ()
+    assert later_deferrals == ()
+
+
 def test_scenario_materializes_and_expires_predictive_artifact_provenance():
     profile = ModelProfile(
         "predicted",
@@ -228,6 +274,36 @@ def test_capacity_sweep_keeps_the_same_seeded_users_and_requests():
     )
 
 
+def test_baseline_strategies_replay_identical_demand_and_physics():
+    reports = {
+        strategy: run_scenario(
+            ScenarioConfig(
+                machines=4,
+                models=8,
+                users=27,
+                minutes=12,
+                seed=91,
+                strategy=strategy,
+            )
+        )
+        for strategy in ("smart", "reactive", "greedy", "static")
+    }
+
+    assert {report.metrics["total_requests"] for report in reports.values()} == {
+        reports["smart"].metrics["total_requests"]
+    }
+    assert all(report.safety["passed"] for report in reports.values())
+    assert reports["smart"].configuration["strategy"] == "smart"
+    assert reports["reactive"].metrics["predictive_prefetches"] == 0
+    assert reports["greedy"].metrics["joint_portfolio_ticks"] == 0
+    assert reports["static"].metrics["joint_portfolio_ticks"] == 0
+
+
+def test_scenario_rejects_unknown_strategy():
+    with pytest.raises(ValueError, match="strategy must be one of"):
+        ScenarioConfig(strategy="magic")
+
+
 def test_roomy_fleet_does_not_dismantle_healthy_placement_during_replica_pressure():
     report = run_scenario(
         ScenarioConfig(machines=12, models=8, users=50, minutes=30, seed=42)
@@ -287,8 +363,12 @@ def test_scenario_checks_real_planner_safety_and_persistent_disk(representative_
     assert 0 <= report.metrics["predictive_prefetch_hit_rate_pct"] <= 100
     assert 0 <= report.metrics["service_rate_pct"] <= 100
     assert 0 <= report.metrics["minimum_user_service_pct"] <= 100
+    assert 0 <= report.metrics["allocatable_minimum_user_service_pct"] <= 100
     assert 0 <= report.metrics["user_slo_attainment_pct"] <= 100
     assert 0 <= report.metrics["workload_slo_attainment_pct"] <= 100
+    assert 0 <= report.metrics["allocatable_user_slo_attainment_pct"] <= 100
+    assert 0 <= report.metrics["allocatable_workload_slo_attainment_pct"] <= 100
+    assert 0 <= report.metrics["workload_coverage_utility_pct"] <= 100
     assert 0 <= report.metrics["minimum_workload_service_pct"] <= 100
     assert 0 <= report.metrics["portfolio_suitability_pct"] <= 100
     assert all(0 <= row["service_rate_pct"] <= 100 for row in report.users)
@@ -395,6 +475,8 @@ def test_cli_parser_exposes_scenario_scale_duration_and_seed():
             "2h",
             "--seed",
             "123",
+            "--strategy",
+            "reactive",
             "--workload-trace",
             "coding=/tmp/coding.csv",
             "--timeline",
@@ -409,6 +491,7 @@ def test_cli_parser_exposes_scenario_scale_duration_and_seed():
     assert args.users == 500
     assert args.duration == 120
     assert args.seed == 123
+    assert args.strategy == "reactive"
     assert args.workload_trace == [("coding", "/tmp/coding.csv")]
     assert args.timeline is True
     assert args.oracle is True
@@ -451,6 +534,7 @@ def test_scenario_cli_prints_human_scorecard(capsys):
     assert args.handler(args) == 0
     output = capsys.readouterr().out
     assert "Planning simulation only" in output
+    assert "Allocation strategy: smart" in output
     assert "becomes ready on the following minute" in output
     assert "Heterogeneous logical fleet" in output
     assert "Model portfolio" in output
@@ -517,5 +601,6 @@ def test_scenario_cli_json_is_machine_readable(capsys):
     assert args.handler(args) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["configuration"]["mode"] == "deterministic planning simulation"
+    assert payload["configuration"]["strategy"] == "smart"
     assert payload["metrics"]["total_requests"] >= 0
     assert payload["safety"]["passed"] is True

@@ -547,6 +547,11 @@ class WorkloadIntelligence:
                 - chosen_evidence["effective_errors"]
                 >= 0.5
             )
+            preemption_node_id, preemption_victims = _placement_preemption_path(
+                chosen.model_id,
+                placement_hints,
+            )
+            preemption_authorized = bool(preemption_node_id and preemption_victims)
             projected = replace(
                 forecast,
                 model_id=chosen.model_id,
@@ -571,8 +576,15 @@ class WorkloadIntelligence:
                 # One long image/video request is enough to justify trying a model on genuinely
                 # spare capacity, but not enough to infer the entire scale-out target. The first
                 # canary's real request/outcome evidence removes this cap on the next plan.
-                canary_only=(spare_capacity_evidence or queue_promoted_evidence)
+                canary_only=(
+                    spare_capacity_evidence
+                    or queue_promoted_evidence
+                    or preemption_authorized
+                )
                 and not canary_validated,
+                preemption_authorized=preemption_authorized,
+                preemption_node_id=preemption_node_id,
+                preemption_victims=preemption_victims,
             )
             merged[chosen.model_id] = _merge_forecasts(
                 merged.get(chosen.model_id), projected
@@ -1294,6 +1306,23 @@ def _placement_spare_canary_allowed(
     return (placement_hints.get(model_id) or {}).get("spare_canary_allowed") is True
 
 
+def _placement_preemption_path(
+    model_id: str,
+    placement_hints: Mapping[str, Mapping[str, Any]] | None,
+) -> tuple[str, tuple[str, ...]]:
+    if placement_hints is None:
+        return "", ()
+    hint = placement_hints.get(model_id) or {}
+    if not (
+        hint.get("feasible_after_preemption") is True
+        and hint.get("portfolio_preemption_safe") is True
+    ):
+        return "", ()
+    node_id = str(hint.get("best_node_id") or "")
+    victims = tuple(str(item) for item in hint.get("preemption_victims") or ())
+    return (node_id, victims) if node_id and victims else ("", ())
+
+
 def _placement_transition_penalty(hint: Mapping[str, Any]) -> float:
     """Penalize avoidable model churn using the best current startup path.
 
@@ -1514,5 +1543,16 @@ def _merge_forecasts(
             projected.canary_only
             if not direct_has_evidence
             else direct.canary_only and projected.canary_only
+        ),
+        preemption_authorized=direct.preemption_authorized or projected.preemption_authorized,
+        preemption_node_id=(
+            direct.preemption_node_id
+            if direct.preemption_authorized
+            else projected.preemption_node_id
+        ),
+        preemption_victims=(
+            direct.preemption_victims
+            if direct.preemption_authorized
+            else projected.preemption_victims
         ),
     )

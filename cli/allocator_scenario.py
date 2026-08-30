@@ -8,6 +8,11 @@ import re
 from collections import Counter
 from typing import Any
 
+from shared.allocator.graduation import (
+    GraduationConfig,
+    GraduationReport,
+    run_graduation,
+)
 from shared.allocator.scenario import (
     SCENARIO_WORKLOADS,
     ScenarioConfig,
@@ -54,6 +59,26 @@ def workload_trace_binding(value: str) -> tuple[str, str]:
     return workload, path
 
 
+def graduation_machine_counts(value: str) -> tuple[int, ...]:
+    try:
+        result = tuple(bounded_scenario_machines(item) for item in value.split(","))
+    except argparse.ArgumentTypeError:
+        raise
+    if not result or len(set(result)) != len(result):
+        raise argparse.ArgumentTypeError("machine counts must be a unique comma-separated list")
+    return result
+
+
+def graduation_seeds(value: str) -> tuple[int, ...]:
+    try:
+        result = tuple(int(item) for item in value.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("seeds must be comma-separated integers") from exc
+    if not result or len(set(result)) != len(result):
+        raise argparse.ArgumentTypeError("seeds must be a unique comma-separated list")
+    return result
+
+
 def cmd_test_scenario(args: argparse.Namespace) -> int:
     config = ScenarioConfig(
         machines=args.machines,
@@ -63,6 +88,7 @@ def cmd_test_scenario(args: argparse.Namespace) -> int:
         seed=args.seed,
         workload_traces=tuple(args.workload_trace),
         oracle=args.oracle,
+        strategy=args.strategy,
     )
     report = run_scenario(config)
     if args.json:
@@ -72,6 +98,56 @@ def cmd_test_scenario(args: argparse.Namespace) -> int:
     return 0 if report.safety["passed"] else 1
 
 
+def cmd_test_graduate(args: argparse.Namespace) -> int:
+    report = run_graduation(
+        GraduationConfig(
+            machine_counts=args.machines,
+            seeds=args.seeds,
+            models=args.models,
+            users=args.users,
+            minutes=args.duration,
+        )
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        _print_graduation(report)
+    return 0 if report.passed else 1
+
+
+def _print_graduation(report: GraduationReport) -> None:
+    cfg = report.configuration
+    print(
+        "Allocator graduation · machines "
+        + ",".join(str(item) for item in cfg["machine_counts"])
+        + " · seeds "
+        + ",".join(str(item) for item in cfg["seeds"])
+        + f" · {cfg['minutes']} minutes per run"
+    )
+    print(
+        "Identical traces compare smart allocation with reactive-only, current-demand greedy, "
+        "and fixed static controls.\n"
+    )
+    print("Case comparison")
+    for row in report.comparisons:
+        print(
+            f"  {row['machines']:>2} nodes · seed {row['seed']:<6} "
+            f"smart {row['smart_score']:>6.2f} · "
+            f"best {row['best_baseline']:<8} {row['best_baseline_score']:>6.2f} · "
+            f"delta {row['score_delta']:>+6.2f} · "
+            f"service-vs-static {row['service_vs_static_delta']:>+6.2f} · "
+            f"coverage-vs-static {row['coverage_vs_static_delta']:>+6.2f} · "
+            f"churn {row['smart_churn']}/{row['greedy_churn']}"
+        )
+    print("\nGraduation gates")
+    for gate in report.gates:
+        print(f"  {'PASS' if gate['passed'] else 'FAIL'} {gate['name']}: {gate['detail']}")
+    print(
+        f"\nAllocator graduation: {'PASS' if report.passed else 'NOT YET'} "
+        f"({report.elapsed_seconds:.1f}s wall time)"
+    )
+
+
 def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
     cfg = report.configuration
     print(
@@ -79,6 +155,7 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
         f"{cfg['machines']} logical machines · {cfg['models']} models · "
         f"{cfg['users']} users · {cfg['minutes']} simulated minutes · seed {cfg['seed']}"
     )
+    print(f"Allocation strategy: {cfg['strategy']}")
     print("Planning simulation only: hardware telemetry is modeled; no GPU processes are started.")
     print("The real `grid test demo` remains the load/warm/drain/unload process test.\n")
     if cfg["workload_traces"]:
@@ -172,6 +249,10 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
                     f"{item['model']}:{item['missing']}" for item in row["unsatisfied"]
                 )
             )
+        if row.get("mutation_deferrals"):
+            changes.append(
+                "defer " + ", ".join(row["mutation_deferrals"][:2])
+            )
         if row.get("overloaded_models"):
             pressure = [
                 f"{model} {values['offered_concurrency']:g}/{values['ready_capacity']:g} q{values['queue_depth']}"
@@ -223,9 +304,21 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
     print(f"  overall allocator score       {metrics['overall_score']:>7.2f}/100")
     print(f"  demand served                 {metrics['service_rate_pct']:>7.2f}%")
     print(f"  least-served user             {metrics['minimum_user_service_pct']:>7.2f}%")
+    print(
+        "  least-served allocatable user "
+        f"{metrics['allocatable_minimum_user_service_pct']:>7.2f}%"
+    )
     print(f"  users meeting 90% SLO         {metrics['user_slo_attainment_pct']:>7.2f}%")
     print(f"  workloads meeting 90% SLO     {metrics['workload_slo_attainment_pct']:>7.2f}%")
     print(f"  portfolio suitability         {metrics['portfolio_suitability_pct']:>7.2f}%")
+    print(
+        f"  feasible-workload coverage    {metrics['workload_coverage_utility_pct']:>7.2f}%"
+    )
+    if metrics["structurally_infeasible_workloads"]:
+        print(
+            "  structurally infeasible       "
+            + ", ".join(metrics["structurally_infeasible_workloads"])
+        )
     print(
         f"  memory utilization        avg {metrics['average_memory_utilization_pct']:>6.2f}% · "
         f"peak {metrics['peak_memory_utilization_pct']:.2f}%"

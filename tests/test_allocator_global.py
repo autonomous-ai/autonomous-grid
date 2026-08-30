@@ -1338,6 +1338,14 @@ def test_allocator_models_validate_impossible_values():
         DemandForecast("m", prediction_lead_seconds=-1)
     with pytest.raises(ValueError, match="prediction_lead_seconds"):
         DemandForecast("m", prediction_lead_seconds=math.inf)
+    with pytest.raises(ValueError, match="exact node and victim"):
+        DemandForecast("m", preemption_authorized=True)
+    with pytest.raises(ValueError, match="exact node and victim"):
+        DemandForecast(
+            "m",
+            preemption_node_id="node-1",
+            preemption_victims=("victim",),
+        )
     with pytest.raises(ValueError, match="active_requests"):
         ready(active_requests=-1)
     with pytest.raises(ValueError, match="non-negative"):

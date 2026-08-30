@@ -29,11 +29,16 @@ from .allocator import (
     cmd_allocator_tick,
     cmd_allocator_token_write,
 )
+from shared.allocator.scenario import SCENARIO_STRATEGIES
+
 from .allocator_scenario import (
     bounded_scenario_machines,
     bounded_scenario_models,
     bounded_scenario_users,
+    cmd_test_graduate,
     cmd_test_scenario,
+    graduation_machine_counts,
+    graduation_seeds,
     simulated_minutes,
     workload_trace_binding,
 )
@@ -368,6 +373,15 @@ def _add_logical_test(sub) -> None:
     )
     scenario.add_argument("--seed", type=int, default=42, help="Deterministic random seed.")
     scenario.add_argument(
+        "--strategy",
+        choices=SCENARIO_STRATEGIES,
+        default="smart",
+        help=(
+            "Allocation policy to evaluate: smart, reactive, greedy, or static "
+            "(default smart)."
+        ),
+    )
+    scenario.add_argument(
         "--workload-trace",
         action="append",
         default=[],
@@ -392,6 +406,48 @@ def _add_logical_test(sub) -> None:
     )
     scenario.add_argument("--json", action="store_true", help="Emit the complete JSON report.")
     scenario.set_defaults(handler=cmd_test_scenario)
+
+    graduate = test_sub.add_parser(
+        "graduate",
+        help="Compare the smart allocator with fixed and reactive baselines",
+    )
+    graduate.add_argument(
+        "--machines",
+        type=graduation_machine_counts,
+        default=(2, 4, 8),
+        metavar="N,N,...",
+        help="Comma-separated logical fleet sizes (default 2,4,8).",
+    )
+    graduate.add_argument(
+        "--seeds",
+        type=graduation_seeds,
+        default=(42, 144),
+        metavar="N,N,...",
+        help="Comma-separated deterministic trace seeds (default 42,144).",
+    )
+    graduate.add_argument(
+        "--models",
+        type=bounded_scenario_models,
+        default=8,
+        metavar="N",
+        help="Configured model profiles (default 8; maximum 32).",
+    )
+    graduate.add_argument(
+        "--users",
+        type=bounded_scenario_users,
+        default=50,
+        metavar="N",
+        help="Concurrent user personas (default 50; maximum 10000).",
+    )
+    graduate.add_argument(
+        "--duration",
+        type=simulated_minutes,
+        default=120,
+        metavar="TIME",
+        help="Simulated duration per run (default 120m).",
+    )
+    graduate.add_argument("--json", action="store_true", help="Emit the complete JSON report.")
+    graduate.set_defaults(handler=cmd_test_graduate)
 
     watch = test_sub.add_parser(
         "watch",
