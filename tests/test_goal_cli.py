@@ -591,6 +591,25 @@ def test_goal_evidence_verify_refuses_a_broken_handoff(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == record
 
 
+def test_goal_evidence_accepts_json_after_the_subcommand(monkeypatch, capsys):
+    """The root help tells users to put ``--json`` after a subcommand.
+
+    Evidence has always been JSON, but rejecting the otherwise universal spelling makes scripts
+    special-case exactly the audit surface most likely to be scripted.
+    """
+    from cli import build_parser
+
+    args = build_parser().parse_args(["goal", "evidence", "goal-1", "--json"])
+    assert args.goal_action == "evidence" and args.json is True
+
+    record = {"schema_version": 1, "goal": {"id": "goal-1"}, "turns": []}
+    monkeypatch.setattr("cli.goal._resolve", lambda _args: ("https://relay", "token", "grid"))
+    monkeypatch.setattr("remote.relay.get_goal_evidence", lambda *_args: record)
+
+    assert args.handler(args) == 0
+    assert json.loads(capsys.readouterr().out) == record
+
+
 def test_goal_evidence_verify_refuses_pruned_training_objects():
     from cli.goal import _verify_evidence
 

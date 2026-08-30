@@ -1122,6 +1122,9 @@ def _add_goal(sub) -> None:
     evidence.add_argument("goal_id")
     evidence.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     evidence.add_argument(
+        "--json", action="store_true",
+        help="Accepted for consistency; Goal evidence is always machine-readable JSON.")
+    evidence.add_argument(
         "--verify", action="store_true",
         help="Fail unless turns, transcript handoffs and final independent evals are complete.")
     evidence.add_argument(
