@@ -143,6 +143,7 @@ def test_goal_inference_proxy_refreshes_expired_node_token_once():
 
 def test_codex_goal_capability_requires_a_measured_native_goal_version(monkeypatch):
     monkeypatch.setattr(task_codex.shutil, "which", lambda _name: "/fake/codex")
+    monkeypatch.setattr(task_codex, "_protocol_capability", lambda _binary: (True, ""))
     monkeypatch.setattr(task_codex, "_binary_version", lambda _binary: (0, 150, 0))
 
     assert task_codex.available() is False
@@ -160,6 +161,75 @@ def test_codex_goal_capability_requires_a_measured_native_goal_version(monkeypat
     assert task_codex.resolve_binary() == "/fake/codex"
 
 
+def test_codex_goal_capability_requires_the_exact_experimental_protocol(monkeypatch):
+    monkeypatch.setattr(task_codex, "_binary_version", lambda _binary: (999, 0, 0))
+    monkeypatch.setattr(
+        task_codex, "_protocol_capability",
+        lambda _binary: (False, "schema lacks thread/goal/get"))
+
+    assert task_codex.supports_distributed_goals("/future/codex") is False
+    try:
+        task_codex._require_distributed_goal_capability("/future/codex")
+    except task_codex.CodexProtocolError as exc:
+        assert "schema lacks thread/goal/get" in str(exc)
+    else:
+        raise AssertionError("a version-new but protocol-incompatible Codex binary was accepted")
+
+
+def test_codex_protocol_schema_probe_checks_every_method_and_caches_failures(
+        tmp_path, monkeypatch):
+    binary = tmp_path / "codex"
+    binary.write_text("fake executable revision\n")
+    calls = []
+
+    def generate(argv, **_kwargs):
+        calls.append(argv)
+        output = Path(argv[argv.index("--out") + 1])
+        # Deliberately omit item/tool/call. A node unable to expose business actions must not claim
+        # a Goal merely because all of its thread lifecycle methods happen to exist.
+        methods = sorted(task_codex._REQUIRED_PROTOCOL_METHODS - {"item/tool/call"})
+        (output / "codex_app_server_protocol.schemas.json").write_text(
+            json.dumps({"nested": {"methods": methods}}))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(task_codex, "_PROTOCOL_CACHE", {})
+    monkeypatch.setattr(task_codex.subprocess, "run", generate)
+    first = task_codex._protocol_capability(str(binary))
+    second = task_codex._protocol_capability(str(binary))
+
+    assert first == second
+    assert first[0] is False and "item/tool/call" in first[1]
+    assert len(calls) == 1, "a cached incompatible binary was probed on every claim poll"
+
+
+def test_runtime_method_drift_quarantines_codex_before_another_goal_claim(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    monkeypatch.setattr(task_codex, "_PROTOCOL_CACHE", {})
+    monkeypatch.setattr(task_codex, "_binary_version", lambda _binary: (999, 0, 0))
+    binary = tmp_path / "codex"
+    binary.write_text("future codex revision\n")
+    process = _FakeProcess([
+        {"id": 1, "result": {"serverInfo": {"name": "future-codex"}}},
+        {"id": 2, "error": {"code": -32601, "message": "thread/start removed"}},
+    ])
+
+    try:
+        task_codex.run_slice(
+            _job(), tmp_path, inference=task_codex.GridInference("https://grid.test", "secret"),
+            executable=str(binary), timeout=30, publish=lambda *_args, **_kwargs: None,
+            process_factory=lambda argv, env, cwd: process)
+    except task_codex.CodexProtocolError as exc:
+        assert "thread/start removed" in str(exc)
+    else:
+        raise AssertionError("method-not-found protocol drift was not retryable")
+
+    # The binary's stat-key is now poisoned. supports_distributed_goals() must fail without probing
+    # again, causing this node's next scheduler profile to omit native_goal.
+    assert task_codex.supports_distributed_goals(str(binary)) is False
+
+
 def test_unknown_native_goal_status_is_retryable_protocol_drift():
     """An upgraded Codex must not turn a status this worker does not know into `failed`.
 
@@ -169,7 +239,7 @@ def test_unknown_native_goal_status_is_retryable_protocol_drift():
     assert task_codex._public_status("failed") == "failed"
     try:
         task_codex._public_status("awaitingHumanReview")
-    except task_codex.CodexGoalError as exc:
+    except task_codex.CodexProtocolError as exc:
         assert "unsupported native Goal status" in str(exc)
     else:
         raise AssertionError("unknown Codex Goal status became a terminal verdict")

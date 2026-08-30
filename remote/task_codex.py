@@ -13,6 +13,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -42,6 +43,17 @@ MIN_DISTRIBUTED_GOAL_VERSION = (0, 150, 1)
 _VERSION_PATTERN = re.compile(r"\Acodex-cli (\d+)\.(\d+)\.(\d+)")
 _VERSION_TIMEOUT_SECONDS = 10
 _VERSION_CACHE: dict[tuple[str, int, int], tuple[int, int, int]] = {}
+_PROTOCOL_TIMEOUT_SECONDS = 15
+_PROTOCOL_SCHEMA_MAX_BYTES = 2 * 1024 * 1024
+# These are the exact request/notification methods used below.  Codex app-server is explicitly
+# experimental, so a semver floor by itself cannot prove that a newer binary still implements the
+# protocol Grid is about to lease a durable Goal to.
+_REQUIRED_PROTOCOL_METHODS = frozenset({
+    "initialize", "initialized", "thread/start", "thread/resume", "thread/goal/set",
+    "thread/goal/get", "thread/tokenUsage/updated", "turn/started", "turn/completed",
+    "item/tool/call",
+})
+_PROTOCOL_CACHE: dict[tuple[str, int, int], tuple[bool, str]] = {}
 _INTERNAL_GOAL_TOOLS = frozenset({"grid_spawn_subgoal"})
 
 
@@ -117,6 +129,10 @@ def _recorded_tool_value(value: Any) -> Any:
 
 class CodexGoalError(RuntimeError):
     pass
+
+
+class CodexProtocolError(CodexGoalError):
+    """The installed app-server cannot safely execute Grid's native Goal contract."""
 
 
 @dataclass(frozen=True)
@@ -207,10 +223,87 @@ def _require_distributed_goal_version(binary: str) -> str:
     return binary
 
 
+def _protocol_capability(binary: str) -> tuple[bool, str]:
+    """Probe the exact installed app-server schema once per executable revision.
+
+    The probe is intentionally local and side-effect-free: it generates the experimental schema
+    under a temporary CODEX_HOME, never starts a thread, and never contacts a model.  False results
+    are cached too, so an incompatible binary cannot turn the provider claim loop into a process
+    storm.
+    """
+    key = _version_cache_key(binary)
+    cached = _PROTOCOL_CACHE.get(key) if key is not None else None
+    if cached is not None:
+        return cached
+    try:
+        with tempfile.TemporaryDirectory(prefix="grid-codex-protocol-") as temporary:
+            root = Path(temporary)
+            output = root / "schema"
+            output.mkdir()
+            codex_home = root / "home"
+            codex_home.mkdir()
+            env = os.environ.copy()
+            env["CODEX_HOME"] = str(codex_home)
+            proc = subprocess.run(
+                [binary, "app-server", "generate-json-schema", "--experimental",
+                 "--out", str(output)],
+                capture_output=True, text=True, errors="replace", env=env,
+                timeout=_PROTOCOL_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL, check=False)
+            if proc.returncode != 0:
+                result = (False, "Codex could not generate its experimental app-server schema "
+                          f"(exit {proc.returncode})")
+            else:
+                schema_path = output / "codex_app_server_protocol.schemas.json"
+                try:
+                    size = schema_path.stat().st_size
+                    if size > _PROTOCOL_SCHEMA_MAX_BYTES:
+                        raise CodexProtocolError("Codex app-server schema is unexpectedly large")
+                    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError, RecursionError) as exc:
+                    raise CodexProtocolError(
+                        f"Codex returned no usable app-server schema: {exc}") from exc
+                remaining = set(_REQUIRED_PROTOCOL_METHODS)
+                pending = [schema]
+                while pending and remaining:
+                    value = pending.pop()
+                    if isinstance(value, str):
+                        remaining.discard(value)
+                    elif isinstance(value, dict):
+                        pending.extend(value.values())
+                    elif isinstance(value, list):
+                        pending.extend(value)
+                if remaining:
+                    result = (False, "Codex app-server schema lacks Grid Goal methods: "
+                              + ", ".join(sorted(remaining)))
+                else:
+                    result = (True, "")
+    except (OSError, subprocess.SubprocessError, CodexProtocolError) as exc:
+        result = (False, str(exc))
+    if key is not None:
+        _PROTOCOL_CACHE[key] = result
+    return result
+
+
+def _remember_protocol_failure(binary: str, reason: str) -> None:
+    """Quarantine deterministic runtime drift until this executable changes on disk."""
+    key = _version_cache_key(binary)
+    if key is not None:
+        _PROTOCOL_CACHE[key] = (False, reason)
+
+
+def _require_distributed_goal_capability(binary: str) -> str:
+    _require_distributed_goal_version(binary)
+    supported, reason = _protocol_capability(binary)
+    if not supported:
+        raise CodexProtocolError(
+            f"Codex cannot provide distributed native Goals: {reason or 'incompatible protocol'}")
+    return binary
+
+
 def supports_distributed_goals(binary: str) -> bool:
     """Whether this exact executable is safe to advertise to the Goal scheduler."""
     try:
-        _require_distributed_goal_version(binary)
+        _require_distributed_goal_capability(binary)
     except CodexGoalError:
         return False
     return True
@@ -220,7 +313,7 @@ def resolve_binary() -> str:
     binary = shutil.which("codex")
     if not binary:
         raise CodexGoalError("Codex is not installed on this provider")
-    return _require_distributed_goal_version(binary)
+    return _require_distributed_goal_capability(binary)
 
 
 def available() -> bool:
@@ -561,7 +654,10 @@ class Rpc:
         response = self.responses.pop(request_id)
         if "error" in response:
             error = response["error"]
-            raise CodexGoalError(str(error.get("message", error) if isinstance(error, dict) else error))
+            message = str(error.get("message", error) if isinstance(error, dict) else error)
+            if isinstance(error, dict) and error.get("code") == -32601:
+                raise CodexProtocolError(f"Codex app-server method is unavailable: {message}")
+            raise CodexGoalError(message)
         return response.get("result")
 
     def wait_completed(self) -> dict[str, Any]:
@@ -685,7 +781,7 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
             thread_result = rpc.wait(rpc.send("thread/start", thread_params)) or {}
             thread_id = str((thread_result.get("thread") or {}).get("id") or "")
             if not thread_id:
-                raise CodexGoalError("Codex thread/start returned no thread id")
+                raise CodexProtocolError("Codex thread/start returned no thread id")
         rollout_relpath = _relative_rollout(
             codex_home, (thread_result.get("thread") or {}).get("path"))
         # Persist the portable thread pointer BEFORE activating/running this slice. If the native
@@ -741,6 +837,12 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
         publish("goal.slice.completed", status=result.status,
                 turns_completed=result.turns_completed, tokens_used=result.tokens_used)
         return result
+    except CodexProtocolError as exc:
+        # The current turn is retried from its Git checkpoint, but this process immediately stops
+        # advertising the incompatible binary.  That prevents one bad node from consuming every
+        # bounded attempt before a compatible Grid machine can claim the Goal.
+        _remember_protocol_failure(executable, str(exc))
+        raise
     finally:
         if process is not None:
             _stop(process)
@@ -780,7 +882,7 @@ def _public_status(native: str) -> str:
         # Version/protocol drift is a harness fault, not proof that the Goal is impossible. The
         # caller turns this into a bounded distributed retry so another compatible node can claim
         # the turn instead of storing an invented terminal failure.
-        raise CodexGoalError(f"Codex returned unsupported native Goal status {native!r}")
+        raise CodexProtocolError(f"Codex returned unsupported native Goal status {native!r}")
     return mapped
 
 

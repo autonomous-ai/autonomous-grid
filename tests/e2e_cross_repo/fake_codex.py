@@ -343,6 +343,25 @@ def main() -> int:
     if sys.argv[1:] == ["--version"]:
         print("codex-cli 0.150.1")
         return 0
+    if sys.argv[1:3] == ["app-server", "generate-json-schema"]:
+        arguments = sys.argv[3:]
+        try:
+            output = Path(arguments[arguments.index("--out") + 1])
+        except (ValueError, IndexError):
+            print("missing --out", file=sys.stderr)
+            return 2
+        output.mkdir(parents=True, exist_ok=True)
+        # Provider capability discovery must exercise the same fail-closed protocol probe as a real
+        # Codex installation.  Keep this fixture intentionally minimal: Grid scans exact schema
+        # string values, while the interactive fake below proves their actual runtime behavior.
+        methods = [
+            "initialize", "initialized", "thread/start", "thread/resume", "thread/goal/set",
+            "thread/goal/get", "thread/tokenUsage/updated", "turn/started", "turn/completed",
+            "item/tool/call",
+        ]
+        (output / "codex_app_server_protocol.schemas.json").write_text(
+            json.dumps({"methods": methods}, separators=(",", ":")) + "\n")
+        return 0
     node = os.environ.get("GRID_E2E_GOAL_NODE", "?")
     thread_id = "grid-e2e-" + str(uuid.uuid4())
     native_status = "paused"
