@@ -154,6 +154,10 @@ candidates per workload and 64 distinct portfolios, so catalog size cannot creat
 planning pass. Every counterfactual reuses one immutable workload-forecast snapshot and omits the
 executable plan identity digest; the single authoritative plan still hashes its complete inputs for
 generation fencing before any command can reach a node.
+An immediately repeated read-only status query reuses that portfolio bundle only when timestamp,
+node snapshots, model profiles, and the telemetry revision are identical. Status exposes the hit,
+and any new request or evaluation forces a fresh solve; reconciliation, admissions, commands, and
+lifecycle history remain live on every response.
 
 Each bounded workload set reserves representation for its exploitation leader and the broadest
 cross-workload candidate; a fifth-ranked generalist can therefore remain discoverable when four

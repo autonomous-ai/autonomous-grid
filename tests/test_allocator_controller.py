@@ -2955,6 +2955,64 @@ def test_controller_status_contains_forecast_plan_and_reconciliation():
     assert status["reconciliation"]["actions"]
 
 
+def test_status_reuses_only_an_identical_portfolio_snapshot(monkeypatch):
+    controller = AllocatorController()
+    controller.put_profile(
+        ModelProfile(
+            "coder",
+            1_000,
+            min_replicas=0,
+            max_replicas=1,
+            min_residency_seconds=0,
+            workload_scores=(("coding", 1.0),),
+        )
+    )
+    for timestamp in (98, 99, 100):
+        controller.observe_lifecycle(
+            RequestFeatures("chat/completions", "auto", "coding"),
+            service_seconds=1,
+            timestamp=timestamp,
+        )
+    machines = (NodeSnapshot("node", 8_000, max_models=1, last_heartbeat=100),)
+    controller.tick(machines, now=100)
+    original = controller._forecast_bundle
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(controller, "_forecast_bundle", counted)
+
+    cached = controller.status(machines, now=100)
+    assert cached["portfolio_policy"]["snapshot_cache_hit"] is True
+    assert calls == 0
+    cached["portfolio_placement_hints"][0]["reason"] = "caller mutation"
+    assert controller.status(machines, now=100)["portfolio_placement_hints"][0][
+        "reason"
+    ] != "caller mutation"
+    assert calls == 0
+
+    controller.observe_lifecycle(
+        RequestFeatures("chat/completions", "auto", "coding"),
+        service_seconds=1,
+        timestamp=100,
+    )
+    refreshed = controller.status(machines, now=100)
+    assert refreshed["portfolio_policy"]["snapshot_cache_hit"] is False
+    assert calls == 1
+
+    assert controller.status(machines, now=100)["portfolio_policy"][
+        "snapshot_cache_hit"
+    ] is True
+    assert calls == 1
+    assert controller.status(machines, now=101)["portfolio_policy"][
+        "snapshot_cache_hit"
+    ] is False
+    assert calls == 2
+
+
 def test_controller_prewarms_correlated_model_group_before_peer_request_arrives():
     controller = AllocatorController()
     for model_id in ("source", "target"):

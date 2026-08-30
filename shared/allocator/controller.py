@@ -14,7 +14,8 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import asdict, replace
+from copy import deepcopy
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,17 @@ _MAX_JOINT_PORTFOLIO_EVALUATIONS = 64
 _MAX_JOINT_EXPLORATION_MODELS = 1
 _MAX_JOINT_PREEMPTION_MODELS = 1
 _SPARE_CANARY_RESERVE_SLOTS = 2
+
+
+@dataclass(frozen=True, slots=True)
+class _PortfolioBundleCache:
+    timestamp: float
+    nodes: tuple[NodeSnapshot, ...]
+    profiles: tuple[ModelProfile, ...]
+    telemetry_revision: int
+    forecasts: tuple[DemandForecast, ...]
+    selection: dict[str, str] | None
+    selection_hints: dict[str, dict[str, Any]]
 
 
 class AllocatorController:
@@ -129,6 +141,8 @@ class AllocatorController:
         self._last_result: ReconcileResult | None = None
         self._last_tick_at = 0.0
         self._last_tick_duration_seconds = 0.0
+        self._telemetry_revision = 0
+        self._portfolio_bundle_cache: _PortfolioBundleCache | None = None
         self._last_delivery_safety_error = ""
         self._lock = threading.RLock()
         # Demand completion runs on the inference event-loop thread. Planning can legitimately
@@ -298,6 +312,7 @@ class AllocatorController:
                 errors=int(error),
                 timestamp=timestamp,
             )
+            self._telemetry_revision += 1
             return True
 
     def observe_lifecycle(
@@ -366,6 +381,7 @@ class AllocatorController:
                 workflow_key=workflow_key,
                 timestamp=timestamp,
             )
+            self._telemetry_revision += 1
         return True
 
     def observe_evaluation(
@@ -397,7 +413,7 @@ class AllocatorController:
                 raise ValueError(
                     "evaluation artifact_sha256 does not match the configured model revision"
                 )
-            return self.intelligence.observe_model_evaluation(
+            outcome = self.intelligence.observe_model_evaluation(
                 model_id,
                 workload,
                 artifact_sha256=configured_artifact,
@@ -407,6 +423,8 @@ class AllocatorController:
                 output_units=output_units,
                 timestamp=timestamp,
             )
+            self._telemetry_revision += 1
+            return outcome
 
     def tick(
         self,
@@ -929,18 +947,44 @@ class AllocatorController:
             load_estimates, load_samples = self._learned_load_estimates(
                 now=timestamp
             )
-            placement_hints = self.planner.portfolio_placement_hints(
-                node_list,
-                profiles,
-                now=timestamp,
-                startup_seconds=startup_estimates,
-                load_seconds=load_estimates,
+            with self._demand_lock:
+                telemetry_revision = self._telemetry_revision
+            cache = self._portfolio_bundle_cache
+            active_profiles = tuple(
+                profile
+                for profile in profiles
+                if profile.model_id not in self._retiring
             )
-            forecasts, portfolio_selection, selection_hints = self._forecast_bundle(
-                timestamp,
-                placement_hints=placement_hints,
-                nodes=node_list,
+            portfolio_cache_hit = bool(
+                cache is not None
+                and cache.timestamp == timestamp
+                and cache.nodes
+                == tuple(sorted(node_list, key=lambda item: item.node_id))
+                and cache.profiles == active_profiles
+                and cache.telemetry_revision == telemetry_revision
             )
+            if portfolio_cache_hit:
+                assert cache is not None
+                forecasts = cache.forecasts
+                portfolio_selection = (
+                    dict(cache.selection) if cache.selection is not None else None
+                )
+                # Status payloads are ordinary mutable dictionaries. Do not let an in-process
+                # consumer mutate the cached nested diagnostics seen by a later caller.
+                selection_hints = deepcopy(cache.selection_hints)
+            else:
+                placement_hints = self.planner.portfolio_placement_hints(
+                    node_list,
+                    profiles,
+                    now=timestamp,
+                    startup_seconds=startup_estimates,
+                    load_seconds=load_estimates,
+                )
+                forecasts, portfolio_selection, selection_hints = self._forecast_bundle(
+                    timestamp,
+                    placement_hints=placement_hints,
+                    nodes=node_list,
+                )
             with self._demand_lock:
                 workload_forecasts = self.intelligence.workload_forecasts(now=timestamp)
                 portfolio_projections = self.intelligence.projections(
@@ -1011,6 +1055,7 @@ class AllocatorController:
                 "portfolio_admissions": portfolio_admissions,
                 "portfolio_policy": {
                     "joint": bool(portfolio_selection is not None),
+                    "snapshot_cache_hit": portfolio_cache_hit,
                     "objective": (
                         "preserve required service; maximize admitted workload coverage; "
                         "restore recently failing workloads among equally broad portfolios; "
@@ -1146,6 +1191,7 @@ class AllocatorController:
             # bounded telemetry under its own mutex, then release it before any optimization so
             # inference finalizers can keep recording demand while the controller holds `_lock`.
             intelligence = WorkloadIntelligence.from_dict(self.intelligence.to_dict())
+            telemetry_revision = self._telemetry_revision
         workload_forecasts = intelligence.portfolio_workload_forecast_map(now=now)
         selection_hints = _portfolio_selection_hints(
             profiles,
@@ -1184,6 +1230,15 @@ class AllocatorController:
             placement_hints=selection_hints,
             chosen_models=selection,
             workload_forecasts=workload_forecasts,
+        )
+        self._portfolio_bundle_cache = _PortfolioBundleCache(
+            timestamp=now,
+            nodes=tuple(sorted(node_list, key=lambda item: item.node_id)),
+            profiles=tuple(sorted(profiles, key=lambda item: item.model_id)),
+            telemetry_revision=telemetry_revision,
+            forecasts=forecasts,
+            selection=(dict(selection) if selection is not None else None),
+            selection_hints=deepcopy(selection_hints),
         )
         return forecasts, selection, selection_hints
 
