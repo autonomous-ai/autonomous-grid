@@ -1122,6 +1122,7 @@ def task_loop(state: Any, capacity: Any = None) -> None:
     # otherwise retire on a pair of unrelated blips neither of which was persistent.
     consecutive_404s = 0
     consecutive_403s = 0
+    agent_claims_suspended = False
     while not (state.stop.is_set() or state.tasks_stop.is_set()):
         pause = _capacity_pause(capacity)
         if pause > 0:
@@ -1191,16 +1192,21 @@ def task_loop(state: Any, capacity: Any = None) -> None:
             # an operator can replace/remove a binary, or its permissions can change.  In a
             # Codex-only process, claim_once then returns None without touching the relay.  Treating
             # that as an ordinary 204 would hot-spin forever because there is no network long-poll
-            # left to pace the loop.  Retire only task serving, exactly as at startup; inference on
-            # the same Grid node remains available.
+            # left to pace the loop.  Suspend and recheck instead: a repaired/replaced executable has
+            # a new stat revision, clears the quarantine naturally, and rejoins without taking down
+            # inference or requiring a process restart.
             if not _agent_profiles():
-                _warn("task serving retired because this node no longer has a runnable configured "
-                      "agent harness; install/enable Codex or Claude, or fix "
-                      "GRID_TASK_AGENT_KINDS (inference is unaffected)")
-                state.tasks_stop.set()
-                return
+                if not agent_claims_suspended:
+                    _warn("task claims suspended because this node no longer has a runnable "
+                          "configured agent harness; rechecking after backoff (inference is "
+                          "unaffected)")
+                agent_claims_suspended = True
+                state.tasks_stop.wait(_CLAIM_BACKOFF_SECONDS)
+            else:
+                agent_claims_suspended = False
             continue
 
+        agent_claims_suspended = False
         _run_and_report(state, job, capacity)
 
 

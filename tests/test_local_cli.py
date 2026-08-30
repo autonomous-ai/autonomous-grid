@@ -28448,8 +28448,9 @@ def test_no_runnable_harness_retires_only_task_serving_without_claiming(monkeypa
     assert "no runnable configured agent harness" in capsys.readouterr().err
 
 
-def test_runtime_harness_quarantine_retires_instead_of_hot_spinning(monkeypatch, capsys):
-    """A Codex binary can fail its runtime protocol after task workers have already started."""
+def test_runtime_harness_quarantine_backs_off_and_recovers_without_hot_spinning(
+        monkeypatch, capsys):
+    """A repaired Codex binary should rejoin without restarting the inference provider."""
     from remote import tasks
 
     state = SimpleNamespace(
@@ -28457,19 +28458,31 @@ def test_runtime_harness_quarantine_retires_instead_of_hot_spinning(monkeypatch,
         signaling_url="https://relay.example", token=lambda: "AT",
         refresh=lambda stale_token=None: False,
     )
+    ready = ({"kind": "codex", "capabilities": ["native_goal"]},)
     profiles = iter([
-        ({"kind": "codex", "capabilities": ["native_goal"]},),  # task_loop preflight
-        (),  # recheck after claim_once observes the process-wide quarantine
+        ready,  # task_loop preflight
+        ready,  # first claim
+        (),  # runtime quarantine discovered after the long poll
+        ready,  # executable was replaced during backoff; second claim advertises it
+        ready,  # post-204 recheck
     ])
     monkeypatch.setattr(tasks, "_agent_profiles", lambda: next(profiles))
     claims = []
-    monkeypatch.setattr(tasks, "claim_once", lambda _state: claims.append(True) or None)
+
+    def claim(*_args, **_kwargs):
+        claims.append(True)
+        if len(claims) == 2:
+            state.stop.set()
+        return None
+
+    monkeypatch.setattr(tasks.relay, "claim_task", claim)
+    monkeypatch.setattr(tasks, "_CLAIM_BACKOFF_SECONDS", 0.001)
 
     tasks.task_loop(state)
 
-    assert claims == [True]
-    assert state.tasks_stop.is_set() and not state.stop.is_set()
-    assert "no longer has a runnable configured agent harness" in capsys.readouterr().err
+    assert claims == [True, True]
+    assert state.stop.is_set() and not state.tasks_stop.is_set()
+    assert "task claims suspended" in capsys.readouterr().err
 
 
 def test_native_goal_impossible_checkpoint_is_reported_not_retried(monkeypatch):
