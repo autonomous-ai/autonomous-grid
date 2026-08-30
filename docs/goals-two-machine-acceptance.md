@@ -10,6 +10,9 @@ turn reclaimed after lease expiry, at least two relay-authenticated execution no
 Git/transcript chain, Grid-attributed inference for every settled turn, and accepted independent
 evals on the final commit.
 
+No SSH is used in this test. Each operator runs Grid locally on their own computer. HTTP, the
+relay-owned Git endpoint, and the distributed task table are the only machine-to-machine paths.
+
 ## Rules
 
 - Use two physical computers, two Grid node identities, and two local task roots.
@@ -38,8 +41,70 @@ uv run grid goal list --all --json
 ```
 
 Any nonzero exit fails preflight. In particular, a response saying the relay does not support Grid
-Goal means the provider branch is ahead of the hosted relay; deploy the matching private branch and
-repeat the query. Do not continue with a task-only relay and call the result a Goal test.
+Goal means the provider branch is ahead of the hosted relay. Do not continue with a task-only relay
+and call the result a Goal test. For this pre-merge gate, use the no-SSH disposable relay below;
+after the matching relay is hosted, skip that subsection and use the hosted Grid normally.
+
+### Pre-merge relay, without SSH
+
+Machine B runs the matching relay checkout locally and stays awake. This is an acceptance-test
+topology, not a production deployment and not a replacement for the hosted relay. On B, in a
+separate clean private-repository checkout:
+
+```bash
+git clone --branch grid-goal-distributed \
+  https://github.com/autonomous-ai/autonomous-grid-cli \
+  /private/tmp/autonomous-grid-cli-goal-relay
+cd /private/tmp/autonomous-grid-cli-goal-relay
+uv sync
+```
+
+Then, from B's clean public `autonomous-grid` worktree, start the test relay in a terminal that will
+remain open:
+
+```bash
+uv run python tests/e2e_cross_repo/physical_goal_lab.py relay \
+  --relay-repo /private/tmp/autonomous-grid-cli-goal-relay \
+  --root /private/tmp/grid-goal-physical
+```
+
+The helper discovers B's reachable address itself; no IP lookup and no remote login is normally
+needed. If B has several network interfaces and discovery chooses one A cannot reach, pass
+`--advertise-host <reachable-LAN-or-VPN-address>` explicitly. The helper starts the relay, creates
+distinct short-lived identities for A and B, writes B's isolated Grid home, and prints one
+disposable pairing bundle for A. It never copies a task root.
+
+On A, from the same public commit:
+
+```bash
+uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \
+  --home /private/tmp/grid-goal-lab-a
+```
+
+Paste B's pairing bundle at the hidden prompt. It does not enter shell history. The two isolated
+Grid homes for the rest of this run are:
+
+```text
+A: /private/tmp/grid-goal-lab-a
+B: /private/tmp/grid-goal-physical/grid-home-b
+```
+
+Verify both machines through Grid itself:
+
+```bash
+# A
+GRID_HOME=/private/tmp/grid-goal-lab-a uv run grid goal list --all --json
+
+# B
+GRID_HOME=/private/tmp/grid-goal-physical/grid-home-b \
+  uv run grid goal list --all --json
+```
+
+Both calls must return the same Goal table. Keep B's relay terminal open. All later commands in
+this document must use the machine's isolated `GRID_HOME` prefix and the Grid name
+`goal-physical`. Do not run `grid login` or `grid use` inside these homes; pairing already wrote the
+exact disposable Grid record. Model inference must still be provided by an engine joined to this
+test Grid—running the relay does not make the relay an inference engine.
 
 On machine A:
 
@@ -75,6 +140,10 @@ uv run grid info <grid>
 uv run grid models <grid> --verbose
 uv run grid engines <grid> --json
 ```
+
+For the disposable pre-merge topology, omit `grid mode remote`, `grid login`, and `grid use` above,
+and prefix the remaining Grid commands with B's isolated `GRID_HOME` as shown in the preceding
+subsection.
 
 Do not discard local changes to make this preflight pass. Stop and preserve them. Do not start B's
 task provider yet; a provider already serving tasks must be removed from this isolated test before
