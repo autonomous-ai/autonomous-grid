@@ -136,8 +136,9 @@ Structured business outcomes can use a commit-pinned JSON metric instead of brit
 Pointers use RFC 6901 escaping. Supported operations are `equals`, `not_equals`,
 `greater_or_equal`, `less_or_equal`, and `exists`. Numeric comparisons reject booleans and
 non-finite values. A JSON file is capped at 4 MiB, all JSON evals at 16 MiB per nomination, and
-parsing is bounded by depth and value count. Invalid JSON is a measured failure the next Goal turn
-can repair; Git/read failures remain blocking evaluator infrastructure errors.
+parsing is bounded by depth and value count. Duplicate object keys and unpaired Unicode surrogates
+are rejected as ambiguous data. Invalid JSON is a measured failure the next Goal turn can repair;
+Git/read failures remain blocking evaluator infrastructure errors.
 
 Each definition is immutable, and its hash includes the evaluator-semantics version. Every score is
 stored with that definition hash, its turn, evaluator node, and exact Git commit. The guarded lease

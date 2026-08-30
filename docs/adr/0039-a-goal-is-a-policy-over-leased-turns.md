@@ -200,9 +200,10 @@ relay-local file and JSON evaluators, requires the evaluator identity to be exac
 
 The JSON evaluator reads one bounded regular-file blob from the exact result commit and applies
 ordered exact, existence, and numeric predicates through validated RFC 6901 pointers. It rejects
-non-finite numbers, boolean-as-number comparisons, excessive depth/value counts, oversized files,
-and aggregate reads above 16 MiB. Invalid JSON is deterministic failed outcome evidence, not an
-infrastructure error; Git/object failures still block the Goal.
+non-finite numbers, boolean-as-number comparisons, duplicate keys, unpaired Unicode surrogates,
+excessive depth/value counts, oversized files, and aggregate reads above 16 MiB. Invalid JSON is
+deterministic failed outcome evidence, not an infrastructure error; Git/object failures still block
+the Goal.
 
 Planned evaluator-node kinds, which are not part of the first release gate, are:
 
