@@ -8,7 +8,7 @@ The detailed physical artifacts are indexed in
 ## Tested code revisions
 
 - Public worker/CLI: `7d06ebfca1d8bfbef7e43a82cd235db2e30ed6e0`
-- Public acceptance harness: `b5e0783101791f3ae696c246f69544d71f0faf2e`
+- Public acceptance harness: `e5787235bacb76b18293e0c8179b79de5207c614`
 - Private relay: `8d18961aacaefb8a539f8bcb8fbe50908a03026e`
 - Both `grid-goal-distributed` branch heads were clean and pushed when these gates completed. The
   commits after the public worker/CLI revision change only tests and evidence documentation, not
@@ -91,6 +91,9 @@ revisions. It includes:
 The matrix harness also treats an atomically replaced workspace as a transient polling miss and
 cancels every Goal created by a failed scenario during teardown. One assertion failure therefore
 cannot leak queued work into the next scenario and create a misleading cascade of cross-test claims.
+Its provider disks live under an atomically reserved one-character `/private/tmp` root, with a hard
+31-character assertion on every task root. The uninterrupted 18-scenario rerun passed in 238.31
+seconds without exercising the macOS path depth that can make sandbox commands fail with `E2BIG`.
 
 The historical repository-wide private sweep is not used as a false green gate. The broader 20-file
 compatibility sweep passed 684 tests and failed four: three domain-claim fixtures received `204`
