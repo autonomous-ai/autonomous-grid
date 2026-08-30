@@ -9,6 +9,7 @@ import stat
 import sys
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -2192,6 +2193,84 @@ def test_the_git_remote_is_fenced_to_this_exact_claim_generation():
 
     assert remote is not None
     assert remote.claim_id == "claim-generation-7"
+
+
+def test_the_git_remote_adopts_a_token_refreshed_during_a_long_goal():
+    from remote import tasks
+
+    live = {"token": "claim-time-token"}
+    state = SimpleNamespace(
+        signaling_url="http://relay", token=lambda: live["token"])
+    remote = tasks._git_remote(state, {
+        "task_id": "T-42", "project_id": "proj-1", "input_commit": "c" * 40,
+        "claim_id": "claim-generation-7",
+    })
+    assert remote is not None and remote.token == "claim-time-token"
+
+    live["token"] = "heartbeat-refreshed-token"
+
+    assert remote.live_token() == "heartbeat-refreshed-token"
+    assert remote.claim_id == "claim-generation-7", "the lease generation must never rotate"
+
+
+def test_checkout_reads_the_live_token_instead_of_the_claim_time_snapshot(
+        agent, monkeypatch):
+    from remote import task_repo, tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    live = {"token": "claim-time-token"}
+    remote = task_repo.GitRemote(
+        url="https://relay.example/git/project", token=live["token"],
+        claim_id="claim-generation-7", token_provider=lambda: live["token"])
+    live["token"] = "heartbeat-refreshed-token"
+    seen = {}
+
+    def materialize(*_args, **kwargs):
+        seen.update(kwargs)
+        raise task_repo.InputFetchError("stop after observing the credential")
+
+    monkeypatch.setattr(task_repo, "materialize", materialize)
+    with pytest.raises(task_repo.InputFetchError):
+        tasks.run_task(
+            _job(input_commit="c" * 40, branch="task/T1"), remote=remote)
+
+    assert seen["token"] == "heartbeat-refreshed-token"
+    assert seen["claim_id"] == "claim-generation-7"
+
+
+def test_transcript_and_result_push_each_read_the_latest_token(tmp_path, monkeypatch):
+    from remote import task_repo, tasks
+
+    live = {"token": "token-before-transcript"}
+    remote = task_repo.GitRemote(
+        url="https://relay.example/git/project", token="claim-time-token",
+        claim_id="claim-generation-7", token_provider=lambda: live["token"])
+    seen = []
+    monkeypatch.setattr(
+        tasks.task_agent, "workspace_for", lambda *_args: tmp_path)
+
+    def push_transcript(_workspace, **kwargs):
+        seen.append(("transcript", kwargs["token"], kwargs.get("claim_id")))
+        live["token"] = "token-before-result"
+        return "a" * 40
+
+    def push_result(_workspace, **kwargs):
+        seen.append(("result", kwargs["token"], kwargs.get("claim_id")))
+        return task_repo.Pushed("b" * 40)
+
+    monkeypatch.setattr(task_repo, "push_transcript", push_transcript)
+    monkeypatch.setattr(task_repo, "commit_and_push", push_result)
+    outcome, landed = tasks._push_result(
+        {"task_id": "T1", "project_id": "P1", "member_key": "M1",
+         "conversation_id": "G1", "branch": "task/T1"},
+        tasks.TaskOutcome("completed", "ok", None), True, remote, _NullPublisher())
+
+    assert landed is True
+    assert outcome.result_commit == "b" * 40
+    assert seen == [
+        ("transcript", "token-before-transcript", "claim-generation-7"),
+        ("result", "token-before-result", "claim-generation-7"),
+    ]
 
 
 class _NullPublisher:

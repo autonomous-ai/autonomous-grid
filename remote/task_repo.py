@@ -33,6 +33,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from . import task_worktree
 
@@ -135,6 +136,11 @@ class GitRemote:
     url: str
     token: str
     claim_id: str | None = None
+    token_provider: Callable[[], str] | None = None
+
+    def live_token(self) -> str:
+        """Read the latest process credential while keeping static test/local remotes simple."""
+        return str(self.token_provider() if self.token_provider is not None else self.token)
 
 
 @dataclass(frozen=True)

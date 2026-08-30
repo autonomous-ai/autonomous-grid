@@ -904,7 +904,7 @@ def run_task(job: dict[str, Any],
         try:
             claim = ({"claim_id": remote.claim_id} if remote.claim_id else {})
             task_repo.materialize(
-                workspace, url=remote.url, token=remote.token,
+                workspace, url=remote.url, token=remote.live_token(),
                 branch=str(job.get("branch") or ""), input_commit=str(input_commit),
                 # A MERGE TASK's second ref (ADR 0033 D-e, issue 15), fetched here rather than by
                 # the agent — which has no grid credential and must not get one. Empty on every
@@ -1798,14 +1798,17 @@ def _git_remote(state: Any, job: dict[str, Any]) -> task_repo.GitRemote | None:
     decide whether to refresh would be a guess. It does not need to be one: a git failure routes to
     the push-failure path below, the task's lease lapses, and the next attempt claims with a token
     freshly fetched. **The recovery path already exists**, so a second one keyed on parsing git's
-    English would add a way to be wrong without adding a way to succeed.
+    English would add a way to be wrong without adding a way to succeed. The remote DOES read the
+    live token before every distinct Git phase, however: lease/event/heartbeat traffic may already
+    have refreshed an expired credential during a long agent run, and retaining the claim-time
+    string would knowingly discard that successful refresh.
     """
     project_id = str(job.get("project_id") or "")
     if not job.get("input_commit") or not project_id:
         return None
     return task_repo.GitRemote(
         url=relay.git_remote_url(state.signaling_url, project_id), token=state.token(),
-        claim_id=str(job.get("claim_id") or "") or None)
+        claim_id=str(job.get("claim_id") or "") or None, token_provider=state.token)
 
 
 def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
@@ -1862,10 +1865,10 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         # transient network fault.
         claim = ({"claim_id": remote.claim_id} if remote.claim_id else {})
         transcript_result_commit = task_repo.push_transcript(
-            workspace, url=remote.url, token=remote.token,
+            workspace, url=remote.url, token=remote.live_token(),
             ref=task_repo.transcript_ref(conversation_id), **claim)
         pushed = task_repo.commit_and_push(
-            workspace, url=remote.url, token=remote.token,
+            workspace, url=remote.url, token=remote.live_token(),
             branch=str(job.get("branch") or ""),
             message=f"task {job.get('task_id')} ({outcome.state})",
             # No `transcript=` any more (ADR 0034 D-j, issue 39). The conversation does not travel
