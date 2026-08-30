@@ -140,6 +140,13 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
             changes.append("prefetch " + ", ".join(row["prefetches"][:3]))
             if len(row["prefetches"]) > 3:
                 changes[-1] += f" +{len(row['prefetches']) - 3}"
+        if row.get("artifact_evictions"):
+            changes.append(
+                "expire predictive cache "
+                + ", ".join(row["artifact_evictions"][:3])
+            )
+            if len(row["artifact_evictions"]) > 3:
+                changes[-1] += f" +{len(row['artifact_evictions']) - 3}"
         if row["loads"]:
             changes.append("load " + ", ".join(row["loads"][:3]))
             if len(row["loads"]) > 3:
@@ -220,6 +227,8 @@ def _print_report(report: ScenarioReport, *, full_timeline: bool) -> None:
         f"hits {metrics['predictive_prefetch_hits']} "
         f"({metrics['predictive_prefetch_hit_rate_pct']:.2f}%) · "
         f"unused {metrics['unused_predictive_prefetches']} · "
+        f"expired {metrics['predictive_prefetch_evictions']} "
+        f"({metrics['predictive_prefetch_reclaimed_mb'] / 1024:.1f} GiB reclaimed) · "
         f"saved {metrics['predictive_cold_start_seconds_avoided']:.1f}s startup · "
         f"avg lead {metrics['average_predictive_prefetch_lead_minutes']:.1f}m"
     )
@@ -317,6 +326,7 @@ def _notable_timeline(rows: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any],
             or row["loads"]
             or row["unloads"]
             or row.get("prefetches")
+            or row.get("artifact_evictions")
             or row.get("overloaded_models")
         ):
             selected.append(row)

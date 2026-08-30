@@ -8,6 +8,7 @@ needs an optimizer or an LLM.
 from shared.allocator.models import (
     ActionKind,
     AllocatorMode,
+    ArtifactEviction,
     ArtifactPrefetch,
     DemandForecast,
     ModelPerformance,
@@ -33,6 +34,7 @@ from shared.allocator.intelligence import (
 __all__ = [
     "ActionKind",
     "AllocatorMode",
+    "ArtifactEviction",
     "ArtifactPrefetch",
     "DemandForecast",
     "ModelPerformance",

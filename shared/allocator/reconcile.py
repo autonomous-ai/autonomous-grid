@@ -181,9 +181,10 @@ class Reconciler:
 
         Pending commands outlive the reconciliation tick that created them.  A later profile or
         heartbeat can therefore invalidate replacement readiness, ownership, minimum-residency, or
-        failure-domain evidence while the pair remains obsolete.  Re-evaluate those safety facts in
-        deterministic command order and project only the DRAIN commands that remain valid, so a
-        batch cannot jointly cross the live diversity floor.
+        failure-domain evidence while the pair remains obsolete. Predictive cache eviction is also
+        re-proven against the latest exact residency before delivery. Re-evaluate those safety
+        facts in deterministic command order and project only the DRAIN commands that remain valid,
+        so a batch cannot jointly cross the live diversity floor.
         """
 
         timestamp = time.time() if now is None else float(now)
@@ -193,7 +194,11 @@ class Reconciler:
             (
                 action
                 for action in actions
-                if action.kind in (ActionKind.DRAIN, ActionKind.UNLOAD)
+                if action.kind in (
+                    ActionKind.DRAIN,
+                    ActionKind.UNLOAD,
+                    ActionKind.EVICT,
+                )
             ),
             key=lambda action: (action.created_at, action.action_id),
         )
@@ -208,12 +213,50 @@ class Reconciler:
         profile_by_id = {profile.model_id: profile for profile in profiles}
         safety = _destructive_safety_state(plan, node_by_id, profile_by_id)
         desired_pairs = plan.desired_pairs
+        artifact_eviction_pairs = {
+            (item.node_id, item.model_id) for item in plan.artifact_evictions
+        }
         preemptions = {
             (item.node_id, item.model_id): item for item in plan.preemptions
         }
         deferrals: dict[str, DeferredMutation] = {}
         for action in destructive:
             pair = (action.node_id, action.model_id)
+            if action.kind == ActionKind.EVICT:
+                node = node_by_id.get(action.node_id)
+                profile = profile_by_id.get(action.model_id)
+                residency = residency_by_pair.get(pair)
+                if pair in desired_pairs:
+                    deferrals[action.action_id] = DeferredMutation(
+                        action.kind,
+                        action.node_id,
+                        action.model_id,
+                        "desired_again",
+                        "The artifact is required by the current desired placement",
+                    )
+                elif (
+                    pair not in artifact_eviction_pairs
+                    or node is None
+                    or profile is None
+                    or residency is None
+                    or node.manually_managed
+                    or "evict" not in node.actuator_capabilities
+                    or residency.state != ResidencyState.CACHED
+                    or not residency.predictive_cache
+                    or not residency.managed
+                    or residency.pinned
+                    or not profile.matches_artifact(residency)
+                    or not action.artifact_sha256
+                    or action.artifact_sha256 != residency.artifact_sha256
+                ):
+                    deferrals[action.action_id] = DeferredMutation(
+                        action.kind,
+                        action.node_id,
+                        action.model_id,
+                        "predictive_cache_changed",
+                        "The exact unused predictive artifact is no longer safe to evict",
+                    )
+                continue
             preemption = preemptions.get(pair)
             priority_preemption = preemption is not None
             if pair in desired_pairs and not priority_preemption:
@@ -637,6 +680,7 @@ class Reconciler:
                 blocked_causes=mutation_block_causes,
                 history_cooldowns=history_cooldowns,
                 memory_mb=profile.memory_for(node.runtimes),
+                predictive_prefetch=True,
             )
             if action is None:
                 deferred.extend(
@@ -711,6 +755,86 @@ class Reconciler:
                         blocked_until=mutation_blocks,
                         blocked_causes=mutation_block_causes,
                         history_cooldowns=history_cooldowns,
+                    )
+                )
+            else:
+                proposals.append(action)
+
+        # Expiration is deliberately narrower than ordinary lifecycle removal. The controller may
+        # delete only an exact, cache-only artifact that the managed node says was fetched for a
+        # prediction and never warmed. Any snapshot drift turns the directive into a no-op rather
+        # than widening authority over operator caches or live model processes.
+        for eviction in plan.artifact_evictions:
+            pair = (eviction.node_id, eviction.model_id)
+            node = node_by_id.get(eviction.node_id)
+            profile = profile_by_id.get(eviction.model_id)
+            residency = residency_by_pair.get(pair)
+            if node is None or profile is None or residency is None:
+                deferred.append(
+                    DeferredMutation(
+                        ActionKind.EVICT,
+                        eviction.node_id,
+                        eviction.model_id,
+                        "target_missing",
+                        "The predictive cache target is no longer present",
+                    )
+                )
+                continue
+            if pair in desired:
+                deferred.append(
+                    DeferredMutation(
+                        ActionKind.EVICT,
+                        eviction.node_id,
+                        eviction.model_id,
+                        "now_desired",
+                        "The artifact is required by the current placement plan",
+                    )
+                )
+                continue
+            if (
+                residency.state != ResidencyState.CACHED
+                or not residency.predictive_cache
+                or not residency.managed
+                or residency.pinned
+                or not profile.matches_artifact(residency)
+            ):
+                deferred.append(
+                    DeferredMutation(
+                        ActionKind.EVICT,
+                        eviction.node_id,
+                        eviction.model_id,
+                        "cache_state_changed",
+                        "Only an unused exact allocator-fetched predictive artifact may be evicted",
+                    )
+                )
+                continue
+            action = self._proposal(
+                ActionKind.EVICT,
+                node,
+                profile,
+                plan,
+                timestamp,
+                "Expire an unused allocator-fetched predictive artifact",
+                history_by_transition=history_by_transition,
+                mode=mode,
+                blocked_until=mutation_blocks,
+                blocked_causes=mutation_block_causes,
+                history_cooldowns=history_cooldowns,
+                residency=residency,
+            )
+            if action is None:
+                deferred.extend(
+                    self._why_deferred(
+                        ActionKind.EVICT,
+                        node,
+                        profile,
+                        history_by_transition,
+                        timestamp,
+                        mode=mode,
+                        blocked_until=mutation_blocks,
+                        blocked_causes=mutation_block_causes,
+                        history_cooldowns=history_cooldowns,
+                        residency=residency,
                     )
                 )
             else:
@@ -864,6 +988,7 @@ class Reconciler:
             ActionKind.WARM: 1,
             ActionKind.DRAIN: 2,
             ActionKind.UNLOAD: 3,
+            ActionKind.EVICT: 4,
         }
 
         def service_priority(action: MutationAction) -> tuple[int, int]:
@@ -1003,6 +1128,7 @@ class Reconciler:
                     artifact_sha256=proposal.artifact_sha256,
                     artifact_source=proposal.artifact_source,
                     artifact_size_mb=proposal.artifact_size_mb,
+                    predictive_prefetch=proposal.predictive_prefetch,
                 )
                 budget -= 1
                 scheduled_by_node[proposal.node_id] = scheduled_by_node.get(proposal.node_id, 0) + 1
@@ -1030,6 +1156,7 @@ class Reconciler:
         bypass_success_observation: bool = False,
         memory_mb: int | None = None,
         residency: ModelResidency | None = None,
+        predictive_prefetch: bool = False,
     ) -> MutationAction | None:
         if kind.value not in node.actuator_capabilities or node.manually_managed:
             return None
@@ -1124,6 +1251,7 @@ class Reconciler:
             artifact_sha256=artifact_sha256,
             artifact_source=(profile.artifact_source if kind == ActionKind.LOAD else ""),
             artifact_size_mb=(profile.artifact_size_mb if kind == ActionKind.LOAD else 0),
+            predictive_prefetch=predictive_prefetch,
         )
 
     def _history_blocked_until(

@@ -54,6 +54,7 @@ class ActionKind(StrEnum):
     WARM = "warm"
     DRAIN = "drain"
     UNLOAD = "unload"
+    EVICT = "evict"
 
 
 def _finite_nonnegative(value: float, name: str) -> None:
@@ -98,6 +99,7 @@ class ModelResidency:
     managed: bool = True
     active_requests: int = 0
     artifact_sha256: str = ""
+    predictive_cache: bool = False
 
     def __post_init__(self) -> None:
         if not self.model_id or len(self.model_id) > MAX_ID_LENGTH:
@@ -112,6 +114,8 @@ class ModelResidency:
             raise ValueError("active_requests is outside the supported range")
         if not isinstance(self.state, ResidencyState):
             object.__setattr__(self, "state", ResidencyState(self.state))
+        if not isinstance(self.predictive_cache, bool):
+            raise ValueError("predictive_cache must be boolean")
         object.__setattr__(
             self,
             "artifact_sha256",
@@ -131,6 +135,7 @@ class ModelResidency:
             managed=bool(value.get("managed", True)),
             active_requests=int(value.get("active_requests") or 0),
             artifact_sha256=value.get("artifact_sha256") or "",
+            predictive_cache=bool(value.get("predictive_cache", False)),
         )
 
 
@@ -742,6 +747,23 @@ class ArtifactPrefetch:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactEviction:
+    """Removal of an unused allocator-fetched predictive artifact."""
+
+    node_id: str
+    model_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.node_id
+            or not self.model_id
+            or len(self.node_id) > MAX_ID_LENGTH
+            or len(self.model_id) > MAX_ID_LENGTH
+        ):
+            raise ValueError("artifact eviction node and model are required")
+
+
+@dataclass(frozen=True, slots=True)
 class PlacementPlan:
     generation: str
     created_at: float
@@ -753,6 +775,7 @@ class PlacementPlan:
     preemptions: tuple[PlacementPreemption, ...] = ()
     artifact_prefetches: tuple[ArtifactPrefetch, ...] = ()
     model_urgencies: tuple[tuple[str, int], ...] = ()
+    artifact_evictions: tuple[ArtifactEviction, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.generation:
@@ -771,11 +794,20 @@ class PlacementPlan:
         ]
         if len(prefetch_pairs) != len(set(prefetch_pairs)):
             raise ValueError("an artifact cannot be prefetched twice to the same node")
+        eviction_pairs = [
+            (item.node_id, item.model_id) for item in self.artifact_evictions
+        ]
+        if len(eviction_pairs) != len(set(eviction_pairs)):
+            raise ValueError("an artifact cannot be evicted twice from the same node")
         desired_pairs = {(node_id, model_id) for model_id, node_id in pairs}
         if desired_pairs.intersection(preemption_pairs):
             raise ValueError("a residency cannot be both desired and preempted")
         if desired_pairs.intersection(prefetch_pairs):
             raise ValueError("a desired residency does not need a cache-only prefetch")
+        if desired_pairs.intersection(eviction_pairs):
+            raise ValueError("a desired residency cannot have its artifact evicted")
+        if set(prefetch_pairs).intersection(eviction_pairs):
+            raise ValueError("an artifact cannot be prefetched and evicted together")
         preemption_beneficiaries = {
             (item.node_id, item.for_model_id)
             for item in self.preemptions
@@ -836,6 +868,9 @@ class PlacementPlan:
             "artifact_prefetches": [
                 asdict(item) for item in self.artifact_prefetches
             ],
+            "artifact_evictions": [
+                asdict(item) for item in self.artifact_evictions
+            ],
             "model_urgencies": dict(self.model_urgencies),
         }
 
@@ -859,6 +894,7 @@ class MutationAction:
     controller_term: int = 0
     controller_id: str = ""
     controller_lease_expires_at: float = 0.0
+    predictive_prefetch: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -894,6 +930,10 @@ class MutationAction:
             raise ValueError("a controller lease requires a positive controller_term")
         if not isinstance(self.kind, ActionKind):
             object.__setattr__(self, "kind", ActionKind(self.kind))
+        if not isinstance(self.predictive_prefetch, bool):
+            raise ValueError("predictive_prefetch must be boolean")
+        if self.predictive_prefetch and self.kind != ActionKind.LOAD:
+            raise ValueError("predictive_prefetch is valid only for load actions")
         object.__setattr__(self, "dependencies", _unique(self.dependencies))
         object.__setattr__(
             self,
@@ -926,6 +966,9 @@ class MutationAction:
         data["schema_version"] = SCHEMA_VERSION
         data["kind"] = self.kind.value
         data["dependencies"] = list(self.dependencies)
+        if not self.predictive_prefetch:
+            # Preserve the legacy command envelope for ordinary actions during rolling upgrades.
+            data.pop("predictive_prefetch", None)
         return data
 
     @classmethod

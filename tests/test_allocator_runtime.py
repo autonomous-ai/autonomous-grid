@@ -47,6 +47,7 @@ class FakeBackend:
         self.raise_after_spawn = False
         self.cancelled = False
         self.fetches: list[tuple[str, str, str, int]] = []
+        self.evictions: list[tuple[str, str]] = []
 
     def cached_models(self) -> tuple[str, ...]:
         return tuple(sorted(self.cached))
@@ -65,6 +66,13 @@ class FakeBackend:
         self.cached.add(model_id)
         self.artifacts[model_id] = expected_sha256
         return expected_sha256
+
+    def evict_artifact(self, model_id: str, expected_sha256: str) -> None:
+        if self.artifacts.get(model_id) != expected_sha256:
+            raise RuntimeError("artifact changed")
+        self.evictions.append((model_id, expected_sha256))
+        self.cached.discard(model_id)
+        self.artifacts.pop(model_id, None)
 
     def start(self, model_id: str, port: int) -> RuntimeHandle:
         if self.start_gate is not None:
@@ -149,6 +157,7 @@ def action(
     controller_term: int = 0,
     controller_id: str = "",
     controller_lease_expires_at: float = 0.0,
+    predictive_prefetch: bool = False,
 ) -> MutationAction:
     return MutationAction(
         action_id=action_id or f"{kind.value}-{generation}",
@@ -167,6 +176,7 @@ def action(
         controller_term=controller_term,
         controller_id=controller_id,
         controller_lease_expires_at=controller_lease_expires_at,
+        predictive_prefetch=predictive_prefetch,
     )
 
 
@@ -199,6 +209,7 @@ def test_mutation_action_wire_round_trip_and_schema_validation():
         artifact_sha256="A" * 64,
     )
     assert original.artifact_sha256 == "a" * 64
+    assert "predictive_prefetch" not in original.to_dict()
     assert MutationAction.from_dict(original.to_dict()) == original
     broken = {**original.to_dict(), "schema_version": 99}
     try:
@@ -207,6 +218,8 @@ def test_mutation_action_wire_round_trip_and_schema_validation():
         assert "schema" in str(exc)
     else:  # pragma: no cover - assertion clarity
         raise AssertionError("unknown schema was accepted")
+    with pytest.raises(ValueError, match="only for load"):
+        action(ActionKind.WARM, predictive_prefetch=True)
 
 
 def test_adopted_process_exit_as_zombie_completes_without_identity_false_alarm(
@@ -309,6 +322,78 @@ def test_checksum_protected_load_and_warm_publish_proven_artifact(tmp_path):
     assert managed.residencies[0].state == ResidencyState.READY
     assert managed.residencies[0].artifact_sha256 == "a" * 64
     assert managed.allocator_envelope()["residencies"][0]["artifact_sha256"] == "a" * 64
+
+
+def test_runtime_expires_only_artifacts_it_fetched_for_prediction(tmp_path):
+    backend = FakeBackend(cached=())
+    clock = Clock(100)
+    managed = runtime(tmp_path, backend=backend, clock=clock)
+    prefetch = action(
+        ActionKind.LOAD,
+        model_id="predicted.gguf",
+        artifact_sha256="b" * 64,
+        artifact_source="hf://example/models/predicted.gguf",
+        artifact_size_mb=4_000,
+        predictive_prefetch=True,
+    )
+
+    managed.begin(prefetch)
+    wait(managed)
+
+    cached = managed.residencies[0]
+    assert cached.state == ResidencyState.CACHED
+    assert cached.predictive_cache is True
+    assert cached.loaded_at == 100
+    assert managed.allocator_envelope()["residencies"][0]["predictive_cache"] is True
+
+    restored = runtime(tmp_path, backend=backend, clock=clock)
+    assert restored.residencies[0].predictive_cache is True
+    eviction = action(
+        ActionKind.EVICT,
+        action_id="evict-prediction",
+        model_id="predicted.gguf",
+        generation="0000000000200-plan",
+        artifact_sha256="b" * 64,
+    )
+    restored.begin(eviction)
+    wait(restored)
+
+    assert receipt_status(restored, eviction.action_id) == MutationStatus.SUCCEEDED
+    assert restored.residencies == ()
+    assert backend.evictions == [("predicted.gguf", "b" * 64)]
+
+
+def test_runtime_never_labels_an_existing_operator_cache_as_predictive(tmp_path):
+    backend = FakeBackend(cached=("operator.gguf",))
+    managed = runtime(tmp_path, backend=backend)
+    verify = action(
+        ActionKind.LOAD,
+        model_id="operator.gguf",
+        artifact_sha256="a" * 64,
+        artifact_source="hf://example/models/operator.gguf",
+        artifact_size_mb=4_000,
+        predictive_prefetch=True,
+    )
+
+    managed.begin(verify)
+    wait(managed)
+
+    assert managed.residencies[0].predictive_cache is False
+    assert "predictive_cache" not in managed.allocator_envelope()["residencies"][0]
+    eviction = action(
+        ActionKind.EVICT,
+        action_id="unsafe-operator-eviction",
+        model_id="operator.gguf",
+        generation="0000000000200-plan",
+        artifact_sha256="a" * 64,
+    )
+    managed.begin(eviction)
+    wait(managed)
+
+    assert receipt_status(managed, eviction.action_id) == MutationStatus.FAILED
+    assert "predictive artifact" in managed.acknowledgements()[-1]["message"]
+    assert backend.evictions == []
+    assert backend.cached_models() == ("operator.gguf",)
 
 
 def test_checksum_mismatch_fails_before_starting_model(tmp_path):
@@ -1944,6 +2029,32 @@ def test_llama_backend_hashes_exact_cached_file_and_invalidates_changed_identity
     second = backend.artifact_sha256("qwen.gguf")
     assert second == runtime_module.hashlib.sha256(b"second immutable model").hexdigest()
     assert second != first
+
+
+def test_llama_backend_evicts_only_the_exact_cached_artifact(monkeypatch, tmp_path):
+    model_path = tmp_path / "qwen.gguf"
+    payload = b"allocator-fetched predictive model"
+    model_path.write_bytes(payload)
+    monkeypatch.setattr(
+        runtime_module.model_store,
+        "list_all",
+        lambda: (
+            (SimpleNamespace(name="qwen.gguf", path=model_path),)
+            if model_path.is_file()
+            else ()
+        ),
+    )
+    backend = LlamaCppBackend()
+    digest = hashlib.sha256(payload).hexdigest()
+
+    with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
+        backend.evict_artifact("qwen.gguf", "b" * 64)
+    assert model_path.read_bytes() == payload
+
+    backend.evict_artifact("qwen.gguf", digest)
+
+    assert not model_path.exists()
+    assert backend.cached_models() == ()
 
 
 def test_llama_backend_rejects_pid_reuse_and_requires_exact_argv(monkeypatch, tmp_path):

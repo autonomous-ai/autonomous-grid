@@ -1014,7 +1014,15 @@ memory, headroom, and model-slot rules remain authoritative.
 Scenario artifacts carry deterministic immutable identities and sources. A learned correlation-only
 prefetch therefore consumes modeled disk without consuming a model slot, and a later placement
 records a real cache hit. The scorecard reports prefetch downloads, hits, unused predictions,
-lead time, and avoided load seconds so a predictor that merely fills disk cannot look successful.
+expiration/reclaimed disk, lead time, and avoided load seconds so a predictor that merely fills
+disk cannot look successful.
+
+Managed nodes retain provenance for artifacts they actually downloaded because of a predictive
+prefetch. If such an artifact is never warmed and demand disappears, the planner may expire it after
+the predictive cache TTL (six hours by default). Expiration is exact-SHA fenced and applies only to
+an unused managed predictive cache entry; existing operator caches, pinned artifacts, active models,
+used downloads, manually managed nodes, and older nodes without the `evict` actuator remain
+untouched. Queued eviction commands are revalidated against the latest heartbeat before delivery.
 
 `--oracle` adds a bounded exhaustive benchmark for at most four machines, nine models, and 240
 minutes. It replays the exact observed request trace with perfect future knowledge, exhaustively

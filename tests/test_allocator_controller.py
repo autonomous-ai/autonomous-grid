@@ -8,6 +8,7 @@ from dataclasses import replace
 import pytest
 
 from shared import jsonio
+from shared.allocator import controller as controller_module
 from shared.allocator.controller import AllocatorController
 from shared.allocator.demand import DemandTracker
 from shared.allocator.intelligence import RequestFeatures
@@ -35,6 +36,81 @@ def profile(model_id: str = "qwen", **kwargs) -> ModelProfile:
         min_residency_seconds=0,
         **kwargs,
     )
+
+
+def test_controller_durable_action_round_trip_preserves_predictive_provenance():
+    command = MutationAction(
+        action_id="prefetch",
+        kind=ActionKind.LOAD,
+        node_id="n",
+        model_id="predicted.gguf",
+        memory_mb=8_000,
+        reason="test prediction",
+        plan_generation="generation",
+        created_at=10,
+        artifact_sha256="a" * 64,
+        artifact_source="hf://owner/repo/predicted.gguf",
+        artifact_size_mb=4_000,
+        predictive_prefetch=True,
+    )
+
+    restored = controller_module._action_from_dict(
+        controller_module._action_dict(command)
+    )
+
+    assert restored == command
+    assert restored.predictive_prefetch is True
+
+
+def test_controller_revalidates_predictive_eviction_at_delivery():
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        planner_policy=PlannerPolicy(predictive_artifact_ttl_seconds=60),
+    )
+    candidate = ModelProfile(
+        "predicted.gguf",
+        8_000,
+        runtimes=("llama.cpp",),
+        min_replicas=0,
+        max_replicas=1,
+        artifact_sha256="a" * 64,
+        artifact_source="hf://owner/repo/predicted.gguf",
+        artifact_size_mb=4_000,
+    )
+    controller.put_profile(candidate)
+    cached = ModelResidency(
+        "predicted.gguf",
+        8_000,
+        ResidencyState.CACHED,
+        loaded_at=100,
+        artifact_sha256="a" * 64,
+        predictive_cache=True,
+    )
+    machine = NodeSnapshot(
+        "n",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        residencies=(cached,),
+        cached_models=("predicted.gguf",),
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+        last_heartbeat=160,
+    )
+
+    controller.tick((machine,), now=160)
+
+    assert controller.commands_for("n", now=160, include_destructive=False) == ()
+    assert [item.kind for item in controller._commands.values()] == [ActionKind.EVICT]
+    changed = replace(
+        machine,
+        residencies=(replace(cached, predictive_cache=False),),
+        last_heartbeat=161,
+    )
+    assert controller.commands_for(
+        "n",
+        now=160,
+        destructive_safety_factory=lambda: (changed,),
+    ) == ()
 
 
 def node(

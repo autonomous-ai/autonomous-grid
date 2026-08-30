@@ -377,6 +377,8 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     predictive_prefetches = 0
     predictive_prefetch_hits = 0
     predictive_prefetch_download_mb = 0
+    predictive_prefetch_evictions = 0
+    predictive_prefetch_reclaimed_mb = 0
     predictive_cold_start_seconds_avoided = 0.0
     predictive_prefetch_lead_minutes: list[int] = []
     predictively_cached_at: dict[tuple[str, str], int] = {}
@@ -402,6 +404,9 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
     prior_states = {node.node_id: node.state for node in nodes}
     disk_available = {
         machine.snapshot.node_id: machine.disk_available_mb for machine in machines
+    }
+    disk_capacity = {
+        machine.snapshot.node_id: machine.disk_total_mb for machine in machines
     }
 
     base_time = 1_000_000.0
@@ -449,6 +454,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 "service_rate_pct": 0.0,
                 "overloaded_models": {},
                 "prefetches": [],
+                "artifact_evictions": [],
                 "loads": sorted(bootstrap_loads),
                 "unloads": [],
                 "node_changes": [],
@@ -719,6 +725,35 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             predictively_cached_at[pair] = minute
             prefetched_pairs.add(pair)
             prefetch_labels.append(f"{prefetch.model_id}@{prefetch.node_id}")
+        evicted_pairs: set[tuple[str, str]] = set()
+        eviction_labels: list[str] = []
+        for eviction in plan.artifact_evictions:
+            pair = (eviction.node_id, eviction.model_id)
+            node = next(item for item in nodes if item.node_id == eviction.node_id)
+            residency = node.residency(eviction.model_id)
+            profile = profile_by_id[eviction.model_id]
+            if (
+                pair in after_pairs
+                or pair in prefetched_pairs
+                or residency is None
+                or residency.state != ResidencyState.CACHED
+                or not residency.predictive_cache
+                or not profile.matches_artifact(residency)
+            ):
+                safety_violations.append(
+                    f"minute {minute}: unsafe predictive artifact eviction for "
+                    f"{eviction.model_id} on {eviction.node_id}"
+                )
+                continue
+            disk_available[eviction.node_id] = min(
+                disk_capacity[eviction.node_id],
+                disk_available[eviction.node_id] + profile.artifact_size_mb,
+            )
+            predictively_cached_at.pop(pair, None)
+            predictive_prefetch_evictions += 1
+            predictive_prefetch_reclaimed_mb += profile.artifact_size_mb
+            evicted_pairs.add(pair)
+            eviction_labels.append(f"{eviction.model_id}@{eviction.node_id}")
         before_nodes: defaultdict[str, set[str]] = defaultdict(set)
         after_nodes: defaultdict[str, set[str]] = defaultdict(set)
         for node_id, model_id in before_pairs:
@@ -804,6 +839,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             or plan.unsatisfied
             or state_changes
             or prefetch_labels
+            or eviction_labels
             or portfolio_changed
             or admission_changed
             or overloaded_models
@@ -823,6 +859,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     ),
                     "overloaded_models": overloaded_models,
                     "prefetches": sorted(prefetch_labels),
+                    "artifact_evictions": sorted(eviction_labels),
                     "loads": [f"{model}@{node}" for node, model in sorted(added)],
                     "unloads": [f"{model}@{node}" for node, model in sorted(removed)],
                     "node_changes": state_changes,
@@ -857,6 +894,7 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             now + 45.0,
             profiles=profile_by_id,
             prefetched_pairs=frozenset(prefetched_pairs),
+            evicted_pairs=frozenset(evicted_pairs),
             used_models=used_models,
         )
 
@@ -1025,7 +1063,12 @@ def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 if predictive_prefetches
                 else 0.0
             ),
-            "unused_predictive_prefetches": len(predictively_cached_at),
+            "unused_predictive_prefetches": (
+                len(predictively_cached_at) + predictive_prefetch_evictions
+            ),
+            "resident_unused_predictive_prefetches": len(predictively_cached_at),
+            "predictive_prefetch_evictions": predictive_prefetch_evictions,
+            "predictive_prefetch_reclaimed_mb": predictive_prefetch_reclaimed_mb,
             "predictive_prefetch_download_mb": predictive_prefetch_download_mb,
             "predictive_cold_start_seconds_avoided": round(
                 predictive_cold_start_seconds_avoided,
@@ -1185,6 +1228,7 @@ def _build_machines(
             ),
             cached_models=tuple(cached),
             max_concurrency=int(source["concurrency"]),
+            actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
             memory_bandwidth_gbps=100.0 + index * 20.0,
             compute_gflops=6_000.0 + index * 2_000.0,
             gpu_count=int(source["gpu_count"]),
@@ -1405,6 +1449,7 @@ def _materialize(
     *,
     profiles: dict[str, ModelProfile],
     prefetched_pairs: frozenset[tuple[str, str]] = frozenset(),
+    evicted_pairs: frozenset[tuple[str, str]] = frozenset(),
     used_models: frozenset[str] = frozenset(),
 ) -> tuple[NodeSnapshot, ...]:
     by_node: defaultdict[str, list[ModelResidency]] = defaultdict(list)
@@ -1450,6 +1495,11 @@ def _materialize(
                 if node_id == node.node_id
             ),
         }
+        cached_models.difference_update(
+            model_id
+            for node_id, model_id in evicted_pairs
+            if node_id == node.node_id
+        )
         ready_models = {item.model_id for item in by_node[node.node_id]}
         cached_residencies = []
         for model_id in sorted(cached_models - ready_models):
@@ -1457,14 +1507,25 @@ def _materialize(
             if profile is None:
                 continue
             prior = prior_by_pair.get((node.node_id, model_id))
+            predictively_prefetched = (node.node_id, model_id) in prefetched_pairs
             cached_residencies.append(
                 ModelResidency(
                     model_id,
                     profile.memory_for(node.runtimes),
                     ResidencyState.CACHED,
-                    loaded_at=prior.loaded_at if prior is not None else 0.0,
+                    loaded_at=(
+                        now
+                        if predictively_prefetched
+                        else prior.loaded_at
+                        if prior is not None
+                        else 0.0
+                    ),
                     last_used_at=prior.last_used_at if prior is not None else 0.0,
                     artifact_sha256=profile.artifact_sha256,
+                    predictive_cache=(
+                        predictively_prefetched
+                        or bool(prior and prior.predictive_cache)
+                    ),
                 )
             )
         result.append(

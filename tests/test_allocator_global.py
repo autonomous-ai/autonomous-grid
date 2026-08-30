@@ -10,6 +10,7 @@ from shared.allocator.demand import DemandTracker
 from shared.allocator.models import (
     ActionKind,
     AllocatorMode,
+    ArtifactEviction,
     ArtifactPrefetch,
     DemandForecast,
     ModelPerformance,
@@ -1353,6 +1354,12 @@ def test_allocator_models_validate_impossible_values():
         PlannerPolicy(predictive_artifact_disk_reserve_mb=-1)
     with pytest.raises(ValueError, match="predictive_artifact_disk_reserve_mb"):
         PlannerPolicy(predictive_artifact_disk_reserve_mb=True)
+    with pytest.raises(ValueError, match="non-negative"):
+        PlannerPolicy(predictive_artifact_ttl_seconds=-1)
+    with pytest.raises(ValueError, match="max_predictive_artifact_evictions"):
+        PlannerPolicy(max_predictive_artifact_evictions=-1)
+    with pytest.raises(ValueError, match="max_predictive_artifact_evictions"):
+        PlannerPolicy(max_predictive_artifact_evictions=True)
     with pytest.raises(ValueError, match="non-negative"):
         PlannerPolicy(max_predictive_lookahead_seconds=-1)
     with pytest.raises(ValueError, match="predictive_growth_limit"):
@@ -5610,6 +5617,7 @@ def test_correlation_only_demand_prefetches_exact_artifact_without_eviction():
         max_models=1,
         disk_capacity_mb=32_000,
         disk_available_mb=16_000,
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
     )
     baseline = model(
         "baseline",
@@ -5655,6 +5663,18 @@ def test_correlation_only_demand_prefetches_exact_artifact_without_eviction():
     assert plan.to_dict()["artifact_prefetches"] == [
         {"node_id": "scarce", "model_id": "predicted"}
     ]
+    legacy = planner.plan(
+        (
+            replace(
+                machine,
+                actuator_capabilities=("load", "warm", "drain", "unload"),
+            ),
+        ),
+        (baseline, predicted),
+        (forecast,),
+        now=10,
+    )
+    assert legacy.artifact_prefetches == ()
 
     result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
         plan,
@@ -5824,6 +5844,7 @@ def test_predictive_prefetch_reserves_disk_after_uncached_desired_loads():
         max_models=1,
         disk_capacity_mb=100_000,
         disk_available_mb=16_000,
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
     )
 
     plan = planner.plan(
@@ -5844,6 +5865,136 @@ def test_predictive_prefetch_reserves_disk_after_uncached_desired_loads():
         now=10,
     )
     assert roomier.artifact_prefetches == (ArtifactPrefetch("media", "predicted"),)
+
+
+def test_stale_allocator_fetched_prediction_is_safely_evicted():
+    predicted = model(
+        "predicted",
+        min_replicas=0,
+        max_replicas=1,
+        artifact_sha256="b" * 64,
+        artifact_source="hf://example/models/predicted.gguf",
+        artifact_size_mb=4_000,
+    )
+    cached = ModelResidency(
+        "predicted",
+        8_000,
+        ResidencyState.CACHED,
+        loaded_at=100,
+        artifact_sha256="b" * 64,
+        predictive_cache=True,
+    )
+    machine = node(
+        "cache-host",
+        residencies=(cached,),
+        cached=("predicted",),
+        now=160,
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+    )
+    planner = PlacementPlanner(
+        PlannerPolicy(
+            memory_headroom_fraction=0,
+            predictive_artifact_ttl_seconds=60,
+        )
+    )
+
+    fresh = planner.plan((machine,), (predicted,), now=159)
+    assert fresh.artifact_evictions == ()
+
+    expired = planner.plan((machine,), (predicted,), now=160)
+    assert expired.artifact_evictions == (
+        ArtifactEviction("cache-host", "predicted"),
+    )
+    assert expired.to_dict()["artifact_evictions"] == [
+        {"node_id": "cache-host", "model_id": "predicted"}
+    ]
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
+        expired,
+        (machine,),
+        (predicted,),
+        mode=AllocatorMode.AUTOMATIC,
+        now=160,
+    )
+    assert [
+        (
+            item.kind,
+            item.node_id,
+            item.model_id,
+            item.artifact_sha256,
+        )
+        for item in result.executable_actions
+    ] == [(ActionKind.EVICT, "cache-host", "predicted", "b" * 64)]
+
+    action = result.executable_actions[0]
+    changed = replace(
+        machine,
+        residencies=(replace(cached, predictive_cache=False),),
+    )
+    deferrals = Reconciler().destructive_command_deferrals(
+        expired,
+        (changed,),
+        (predicted,),
+        (action,),
+        now=161,
+    )
+    assert deferrals[action.action_id].code == "predictive_cache_changed"
+
+
+@pytest.mark.parametrize(
+    "residency",
+    (
+        ModelResidency(
+            "predicted",
+            8_000,
+            ResidencyState.CACHED,
+            loaded_at=100,
+            artifact_sha256="b" * 64,
+        ),
+        ModelResidency(
+            "predicted",
+            8_000,
+            ResidencyState.CACHED,
+            loaded_at=100,
+            pinned=True,
+            artifact_sha256="b" * 64,
+            predictive_cache=True,
+        ),
+        ModelResidency(
+            "predicted",
+            8_000,
+            ResidencyState.READY,
+            loaded_at=100,
+            artifact_sha256="b" * 64,
+            predictive_cache=True,
+        ),
+    ),
+)
+def test_predictive_expiration_never_deletes_operator_pinned_or_live_artifacts(
+    residency,
+):
+    predicted = model(
+        "predicted",
+        min_replicas=0,
+        max_replicas=1,
+        artifact_sha256="b" * 64,
+        artifact_source="hf://example/models/predicted.gguf",
+        artifact_size_mb=4_000,
+    )
+    machine = node(
+        "cache-host",
+        residencies=(residency,),
+        cached=("predicted",),
+        now=1_000,
+        actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+    )
+    plan = PlacementPlanner(
+        PlannerPolicy(
+            predictive_artifact_ttl_seconds=60,
+            max_predictive_artifact_prefetches=0,
+        )
+    ).plan((machine,), (predicted,), now=1_000)
+
+    assert plan.artifact_evictions == ()
 
 
 def test_queued_preemption_drain_is_revalidated_against_beneficiary_cache():

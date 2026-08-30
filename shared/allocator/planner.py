@@ -18,6 +18,7 @@ from itertools import combinations
 from shared.allocator.models import (
     MAX_COUNTER,
     MAX_MEMORY_MB,
+    ArtifactEviction,
     ArtifactPrefetch,
     DemandForecast,
     ModelProfile,
@@ -53,6 +54,8 @@ class PlannerPolicy:
     max_staged_preemptions: int = 64
     max_predictive_artifact_prefetches: int = 1
     predictive_artifact_disk_reserve_mb: int = 10_240
+    predictive_artifact_ttl_seconds: float = 21_600.0
+    max_predictive_artifact_evictions: int = 1
 
     def __post_init__(self) -> None:
         if not 0 <= self.memory_headroom_fraction < 1:
@@ -66,6 +69,7 @@ class PlannerPolicy:
                 self.model_failure_penalty,
                 self.performance_ttl_seconds,
                 self.max_predictive_lookahead_seconds,
+                self.predictive_artifact_ttl_seconds,
             )
         ):
             raise ValueError("planner weights and TTL must be finite and non-negative")
@@ -107,6 +111,15 @@ class PlannerPolicy:
             raise ValueError(
                 "predictive_artifact_disk_reserve_mb must be in "
                 f"[0, {MAX_MEMORY_MB}]"
+            )
+        if (
+            isinstance(self.max_predictive_artifact_evictions, bool)
+            or not isinstance(self.max_predictive_artifact_evictions, int)
+            or not 0 <= self.max_predictive_artifact_evictions <= MAX_COUNTER
+        ):
+            raise ValueError(
+                "max_predictive_artifact_evictions must be in "
+                f"[0, {MAX_COUNTER}]"
             )
         if (
             not math.isfinite(self.latency_pressure_limit)
@@ -2439,6 +2452,10 @@ class PlacementPlanner:
                 if (
                     pair not in assignment_pairs
                     and not artifact_present
+                    # Predictive provenance and bounded cleanup arrived with the EVICT actuator.
+                    # Legacy nodes may still receive ordinary/preemption LOAD work, but must not
+                    # accumulate new speculative artifacts they cannot identify and expire.
+                    and "evict" in node.actuator_capabilities
                     and remaining_disk is not None
                     and model.artifact_size_mb
                     + self.policy.predictive_artifact_disk_reserve_mb
@@ -2470,6 +2487,54 @@ class PlacementPlanner:
                 prefetch_disk_remaining[selected.node_id] = (
                     selected_disk - model.artifact_size_mb
                 )
+        # A speculative artifact that was never warmed must not consume disk forever. Only exact
+        # artifacts that a managed node explicitly labels as predictive are eligible; operator
+        # caches, pinned entries, used models, live runtimes, and legacy nodes are never inferred
+        # to be disposable. Expiration is plan state so ordinary generation fencing and mutation
+        # budgets apply to deletion just as they do to every other allocator side effect.
+        prefetch_pairs = {
+            (item.node_id, item.model_id) for item in artifact_prefetches
+        }
+        stale_predictive_artifacts: list[
+            tuple[float, int, str, str]
+        ] = []
+        for node in node_list:
+            if node.manually_managed or "evict" not in node.actuator_capabilities:
+                continue
+            for residency in node.residencies:
+                profile = profile_by_id.get(residency.model_id)
+                pair = (node.node_id, residency.model_id)
+                age = (
+                    timestamp - residency.loaded_at
+                    if 0 < residency.loaded_at <= timestamp
+                    else 0.0
+                )
+                if (
+                    profile is not None
+                    and residency.state == ResidencyState.CACHED
+                    and residency.predictive_cache
+                    and residency.managed
+                    and not residency.pinned
+                    and profile.matches_artifact(residency)
+                    and desired_by_model[profile.model_id] == 0
+                    and pair not in assignment_pairs
+                    and pair not in prefetch_pairs
+                    and age >= self.policy.predictive_artifact_ttl_seconds
+                ):
+                    stale_predictive_artifacts.append(
+                        (
+                            residency.loaded_at,
+                            -profile.artifact_size_mb,
+                            node.node_id,
+                            profile.model_id,
+                        )
+                    )
+        artifact_evictions = [
+            ArtifactEviction(node_id, model_id)
+            for _loaded_at, _negative_size, node_id, model_id in sorted(
+                stale_predictive_artifacts
+            )[: self.policy.max_predictive_artifact_evictions]
+        ]
         # Wall-clock time is not itself a desired-state input, but TTL and scale-down boundaries
         # derived from it are. Include the resulting targets and placements so the controller
         # advances its logical generation exactly when a time-sensitive decision changes. A late
@@ -2483,6 +2548,7 @@ class PlacementPlanner:
                 assignments=assignments,
                 preemptions=preemptions,
                 artifact_prefetches=artifact_prefetches,
+                artifact_evictions=artifact_evictions,
             )
             if compute_input_digest
             else ""
@@ -2504,6 +2570,7 @@ class PlacementPlanner:
             input_digest=input_digest,
             preemptions=tuple(preemptions),
             artifact_prefetches=tuple(artifact_prefetches),
+            artifact_evictions=tuple(artifact_evictions),
             model_urgencies=tuple(
                 sorted(
                     (
@@ -4036,6 +4103,7 @@ def _input_digest(
     assignments: list[PlacementAssignment],
     preemptions: list[PlacementPreemption],
     artifact_prefetches: list[ArtifactPrefetch],
+    artifact_evictions: list[ArtifactEviction],
 ) -> str:
     return stable_digest(
         {
@@ -4072,6 +4140,9 @@ def _input_digest(
             ],
             "artifact_prefetches": [
                 (item.node_id, item.model_id) for item in artifact_prefetches
+            ],
+            "artifact_evictions": [
+                (item.node_id, item.model_id) for item in artifact_evictions
             ],
         }
     )

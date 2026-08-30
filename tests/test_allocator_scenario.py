@@ -135,6 +135,40 @@ def test_scenario_materialization_advances_only_models_that_served_requests():
     assert used[0].residencies[0].last_used_at == 101
 
 
+def test_scenario_materializes_and_expires_predictive_artifact_provenance():
+    profile = ModelProfile(
+        "predicted",
+        8_000,
+        runtimes=("llama.cpp",),
+        artifact_sha256="a" * 64,
+    )
+    node = NodeSnapshot("node-1", 16_000, runtimes=("llama.cpp",))
+    cached = scenario_module._materialize(
+        (),
+        (node,),
+        100,
+        profiles={"predicted": profile},
+        prefetched_pairs=frozenset({("node-1", "predicted")}),
+    )
+
+    residency = cached[0].residency("predicted")
+    assert residency is not None
+    assert residency.state == ResidencyState.CACHED
+    assert residency.predictive_cache is True
+    assert residency.loaded_at == 100
+
+    expired = scenario_module._materialize(
+        (),
+        cached,
+        200,
+        profiles={"predicted": profile},
+        evicted_pairs=frozenset({("node-1", "predicted")}),
+    )
+
+    assert expired[0].residency("predicted") is None
+    assert "predicted" not in expired[0].cached_models
+
+
 def test_small_fleet_oracle_reports_a_reproducible_placement_ceiling():
     report = run_scenario(
         ScenarioConfig(
@@ -247,6 +281,8 @@ def test_scenario_checks_real_planner_safety_and_persistent_disk(representative_
     assert report.metrics["artifact_download_mb"] >= 0
     assert report.metrics["predictive_prefetches"] >= 0
     assert report.metrics["predictive_prefetch_hits"] >= 0
+    assert report.metrics["predictive_prefetch_evictions"] >= 0
+    assert report.metrics["predictive_prefetch_reclaimed_mb"] >= 0
     assert 0 <= report.metrics["predictive_prefetch_hit_rate_pct"] <= 100
     assert 0 <= report.metrics["service_rate_pct"] <= 100
     assert 0 <= report.metrics["minimum_user_service_pct"] <= 100

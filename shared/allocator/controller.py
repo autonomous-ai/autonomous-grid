@@ -48,6 +48,9 @@ from shared.allocator.reconcile import (
 )
 
 _TERMINAL = {MutationStatus.SUCCEEDED, MutationStatus.FAILED, MutationStatus.CANCELLED}
+_DESTRUCTIVE_ACTION_KINDS = frozenset(
+    {ActionKind.DRAIN, ActionKind.UNLOAD, ActionKind.EVICT}
+)
 _MAX_REPORTED_ACTION_DURATION_SECONDS = 3_600.0
 _STARTUP_ESTIMATE_SAMPLES = 8
 _STARTUP_ESTIMATE_FULL_CONFIDENCE_SAMPLES = 4
@@ -750,7 +753,7 @@ class AllocatorController:
                 and action.not_before <= timestamp
                 and (
                     include_destructive
-                    or action.kind not in (ActionKind.DRAIN, ActionKind.UNLOAD)
+                    or action.kind not in _DESTRUCTIVE_ACTION_KINDS
                 )
             )
             newly_delivered = {
@@ -766,7 +769,7 @@ class AllocatorController:
             destructive = tuple(
                 action
                 for action in commands
-                if action.kind in (ActionKind.DRAIN, ActionKind.UNLOAD)
+                if action.kind in _DESTRUCTIVE_ACTION_KINDS
             )
             if not destructive or destructive_safety_factory is None:
                 return commands
@@ -1884,6 +1887,7 @@ class AllocatorController:
             preemptions=plan.preemptions,
             artifact_prefetches=plan.artifact_prefetches,
             model_urgencies=plan.model_urgencies,
+            artifact_evictions=plan.artifact_evictions,
         )
 
     def _sequence_actions(self, result: ReconcileResult) -> ReconcileResult:
@@ -2004,11 +2008,15 @@ class AllocatorController:
                     ResidencyState.CACHED,
                     ResidencyState.DRAINING,
                 )
-            else:
+            elif action.kind == ActionKind.UNLOAD:
                 # UNLOAD's postcondition is a cached artifact without a live residency.
                 # In particular READY is not resolution: a late, previously delivered unload
                 # could race a newer warm and remove the newly admitted replica.
                 resolved = residency is None or residency.state == ResidencyState.CACHED
+            else:
+                # EVICT removes both the managed cache residency and its exact artifact. A CACHED
+                # heartbeat therefore proves the old command has not reached its postcondition.
+                resolved = residency is None
             if resolved:
                 self._resolve_delivered_action(action_id)
 
@@ -2086,7 +2094,7 @@ class AllocatorController:
                 stale = (
                     action.kind in (ActionKind.LOAD, ActionKind.WARM) and pair not in desired
                 ) or (
-                    action.kind in (ActionKind.DRAIN, ActionKind.UNLOAD) and pair in desired
+                    action.kind in _DESTRUCTIVE_ACTION_KINDS and pair in desired
                 )
                 message = "desired placement changed before execution"
                 if stale and action.kind in (ActionKind.LOAD, ActionKind.WARM):
@@ -2133,14 +2141,14 @@ class AllocatorController:
             action.model_id
             for action_id, action in self._commands.items()
             if action_id in stale_messages
-            and action.kind in (ActionKind.DRAIN, ActionKind.UNLOAD)
+            and action.kind in _DESTRUCTIVE_ACTION_KINDS
         }
         unsafe_destructive_models.update(
             action.model_id for action in self._withdrawn_destructive.values()
         )
         for action_id, action in self._commands.items():
             if (
-                action.kind not in (ActionKind.DRAIN, ActionKind.UNLOAD)
+                action.kind not in _DESTRUCTIVE_ACTION_KINDS
                 or action.model_id not in unsafe_destructive_models
             ):
                 continue
@@ -2332,7 +2340,7 @@ class AllocatorController:
         )
         if (
             action.action_id in self._delivered_command_ids
-            and action.kind in (ActionKind.DRAIN, ActionKind.UNLOAD)
+            and action.kind in _DESTRUCTIVE_ACTION_KINDS
         ):
             self._withdrawn_destructive[action.action_id] = action
         self._commands.pop(action.action_id, None)
@@ -2656,7 +2664,7 @@ class AllocatorController:
             for action in (_action_from_dict(row) for row in withdrawn_rows)
         }
         if any(
-            action.kind not in (ActionKind.DRAIN, ActionKind.UNLOAD)
+            action.kind not in _DESTRUCTIVE_ACTION_KINDS
             for action in self._withdrawn_destructive.values()
         ) or set(self._commands).intersection(self._withdrawn_destructive):
             raise ValueError("invalid persisted withdrawn allocator command")
@@ -3498,11 +3506,14 @@ def _portfolio_admissions(
 
 
 def _action_dict(action: MutationAction) -> dict[str, Any]:
-    return {
+    payload = {
         **asdict(action),
         "kind": action.kind.value,
         "dependencies": list(action.dependencies),
     }
+    if not action.predictive_prefetch:
+        payload.pop("predictive_prefetch", None)
+    return payload
 
 
 def _action_from_dict(value: dict[str, Any]) -> MutationAction:
@@ -3526,6 +3537,7 @@ def _action_from_dict(value: dict[str, Any]) -> MutationAction:
         controller_lease_expires_at=float(
             value.get("controller_lease_expires_at") or 0.0
         ),
+        predictive_prefetch=bool(value.get("predictive_prefetch", False)),
     )
 
 

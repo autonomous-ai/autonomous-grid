@@ -159,6 +159,7 @@ class ManagedResidency:
     pinned: bool = False
     handle: RuntimeHandle | None = None
     artifact_sha256: str = ""
+    predictive_cache: bool = False
 
     def __post_init__(self) -> None:
         if not self.model_id or self.memory_mb <= 0:
@@ -171,6 +172,8 @@ class ManagedResidency:
             raise ValueError(
                 "managed residency counters and timestamps must be non-negative"
             )
+        if not isinstance(self.predictive_cache, bool):
+            raise ValueError("predictive_cache must be boolean")
         object.__setattr__(
             self, "artifact_sha256", canonical_sha256(self.artifact_sha256)
         )
@@ -186,6 +189,7 @@ class ManagedResidency:
             pinned=self.pinned,
             managed=True,
             artifact_sha256=self.artifact_sha256,
+            predictive_cache=self.predictive_cache,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -210,6 +214,7 @@ class ManagedResidency:
                 else None
             ),
             artifact_sha256=value.get("artifact_sha256") or "",
+            predictive_cache=bool(value.get("predictive_cache", False)),
         )
 
 
@@ -290,6 +295,8 @@ class ModelRuntimeBackend(Protocol):
         expected_sha256: str,
         max_size_mb: int,
     ) -> str: ...
+
+    def evict_artifact(self, model_id: str, expected_sha256: str) -> None: ...
 
     def start(self, model_id: str, port: int) -> RuntimeHandle: ...
 
@@ -542,6 +549,50 @@ class LlamaCppBackend:
         with self._artifact_lock:
             self._artifact_digests.clear()
         return digest
+
+    def evict_artifact(self, model_id: str, expected_sha256: str) -> None:
+        """Delete one exact cached GGUF after proving its immutable identity.
+
+        The control plane grants this authority only for never-used predictive downloads. The
+        backend still verifies the digest at execution time so a stale command cannot remove a
+        same-named artifact that an operator or newer plan replaced.
+        """
+
+        digest = canonical_sha256(expected_sha256, "expected artifact SHA-256")
+        if not digest:
+            raise RuntimeError("artifact eviction requires an exact SHA-256")
+        path = _cached_model_path(model_id)
+        if path is None:
+            return
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError("refusing to evict a non-regular model artifact")
+        actual = self.artifact_sha256(model_id)
+        if actual != digest:
+            raise RuntimeError(
+                f"artifact SHA-256 mismatch for {model_id!r}: expected {digest}, found {actual}"
+            )
+        try:
+            before = path.stat()
+            with self._artifact_lock:
+                current = _cached_model_path(model_id)
+                if current is None:
+                    return
+                if current != path or current.is_symlink() or not current.is_file():
+                    raise RuntimeError("cached model changed before eviction")
+                if _stat_identity(before) != _stat_identity(current.stat()):
+                    raise RuntimeError("cached model changed before eviction")
+                current.unlink()
+                self._artifact_digests.clear()
+            if os.name != "nt":
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not evict cached model {model_id!r}: {exc}"
+            ) from exc
 
     def start(self, model_id: str, port: int) -> RuntimeHandle:
         return self._start(model_id, port, on_spawn=None)
@@ -1390,6 +1441,7 @@ class ManagedModelRuntime:
                 pinned=current.pinned,
                 handle=current.handle,
                 artifact_sha256=current.artifact_sha256,
+                predictive_cache=False,
             )
             self._save_locked()
             return True
@@ -1551,6 +1603,7 @@ class ManagedModelRuntime:
                 residency.pinned,
                 handle,
                 residency.artifact_sha256,
+                False,
             )
         if (
             not recovering
@@ -1581,6 +1634,7 @@ class ManagedModelRuntime:
             residency.pinned,
             handle if alive is not False else None,
             residency.artifact_sha256,
+            residency.predictive_cache,
         )
 
     def begin_shutdown(self) -> None:
@@ -1610,6 +1664,7 @@ class ManagedModelRuntime:
                     pinned=residency.pinned,
                     handle=residency.handle,
                     artifact_sha256=residency.artifact_sha256,
+                    predictive_cache=False,
                 )
                 changed = True
             if changed:
@@ -1730,6 +1785,7 @@ class ManagedModelRuntime:
                         load_failures=current.load_failures,
                         pinned=current.pinned,
                         artifact_sha256=current.artifact_sha256,
+                        predictive_cache=False,
                     )
                     changed = True
             if changed:
@@ -1864,6 +1920,8 @@ class ManagedModelRuntime:
                 self._drain(action)
             elif action.kind == ActionKind.UNLOAD:
                 self._unload(action)
+            elif action.kind == ActionKind.EVICT:
+                self._evict(action)
             else:  # pragma: no cover - enum exhaustiveness guard
                 raise RuntimeError(f"unsupported allocator action: {action.kind}")
         except (Exception, SystemExit) as exc:  # noqa: BLE001
@@ -1928,14 +1986,16 @@ class ManagedModelRuntime:
                 raise RuntimeError("runtime backend did not prove the requested artifact")
             if action.model_id not in self.backend.cached_models():
                 raise RuntimeError("runtime backend fetched no visible cache artifact")
+        artifact_fetched = not cached
         verified_artifact = self._verify_action_artifact(action)
+        now = max(0.0, float(self.clock()))
         with self._lock:
             current = self._residencies.get(action.model_id)
             self._residencies[action.model_id] = ManagedResidency(
                 model_id=action.model_id,
                 memory_mb=action.memory_mb,
                 state=ResidencyState.CACHED,
-                loaded_at=current.loaded_at if current else 0.0,
+                loaded_at=(now if artifact_fetched else current.loaded_at if current else 0.0),
                 last_used_at=current.last_used_at if current else 0.0,
                 load_failures=current.load_failures if current else 0,
                 pinned=current.pinned if current else False,
@@ -1943,9 +2003,16 @@ class ManagedModelRuntime:
                     verified_artifact
                     or (current.artifact_sha256 if current else "")
                 ),
+                predictive_cache=(
+                    bool(action.predictive_prefetch)
+                    if artifact_fetched
+                    else current.predictive_cache
+                    if current is not None
+                    else False
+                ),
             )
             self._save_locked()
-        return not cached
+        return artifact_fetched
 
     def _warm(self, action: MutationAction) -> None:
         if action.model_id not in self.backend.cached_models():
@@ -1980,6 +2047,7 @@ class ManagedModelRuntime:
                             pinned=current.pinned,
                             handle=current.handle,
                             artifact_sha256=current.artifact_sha256,
+                            predictive_cache=False,
                         )
                         self._save_locked()
                     return
@@ -2004,6 +2072,7 @@ class ManagedModelRuntime:
                         current.pinned,
                         current.handle,
                         current.artifact_sha256,
+                        False,
                     )
                     self._residencies[action.model_id] = current
                     self._save_locked()
@@ -2019,6 +2088,7 @@ class ManagedModelRuntime:
                         current.pinned,
                         None,
                         current.artifact_sha256,
+                        False,
                     )
                     self._residencies[action.model_id] = current
                     self._save_locked()
@@ -2078,6 +2148,7 @@ class ManagedModelRuntime:
                             pinned=current.pinned,
                             handle=recovery_handle,
                             artifact_sha256=current.artifact_sha256,
+                            predictive_cache=False,
                         )
                         self._save_locked()
                         return
@@ -2096,6 +2167,7 @@ class ManagedModelRuntime:
                         current.pinned,
                         None,
                         current.artifact_sha256,
+                        False,
                     )
                     self._residencies[action.model_id] = current
                     self._save_locked()
@@ -2124,6 +2196,7 @@ class ManagedModelRuntime:
                     verified_artifact
                     or (current.artifact_sha256 if current else "")
                 ),
+                predictive_cache=False,
             )
             self._save_locked()
         with self._lock:
@@ -2145,6 +2218,7 @@ class ManagedModelRuntime:
                         verified_artifact
                         or (current.artifact_sha256 if current else "")
                     ),
+                    predictive_cache=False,
                 )
                 self._save_locked()
 
@@ -2176,6 +2250,7 @@ class ManagedModelRuntime:
                     verified_artifact
                     or (current.artifact_sha256 if current else "")
                 ),
+                predictive_cache=False,
             )
             self._save_locked()
 
@@ -2200,6 +2275,7 @@ class ManagedModelRuntime:
                 pinned=current.pinned,
                 handle=current.handle,
                 artifact_sha256=current.artifact_sha256,
+                predictive_cache=False,
             )
             self._save_locked()
 
@@ -2235,7 +2311,49 @@ class ManagedModelRuntime:
                 load_failures=current.load_failures,
                 pinned=current.pinned,
                 artifact_sha256=current.artifact_sha256,
+                predictive_cache=False,
             )
+            self._save_locked()
+
+    def _evict(self, action: MutationAction) -> None:
+        with self._lock:
+            current = self._residencies.get(action.model_id)
+            if current is None:
+                return
+            if (
+                current.state != ResidencyState.CACHED
+                or current.handle is not None
+                or not current.predictive_cache
+                or current.pinned
+            ):
+                raise RuntimeError(
+                    "only an unused allocator-fetched predictive artifact may be evicted"
+                )
+            if not action.artifact_sha256 or (
+                current.artifact_sha256 != action.artifact_sha256
+            ):
+                raise RuntimeError(
+                    "residency artifact changed; refusing stale eviction command"
+                )
+        evictor = getattr(self.backend, "evict_artifact", None)
+        if not callable(evictor):
+            raise RuntimeError("runtime backend cannot evict cached model artifacts")
+        evictor(action.model_id, action.artifact_sha256)
+        if action.model_id in self.backend.cached_models():
+            raise RuntimeError("runtime backend left the evicted artifact visible")
+        with self._lock:
+            current = self._residencies.get(action.model_id)
+            if current is None:
+                return
+            if (
+                current.state != ResidencyState.CACHED
+                or current.handle is not None
+                or not current.predictive_cache
+                or current.pinned
+                or current.artifact_sha256 != action.artifact_sha256
+            ):
+                raise RuntimeError("predictive cache state changed during artifact eviction")
+            del self._residencies[action.model_id]
             self._save_locked()
 
     def _fail(self, action: MutationAction, exc: BaseException) -> None:
@@ -2272,6 +2390,7 @@ class ManagedModelRuntime:
                         if current is not None
                         else action.artifact_sha256
                     ),
+                    predictive_cache=False,
                 )
             self._finish_locked(action, MutationStatus.FAILED, message)
 
@@ -2391,6 +2510,7 @@ class ManagedModelRuntime:
                         residency.pinned,
                         None,
                         residency.artifact_sha256,
+                        residency.predictive_cache,
                     )
                     continue
                 if residency.handle is not None:
@@ -2416,6 +2536,7 @@ class ManagedModelRuntime:
                     residency.pinned,
                     None,
                     residency.artifact_sha256,
+                    False,
                 )
             snapshot = tuple(
                 (model_id, residency)
@@ -2691,6 +2812,9 @@ def _model_residency_dict(
         "managed": residency.managed,
         "artifact_sha256": residency.artifact_sha256,
     }
+    if residency.predictive_cache:
+        # Keep ordinary heartbeats readable by the previous server during rolling upgrades.
+        payload["predictive_cache"] = True
     if now is not None:
         payload["loaded_age_seconds"] = min(
             MAX_MODEL_AGE_SECONDS,
