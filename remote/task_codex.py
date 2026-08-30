@@ -52,7 +52,8 @@ _PROTOCOL_SCHEMA_MAX_BYTES = 2 * 1024 * 1024
 # protocol Grid is about to lease a durable Goal to.
 _REQUIRED_PROTOCOL_METHODS = frozenset({
     "initialize", "initialized", "thread/start", "thread/resume", "thread/goal/set",
-    "thread/goal/get", "thread/tokenUsage/updated", "turn/started", "turn/completed",
+    "thread/goal/get", "thread/tokenUsage/updated", "turn/started", "turn/steer",
+    "turn/completed",
     "item/tool/call",
 })
 _PROTOCOL_CACHE: dict[BinaryRevision, tuple[bool, str]] = {}
@@ -641,7 +642,7 @@ class ToolExecutor:
 
 class Rpc:
     def __init__(self, process: ProcessLike, *, timeout: float, tools: ToolExecutor,
-                 publish: Callable[..., None]):
+                 publish: Callable[..., None], continuation: str | None = None):
         if process.stdin is None or process.stdout is None:
             raise CodexGoalError("Codex app-server did not expose stdio")
         self.process, self.stdin, self.stdout = process, process.stdin, process.stdout
@@ -651,6 +652,8 @@ class Rpc:
         self.responses: dict[int, dict[str, Any]] = {}
         self.completed: dict[str, Any] | None = None
         self.pause_id: int | None = None
+        self.steer_id: int | None = None
+        self.continuation = continuation
         self.tokens = 0
         self.lines: queue.Queue[str | None] = queue.Queue()
         threading.Thread(target=self._read, daemon=True).start()
@@ -751,6 +754,16 @@ class Rpc:
         elif method == "turn/started" and self.pause_id is None:
             thread_id = str(params.get("threadId") or "")
             if thread_id:
+                if self.continuation:
+                    turn_id = str((params.get("turn") or {}).get("id") or "")
+                    if not turn_id:
+                        raise CodexProtocolError(
+                            "Codex turn/started omitted the turn id required for fenced steering")
+                    self.steer_id = self.send("turn/steer", {
+                        "threadId": thread_id,
+                        "expectedTurnId": turn_id,
+                        "input": [{"type": "text", "text": self.continuation}],
+                    })
                 # Grid owns continuation. Pause suppresses Codex's automatic next turn after this one.
                 self.pause_id = self.send("thread/goal/set", {"threadId": thread_id,
                                                                "status": "paused"})
@@ -806,7 +819,12 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
         process = process_factory([executable, "app-server", "--listen", "stdio://"], env, workspace)
         if on_spawn is not None:
             on_spawn(process)
-        rpc = Rpc(process, timeout=timeout, tools=tools, publish=publish)
+        continuation = job.get("prompt")
+        continuation = (continuation.strip()
+                        if turns_before and isinstance(continuation, str)
+                        and continuation.strip() else None)
+        rpc = Rpc(process, timeout=timeout, tools=tools, publish=publish,
+                  continuation=continuation)
         rpc.wait(rpc.send("initialize", {
             "clientInfo": {"name": "grid-goal", "title": "Grid Goal", "version": "0.1"},
             "capabilities": {"experimentalApi": True},
@@ -859,25 +877,17 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
         # Grid may reduce the parent's remaining native budget after terminal children replace
         # their allocations with actual cumulative usage. Refresh the cap on every resumed slice;
         # setting it only at thread creation would let the old native cap overspend the hierarchy.
-        native_objective = (
-            f"{goal['objective'].strip()}\n\nDone when: {goal['done_when'].strip()}")
-        continuation = job.get("prompt")
-        if turns_before and isinstance(continuation, str) and continuation.strip():
-            # Native Codex Goal owns the loop and stop decision, but Grid owns distributed
-            # continuation context: independent eval failures, child fan-in and bounded prior-turn
-            # summaries live on the relay-authored task prompt. Merely reactivating the stored
-            # native objective drops that information, causing every replacement machine to repeat
-            # the same false completion. Updating the native objective is the Goal API's durable,
-            # portable way to make the next native turn see Grid's evidence; retrying the same
-            # leased turn writes the same value and is therefore idempotent.
-            native_objective += "\n\nGrid continuation context:\n" + continuation.strip()
         set_goal: dict[str, Any] = {
             "threadId": thread_id, "status": "active",
             "tokenBudget": goal.get("token_budget"),
-            "objective": native_objective,
         }
+        if turns_before == 0:
+            set_goal["objective"] = (
+                f"{goal['objective'].strip()}\n\nDone when: {goal['done_when'].strip()}")
         rpc.wait(rpc.send("thread/goal/set", set_goal))
         completed = rpc.wait_completed()
+        if rpc.steer_id is not None:
+            rpc.wait(rpc.steer_id)
         if rpc.pause_id is not None:
             rpc.wait(rpc.pause_id)
         native = rpc.wait(rpc.send("thread/goal/get", {"threadId": thread_id})) or {}

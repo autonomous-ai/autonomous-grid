@@ -54,21 +54,33 @@ class _CreateRolloutOnActivation(_OpenStringIO):
         return written
 
 
-def _messages(rollout_path, status="complete"):
-    return [
+def _messages(rollout_path, status="complete", *, steered=False):
+    messages = [
         {"id": 1, "result": {"userAgent": "codex"}},
         {"id": 2, "result": {"thread": {
             "id": "thread-portable", "path": str(rollout_path)}}},
-        {"method": "turn/started", "params": {"threadId": "thread-portable"}},
+        {"method": "turn/started", "params": {
+            "threadId": "thread-portable", "turn": {"id": "turn-native"}}},
         {"id": 3, "result": {"goal": {"status": "active"}}},
+    ]
+    if steered:
+        messages.extend([
+            {"id": 4, "result": {}},
+            {"id": 5, "result": {"goal": {"status": "paused"}}},
+        ])
+        goal_response_id = 6
+    else:
+        messages.append({"id": 4, "result": {"goal": {"status": "paused"}}})
+        goal_response_id = 5
+    messages.extend([
         {"method": "thread/tokenUsage/updated", "params": {
             "tokenUsage": {"total": {"totalTokens": 450}}}},
         {"method": "turn/completed", "params": {
             "turn": {"id": "turn-1", "status": "completed", "output": "done"}}},
-        {"id": 4, "result": {"goal": {"status": "paused"}}},
-        {"id": 5, "result": {"goal": {
+        {"id": goal_response_id, "result": {"goal": {
             "status": status, "tokensUsed": 321, "timeUsedSeconds": 9}}},
-    ]
+    ])
+    return messages
 
 
 def _job(**changes):
@@ -453,7 +465,7 @@ def test_resumed_native_goal_receives_grid_budget_and_continuation_evidence(
         "status": "active", "turns_completed": 1, "tokens_used": 500,
         "time_used_seconds": 5,
     }))
-    process = _FakeProcess(_messages(rollout))
+    process = _FakeProcess(_messages(rollout, steered=True))
     job = _job()
     job["goal"] = {**job["goal"], "turns_completed": 1, "tokens_used": 500,
                    "time_used_seconds": 5, "token_budget": 7_500}
@@ -471,11 +483,13 @@ def test_resumed_native_goal_receives_grid_budget_and_continuation_evidence(
                  and row.get("params", {}).get("status") == "active"]
     assert len(activated) == 1
     assert activated[0]["params"]["tokenBudget"] == 7_500
-    objective = activated[0]["params"]["objective"]
-    assert objective.startswith(
-        "Build the game\n\nDone when: all four features and tests pass")
-    assert "Grid continuation context:" in objective
-    assert "README: required file is absent" in objective
+    assert "objective" not in activated[0]["params"]
+    steered = [row for row in sent if row.get("method") == "turn/steer"]
+    assert len(steered) == 1
+    assert steered[0]["params"]["expectedTurnId"] == "turn-native"
+    assert steered[0]["params"]["input"] == [{
+        "type": "text", "text": job["prompt"],
+    }]
 
 
 def test_copied_codex_checkpoint_rebases_rollout_to_the_new_worker(tmp_path):
