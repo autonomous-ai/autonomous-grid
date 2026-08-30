@@ -101,6 +101,47 @@ def test_configure_reads_private_bundle_file_without_printing_secret(
     assert bundle not in capsys.readouterr().out
 
 
+def test_configure_replace_refuses_runtime_state_from_an_old_worker(
+        tmp_path, monkeypatch):
+    home = tmp_path / "old-worker-home"
+    (home / "run" / "engines").mkdir(parents=True)
+    called = False
+
+    def configure(*_args):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(lab, "configure_home", configure)
+    pair = _pair(node="replacement")
+    bundle = lab.encode_pair(
+        url=pair["relay_url"], token=pair["access_token"],
+        node_id=pair["node_id"], expires_at=pair["expires_at"])
+    with pytest.raises(SystemExit, match="runtime or unknown artifacts"):
+        lab.cmd_configure(argparse.Namespace(
+            bundle=bundle, bundle_file=None, home=str(home), replace=True))
+    assert called is False
+
+
+def test_configure_replace_allows_only_the_helpers_two_state_files(
+        tmp_path, monkeypatch, capsys):
+    home = tmp_path / "expired-pairing"
+    home.mkdir()
+    (home / "state.json").write_text("{}", encoding="utf-8")
+    (home / "credentials.toml").write_text("", encoding="utf-8")
+    captured = {}
+    monkeypatch.setattr(lab, "configure_home", lambda path, pair: captured.update(
+        home=path, node=pair["node_id"]))
+    pair = _pair(node="replacement")
+    bundle = lab.encode_pair(
+        url=pair["relay_url"], token=pair["access_token"],
+        node_id=pair["node_id"], expires_at=pair["expires_at"])
+
+    assert lab.cmd_configure(argparse.Namespace(
+        bundle=bundle, bundle_file=None, home=str(home), replace=True)) == 0
+    assert captured == {"home": home.resolve(), "node": "replacement"}
+    assert bundle not in capsys.readouterr().out
+
+
 def test_configure_refuses_group_readable_bundle_file(tmp_path):
     path = tmp_path / "pairing.txt"
     path.write_text("credential", encoding="utf-8")

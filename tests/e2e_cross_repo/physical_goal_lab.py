@@ -1,9 +1,9 @@
-"""No-SSH launcher for the physical two-machine Grid Goal acceptance test.
+"""No-SSH launcher for physical multi-machine Grid Goal acceptance tests.
 
-This is deliberately a test utility, not a production relay installer.  Until the hosted relay
-has the feature branch, one of the two test machines can run the matching private relay checkout
-in the foreground.  The other machine joins it through ordinary Grid HTTP/Git traffic; nobody
-logs into the other machine and no task workspace is copied.
+This is deliberately a test utility, not a production relay installer. Until the hosted relay has
+the feature branch, one test machine can run the matching private relay checkout in the foreground.
+Every other machine joins it through ordinary Grid HTTP/Git traffic; nobody logs into another
+machine and no task workspace is copied.
 
 Relay host (either physical machine)::
 
@@ -484,8 +484,21 @@ def cmd_configure(args: argparse.Namespace) -> int:
     except ValueError as exc:
         raise SystemExit(f"Invalid pairing bundle: {exc}") from None
     home = _safe_root(args.home)
-    if home.exists() and any(home.iterdir()) and not args.replace:
+    existing = list(home.iterdir()) if home.exists() else []
+    if existing and not args.replace:
         raise SystemExit(f"Grid home is not empty: {home}. Use a new path or pass --replace.")
+    if existing:
+        # Re-pairing may replace only the two credential/state files this helper writes. A `run/`
+        # tree means a provider may still be alive, and cached engines/logs from another signed
+        # identity invalidate a physical acceptance run. Refuse arbitrary files rather than
+        # deleting a caller's directory under a flag whose name sounds harmless.
+        allowed = {"credentials.toml", "state.json"}
+        unsafe = [path.name for path in existing
+                  if path.name not in allowed or path.is_symlink() or not path.is_file()]
+        if unsafe:
+            raise SystemExit(
+                f"Grid home cannot be safely replaced: {home} contains runtime or unknown "
+                f"artifacts {sorted(unsafe)}. Stop the worker and use a new empty --home.")
     configure_home(home, pairing)
     print("Joining worker is paired without SSH.")
     print(f"  GRID_HOME={home}")
@@ -537,7 +550,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=("Read the disposable pairing bundle from an owner-only 0600 file without exposing "
               "it in shell history or the process list."))
     configure.add_argument("--replace", action="store_true",
-                           help="Replace an existing disposable Grid home")
+                           help=("Re-pair a home containing only state.json and credentials.toml; "
+                                 "runtime or unknown artifacts are refused"))
     configure.set_defaults(func=cmd_configure)
     return parser
 
