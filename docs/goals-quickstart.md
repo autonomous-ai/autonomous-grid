@@ -156,10 +156,11 @@ children remain available as trajectory history.
 
 Each claim also carries a random opaque generation. A native Goal worker must present that exact
 generation on lease renewal, progress events, retry checkpoints, terminal results, Git fetch/push,
-and Grid inference. Node identity alone is insufficient: after a lease moves—or even when the same
-node immediately reclaims the same turn—a delayed process from the prior claim is rejected. The
-generation is relay-issued and never exposed to the native Codex or Claude process; only the local
-Grid supervisor and its loopback inference proxy carry it.
+Grid inference, and relay-internal actions such as spawning a subgoal. Node identity alone is
+insufficient: after a lease moves—or even when the same node immediately reclaims the same turn—a
+delayed process from the prior claim is rejected. The generation is relay-issued and never exposed
+to the native Codex or Claude process; only the local Grid supervisor and its loopback inference
+proxy carry it.
 
 `objective` says what to achieve. `done-when` is one clear, verifiable finish line. The native Goal
 mechanism decides when to nominate completion. If independent evals are configured, Grid checks the

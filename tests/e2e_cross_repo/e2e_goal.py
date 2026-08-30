@@ -115,9 +115,10 @@ def test_same_node_reclaim_rejects_the_old_process_on_every_goal_plane(
     goal = relay_client.create_goal(
         relay, owner_token, project_id=project_id,
         objective="Prove a stale process cannot mutate its replacement's Goal attempt",
-        done_when="SAFE.md exists", model="fake-grid-model", token_budget=1_000,
+        done_when="SAFE.md exists", model="fake-grid-model", token_budget=10_000,
+        allow_subgoals=True,
         evals=[{"type": "file", "name": "safe handoff", "path": "SAFE.md"}])
-    profile = ({"kind": "codex", "capabilities": ["native_goal"]},)
+    profile = ({"kind": "codex", "capabilities": ["native_goal", "subgoals"]},)
 
     try:
         old = relay_client.claim_task(
@@ -174,6 +175,29 @@ def test_same_node_reclaim_rejects_the_old_process_on_every_goal_plane(
                 f"/relay/v1/git/{project_id}/info/refs",
                 headers=stale, params={"service": "git-upload-pack"}).status_code == 404
 
+            child_url = f"/relay/v1/goals/{goal['id']}/children"
+            child_headers = {
+                "X-Grid-Goal-Turn": old["task_id"],
+                "Idempotency-Key": "same-node-child",
+            }
+            child_body = {
+                "objective": "Build a child proof", "done_when": "CHILD.md exists",
+                "required": False, "token_budget": 1_000,
+            }
+            missing_child = client.post(
+                child_url, headers={**auth, **child_headers}, json=child_body)
+            stale_child = client.post(
+                child_url, headers={**stale, **child_headers}, json=child_body)
+            assert missing_child.status_code == 403
+            assert stale_child.status_code == 409
+            live = {**auth, "X-Grid-Task-Claim": current["claim_id"]}
+            child = client.post(
+                child_url, headers={**live, **child_headers}, json=child_body)
+            assert child.status_code == 201, child.text
+            stale_replay = client.post(
+                child_url, headers={**stale, **child_headers}, json=child_body)
+            assert stale_replay.status_code == 409
+
         # The old process altered nothing and the replacement generation still owns the lease.
         relay_client.renew_task_lease(
             relay, node_token, current["task_id"], claim_id=current["claim_id"])
@@ -184,6 +208,8 @@ def test_same_node_reclaim_rejects_the_old_process_on_every_goal_plane(
         assert not [item for item in evidence["attempt_events"]
                     if item["event"].get("text") in ("unfenced", "stale")]
         assert evidence["eval_runs"] == []
+        assert [row["id"] for row in relay_client.get_goal(
+            relay, owner_token, goal["id"])["children"]] == [child.json()["id"]]
     finally:
         relay_client.control_goal(relay, owner_token, goal["id"], "cancel")
 

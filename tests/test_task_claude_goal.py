@@ -308,7 +308,8 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
             "headers": {"X-Grid-Goal-Turn": "turn-1", "X-Not-Allowed": "secret"},
         },
     }], publish=lambda *_a, **_k: None,
-        inference=task_codex.GridInference("https://grid.example", "grid-token"),
+        inference=task_codex.GridInference(
+            "https://grid.example", "grid-token", claim_id="claim-generation-7"),
         scope="parent", turn_scope="parent:1")
     result = executor.call(
         "grid_spawn_subgoal", {"objective": "child"}, "call-1")
@@ -319,7 +320,8 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
     assert executor.call(
         "grid_spawn_subgoal", {"objective": "child"}, "replacement-call")["success"] is True
     later = task_codex.ToolExecutor(executor.tools.values(), publish=lambda *_a, **_k: None,
-        inference=task_codex.GridInference("https://grid.example", "grid-token"),
+        inference=task_codex.GridInference(
+            "https://grid.example", "grid-token", claim_id="claim-generation-8"),
         scope="parent", turn_scope="parent:2")
     assert later.call(
         "grid_spawn_subgoal", {"objective": "child"}, "call-1")["success"] is True
@@ -327,6 +329,7 @@ def test_internal_subgoal_tool_carries_grid_auth_lease_fence_and_idempotency(mon
     assert captured[0]["url"] == "https://grid.example/relay/v1/goals/parent/children"
     assert captured[0]["headers"]["Authorization"] == "Bearer grid-token"
     assert captured[0]["headers"]["X-Grid-Goal-Turn"] == "turn-1"
+    assert captured[0]["headers"]["X-Grid-Task-Claim"] == "claim-generation-7"
     assert "X-Not-Allowed" not in captured[0]["headers"]
     keys = [request["headers"]["Idempotency-Key"] for request in captured]
     assert keys[0].startswith("grid-goal-")
@@ -381,7 +384,8 @@ def test_internal_subgoal_tool_refreshes_expired_node_token_without_repeating_ac
         },
     }], publish=lambda *_a, **_k: None,
         inference=task_codex.GridInference(
-            "https://grid.example", lambda: live["token"], refresh),
+            "https://grid.example", lambda: live["token"], refresh,
+            claim_id="claim-generation-7"),
         scope="parent", turn_scope="parent:1")
 
     result = executor.call("grid_spawn_subgoal", {"objective": "child"}, "call-1")
@@ -392,6 +396,8 @@ def test_internal_subgoal_tool_refreshes_expired_node_token_without_repeating_ac
         "Bearer expired-node-token", "Bearer fresh-node-token"]
     # The same idempotency key makes the one authentication retry safe even for an act tool.
     assert calls[0]["Idempotency-Key"] == calls[1]["Idempotency-Key"]
+    assert [call["X-Grid-Task-Claim"] for call in calls] == [
+        "claim-generation-7", "claim-generation-7"]
 
 
 def test_claude_profile_cannot_claim_grid_runner_capabilities_it_does_not_wire(monkeypatch):

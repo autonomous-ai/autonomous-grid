@@ -504,6 +504,11 @@ class ToolExecutor:
         # origin. Business API credentials are never smuggled through the Goal manifest or Git.
         if internal:
             headers["Authorization"] = f"Bearer {self.inference.current_token()}"
+            if self.inference.claim_id:
+                # Internal actions mutate Grid state and need the same exact attempt generation as
+                # Git, inference, events and settlement. It stays in the supervisor-side HTTP
+                # client and is never exposed to the native agent or accepted from a user manifest.
+                headers["X-Grid-Task-Claim"] = self.inference.claim_id
             configured_headers = http.get("headers")
             if isinstance(configured_headers, dict):
                 # The relay injects this lease fence for its built-in subgoal action. No arbitrary

@@ -228,9 +228,10 @@ spending evaluator I/O. The post-eval guarded transaction remains authoritative 
 owner can lose its lease while evaluation is running; that race retains an unaccepted audit row.
 For native Goal turns, both fences bind to the relay-issued random `claim_id`, not merely the node
 id. The provider carries it as `X-Grid-Task-Claim` across result, retry, event, lease, smart-HTTP Git,
-and model-inference requests. Missing generations are rejected for Goals, and mismatches remain
-rejected when the old and new workers share a node id or reuse an attempt number. Ordinary tasks
-retain missing-header compatibility during rolling upgrades.
+model-inference, and relay-internal subgoal requests. Idempotent child reservation replay rechecks
+the same live generation before returning or finishing a child. Missing generations are rejected
+for Goals, and mismatches remain rejected when the old and new workers share a node id or reuse an
+attempt number. Ordinary tasks retain missing-header compatibility during rolling upgrades.
 Malformed stored task-event or evaluator-evidence JSON is exported as an explicit corruption marker
 instead of failing or silently omitting the evidence response. Offline verification rejects every
 such marker, preserving inspectability without admitting damaged records as release or training
