@@ -2146,6 +2146,154 @@ def test_controller_learns_and_persists_bounded_warm_duration(tmp_path):
     assert restored.status(now=31 * 24 * 60 * 60)["learned_warm_seconds"] == []
 
 
+def test_controller_learns_only_real_artifact_fetch_duration(tmp_path):
+    state_path = tmp_path / "controller.json"
+    digest = "a" * 64
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        state_path=state_path,
+    )
+    candidate = profile(
+        "qwen.gguf",
+        artifact_sha256=digest,
+        artifact_source="hf://owner/repo/qwen.gguf",
+        artifact_size_mb=4_000,
+        load_seconds=60,
+        warm_seconds=1,
+    )
+    controller.put_profile(candidate)
+    machine = NodeSnapshot(
+        "n",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        disk_capacity_mb=10_000,
+        disk_available_mb=10_000,
+        last_heartbeat=10,
+    )
+    controller.tick((machine,), now=10)
+    command = controller.commands_for("n", now=10)[0]
+    assert command.kind == ActionKind.LOAD
+
+    controller.acknowledge(
+        "n",
+        command.action_id,
+        MutationStatus.SUCCEEDED,
+        duration_seconds=100,
+        artifact_fetched=True,
+        now=11,
+    )
+
+    learned = controller.status(now=11)["learned_load_seconds"]
+    assert learned == [
+        {"node_id": "n", "model_id": "qwen.gguf", "seconds": 70.0, "samples": 1}
+    ]
+    restored = AllocatorController(state_path=state_path)
+    assert restored.status(now=11)["learned_load_seconds"] == learned
+    assert restored.status(now=31 * 24 * 60 * 60)["learned_load_seconds"] == []
+    restored.put_profile(replace(candidate, artifact_sha256="b" * 64))
+    assert restored.status(now=12)["learned_load_seconds"] == []
+
+
+def test_controller_does_not_learn_cache_verification_as_artifact_fetch():
+    digest = "a" * 64
+    controller = AllocatorController(mode=AllocatorMode.AUTOMATIC)
+    controller.put_profile(
+        profile(
+            "qwen.gguf",
+            artifact_sha256=digest,
+            artifact_source="hf://owner/repo/qwen.gguf",
+            artifact_size_mb=4_000,
+            load_seconds=60,
+        )
+    )
+    machine = NodeSnapshot(
+        "n",
+        16_000,
+        runtimes=("llama.cpp",),
+        backends=("metal",),
+        disk_capacity_mb=10_000,
+        disk_available_mb=10_000,
+        last_heartbeat=10,
+    )
+    controller.tick((machine,), now=10)
+    command = controller.commands_for("n", now=10)[0]
+
+    controller.acknowledge(
+        "n",
+        command.action_id,
+        MutationStatus.SUCCEEDED,
+        duration_seconds=0.01,
+        artifact_fetched=False,
+        now=11,
+    )
+
+    assert controller.status(now=11)["learned_load_seconds"] == []
+
+
+def test_controller_places_next_cold_replica_on_the_learned_faster_fetch_host():
+    digest = "a" * 64
+    controller = AllocatorController(
+        mode=AllocatorMode.AUTOMATIC,
+        reconcile_policy=ReconcilePolicy(max_concurrent_mutations=2),
+    )
+    initial = ModelProfile(
+        "qwen.gguf",
+        8_000,
+        runtimes=("llama.cpp",),
+        min_replicas=2,
+        max_replicas=2,
+        pinned_nodes=("a-slow", "z-fast"),
+        artifact_sha256=digest,
+        artifact_source="hf://owner/repo/qwen.gguf",
+        artifact_size_mb=4_000,
+        load_seconds=60,
+        warm_seconds=1,
+        min_residency_seconds=0,
+    )
+    controller.put_profile(initial)
+
+    def cold_node(node_id: str, heartbeat: float) -> NodeSnapshot:
+        return NodeSnapshot(
+            node_id,
+            16_000,
+            runtimes=("llama.cpp",),
+            backends=("metal",),
+            disk_capacity_mb=10_000,
+            disk_available_mb=10_000,
+            last_heartbeat=heartbeat,
+        )
+
+    machines = (cold_node("a-slow", 10), cold_node("z-fast", 10))
+    controller.tick(machines, now=10)
+    loads = {
+        action.node_id: action
+        for action in controller._commands.values()
+        if action.kind == ActionKind.LOAD
+    }
+    assert set(loads) == {"a-slow", "z-fast"}
+    for node_id, duration in (("a-slow", 100), ("z-fast", 1)):
+        controller.acknowledge(
+            node_id,
+            loads[node_id].action_id,
+            MutationStatus.SUCCEEDED,
+            duration_seconds=duration,
+            artifact_fetched=True,
+            now=11,
+        )
+
+    controller.put_profile(
+        replace(initial, min_replicas=1, max_replicas=1, pinned_nodes=())
+    )
+    controller.tick(
+        (cold_node("a-slow", 12), cold_node("z-fast", 12)),
+        now=12,
+    )
+
+    assert controller.last_plan is not None
+    assert controller.last_plan.nodes_for("qwen.gguf") == ("z-fast",)
+
+
 def test_learned_warm_time_prioritizes_faster_equal_priority_start():
     controller = AllocatorController(
         mode=AllocatorMode.AUTOMATIC,

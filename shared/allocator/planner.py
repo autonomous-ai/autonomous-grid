@@ -161,6 +161,8 @@ class PlacementPlanner:
         models: Iterable[ModelProfile],
         *,
         now: float | None = None,
+        startup_seconds: Mapping[tuple[str, str], float] | None = None,
+        load_seconds: Mapping[tuple[str, str], float] | None = None,
     ) -> dict[str, dict[str, object]]:
         """Summarize which portfolio models can occupy a live node right now.
 
@@ -179,6 +181,8 @@ class PlacementPlanner:
         _require_unique((node.node_id for node in node_list), "node")
         _require_unique((model.model_id for model in model_list), "model")
         profile_by_id = {model.model_id: model for model in model_list}
+        warm_by_pair = _validated_startup_seconds(startup_seconds)
+        load_by_pair = _validated_load_seconds(load_seconds)
         hints: dict[str, dict[str, object]] = {}
 
         def relocation_target(
@@ -233,7 +237,13 @@ class PlacementPlanner:
                     continue
                 candidates.append(
                     (
-                        _portfolio_startup_seconds(residency, victim),
+                        _portfolio_startup_seconds(
+                            candidate_node,
+                            residency,
+                            victim,
+                            warm_by_pair,
+                            load_by_pair,
+                        ),
                         candidate_node.host_priority,
                         candidate_node.node_id,
                     )
@@ -290,7 +300,13 @@ class PlacementPlanner:
                         self.policy,
                     )
 
-                    startup_seconds = _portfolio_startup_seconds(residency, model)
+                    startup_seconds = _portfolio_startup_seconds(
+                        node,
+                        residency,
+                        model,
+                        warm_by_pair,
+                        load_by_pair,
+                    )
                     if reason is None:
                         eligible.append(
                             (
@@ -464,6 +480,7 @@ class PlacementPlanner:
         *,
         now: float | None = None,
         startup_seconds: Mapping[tuple[str, str], float] | None = None,
+        load_seconds: Mapping[tuple[str, str], float] | None = None,
     ) -> PlacementPlan:
         timestamp = time.time() if now is None else float(now)
         if not math.isfinite(timestamp) or timestamp < 0:
@@ -476,6 +493,7 @@ class PlacementPlanner:
         _require_unique((item.model_id for item in forecast_list), "forecast model")
         forecast_by_model = {item.model_id: item for item in forecast_list}
         startup_by_pair = _validated_startup_seconds(startup_seconds)
+        load_by_pair = _validated_load_seconds(load_seconds)
         capacity = {}
         placement_budget: dict[str, int] = {}
         for node in node_list:
@@ -525,6 +543,7 @@ class PlacementPlanner:
                     model,
                     node_list,
                     startup_by_pair,
+                    load_by_pair,
                     now=timestamp,
                     policy=self.policy,
                 ),
@@ -888,6 +907,7 @@ class PlacementPlanner:
                     now=timestamp,
                     need_new_domain=need_new_domain,
                     startup_seconds=startup_by_pair,
+                    load_seconds=load_by_pair,
                 )
                 constrained = scarce_host_claims.get((model.model_id, node.node_id), ())
                 excess_scarcity = scarce_host_excess_claims.get(
@@ -1757,6 +1777,7 @@ class PlacementPlanner:
                     timestamp,
                     self.policy,
                     startup_by_pair,
+                    load_by_pair,
                     require_new_domain=(
                         len(staged_domains[beneficiary.model_id])
                         < min(
@@ -2136,8 +2157,11 @@ def _portfolio_dynamic_fit_reason(
 
 
 def _portfolio_startup_seconds(
+    node: NodeSnapshot,
     residency: ModelResidency | None,
     model: ModelProfile,
+    startup_seconds: Mapping[tuple[str, str], float],
+    load_seconds: Mapping[tuple[str, str], float],
 ) -> float:
     if (
         residency is not None
@@ -2156,8 +2180,15 @@ def _portfolio_startup_seconds(
             ResidencyState.DRAINING,
         )
     ):
-        return model.warm_seconds
-    return model.load_seconds + model.warm_seconds
+        return startup_seconds.get(
+            (node.node_id, model.model_id),
+            model.warm_seconds,
+        )
+    key = (node.node_id, model.model_id)
+    return load_seconds.get(key, model.load_seconds) + startup_seconds.get(
+        key,
+        model.warm_seconds,
+    )
 
 
 def _placement_demand_urgency(
@@ -2224,6 +2255,7 @@ def _next_replica_startup_seconds(
     model: ModelProfile,
     nodes: Iterable[NodeSnapshot],
     startup_seconds: Mapping[tuple[str, str], float],
+    load_seconds: Mapping[tuple[str, str], float],
     *,
     now: float,
     policy: PlannerPolicy,
@@ -2276,7 +2308,13 @@ def _next_replica_startup_seconds(
             and model.matches_artifact(residency)
         )
         candidates.append(
-            warm_seconds if artifact_cached else model.load_seconds + warm_seconds
+            warm_seconds
+            if artifact_cached
+            else load_seconds.get(
+                (node.node_id, model.model_id),
+                model.load_seconds,
+            )
+            + warm_seconds
         )
     return min(candidates, default=model.load_seconds + model.warm_seconds)
 
@@ -2775,6 +2813,7 @@ def _priority_preemption_candidates(
     now: float,
     policy: PlannerPolicy,
     startup_seconds: Mapping[tuple[str, str], float],
+    load_seconds: Mapping[tuple[str, str], float],
     *,
     required_node_id: str | None,
     excluded_nodes: set[str],
@@ -2957,7 +2996,10 @@ def _priority_preemption_candidates(
             )
             beneficiary_startup_seconds = beneficiary_warm_seconds
             if not beneficiary_cached:
-                beneficiary_startup_seconds += beneficiary.load_seconds
+                beneficiary_startup_seconds += load_seconds.get(
+                    (node.node_id, beneficiary.model_id),
+                    beneficiary.load_seconds,
+                )
             candidates.append(
                 _PreemptionCandidate(
                     sort_key=(
@@ -3005,6 +3047,7 @@ def _stage_priority_preemption(
     now: float,
     policy: PlannerPolicy,
     startup_seconds: Mapping[tuple[str, str], float],
+    load_seconds: Mapping[tuple[str, str], float],
     *,
     require_new_domain: bool,
     existing_domains: set[str],
@@ -3037,6 +3080,7 @@ def _stage_priority_preemption(
             now,
             policy,
             startup_seconds,
+            load_seconds,
             required_node_id=required_node_id,
             excluded_nodes=excluded_nodes,
         )
@@ -3182,12 +3226,14 @@ def _candidate_score(
     now: float,
     need_new_domain: bool,
     startup_seconds: Mapping[tuple[str, str], float],
+    load_seconds: Mapping[tuple[str, str], float],
 ) -> tuple[float, tuple[str, ...]]:
     score = 0.0
     reasons: list[str] = []
     residency = node.residency(model.model_id)
     startup_key = (node.node_id, model.model_id)
     warm_seconds = startup_seconds.get(startup_key, model.warm_seconds)
+    artifact_load_seconds = load_seconds.get(startup_key, model.load_seconds)
     performance_value_weight = _performance_value_weight(model, forecast)
     artifact_matches = model.matches_artifact(residency)
     if residency and residency.state == ResidencyState.READY and artifact_matches:
@@ -3212,7 +3258,7 @@ def _candidate_score(
         score += 20_000.0 - min(warm_seconds, 1_000_000_000_000.0) * 20.0
         reasons.append("weights cached locally")
     else:
-        cold_seconds = model.load_seconds + warm_seconds
+        cold_seconds = artifact_load_seconds + warm_seconds
         score -= min(cold_seconds, 1_000_000_000_000.0) * 20.0
         reasons.append("cold load required")
     if startup_key in startup_seconds and not (
@@ -3222,6 +3268,20 @@ def _candidate_score(
         in (ResidencyState.READY, ResidencyState.LOADING, ResidencyState.WARMING)
     ):
         reasons.append("learned warm-start estimate")
+    if startup_key in load_seconds and not (
+        residency
+        and artifact_matches
+        and residency.state
+        in (
+            ResidencyState.READY,
+            ResidencyState.LOADING,
+            ResidencyState.WARMING,
+            ResidencyState.CACHED,
+            ResidencyState.DRAINING,
+            ResidencyState.FAILED,
+        )
+    ):
+        reasons.append("learned artifact-load estimate")
     if (
         residency
         and residency.state == ResidencyState.FAILED
@@ -3475,6 +3535,20 @@ def _require_unique(values: Iterable[str], kind: str) -> None:
 def _validated_startup_seconds(
     values: Mapping[tuple[str, str], float] | None,
 ) -> dict[tuple[str, str], float]:
+    return _validated_duration_seconds(values, label="startup")
+
+
+def _validated_load_seconds(
+    values: Mapping[tuple[str, str], float] | None,
+) -> dict[tuple[str, str], float]:
+    return _validated_duration_seconds(values, label="load")
+
+
+def _validated_duration_seconds(
+    values: Mapping[tuple[str, str], float] | None,
+    *,
+    label: str,
+) -> dict[tuple[str, str], float]:
     result: dict[tuple[str, str], float] = {}
     for key, raw_duration in (values or {}).items():
         if (
@@ -3482,12 +3556,12 @@ def _validated_startup_seconds(
             or len(key) != 2
             or not all(isinstance(item, str) and item for item in key)
         ):
-            raise ValueError("startup estimate keys must contain node and model IDs")
+            raise ValueError(f"{label} estimate keys must contain node and model IDs")
         if isinstance(raw_duration, bool):
-            raise ValueError("startup estimates must be finite and non-negative")
+            raise ValueError(f"{label} estimates must be finite and non-negative")
         duration = float(raw_duration)
         if not math.isfinite(duration) or duration < 0:
-            raise ValueError("startup estimates must be finite and non-negative")
+            raise ValueError(f"{label} estimates must be finite and non-negative")
         result[key] = duration
     return result
 

@@ -223,6 +223,7 @@ class ActionReceipt:
     reported_status: MutationStatus | None = None
     sequence: int = 0
     duration_seconds: float = 0.0
+    artifact_fetched: bool = False
 
     def __post_init__(self) -> None:
         if not self.action_id or not self.plan_generation:
@@ -241,6 +242,8 @@ class ActionReceipt:
             raise ValueError("receipt sequence must be non-negative")
         if not math.isfinite(self.duration_seconds) or self.duration_seconds < 0:
             raise ValueError("receipt duration must be finite and non-negative")
+        if not isinstance(self.artifact_fetched, bool):
+            raise ValueError("artifact_fetched must be boolean")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -254,6 +257,7 @@ class ActionReceipt:
             else None,
             "sequence": self.sequence,
             "duration_seconds": self.duration_seconds,
+            "artifact_fetched": self.artifact_fetched,
         }
 
     @classmethod
@@ -268,6 +272,7 @@ class ActionReceipt:
             reported_status=MutationStatus(reported) if reported else None,
             sequence=int(value.get("sequence") or 0),
             duration_seconds=float(value.get("duration_seconds") or 0.0),
+            artifact_fetched=bool(value.get("artifact_fetched", False)),
         )
 
 
@@ -1055,6 +1060,7 @@ class ManagedModelRuntime:
                         existing.updated_at,
                         sequence=existing.sequence,
                         duration_seconds=existing.duration_seconds,
+                        artifact_fetched=existing.artifact_fetched,
                     )
                     self._receipts[action.action_id] = existing
                 self._save_locked()
@@ -1214,6 +1220,7 @@ class ManagedModelRuntime:
                         existing.updated_at,
                         sequence=existing.sequence,
                         duration_seconds=existing.duration_seconds,
+                        artifact_fetched=existing.artifact_fetched,
                     )
                     self._receipts[action.action_id] = existing
                 self._save_locked()
@@ -1242,6 +1249,7 @@ class ManagedModelRuntime:
                     "status": receipt.status.value,
                     "message": receipt.message,
                     "duration_seconds": receipt.duration_seconds,
+                    "artifact_fetched": receipt.artifact_fetched,
                 }
                 for receipt in sorted(
                     self._receipts.values(), key=lambda item: item.sequence
@@ -1272,6 +1280,7 @@ class ManagedModelRuntime:
                     reported_status=receipt.status,
                     sequence=receipt.sequence,
                     duration_seconds=receipt.duration_seconds,
+                    artifact_fetched=receipt.artifact_fetched,
                 )
                 changed = True
             if changed:
@@ -1845,9 +1854,10 @@ class ManagedModelRuntime:
         return actual
 
     def _execute(self, action: MutationAction) -> None:
+        artifact_fetched = False
         try:
             if action.kind == ActionKind.LOAD:
-                self._load(action)
+                artifact_fetched = self._load(action)
             elif action.kind == ActionKind.WARM:
                 self._warm(action)
             elif action.kind == ActionKind.DRAIN:
@@ -1862,10 +1872,15 @@ class ManagedModelRuntime:
             self._fail(action, exc)
         else:
             self._finish(
-                action, MutationStatus.SUCCEEDED, f"{action.kind.value} complete"
+                action,
+                MutationStatus.SUCCEEDED,
+                f"{action.kind.value} complete",
+                artifact_fetched=artifact_fetched,
             )
 
-    def _load(self, action: MutationAction) -> None:
+    def _load(self, action: MutationAction) -> bool:
+        """Materialize the artifact and report whether the backend fetched missing bytes."""
+
         with self._lock:
             current = self._residencies.get(action.model_id)
             if (
@@ -1881,13 +1896,13 @@ class ManagedModelRuntime:
                     raise RuntimeError(
                         "a different artifact version is live; drain it before replacement"
                     )
-                return
+                return False
             if current and current.state in (
                 ResidencyState.READY,
                 ResidencyState.WARMING,
                 ResidencyState.DRAINING,
             ):
-                return
+                return False
         cached = action.model_id in self.backend.cached_models()
         if cached and action.artifact_sha256:
             cached = self.backend.artifact_sha256(action.model_id) == action.artifact_sha256
@@ -1930,6 +1945,7 @@ class ManagedModelRuntime:
                 ),
             )
             self._save_locked()
+        return not cached
 
     def _warm(self, action: MutationAction) -> None:
         if action.model_id not in self.backend.cached_models():
@@ -2260,16 +2276,28 @@ class ManagedModelRuntime:
             self._finish_locked(action, MutationStatus.FAILED, message)
 
     def _finish(
-        self, action: MutationAction, status: MutationStatus, message: str
+        self,
+        action: MutationAction,
+        status: MutationStatus,
+        message: str,
+        *,
+        artifact_fetched: bool = False,
     ) -> None:
         with self._lock:
-            self._finish_locked(action, status, message)
+            self._finish_locked(
+                action,
+                status,
+                message,
+                artifact_fetched=artifact_fetched,
+            )
 
     def _finish_locked(
         self,
         action: MutationAction,
         status: MutationStatus,
         message: str,
+        *,
+        artifact_fetched: bool = False,
     ) -> None:
         existing = self._receipts.get(action.action_id)
         duration_seconds = 0.0
@@ -2293,6 +2321,7 @@ class ManagedModelRuntime:
                 else self._allocate_receipt_sequence_locked()
             ),
             duration_seconds=duration_seconds,
+            artifact_fetched=artifact_fetched,
         )
         if self._active_action_id == action.action_id:
             self._active_action_id = None
@@ -2599,6 +2628,7 @@ class ManagedModelRuntime:
                     reported_status=item.reported_status,
                     sequence=self._next_receipt_sequence,
                     duration_seconds=item.duration_seconds,
+                    artifact_fetched=item.artifact_fetched,
                 )
             self._receipts[item.action_id] = item
             self._next_receipt_sequence = max(

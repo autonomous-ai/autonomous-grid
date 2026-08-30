@@ -278,6 +278,7 @@ def test_load_verifies_cache_and_reports_success_once(tmp_path):
     assert running and running.status == MutationStatus.RUNNING
     wait(managed)
     assert receipt_status(managed, command.action_id) == MutationStatus.SUCCEEDED
+    assert managed.acknowledgements()[0]["artifact_fetched"] is False
     assert managed.residencies[0].state == ResidencyState.CACHED
 
     acknowledgement = managed.acknowledgements()
@@ -396,6 +397,7 @@ def test_uncached_load_fetches_only_an_operator_bounded_immutable_artifact(tmp_p
     wait(managed)
 
     assert receipt_status(managed, command.action_id) == MutationStatus.SUCCEEDED
+    assert managed.acknowledgements()[0]["artifact_fetched"] is True
     assert backend.fetches == [
         ("qwen.gguf", "hf://owner/repo/qwen.gguf", "b" * 64, 512)
     ]

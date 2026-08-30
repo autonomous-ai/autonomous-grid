@@ -533,6 +533,9 @@ def create_app(
                         MutationStatus(supplied_status),
                         message=str(acknowledgement.get("message") or ""),
                         duration_seconds=acknowledgement.get("duration_seconds"),
+                        artifact_fetched=acknowledgement.get(
+                            "artifact_fetched", False
+                        ),
                     )
                 except (KeyError, TypeError, ValueError) as exc:
                     # A receipt can outlive bounded controller history or race cancellation. It is

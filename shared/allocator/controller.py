@@ -468,17 +468,20 @@ class AllocatorController:
         self._mutation_block_delays = bounded_delays
         self._mutation_block_causes = bounded_causes
         profiles = self.profiles
+        startup_estimates, _ = self._learned_warm_estimates(now=timestamp)
+        load_estimates, _ = self._learned_load_estimates(now=timestamp)
         placement_hints = self.planner.portfolio_placement_hints(
             node_list,
             profiles,
             now=timestamp,
+            startup_seconds=startup_estimates,
+            load_seconds=load_estimates,
         )
         forecasts = self._forecasts(
             timestamp,
             placement_hints=placement_hints,
             nodes=node_list,
         )
-        startup_estimates, _ = self._learned_warm_estimates(now=timestamp)
         learned_by_model = {
             profile.model_id: profile.warm_seconds for profile in profiles
         }
@@ -487,12 +490,24 @@ class AllocatorController:
                 learned_by_model.get(model_id, 0.0),
                 estimate,
             )
+        learned_load_by_model = {
+            profile.model_id: profile.load_seconds for profile in profiles
+        }
+        for (_, model_id), estimate in load_estimates.items():
+            learned_load_by_model[model_id] = max(
+                learned_load_by_model.get(model_id, 0.0),
+                estimate,
+            )
         effective_profiles = tuple(
             replace(
                 profile,
                 warm_seconds=learned_by_model.get(
                     profile.model_id,
                     profile.warm_seconds,
+                ),
+                load_seconds=learned_load_by_model.get(
+                    profile.model_id,
+                    profile.load_seconds,
                 ),
             )
             for profile in profiles
@@ -508,6 +523,7 @@ class AllocatorController:
             forecasts,
             now=timestamp,
             startup_seconds=startup_estimates,
+            load_seconds=load_estimates,
         )
         plan = self._version_plan(raw_plan)
         self._resolve_revalidated_withdrawn_destructive(
@@ -549,6 +565,7 @@ class AllocatorController:
             blocked_causes=self._mutation_block_causes,
             blocked_destructive_models=blocked_destructive_models,
             startup_seconds=startup_estimates,
+            load_seconds=load_estimates,
         )
         if self.mode == AllocatorMode.AUTOMATIC:
             result = self._sequence_actions(result)
@@ -805,6 +822,7 @@ class AllocatorController:
         *,
         message: str = "",
         duration_seconds: Any = 0.0,
+        artifact_fetched: bool = False,
         now: float | None = None,
     ) -> MutationRecord:
         timestamp = time.time() if now is None else float(now)
@@ -816,6 +834,8 @@ class AllocatorController:
         message = str(message)[:500]
         duration = _bounded_action_duration(duration_seconds)
         status = MutationStatus(status)
+        if not isinstance(artifact_fetched, bool):
+            raise ValueError("artifact_fetched must be boolean")
         with self._lock:
             checkpoint = self._checkpoint()
             action = self._commands.get(action_id)
@@ -871,6 +891,12 @@ class AllocatorController:
                 failures=failures,
                 message=message,
                 artifact_sha256=source.artifact_sha256,
+                artifact_fetched=(
+                    artifact_fetched
+                    if status == MutationStatus.SUCCEEDED
+                    and source.kind == ActionKind.LOAD
+                    else False
+                ),
             )
             self._append_record(record)
             if status in _TERMINAL:
@@ -894,18 +920,23 @@ class AllocatorController:
         node_list = tuple(nodes)
         with self._lock:
             profiles = self.profiles
+            startup_estimates, startup_samples = self._learned_warm_estimates(
+                now=timestamp
+            )
+            load_estimates, load_samples = self._learned_load_estimates(
+                now=timestamp
+            )
             placement_hints = self.planner.portfolio_placement_hints(
                 node_list,
                 profiles,
                 now=timestamp,
+                startup_seconds=startup_estimates,
+                load_seconds=load_estimates,
             )
             forecasts, portfolio_selection, selection_hints = self._forecast_bundle(
                 timestamp,
                 placement_hints=placement_hints,
                 nodes=node_list,
-            )
-            startup_estimates, startup_samples = self._learned_warm_estimates(
-                now=timestamp
             )
             with self._demand_lock:
                 workload_forecasts = self.intelligence.workload_forecasts(now=timestamp)
@@ -1011,6 +1042,17 @@ class AllocatorController:
                     }
                     for (node_id, model_id), estimate in sorted(
                         startup_estimates.items()
+                    )
+                ],
+                "learned_load_seconds": [
+                    {
+                        "node_id": node_id,
+                        "model_id": model_id,
+                        "seconds": estimate,
+                        "samples": load_samples[(node_id, model_id)],
+                    }
+                    for (node_id, model_id), estimate in sorted(
+                        load_estimates.items()
                     )
                 ],
                 "plan": self._last_plan.to_dict() if self._last_plan else None,
@@ -1394,15 +1436,56 @@ class AllocatorController:
     ]:
         """Blend bounded successful warm timings with each model's configured prior."""
 
+        return self._learned_action_estimates(
+            ActionKind.WARM,
+            prior_field="warm_seconds",
+            now=now,
+        )
+
+    def _learned_load_estimates(
+        self,
+        *,
+        now: float,
+    ) -> tuple[
+        dict[tuple[str, str], float],
+        dict[tuple[str, str], int],
+    ]:
+        """Blend real artifact-transfer timings without learning cache verification as a fetch."""
+
+        return self._learned_action_estimates(
+            ActionKind.LOAD,
+            prior_field="load_seconds",
+            now=now,
+            require_artifact_fetch=True,
+        )
+
+    def _learned_action_estimates(
+        self,
+        kind: ActionKind,
+        *,
+        prior_field: str,
+        now: float,
+        require_artifact_fetch: bool = False,
+    ) -> tuple[
+        dict[tuple[str, str], float],
+        dict[tuple[str, str], int],
+    ]:
+        """Return bounded per-host timings tied to the current immutable artifact revision."""
+
         samples: dict[tuple[str, str], list[float]] = {}
         for record in self._history:
+            profile = self._profiles.get(record.model_id)
             if (
-                record.kind != ActionKind.WARM
+                record.kind != kind
                 or record.status != MutationStatus.SUCCEEDED
                 or record.duration_seconds <= 0
-                or record.model_id not in self._profiles
+                or profile is None
+                or (
+                    require_artifact_fetch
+                    and (not profile.artifact_source or not record.artifact_fetched)
+                )
                 or record.artifact_sha256
-                != self._profiles[record.model_id].artifact_sha256
+                != profile.artifact_sha256
                 or record.completed_at > now
                 or now - record.completed_at >= _STARTUP_ESTIMATE_TTL_SECONDS
             ):
@@ -1423,7 +1506,7 @@ class AllocatorController:
                 1.0,
                 len(values) / _STARTUP_ESTIMATE_FULL_CONFIDENCE_SAMPLES,
             )
-            prior = self._profiles[key[1]].warm_seconds
+            prior = float(getattr(self._profiles[key[1]], prior_field))
             estimates[key] = (1.0 - confidence) * prior + confidence * observed
             counts[key] = len(values)
         return estimates, counts
@@ -2909,6 +2992,7 @@ def _record_from_dict(value: dict[str, Any]) -> MutationRecord:
         failures=int(value.get("failures") or 0),
         message=str(value.get("message") or ""),
         artifact_sha256=value.get("artifact_sha256") or "",
+        artifact_fetched=bool(value.get("artifact_fetched", False)),
     )
 
 

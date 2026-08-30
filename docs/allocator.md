@@ -245,15 +245,17 @@ domain interaction falls back to complete rescoring and bounded repacking.
 Load, latency, host priority, cold-start time, and throttling lower a candidate's score. Managed
 nodes report monotonic action duration in their authenticated acknowledgements. Successful warm
 times are retained in bounded controller history and blended with the configured model estimate as
-a cold-start prior; a bounded eight-sample EWMA becomes authoritative after four samples for that
-node/model/artifact revision. A checksum change starts with the configured prior instead of
-inheriting an optimistic timing from different weights. Placement favors a faster cached host,
-and the predictive prewarm horizon follows the fastest eligible next host's learned warm time and
-cache/lifecycle state; a replica already warming does not pay the artifact-load phase twice. An
-unknown host keeps the conservative configured load-plus-warm fallback, while one known slow host
-does not inflate the whole fleet's target when a faster path is available. Samples
-expire after 30 days so a runtime or hardware upgrade can relearn. Invalid, non-finite, negative, or
-over-one-hour reports are ignored rather than poisoning scheduling or receipt delivery. Persisted
+startup prior. Real missing-artifact fetches are marked separately from local cache verification;
+their successful durations likewise become per-host load estimates, while verification-only loads
+cannot teach the controller that a network transfer is nearly instant. A bounded eight-sample EWMA
+becomes authoritative after four samples for that node/model/artifact revision. A checksum change
+starts with the configured priors instead of inheriting optimistic timings from different weights.
+Placement favors both faster cached hosts and faster cold-fetch hosts. Portfolio selection,
+predictive prewarming, priority preemption, and mutation scheduling all use the fastest eligible
+learned load-plus-warm path; a replica already warming does not pay the artifact-load phase twice.
+An unknown host keeps the conservative configured fallback. Samples expire after 30 days so a
+runtime, storage, or network upgrade can relearn. Invalid, non-finite, negative, or over-one-hour
+reports are ignored rather than poisoning scheduling or receipt delivery. Persisted
 failed warm/load attempts apply a bounded per-model penalty, allowing a healthy peer to be tried
 after backoff instead of selecting the same broken cache forever; the failed node remains a fallback
 when it is the only feasible target. Mutation acknowledgements and inventory snapshots are fenced
@@ -599,11 +601,16 @@ Heartbeat requests may update `load`, `resources`, and `allocator`, and may ackn
       "action_id": "8ccf...",
       "status": "succeeded",
       "message": "ready",
-      "duration_seconds": 12.5
+      "duration_seconds": 12.5,
+      "artifact_fetched": true
     }
   ]
 }
 ```
+
+`artifact_fetched` is `true` only when a `load` had to invoke the runtime's immutable-artifact
+fetch path. It remains `false` for a cache hit, artifact verification, and every non-load action, so
+the controller learns cold-fetch latency only from relevant measurements.
 
 `request_commands` defaults to `true` for compatibility. The node sets it to `false` on its early
 lease and fail-closed fence heartbeats: those requests update registry truth and mark placement

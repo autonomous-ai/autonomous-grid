@@ -49,6 +49,7 @@ class MutationRecord:
     failures: int = 0
     message: str = ""
     artifact_sha256: str = ""
+    artifact_fetched: bool = False
 
     def __post_init__(self) -> None:
         if not self.action_id or not self.node_id or not self.model_id:
@@ -68,6 +69,8 @@ class MutationRecord:
             "artifact_sha256",
             canonical_sha256(self.artifact_sha256),
         )
+        if not isinstance(self.artifact_fetched, bool):
+            raise ValueError("artifact_fetched must be boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +232,7 @@ class Reconciler:
         ] | None = None,
         blocked_destructive_models: Iterable[str] = (),
         startup_seconds: Mapping[tuple[str, str], float] | None = None,
+        load_seconds: Mapping[tuple[str, str], float] | None = None,
     ) -> ReconcileResult:
         timestamp = time.time() if now is None else float(now)
         if not math.isfinite(timestamp) or timestamp < 0:
@@ -248,6 +252,19 @@ class Reconciler:
             if not math.isfinite(duration) or duration < 0:
                 raise ValueError("startup estimates must be finite and non-negative")
             startup_by_pair[key] = duration
+        load_by_pair: dict[tuple[str, str], float] = {}
+        for key, raw_duration in (load_seconds or {}).items():
+            if (
+                not isinstance(key, tuple)
+                or len(key) != 2
+                or not all(isinstance(item, str) and item for item in key)
+                or isinstance(raw_duration, bool)
+            ):
+                raise ValueError("load estimates must identify a node/model pair")
+            duration = float(raw_duration)
+            if not math.isfinite(duration) or duration < 0:
+                raise ValueError("load estimates must be finite and non-negative")
+            load_by_pair[key] = duration
         node_by_id = {node.node_id: node for node in nodes}
         residency_by_pair = {
             (node.node_id, residency.model_id): residency
@@ -703,13 +720,19 @@ class Reconciler:
             if action.kind == ActionKind.WARM and not action.dependencies:
                 return warm_seconds
             if action.kind in (ActionKind.LOAD, ActionKind.WARM):
-                return profile.load_seconds + warm_seconds
+                return load_by_pair.get(
+                    (action.node_id, model_id),
+                    profile.load_seconds,
+                ) + warm_seconds
             if preemption is not None:
                 group = preemption_group_by_pair.get(
                     (action.node_id, action.model_id)
                 )
                 wait_seconds = preemption_wait_by_group.get(group, 0.0)
-                return profile.load_seconds + warm_seconds + wait_seconds
+                return load_by_pair.get(
+                    (action.node_id, model_id),
+                    profile.load_seconds,
+                ) + warm_seconds + wait_seconds
             return math.inf
 
         def action_stage(action: MutationAction) -> int:

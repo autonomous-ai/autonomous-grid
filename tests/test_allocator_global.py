@@ -2543,6 +2543,45 @@ def test_planner_uses_learned_warm_time_to_choose_between_cached_hosts():
     assert "learned warm-start estimate" in learned.assignments[0].reasons
 
 
+def test_planner_uses_learned_artifact_load_time_to_choose_between_cold_hosts():
+    slow = node("a-slow")
+    fast = node("z-fast")
+    profile = model(min_replicas=1, max_replicas=1, load_seconds=10, warm_seconds=1)
+    planner = PlacementPlanner()
+
+    baseline = planner.plan((slow, fast), (profile,), now=10)
+    learned = planner.plan(
+        (slow, fast),
+        (profile,),
+        now=10,
+        load_seconds={
+            (slow.node_id, profile.model_id): 100,
+            (fast.node_id, profile.model_id): 2,
+        },
+    )
+
+    assert baseline.assignments[0].node_id == slow.node_id
+    assert learned.assignments[0].node_id == fast.node_id
+    assert "learned artifact-load estimate" in learned.assignments[0].reasons
+
+
+def test_portfolio_hint_uses_fastest_learned_cold_path():
+    profile = model("coder", min_replicas=0, load_seconds=10, warm_seconds=1)
+
+    hint = PlacementPlanner().portfolio_placement_hints(
+        (node("a-slow"), node("z-fast")),
+        (profile,),
+        now=10,
+        load_seconds={
+            ("a-slow", "coder"): 100,
+            ("z-fast", "coder"): 2,
+        },
+    )["coder"]
+
+    assert hint["best_node_id"] == "z-fast"
+    assert hint["startup_seconds"] == 3
+
+
 @pytest.mark.parametrize("duration", [float("nan"), float("inf"), -1, True])
 def test_planner_rejects_invalid_startup_estimates(duration):
     with pytest.raises(ValueError, match="startup estimates"):
@@ -2551,6 +2590,17 @@ def test_planner_rejects_invalid_startup_estimates(duration):
             (model(),),
             now=10,
             startup_seconds={("n", "qwen"): duration},
+        )
+
+
+@pytest.mark.parametrize("duration", [float("nan"), float("inf"), -1, True])
+def test_planner_rejects_invalid_load_estimates(duration):
+    with pytest.raises(ValueError, match="load estimates"):
+        PlacementPlanner().plan(
+            (node("n"),),
+            (model(),),
+            now=10,
+            load_seconds={("n", "qwen"): duration},
         )
 
 
@@ -4516,6 +4566,31 @@ def test_reconciler_automatic_mode_applies_global_and_per_node_governor():
     assert len(result.executable_actions) == 2
     assert {item.node_id for item in result.executable_actions} == {"a", "b"}
     assert any(item.code == "node_mutation_limit" for item in result.deferred)
+
+
+def test_mutation_governor_starts_fastest_learned_cold_path_first():
+    machines = (node("a-slow"), node("z-fast"))
+    profiles = (
+        model("slow", pinned_nodes=("a-slow",), load_seconds=10),
+        model("fast", pinned_nodes=("z-fast",), load_seconds=10),
+    )
+    plan = PlacementPlanner().plan(machines, profiles, now=10)
+
+    result = Reconciler(ReconcilePolicy(max_concurrent_mutations=1)).reconcile(
+        plan,
+        machines,
+        profiles,
+        mode=AllocatorMode.AUTOMATIC,
+        now=10,
+        load_seconds={
+            ("a-slow", "slow"): 100,
+            ("z-fast", "fast"): 2,
+        },
+    )
+
+    assert [(item.kind, item.model_id) for item in result.executable_actions] == [
+        (ActionKind.LOAD, "fast")
+    ]
 
 
 def test_mutation_governor_starts_higher_priority_model_before_node_id_order():
