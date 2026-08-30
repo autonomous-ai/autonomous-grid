@@ -183,6 +183,11 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 or not isinstance(export.get("pages"), int) or export["pages"] < 1
                 or export.get("total_turns") != len(turns)):
             failures.append("Goal evidence has inconsistent paginated export metadata")
+        snapshot = export.get("snapshot") if isinstance(export, dict) else None
+        if snapshot is not None and (
+                not isinstance(snapshot, str)
+                or re.fullmatch(r"[0-9a-f]{64}", snapshot) is None):
+            failures.append("Goal evidence has a malformed paginated snapshot")
 
     trajectory = (record.get("trajectory")
                   if isinstance(record.get("trajectory"), dict) else {})

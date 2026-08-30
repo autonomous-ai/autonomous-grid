@@ -19,6 +19,7 @@ module is the stateless wire boundary.
 """
 from __future__ import annotations
 
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -1150,6 +1151,11 @@ def get_goal_evidence(signaling_url: str, access_token: str, goal_id: str) -> di
         return record
 
     total = paging.get("total_turns")
+    snapshot = paging.get("snapshot")
+    if snapshot is not None and (
+            not isinstance(snapshot, str)
+            or re.fullmatch(r"[0-9a-f]{64}", snapshot) is None):
+        raise RelayError("Goal evidence pagination snapshot is malformed")
     expected_cursor = 0
     pages = 0
     baseline_goal = record.get("goal")
@@ -1173,7 +1179,8 @@ def get_goal_evidence(signaling_url: str, access_token: str, goal_id: str) -> di
                 or paging["limit"] < 1
                 or not isinstance(total, int)
                 or total < 0
-                or paging.get("total_turns") != total):
+                or paging.get("total_turns") != total
+                or (snapshot is not None and paging.get("snapshot") != snapshot)):
             raise RelayError("Goal evidence pagination metadata is inconsistent")
         page_turns = page["turns"]
         if len(page_turns) > paging["limit"]:
@@ -1212,7 +1219,10 @@ def get_goal_evidence(signaling_url: str, access_token: str, goal_id: str) -> di
     if len(turn_ids) != total or len(set(turn_ids)) != total:
         raise RelayError("Goal evidence pagination returned duplicate or malformed turns")
     combined.pop("pagination", None)
-    combined["export"] = {"paginated": True, "pages": pages, "total_turns": total}
+    combined["export"] = {
+        "paginated": True, "pages": pages, "total_turns": total,
+        **({"snapshot": snapshot} if snapshot is not None else {}),
+    }
     return combined
 
 

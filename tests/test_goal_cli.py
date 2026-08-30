@@ -196,6 +196,7 @@ def test_goal_evidence_client_assembles_contiguous_bounded_pages(monkeypatch):
         "schema_version": 1, "goal": {"id": "goal-1", "status": "complete"},
         "relationships": {"parent_goal_id": None, "children": []},
     }
+    snapshot = "a" * 64
     pages = [{
         **common,
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
@@ -203,7 +204,7 @@ def test_goal_evidence_client_assembles_contiguous_bounded_pages(monkeypatch):
         "turns": [{"id": "turn-1"}], "attempt_events": [{"turn_id": "turn-1"}],
         "inference": [{"turn_id": "turn-1"}], "eval_runs": [{"turn_id": "turn-1"}],
         "pagination": {"cursor": 0, "limit": 1, "total_turns": 2,
-                       "next_cursor": 1, "complete": False},
+                       "next_cursor": 1, "complete": False, "snapshot": snapshot},
     }, {
         **common,
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": ["turn-2"],
@@ -213,7 +214,7 @@ def test_goal_evidence_client_assembles_contiguous_bounded_pages(monkeypatch):
         "turns": [{"id": "turn-2"}], "attempt_events": [{"turn_id": "turn-2"}],
         "inference": [{"turn_id": "turn-2"}], "eval_runs": [{"turn_id": "turn-2"}],
         "pagination": {"cursor": 1, "limit": 1, "total_turns": 2,
-                       "next_cursor": None, "complete": True},
+                       "next_cursor": None, "complete": True, "snapshot": snapshot},
     }]
     calls = []
 
@@ -228,11 +229,17 @@ def test_goal_evidence_client_assembles_contiguous_bounded_pages(monkeypatch):
     assert [item["turn_id"] for item in record["attempt_events"]] == ["turn-1", "turn-2"]
     assert record["trajectory"]["pruned_turn_branches"] == ["turn-2"]
     assert len(record["trajectory"]["worktree_chain"]) == 1
-    assert record["export"] == {"paginated": True, "pages": 2, "total_turns": 2}
+    assert record["export"] == {
+        "paginated": True, "pages": 2, "total_turns": 2, "snapshot": snapshot}
     assert [call["params"] for call in calls] == [
         {"limit": "20", "cursor": "0"}, {"limit": "20", "cursor": "1"}]
 
     pages[1]["pagination"]["cursor"] = 0
+    with pytest.raises(relay.RelayError, match="pagination metadata is inconsistent"):
+        relay.get_goal_evidence("http://relay", "token", "goal-1")
+
+    pages[1]["pagination"]["cursor"] = 1
+    pages[1]["pagination"]["snapshot"] = "b" * 64
     with pytest.raises(relay.RelayError, match="pagination metadata is inconsistent"):
         relay.get_goal_evidence("http://relay", "token", "goal-1")
 
