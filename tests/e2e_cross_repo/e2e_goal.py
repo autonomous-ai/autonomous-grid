@@ -13,6 +13,8 @@ import time
 from itertools import pairwise
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _harness as H
 
@@ -40,7 +42,29 @@ def _tasks(relay: str, token: str, project_id: str, conversation_id: str) -> lis
 
 
 def _partial(root: Path, name: str):
-    return next(iter(root.rglob(name)), None) if root.exists() else None
+    if not root.exists():
+        return None
+    try:
+        # Workspaces are disposable and replaced between attempts. A recursive scan can observe a
+        # directory and then lose it before scandir reaches it; that means "not visible yet", not a
+        # failed Goal. The wait loop retries against the next stable snapshot.
+        return next(iter(root.rglob(name)), None)
+    except FileNotFoundError:
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _cancel_goals_created_by_each_scenario(relay, owner_token):
+    """A failed scenario must not feed its queued Goal to the next scenario's providers."""
+    from remote import relay as relay_client
+
+    before = {
+        goal["id"] for goal in relay_client.list_goals(relay, owner_token, all=True)
+    }
+    yield
+    for goal in relay_client.list_goals(relay, owner_token, all=False):
+        if goal.get("id") not in before:
+            relay_client.control_goal(relay, owner_token, goal["id"], "cancel")
 
 
 def _completed_goal(relay: str, token: str, conversation_id: str) -> dict | None:
