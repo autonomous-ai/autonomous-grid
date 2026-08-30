@@ -107,9 +107,11 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                      require_inference: bool = False) -> list[str]:
     """Return deterministic release-gate failures in a relay-authored Goal evidence record."""
     failures: list[str] = []
-    if record.get("schema_version") != 1:
+    schema_version = record.get("schema_version")
+    if (not isinstance(schema_version, int) or isinstance(schema_version, bool)
+            or schema_version != 1):
         failures.append(
-            f"unsupported Goal evidence schema version {record.get('schema_version')!r}")
+            f"unsupported Goal evidence schema version {schema_version!r}")
     goal = record.get("goal") if isinstance(record.get("goal"), dict) else {}
     turns = record.get("turns") if isinstance(record.get("turns"), list) else []
     if goal.get("status") != "complete":
@@ -179,9 +181,12 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         failures.append("Goal evidence contains duplicate or malformed turn identities")
     export = record.get("export")
     if export is not None:
+        pages = export.get("pages") if isinstance(export, dict) else None
+        total_turns = export.get("total_turns") if isinstance(export, dict) else None
         if (not isinstance(export, dict) or export.get("paginated") is not True
-                or not isinstance(export.get("pages"), int) or export["pages"] < 1
-                or export.get("total_turns") != len(turns)):
+                or not isinstance(pages, int) or isinstance(pages, bool) or pages < 1
+                or not isinstance(total_turns, int) or isinstance(total_turns, bool)
+                or total_turns != len(turns)):
             failures.append("Goal evidence has inconsistent paginated export metadata")
         snapshot = export.get("snapshot") if isinstance(export, dict) else None
         if (not isinstance(snapshot, str)

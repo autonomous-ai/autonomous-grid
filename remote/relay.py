@@ -1173,11 +1173,14 @@ def get_goal_evidence(signaling_url: str, access_token: str, goal_id: str) -> di
 
     while True:
         paging = page.get("pagination")
+        page_cursor = paging.get("cursor") if isinstance(paging, dict) else None
+        page_limit = paging.get("limit") if isinstance(paging, dict) else None
         if (not isinstance(paging, dict)
-                or paging.get("cursor") != expected_cursor
-                or not isinstance(paging.get("limit"), int)
+                or not isinstance(page_cursor, int) or isinstance(page_cursor, bool)
+                or page_cursor != expected_cursor
+                or not isinstance(page_limit, int) or isinstance(page_limit, bool)
                 or paging["limit"] < 1
-                or not isinstance(total, int)
+                or not isinstance(total, int) or isinstance(total, bool)
                 or total < 0
                 or paging.get("total_turns") != total
                 or (snapshot is not None and paging.get("snapshot") != snapshot)):
@@ -1187,7 +1190,13 @@ def get_goal_evidence(signaling_url: str, access_token: str, goal_id: str) -> di
             raise RelayError("Goal evidence page exceeds its declared turn limit")
         consumed = expected_cursor + len(page_turns)
         expected_next = consumed if consumed < total else None
-        if (paging.get("next_cursor") != expected_next
+        next_cursor = paging.get("next_cursor")
+        next_cursor_valid = (
+            next_cursor is None if expected_next is None
+            else (isinstance(next_cursor, int) and not isinstance(next_cursor, bool)
+                  and next_cursor == expected_next)
+        )
+        if (not next_cursor_valid
                 or paging.get("complete") is not (expected_next is None)):
             raise RelayError("Goal evidence pagination cursor is not contiguous")
         pages += 1
