@@ -817,26 +817,78 @@ def preflight() -> None:
         task_sandbox.preflight(task_root=workspace_root())
 
 
+def claude_available() -> bool:
+    """Whether this process can safely advertise the ordinary Claude task harness right now."""
+    try:
+        preflight()
+        resolve_binary()
+        _require_the_sandbox_packages()
+    except (Exception, SystemExit):
+        return False
+    return True
+
+
+def _configured_task_harnesses() -> tuple[str, ...]:
+    configured = (os.getenv("GRID_TASK_AGENT_KINDS") or "claude,codex").replace(",", " ").split()
+    return tuple(dict.fromkeys(
+        kind for kind in configured if kind in ("claude", "codex")))
+
+
 def preflight_before_serving() -> None:
-    """Everything a task will need, asked before there is a task — for `grid join` (issue 58).
+    """Prove that at least one configured task harness can run before `grid join` succeeds.
 
-    `run_task` asks `preflight()` and `resolve_binary()` at claim time, which is after a member is
-    already waiting on this provider. Until this existed, that was the ONLY moment either was asked:
-    `grid join` printed its banner, `grid project status` said online, and the provider looked
-    healthy right up until somebody else's task died on it.
+    A task-only node is agent capacity, not specifically Claude capacity.  Codex-only company
+    machines are valid Grid workers, so a missing Claude binary must not reject one that can run
+    Codex's native Goal harness.  Conversely, merely having one of the two names configured is not
+    enough: the provider may advertise only a harness whose real binary and safety checks pass.
 
-    The **same two functions**, never a copy of them. A second opinion here about the sandbox, the
-    permission mode or the version floor would be one more thing to keep in step, and every failure
-    this plane has recorded is two readings of one rule that got edited apart.
+    Claude uses the same `preflight`/`resolve_binary`/sandbox-package checks as its claim path.
+    Codex uses `task_codex.resolve_binary`, including the measured native-Goal protocol probe.  The
+    shared workspace-root check applies whichever harness wins.
 
     One question is asked here and nowhere else — whether the workspace root is reachable at all —
     and it is asked **unconditionally**, unlike the checks inside `preflight()` that belong to the
     sandbox. An unwritable root fails every task with the sandbox on or off.
     """
-    preflight()
-    resolve_binary()
-    _require_the_sandbox_packages()
+    configured = _configured_task_harnesses()
+    if not configured:
+        raise RuntimeError(
+            "GRID_TASK_AGENT_KINDS enables no supported task harness; choose codex, claude, or both")
+
+    # This is shared infrastructure, not a harness opinion. Ask once and preserve its exact OSError:
+    # trying Codex after Claude cannot make an unwritable/not-a-directory root usable, and wrapping
+    # the refusal would discard the path-specific diagnosis existing operators rely on.
     _require_a_reachable_workspace_root()
+
+    failures: list[str] = []
+    causes: list[BaseException] = []
+    if "claude" in configured:
+        try:
+            preflight()
+            resolve_binary()
+            _require_the_sandbox_packages()
+            return
+        except (Exception, SystemExit) as exc:
+            failures.append(f"claude: {str(exc) or exc.__class__.__name__}")
+            causes.append(exc)
+
+    if "codex" in configured:
+        try:
+            # Imported here to avoid task_agent -> task_codex -> task_agent at module import time.
+            from . import task_codex
+
+            task_codex.resolve_binary()
+            return
+        except (Exception, SystemExit) as exc:
+            failures.append(f"codex: {str(exc) or exc.__class__.__name__}")
+            causes.append(exc)
+
+    # Preserve Claude's established sandbox-package OSError when Codex fallback is also absent.
+    # The operator gets the exact package/install guidance and existing callers retain the useful
+    # exception class. Other multi-harness failures are combined so neither missing binary is hidden.
+    if causes and isinstance(causes[0], OSError):
+        raise causes[0]
+    raise RuntimeError("no configured task harness is usable (" + "; ".join(failures) + ")")
 
 
 # What the Linux sandbox needs on the box, and it is **two packages, not one** (issue 59). MEASURED

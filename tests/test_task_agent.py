@@ -5673,6 +5673,54 @@ def test_preflight_before_serving_asks_what_a_claim_would_ask(monkeypatch, tmp_p
     assert asked == ["preflight", "binary"]
 
 
+def test_codex_only_preflight_does_not_require_claude(monkeypatch, tmp_path):
+    """A company machine with Codex but no Claude is still real distributed Goal capacity."""
+    from remote import task_agent, task_codex
+
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    monkeypatch.setattr(
+        task_agent, "preflight",
+        lambda: pytest.fail("Codex-only node ran Claude's configuration preflight"))
+    monkeypatch.setattr(
+        task_agent, "resolve_binary",
+        lambda: pytest.fail("Codex-only node tried to resolve Claude"))
+    monkeypatch.setattr(task_codex, "resolve_binary", lambda: "/opt/grid/bin/codex")
+
+    task_agent.preflight_before_serving()
+
+
+def test_preflight_accepts_codex_when_default_claude_is_missing(monkeypatch, tmp_path):
+    """The default `claude,codex` means either usable harness, not an accidental Claude mandate."""
+    from remote import task_agent, task_codex
+
+    monkeypatch.delenv("GRID_TASK_AGENT_KINDS", raising=False)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(
+        task_agent, "resolve_binary", lambda: (_ for _ in ()).throw(RuntimeError("no Claude")))
+    monkeypatch.setattr(task_codex, "resolve_binary", lambda: "/opt/grid/bin/codex")
+    _sandbox_packages_present(monkeypatch)
+
+    task_agent.preflight_before_serving()
+
+
+def test_preflight_refuses_when_every_configured_harness_is_unusable(monkeypatch, tmp_path):
+    from remote import task_agent, task_codex
+
+    monkeypatch.delenv("GRID_TASK_AGENT_KINDS", raising=False)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(
+        task_agent, "resolve_binary", lambda: (_ for _ in ()).throw(RuntimeError("no Claude")))
+    monkeypatch.setattr(
+        task_codex, "resolve_binary", lambda: (_ for _ in ()).throw(RuntimeError("no Codex")))
+    _sandbox_packages_present(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="claude: no Claude.*codex: no Codex"):
+        task_agent.preflight_before_serving()
+
+
 def test_preflight_before_serving_refuses_a_workspace_root_it_cannot_write(monkeypatch, tmp_path):
     """The macOS shape: `/var` is root-owned, so a provider without sudo fails EVERY task with
     "could not create /var/grid/…" — one member's task at a time, forever, every signal green."""

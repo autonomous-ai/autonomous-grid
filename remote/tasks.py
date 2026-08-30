@@ -314,7 +314,7 @@ def decline_claim_once(serve_state: Any, task_id: str, *, attempt: int,
 
 
 def _agent_kinds() -> tuple[str, ...]:
-    """Harnesses this process can really execute; never advertise Codex optimistically."""
+    """Harnesses this process can really execute; never advertise either one optimistically."""
     configured = (os.getenv("GRID_TASK_AGENT_KINDS") or "claude,codex").replace(",", " ").split()
     allowed = {kind for kind in configured if kind in ("claude", "codex")}
     invalid = [kind for kind in configured if kind not in ("claude", "codex")]
@@ -322,7 +322,7 @@ def _agent_kinds() -> tuple[str, ...]:
         _warn(f"ignoring unsupported harness {kind!r} in GRID_TASK_AGENT_KINDS")
     # Empty or wholly invalid is fail closed: this provider claims no tasks instead of running a
     # harness its operator meant to disable.
-    kinds = ["claude"] if "claude" in allowed else []
+    kinds = ["claude"] if "claude" in allowed and task_agent.claude_available() else []
     if "codex" in allowed and task_codex.available():
         kinds.append("codex")
     return tuple(kinds)

@@ -250,6 +250,7 @@ def test_missing_claude_goal_attachment_quarantines_only_that_binary_revision(
     assert "without a native evaluator checkpoint" in str(outcome.error)
     assert task_agent.distributed_goal_available() is False
     # Claude remains an ordinary task harness, but its scheduler profile loses native_goal.
+    monkeypatch.setattr(task_agent, "claude_available", lambda: True)
     assert tasks._agent_profiles() == ({"kind": "claude", "capabilities": []},)
 
     binary.chmod(0o755)
@@ -423,10 +424,19 @@ def test_claude_profile_cannot_claim_grid_runner_capabilities_it_does_not_wire(m
         "GRID_CLAUDE_TASK_CAPABILITIES",
         "native_goal dynamic_tools subgoals image_generation")
     monkeypatch.setattr(task_agent, "distributed_goal_available", lambda: True)
+    monkeypatch.setattr(task_agent, "claude_available", lambda: True)
 
     assert tasks._agent_profiles() == ({
         "kind": "claude", "capabilities": ["native_goal"],
     },)
+
+
+def test_unavailable_claude_is_not_advertised_to_the_scheduler(monkeypatch):
+    """A Codex-only node must not claim a Claude task and fail it after checkout."""
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude")
+    monkeypatch.setattr(task_agent, "claude_available", lambda: False)
+
+    assert tasks._agent_profiles() == ()
 
 
 def test_codex_profile_advertises_only_operator_approved_tool_origins(monkeypatch):
