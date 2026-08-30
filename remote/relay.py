@@ -1080,6 +1080,14 @@ def create_task(
     return task
 
 
+# Every Goal endpoint arrived as one relay feature. A CLI ahead of its relay therefore gets
+# FastAPI's bare framework 404 from any of them. "Not Found" is especially misleading for status,
+# evidence and control: it sounds as if the Goal id is wrong, when the server has never heard of a
+# Goal. Keep the one diagnosis on every route, while preserving a Goal-aware relay's own specific
+# 404 (the hint is substituted only for the exact bare framework body in `_task_oneshot`).
+_OLD_RELAY_NO_GOALS = "This grid's relay does not support Grid Goal yet."
+
+
 def create_goal(signaling_url: str, access_token: str, *, project_id: str, objective: str,
                 done_when: str, model: str, token_budget: int | None,
                 tools: list[dict[str, Any]] | None = None, name: str | None = None,
@@ -1106,7 +1114,7 @@ def create_goal(signaling_url: str, access_token: str, *, project_id: str, objec
             return _task_oneshot(
                 signaling_url, access_token, "POST", "/relay/v1/goals", json=body,
                 headers={"Idempotency-Key": key},
-                missing_route_hint="This grid's relay does not support Grid Goal yet.")
+                missing_route_hint=_OLD_RELAY_NO_GOALS)
         except TaskTransportError as exc:
             if attempt == 0:
                 continue
@@ -1118,7 +1126,8 @@ def create_goal(signaling_url: str, access_token: str, *, project_id: str, objec
 
 def list_goals(signaling_url: str, access_token: str, *, all: bool = False) -> list[dict[str, Any]]:
     answer = _task_oneshot(signaling_url, access_token, "GET", "/relay/v1/goals",
-                           params={"all": "true"} if all else {})
+                           params={"all": "true"} if all else {},
+                           missing_route_hint=_OLD_RELAY_NO_GOALS)
     if not isinstance(answer, list):
         raise RelayError("list_goals returned a malformed body")
     return answer
@@ -1126,7 +1135,8 @@ def list_goals(signaling_url: str, access_token: str, *, all: bool = False) -> l
 
 def get_goal(signaling_url: str, access_token: str, goal_id: str) -> dict[str, Any]:
     return _task_oneshot(signaling_url, access_token, "GET",
-                         f"/relay/v1/goals/{quote(goal_id, safe='')}")
+                         f"/relay/v1/goals/{quote(goal_id, safe='')}",
+                         missing_route_hint=_OLD_RELAY_NO_GOALS)
 
 
 def get_goal_evidence(signaling_url: str, access_token: str, goal_id: str) -> dict[str, Any]:
@@ -1140,7 +1150,8 @@ def get_goal_evidence(signaling_url: str, access_token: str, goal_id: str) -> di
     def fetch(cursor: int) -> dict[str, Any]:
         answer = _task_oneshot(
             signaling_url, access_token, "GET", path, timeout=60.0,
-            params={"limit": "20", "cursor": str(cursor)})
+            params={"limit": "20", "cursor": str(cursor)},
+            missing_route_hint=_OLD_RELAY_NO_GOALS)
         if not isinstance(answer, dict):
             raise RelayError("get_goal_evidence returned a malformed body")
         return answer
@@ -1238,7 +1249,8 @@ def get_goal_evidence(signaling_url: str, access_token: str, goal_id: str) -> di
 def control_goal(signaling_url: str, access_token: str, goal_id: str,
                  action: str) -> dict[str, Any]:
     return _task_oneshot(signaling_url, access_token, "POST",
-                         f"/relay/v1/goals/{quote(goal_id, safe='')}/{quote(action, safe='')}")
+                         f"/relay/v1/goals/{quote(goal_id, safe='')}/{quote(action, safe='')}",
+                         missing_route_hint=_OLD_RELAY_NO_GOALS)
 
 
 # Every project endpoint arrived together (ADR 0033 issue 10), so a relay missing one is missing

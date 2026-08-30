@@ -151,6 +151,29 @@ def test_goal_create_does_not_retry_an_old_relay_missing_route(monkeypatch):
     assert calls == 1
 
 
+def test_every_goal_read_and_control_explains_an_old_relay(monkeypatch):
+    """All Goal routes shipped together; none may leak FastAPI's bare ``Not Found``."""
+    from remote import relay
+
+    calls = []
+
+    def request(*args, **kwargs):
+        calls.append((args[2], args[3], kwargs.get("missing_route_hint")))
+        return [] if args[3] == "/relay/v1/goals" else {}
+
+    monkeypatch.setattr(relay, "_task_oneshot", request)
+
+    assert relay.list_goals("http://relay", "token", all=True) == []
+    assert relay.get_goal("http://relay", "token", "goal-1") == {}
+    assert relay.get_goal_evidence("http://relay", "token", "goal-1") == {}
+    assert relay.control_goal("http://relay", "token", "goal-1", "pause") == {}
+
+    assert len(calls) == 4
+    assert all(hint == relay._OLD_RELAY_NO_GOALS for _method, _path, hint in calls)
+    assert all("Grid Goal" in hint and "Not Found" not in hint
+               for _method, _path, hint in calls)
+
+
 @pytest.mark.parametrize("action", ["pause", "resume", "cancel"])
 def test_goal_control_uses_the_named_goal_and_action(monkeypatch, action):
     from cli import goal

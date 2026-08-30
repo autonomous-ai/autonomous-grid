@@ -30,6 +30,16 @@ evals on the final commit.
 
 Both public checkouts must be clean and at the same pushed `grid-goal-distributed` commit. The
 relay must run the matching private `grid-goal-distributed` commit. Record the SHAs before work.
+Before installing or starting a task provider, prove that the selected relay actually has the Goal
+routes:
+
+```bash
+uv run grid goal list --all --json
+```
+
+Any nonzero exit fails preflight. In particular, a response saying the relay does not support Grid
+Goal means the provider branch is ahead of the hosted relay; deploy the matching private branch and
+repeat the query. Do not continue with a task-only relay and call the result a Goal test.
 
 On machine A:
 
@@ -38,6 +48,7 @@ cd /path/to/autonomous-grid
 git status --short
 git rev-parse HEAD
 codex --version
+uv run grid agent install codex
 uv run grid agent status
 ```
 
@@ -58,6 +69,7 @@ chmod 700 /private/tmp/grid-goal-b
 git rev-parse HEAD
 codex --version
 claude --version
+uv run grid agent install codex
 uv run grid agent status
 uv run grid info <grid>
 uv run grid models <grid> --verbose
