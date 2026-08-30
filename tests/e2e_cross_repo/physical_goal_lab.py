@@ -9,9 +9,10 @@ Relay host (either physical machine)::
 
     uv run python tests/e2e_cross_repo/physical_goal_lab.py relay \
       --relay-repo /private/tmp/autonomous-grid-cli-goal-relay \
-      --root /private/tmp/grid-goal-physical
+      --root /private/tmp/grid-goal-physical \
+      --joining-workers 2
 
-Joining worker (the other physical machine)::
+Joining workers (the other physical machines, each with its own printed bundle)::
 
     uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \
       --home /private/tmp/grid-goal-worker
@@ -257,6 +258,16 @@ def _write_private(path: Path, value: str) -> None:
     jsonio.atomic_write_bytes(path, value.encode(), 0o600)
 
 
+def validate_physical_node_ids(relay_node: str, worker_nodes: list[str]) -> None:
+    """Refuse an acceptance topology that collapses physical machines onto one identity."""
+    node_ids = [relay_node, *worker_nodes]
+    if not relay_node or not worker_nodes or any(not node_id for node_id in node_ids):
+        raise SystemExit("Physical Goal lab identity state has a missing relay or worker node id")
+    if len(set(node_ids)) != len(node_ids):
+        raise SystemExit(
+            "Physical Goal lab identities must be distinct; use one pairing bundle per machine")
+
+
 def prepare_relay(args: argparse.Namespace) -> tuple[Path, dict[str, str], str]:
     root = _safe_root(args.root)
     relay_repo = Path(args.relay_repo).expanduser().resolve()
@@ -275,42 +286,67 @@ def prepare_relay(args: argparse.Namespace) -> tuple[Path, dict[str, str], str]:
 
     secret_path = root / "jwt-secret"
     identity_path = root / "identity.json"
+    requested_workers = getattr(args, "joining_workers", None)
     if secret_path.exists() and identity_path.exists() and args.reuse:
         secret = secret_path.read_text(encoding="utf-8")
         identity = json.loads(identity_path.read_text(encoding="utf-8"))
         user_id = str(identity["user_id"])
         # Accept roots created by the first lab helper, whose A/B names encoded one arbitrary
         # topology. New roots persist role names so either physical machine can host the relay.
-        worker_node = str(identity.get("worker_node_id") or identity["node_a"])
+        stored_workers = identity.get("worker_node_ids")
+        if isinstance(stored_workers, list) and stored_workers:
+            worker_nodes = [str(node) for node in stored_workers if str(node)]
+        else:
+            worker_nodes = [str(identity.get("worker_node_id") or identity["node_a"])]
         relay_node = str(identity.get("relay_node_id") or identity["node_b"])
+        if requested_workers is not None:
+            while len(worker_nodes) < requested_workers:
+                worker_nodes.append(f"goal-worker-{uuid.uuid4()}")
+        # Upgrade legacy identities and persist any added workers. Never shrink a reused lab: an
+        # already-paired physical worker must keep its signed identity across relay restarts.
+        validate_physical_node_ids(relay_node, worker_nodes)
+        _write_private(identity_path, json.dumps({
+            "user_id": user_id,
+            "worker_node_ids": worker_nodes,
+            "relay_node_id": relay_node,
+        }, indent=2) + "\n")
     elif secret_path.exists() or identity_path.exists():
         raise SystemExit(f"Lab root {root} is incomplete; use a new root instead of reusing it")
     else:
         secret = secrets.token_urlsafe(48)
         user_id = f"goal-lab-{uuid.uuid4()}"
-        worker_node = f"goal-worker-{uuid.uuid4()}"
+        worker_nodes = [
+            f"goal-worker-{uuid.uuid4()}"
+            for _ in range(requested_workers or 1)
+        ]
         relay_node = f"goal-relay-{uuid.uuid4()}"
+        validate_physical_node_ids(relay_node, worker_nodes)
         _write_secret(secret_path, secret)
         _write_private(identity_path, json.dumps({
             "user_id": user_id,
-            "worker_node_id": worker_node,
+            "worker_node_ids": worker_nodes,
             "relay_node_id": relay_node,
         }, indent=2) + "\n")
 
     host = args.advertise_host or discover_lan_host()
     url = relay_url(host, args.port)
     expires_at = int(time.time()) + int(args.token_hours * 3600)
-    worker_token = issue_token(
-        secret, user_id=user_id, node_id=worker_node, expires_at=expires_at)
     relay_token = issue_token(
         secret, user_id=user_id, node_id=relay_node, expires_at=expires_at)
-    worker_pair = encode_pair(
-        url=url, token=worker_token, node_id=worker_node, expires_at=expires_at)
+    worker_pairs = [encode_pair(
+        url=url,
+        token=issue_token(
+            secret, user_id=user_id, node_id=worker_node, expires_at=expires_at),
+        node_id=worker_node, expires_at=expires_at,
+    ) for worker_node in worker_nodes]
     relay_pair = decode_pair(encode_pair(
         url=url, token=relay_token, node_id=relay_node, expires_at=expires_at))
     configure_home(root / "grid-home-relay", relay_pair)
-    pair_path = root / "joining-worker-pairing.txt"
-    _write_private(pair_path, worker_pair + "\n")
+    # Keep the original filename as the first-worker compatibility alias. Numbered private files
+    # make it possible to stage credentials independently without ever giving B and C one node id.
+    _write_private(root / "joining-worker-pairing.txt", worker_pairs[0] + "\n")
+    for index, worker_pair in enumerate(worker_pairs, start=1):
+        _write_private(root / f"joining-worker-{index}-pairing.txt", worker_pair + "\n")
 
     revision = subprocess.run(
         ["git", "-C", str(relay_repo), "rev-parse", "HEAD"], capture_output=True,
@@ -331,8 +367,10 @@ def prepare_relay(args: argparse.Namespace) -> tuple[Path, dict[str, str], str]:
     }
     metadata = {
         "url": url,
-        "worker_pair": worker_pair,
-        "worker_node_id": worker_node,
+        "worker_pair": worker_pairs[0],
+        "worker_node_id": worker_nodes[0],
+        "worker_pairs": worker_pairs,
+        "worker_node_ids": worker_nodes,
         "relay_node_id": relay_node,
         "relay_home": str(root / "grid-home-relay"),
         "server_dir": str(server_dir),
@@ -373,19 +411,24 @@ def cmd_relay(args: argparse.Namespace) -> int:
         print(f"  relay:       {metadata['url']}", flush=True)
         print(f"  relay node:  GRID_HOME={metadata['relay_home']}", flush=True)
         print(f"  relay id:    {metadata['relay_node_id']}", flush=True)
-        print(f"  worker id:   {metadata['worker_node_id']}", flush=True)
+        worker_node_ids = metadata.get("worker_node_ids") or [metadata["worker_node_id"]]
+        worker_pairs = metadata.get("worker_pairs") or [metadata["worker_pair"]]
+        for index, worker_node_id in enumerate(worker_node_ids, start=1):
+            print(f"  worker {index} id: {worker_node_id}", flush=True)
         print(f"  relay state: {root}", flush=True)
         print(f"  relay SHA:   {metadata['relay_revision']}", flush=True)
         if args.no_print_bundle:
             print("\nPairing bundle suppressed; already-paired workers can reconnect.", flush=True)
         else:
-            print("\nThe relay id and worker id above must be different. Record both; node names "
-                  "alone are not identity evidence.", flush=True)
-            print("\nOn the joining worker, run:", flush=True)
-            print("  uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \\", flush=True)
-            print("    --home /private/tmp/grid-goal-worker", flush=True)
-            print("\nThen paste this disposable bundle at its hidden prompt:", flush=True)
-            print(metadata["worker_pair"], flush=True)
+            print("\nEvery relay/worker id above must be different. Record them; node names alone "
+                  "are not identity evidence.", flush=True)
+            for index, worker_pair in enumerate(worker_pairs, start=1):
+                print(f"\nOn joining worker {index}, run:", flush=True)
+                print("  uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \\", flush=True)
+                print(f"    --home /private/tmp/grid-goal-worker-{index}", flush=True)
+                print("Then paste only this worker's disposable bundle at its hidden prompt:",
+                      flush=True)
+                print(worker_pair, flush=True)
         print("\nKeep this terminal open. Ctrl-C stops only the disposable relay.", flush=True)
         return proc.wait()
     except KeyboardInterrupt:
@@ -470,6 +513,11 @@ def build_parser() -> argparse.ArgumentParser:
     relay.add_argument("--lease-seconds", type=int, default=120)
     relay.add_argument("--reaper-seconds", type=int, default=5)
     relay.add_argument("--claim-timeout-seconds", type=int, default=30)
+    relay.add_argument(
+        "--joining-workers", type=int, default=None, metavar="N",
+        help=("Mint N distinct joining-worker identities (default: 1 for a new lab; preserve all "
+              "stored identities on --reuse). Use 2 when the relay host is machine A of the "
+              "three-machine acceptance test."))
     relay.add_argument("--reuse", action="store_true",
                        help="Reuse this lab identity/database after a relay restart")
     relay.add_argument("--no-print-bundle", action="store_true",
@@ -504,6 +552,8 @@ def main(argv: list[str] | None = None) -> int:
         for name in ("lease_seconds", "reaper_seconds", "claim_timeout_seconds"):
             if getattr(args, name) <= 0:
                 raise SystemExit(f"--{name.replace('_', '-')} must be positive")
+        if args.joining_workers is not None and not 1 <= args.joining_workers <= 8:
+            raise SystemExit("--joining-workers must be between 1 and 8")
     return int(args.func(args))
 
 

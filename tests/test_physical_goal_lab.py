@@ -43,6 +43,14 @@ def test_pairing_round_trip_pins_relay_node_owner_and_expiry():
     assert set(lab.SCOPES).issubset(claims["scopes"])
 
 
+def test_physical_identity_set_refuses_shared_or_missing_worker_ids():
+    lab.validate_physical_node_ids("relay", ["worker-b", "worker-c"])
+    with pytest.raises(SystemExit, match="distinct"):
+        lab.validate_physical_node_ids("relay", ["worker", "worker"])
+    with pytest.raises(SystemExit, match="missing"):
+        lab.validate_physical_node_ids("relay", [])
+
+
 def test_configure_exposes_automation_bundle_parameter_with_warning():
     parser = lab.build_parser()
     args = parser.parse_args(["configure", "--bundle", "disposable"])
@@ -139,6 +147,22 @@ def test_relay_restart_can_suppress_pairing_credential_output():
     assert "credential" in help_text
 
 
+def test_relay_can_mint_multiple_distinct_joining_worker_identities():
+    parser = lab.build_parser()
+    args = parser.parse_args([
+        "relay", "--relay-repo", "/tmp/private-relay", "--joining-workers", "2",
+    ])
+
+    assert args.joining_workers == 2
+    help_text = parser._subparsers._group_actions[0].choices["relay"].format_help()
+    assert "--joining-workers N" in help_text
+    assert "three-machine acceptance" in help_text
+    with pytest.raises(SystemExit, match="between 1 and 8"):
+        lab.main([
+            "relay", "--relay-repo", "/tmp/private-relay", "--joining-workers", "0",
+        ])
+
+
 def test_pairing_refuses_expiry_identity_mismatch_and_oversize():
     expired = int(time.time()) - 1
     token = lab.issue_token(
@@ -203,11 +227,12 @@ def test_prepare_relay_mints_distinct_machine_identities_and_private_files(
     args = argparse.Namespace(
         root=str(root), relay_repo=str(relay_repo), reuse=False, advertise_host=None,
         port=8090, token_hours=48, lease_seconds=120, reaper_seconds=5,
-        claim_timeout_seconds=30)
+        claim_timeout_seconds=30, joining_workers=2)
 
     prepared_root, env, raw = lab.prepare_relay(args)
     metadata = lab.json.loads(raw)
-    worker = lab.decode_pair(metadata["worker_pair"])
+    workers = [lab.decode_pair(bundle) for bundle in metadata["worker_pairs"]]
+    worker = workers[0]
     monkeypatch.setenv("GRID_HOME", metadata["relay_home"])
     from remote import credentials
     b_token = credentials.load_credentials()["networks"][0]["access_token"]
@@ -219,14 +244,20 @@ def test_prepare_relay_mints_distinct_machine_identities_and_private_files(
     assert worker_claims["user_id"] == b_claims["user_id"]
     assert worker_claims["node_id"] != b_claims["node_id"]
     assert metadata["worker_node_id"] == worker_claims["node_id"]
+    assert len(metadata["worker_node_ids"]) == len(workers) == 2
+    assert len({pair["node_id"] for pair in workers}) == 2
+    assert b_claims["node_id"] not in {pair["node_id"] for pair in workers}
     assert metadata["relay_node_id"] == b_claims["node_id"]
     assert env["TASK_REPO_ROOT"] == str(root / "projects")
     assert env["GRID_MODE"] == "false"
     identity = lab.json.loads((root / "identity.json").read_text(encoding="utf-8"))
-    assert set(identity) == {"user_id", "worker_node_id", "relay_node_id"}
+    assert set(identity) == {"user_id", "worker_node_ids", "relay_node_id"}
+    assert identity["worker_node_ids"] == metadata["worker_node_ids"]
     assert metadata["relay_home"] == str(root / "grid-home-relay")
     assert stat.S_IMODE((root / "jwt-secret").stat().st_mode) == 0o600
     assert stat.S_IMODE((root / "joining-worker-pairing.txt").stat().st_mode) == 0o600
+    assert stat.S_IMODE((root / "joining-worker-1-pairing.txt").stat().st_mode) == 0o600
+    assert stat.S_IMODE((root / "joining-worker-2-pairing.txt").stat().st_mode) == 0o600
 
 
 def test_relay_banner_prints_both_distinct_nonsecret_node_ids(tmp_path, monkeypatch, capsys):
@@ -267,8 +298,48 @@ def test_relay_banner_prints_both_distinct_nonsecret_node_ids(tmp_path, monkeypa
         bind_host="0.0.0.0", port=8090, no_print_bundle=True)) == 0
     out = capsys.readouterr().out
     assert "relay id:    goal-relay-distinct" in out
-    assert "worker id:   goal-worker-distinct" in out
+    assert "worker 1 id: goal-worker-distinct" in out
     assert secret_bundle not in out
+
+
+def test_relay_banner_assigns_one_bundle_to_each_joining_worker(
+        tmp_path, monkeypatch, capsys):
+    class RelayProcess:
+        returncode = None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(lab, "prepare_relay", lambda _args: (
+        tmp_path,
+        {},
+        lab.json.dumps({
+            "url": "http://192.0.2.88:8090",
+            "worker_pair": "bundle-b",
+            "worker_node_id": "goal-worker-b",
+            "worker_pairs": ["bundle-b", "bundle-c"],
+            "worker_node_ids": ["goal-worker-b", "goal-worker-c"],
+            "relay_node_id": "goal-relay-a",
+            "relay_home": str(tmp_path / "grid-home-relay"),
+            "server_dir": str(tmp_path),
+            "python": "/fake/python",
+            "relay_revision": "abc123",
+        }),
+    ))
+    monkeypatch.setattr(lab.subprocess, "Popen", lambda *_args, **_kwargs: RelayProcess())
+    monkeypatch.setattr(lab, "_wait_for_health", lambda *_args, **_kwargs: None)
+
+    assert lab.cmd_relay(argparse.Namespace(
+        bind_host="0.0.0.0", port=8090, no_print_bundle=False)) == 0
+    out = capsys.readouterr().out
+    assert "worker 1 id: goal-worker-b" in out
+    assert "worker 2 id: goal-worker-c" in out
+    assert out.count("bundle-b") == out.count("bundle-c") == 1
+    assert "--home /private/tmp/grid-goal-worker-1" in out
+    assert "--home /private/tmp/grid-goal-worker-2" in out
 
 
 def test_prepare_relay_reuses_legacy_ab_identity_by_role(tmp_path, monkeypatch):
@@ -297,3 +368,30 @@ def test_prepare_relay_reuses_legacy_ab_identity_by_role(tmp_path, monkeypatch):
     relay_claims = lab.token_claims(credentials.load_credentials()["networks"][0]["access_token"])
     assert worker["node_id"] == "legacy-worker"
     assert relay_claims["node_id"] == "legacy-relay"
+
+
+def test_prepare_relay_reuse_preserves_all_joining_worker_ids(tmp_path, monkeypatch):
+    relay_repo = tmp_path / "private-relay"
+    (relay_repo / "grid_cli" / "private_server").mkdir(parents=True)
+    relay_python = relay_repo / ".venv" / "bin" / "python"
+    relay_python.parent.mkdir(parents=True)
+    relay_python.write_text("", encoding="utf-8")
+    root = tmp_path / "reused-state"
+    monkeypatch.setattr(lab, "discover_lan_host", lambda: "192.0.2.88")
+    common = dict(
+        root=str(root), relay_repo=str(relay_repo), advertise_host=None,
+        port=8090, token_hours=48, lease_seconds=120, reaper_seconds=5,
+        claim_timeout_seconds=30,
+    )
+
+    _, _, first_raw = lab.prepare_relay(argparse.Namespace(
+        **common, reuse=False, joining_workers=2))
+    first = lab.json.loads(first_raw)
+    _, _, second_raw = lab.prepare_relay(argparse.Namespace(
+        **common, reuse=True, joining_workers=None))
+    second = lab.json.loads(second_raw)
+
+    assert second["worker_node_ids"] == first["worker_node_ids"]
+    assert len(second["worker_pairs"]) == 2
+    assert [lab.decode_pair(bundle)["node_id"] for bundle in second["worker_pairs"]] == (
+        first["worker_node_ids"])

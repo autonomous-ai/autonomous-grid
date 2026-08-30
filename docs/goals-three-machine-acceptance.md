@@ -72,6 +72,11 @@ below.
 
 Start each worker with an explicit harness policy and unique local root:
 
+When using the disposable no-SSH lab with machine A as the relay host, start it with
+`physical_goal_lab.py relay --joining-workers 2`. It prints separate signed bundles for B and C.
+Never paste one bundle on both machines: shared credentials collapse two physical computers into
+one relay identity and invalidate the acceptance result.
+
 ```bash
 # A and C
 GRID_TASK_AGENT_KINDS=codex grid join <grid> --tasks --tasks-root <local-path>

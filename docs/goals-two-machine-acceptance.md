@@ -79,7 +79,8 @@ normally needed. If it has several network interfaces and discovery chooses one 
 cannot reach, pass `--advertise-host <reachable-LAN-or-VPN-address>` explicitly. The helper starts
 the relay, creates distinct short-lived identities for the relay node and joining worker, writes the
 relay node's isolated Grid home, and prints one disposable pairing bundle for the joining worker.
-It never copies a task root. Record the printed `relay id` and `worker id` and require them to differ.
+It never copies a task root. Record the printed `relay id` and `worker 1 id` and require them to
+differ.
 These credential-bound IDs—not `--name` labels or temporary directory names—prove two Grid nodes.
 
 On the joining worker, from the same public commit:
