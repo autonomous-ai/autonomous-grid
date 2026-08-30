@@ -48,6 +48,11 @@ harness protocols, transcript checkpoints, independent evals, and relay-authored
 fake model and fake native binaries keep failures deterministic; the Grid protocol between them is
 real.
 
+The fake Codex also implements the installed-binary schema command used by provider admission. This
+means every Codex process in the matrix must first prove the exact `thread/resume`,
+`thread/goal/{set,get}`, event and dynamic-tool surface before it can advertise `native_goal`; the
+interactive JSON-RPC fixture then proves those declared methods during execution.
+
 | Scenario | Nodes and harnesses | Failure or constraint | Proof |
 |---|---|---|---|
 | Root create replay | Client -> relay twice | First acknowledgement may be lost | Same member key returns one Goal and one turn; changed body conflicts |

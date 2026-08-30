@@ -27,10 +27,14 @@ Before creating work, the owner machine must get a non-404 response from:
 grid goal list --all --json
 ```
 
-On A and C, `grid agent status` must report Codex installed. On B, `claude --version` must succeed;
-the Claude-only canary below is the authoritative native-Goal wiring check. Stop every other
-task-serving provider for this project during the run; inference-only engines may stay online. The
-three intended task nodes must use distinct node ids and the expected harness allowlist below.
+On A and C, `grid agent status` must report Codex installed. This is not a file/version-only check:
+it generates the exact installed app-server's experimental schema in a temporary home and verifies
+the Goal, resume, event and dynamic-tool methods Grid invokes. A schema-incompatible Codex must
+report `Goal upgrade required` and must not advertise `native_goal`. On B, `claude --version` must
+succeed; the Claude-only canary below is the authoritative native-Goal wiring check. Stop every
+other task-serving provider for this project during the run; inference-only engines may stay
+online. The three intended task nodes must use distinct node ids and the expected harness allowlist
+below.
 
 Start each worker with an explicit harness policy and unique local root:
 
@@ -134,6 +138,7 @@ not accepted from screenshots alone.
 | Turn 3 | Retry names B and its Claude harness; C attempt 2, Codex, same turn id, result commit and transcript input/output |
 | Isolation | both uncommitted markers absent on replacement machines and final tree |
 | Native path portability | B and C resume Codex using rollout paths beneath their own distinct task roots; A's absolute path is never reused |
+| Codex protocol preflight | A/C versions and `grid agent status`; both exact executable schemas pass before either node polls |
 | Detected harness crash | Retry reason is `native_harness_failure`; accepted worktree/transcript checkpoint pins become attempt 2 inputs |
 | Evaluation | each definition hash, evaluator node, exact result commit, score and evidence |
 | Terminal state | Goal `complete`; zero queued/running turns for its conversation |

@@ -26,6 +26,15 @@ grid join <grid-name> --tasks --tasks-root /short/grid-tasks
 Codex Goal workers require `codex-cli 0.150.1` or newer, the oldest release Grid has measured with
 the persisted `thread/goal/*` and `thread/resume` app-server contract. Older or unreadable binaries
 are not advertised to the distributed queue, so they cannot claim and strand a Goal.
+Because Codex app-server is experimental, the version is only the first gate. Grid also asks the
+exact installed executable to generate its experimental protocol schema under a temporary
+`CODEX_HOME` and verifies every lifecycle, Goal, event and dynamic-tool method the runner uses.
+The result is cached by executable revision, so task polling does not repeatedly launch the probe.
+If a method nevertheless returns JSON-RPC `method not found`, or Codex reports a native Goal status
+Grid cannot interpret, that executable revision is quarantined in the provider process: the leased
+turn is handed back through the bounded retry path and the node stops advertising `native_goal`
+before it can consume the remaining attempts. Updating the executable creates a new revision and
+reruns the probe. `grid agent status` must say `Codex: installed` before physical acceptance.
 
 The provider advertises each native Goal harness it can actually run. Restrict a node explicitly
 with `GRID_TASK_AGENT_KINDS=codex` or `GRID_TASK_AGENT_KINDS=claude` when desired.
