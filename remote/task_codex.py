@@ -699,11 +699,16 @@ def run_slice(job: dict[str, Any], workspace: Path, *, inference: GridInference,
             "turns_completed": turns_before, "tokens_used": tokens_before,
             "time_used_seconds": time_before,
         })
-        set_goal: dict[str, Any] = {"threadId": thread_id, "status": "active"}
+        # Grid may reduce the parent's remaining native budget after terminal children replace
+        # their allocations with actual cumulative usage. Refresh the cap on every resumed slice;
+        # setting it only at thread creation would let the old native cap overspend the hierarchy.
+        set_goal: dict[str, Any] = {
+            "threadId": thread_id, "status": "active",
+            "tokenBudget": goal.get("token_budget"),
+        }
         if turns_before == 0:
             set_goal.update({
                 "objective": f"{goal['objective'].strip()}\n\nDone when: {goal['done_when'].strip()}",
-                "tokenBudget": goal.get("token_budget"),
             })
         rpc.wait(rpc.send("thread/goal/set", set_goal))
         completed = rpc.wait_completed()

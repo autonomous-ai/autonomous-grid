@@ -247,6 +247,37 @@ def test_mid_slice_crash_still_publishes_a_portable_codex_thread_pointer(tmp_pat
     }
 
 
+def test_resumed_native_goal_receives_grid_reduced_hierarchical_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    rollout = (tmp_path / task_codex.AGENT_DIR / task_codex.HOME_DIR
+               / "sessions/fake/rollout-resumed-budget.jsonl")
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    (tmp_path / task_codex.AGENT_DIR / task_codex.STATE_FILE).write_text(json.dumps({
+        "version": 2, "thread_id": "thread-portable",
+        "rollout_relpath": "sessions/fake/rollout-resumed-budget.jsonl",
+        "status": "active", "turns_completed": 1, "tokens_used": 500,
+        "time_used_seconds": 5,
+    }))
+    process = _FakeProcess(_messages(rollout))
+    job = _job()
+    job["goal"] = {**job["goal"], "turns_completed": 1, "tokens_used": 500,
+                   "time_used_seconds": 5, "token_budget": 7_500}
+
+    task_codex.run_slice(
+        job, tmp_path, inference=task_codex.GridInference("https://grid.test", "secret"),
+        executable="/fake/codex", timeout=30, publish=lambda *_args, **_kwargs: None,
+        process_factory=lambda argv, env, cwd: process)
+
+    sent = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
+    activated = [row for row in sent if row.get("method") == "thread/goal/set"
+                 and row.get("params", {}).get("status") == "active"]
+    assert len(activated) == 1
+    assert activated[0]["params"]["tokenBudget"] == 7_500
+    assert "objective" not in activated[0]["params"]
+
+
 def test_copied_codex_checkpoint_rebases_rollout_to_the_new_worker(tmp_path):
     worker_b_home = tmp_path / "worker-b" / "home"
     rollout = worker_b_home / "sessions/2026/rollout-thread-portable.jsonl"

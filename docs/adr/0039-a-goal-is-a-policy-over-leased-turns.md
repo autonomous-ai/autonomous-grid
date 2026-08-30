@@ -244,6 +244,15 @@ waiting child-parent with its own parent. Relay processes reconcile through the 
 compare-and-swap: a loser recomputes from the new tip, where an already-merged child is detected by
 ancestry instead of misreported as a merge failure. Required children must independently pass their
 evaluations. Their pinned result commits and summaries are included in the parent's next handoff.
+
+Child allocations are worst-case reservations, not permanent spend. A terminal child atomically
+replaces its allocation with actual cumulative usage exactly once; a separate descendant counter
+keeps that charge distinct from the native parent's cumulative checkpoint. This separation is
+required: taking `max(parent+child, next native parent checkpoint)` would swallow later parent
+usage. Nested charges already include their descendants. Reconciliation fans in terminal branches,
+then changes the parent to `budget_limited` instead of queueing another turn when actual aggregate
+usage has reached the cap.
+
 Optional children may omit evaluations;
 their failure is preserved as trajectory evidence but cannot block the parent, and their branch is
 merged only when they complete. The parent waits until every child is terminal so it receives one

@@ -175,6 +175,13 @@ fan-out is limited to eight children, nesting is limited to three levels, and at
 tokens remain for final fan-in. Subgoals are off by default because enabling them authorizes
 autonomous parallel work and budget allocation.
 
+A live child reserves its full allocation against the parent's cumulative token cap. When that
+child terminals, Grid releases the allocation and charges the child's actual usage exactly once;
+for nested Goals that actual usage already includes all descendants. `grid goal status` reports
+the total actual usage plus any allocation still reserved for live children. If parent plus
+descendant usage reaches the cap, Grid can still fan in the finished branches, then ends the parent
+as `budget_limited` without scheduling another agent turn.
+
 Harness capabilities are scheduled honestly:
 
 | Harness | Native Goal | Goal HTTP tools | Spawn child Goals |

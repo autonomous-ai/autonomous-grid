@@ -58,7 +58,13 @@ def _show(goal: dict, as_json: bool) -> None:
           f"{goal.get('tokens_used', 0)} tokens")
     if goal.get("token_budget") is not None:
         reserved = int(goal.get("child_tokens_reserved") or 0)
-        suffix = f" · {reserved:,} reserved for children" if reserved else ""
+        descendants = int(goal.get("descendant_tokens_used") or 0)
+        details = []
+        if descendants:
+            details.append(f"{descendants:,} used by descendants")
+        if reserved:
+            details.append(f"{reserved:,} reserved for live children")
+        suffix = " · " + " · ".join(details) if details else ""
         print(f"  budget     {int(goal.get('tokens_used') or 0):,} / "
               f"{int(goal['token_budget']):,} tokens{suffix}")
     if goal.get("agents"):
@@ -98,6 +104,63 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     turns = record.get("turns") if isinstance(record.get("turns"), list) else []
     if goal.get("status") != "complete":
         failures.append(f"Goal status is {goal.get('status')!r}, not 'complete'")
+
+    # New relays separate native-parent usage from usage charged by terminal descendants. This is
+    # training/release evidence, so verify the arithmetic rather than trusting the displayed total.
+    budget_fields = (
+        "tokens_used", "own_tokens_used", "descendant_tokens_used", "child_tokens_reserved")
+    if "own_tokens_used" in goal or "descendant_tokens_used" in goal:
+        values = {field: goal.get(field) for field in budget_fields}
+        for field, value in values.items():
+            if (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+                failures.append(f"Goal has no valid nonnegative {field}")
+        if all(isinstance(values[field], int) and not isinstance(values[field], bool)
+               and values[field] >= 0 for field in budget_fields):
+            if (values["tokens_used"]
+                    != values["own_tokens_used"] + values["descendant_tokens_used"]):
+                failures.append(
+                    "Goal total token usage does not equal own plus descendant usage")
+            relationships = (record.get("relationships")
+                             if isinstance(record.get("relationships"), dict) else {})
+            children = (relationships.get("children")
+                        if isinstance(relationships.get("children"), list) else None)
+            if children is not None:
+                charged = 0
+                reserved = 0
+                valid_children = True
+                for child in children:
+                    if not isinstance(child, dict):
+                        failures.append("Goal relationships contain a malformed child")
+                        valid_children = False
+                        continue
+                    allocation = child.get("token_budget")
+                    actual = child.get("tokens_charged")
+                    if (not isinstance(allocation, int) or isinstance(allocation, bool)
+                            or allocation <= 0):
+                        failures.append(
+                            f"child {child.get('id') or '?'} has no valid token allocation")
+                        valid_children = False
+                    elif actual is None:
+                        reserved += allocation
+                        if child.get("status") in (
+                                "complete", "failed", "cancelled", "budget_limited",
+                                "usage_limited"):
+                            failures.append(
+                                f"terminal child {child.get('id') or '?'} still has a live token "
+                                "reservation")
+                            valid_children = False
+                    elif (not isinstance(actual, int) or isinstance(actual, bool) or actual < 0):
+                        failures.append(
+                            f"child {child.get('id') or '?'} has no valid actual token charge")
+                        valid_children = False
+                    else:
+                        charged += actual
+                if valid_children and charged != values["descendant_tokens_used"]:
+                    failures.append(
+                        "Goal descendant token usage does not equal its settled child charges")
+                if valid_children and reserved != values["child_tokens_reserved"]:
+                    failures.append(
+                        "Goal live child token reservations do not equal its unsettled allocations")
     if not turns:
         failures.append("no Goal turns were recorded")
         return failures

@@ -666,7 +666,8 @@ def test_goal_status_shows_budget_blocker_and_distributed_children(capsys):
     _show({
         "id": "parent", "status": "blocked", "objective": "Ship it",
         "done_when": "checks pass", "turns_completed": 2, "tokens_used": 1_250,
-        "token_budget": 10_000, "child_tokens_reserved": 4_000,
+        "token_budget": 10_000, "descendant_tokens_used": 250,
+        "child_tokens_reserved": 4_000,
         "agents": ["codex", "claude"], "blocked_reason": "child conflict in app.py",
         "children": [{
             "id": "child-1", "status": "complete", "required": False,
@@ -675,8 +676,43 @@ def test_goal_status_shows_budget_blocker_and_distributed_children(capsys):
         }],
     }, False)
     output = capsys.readouterr().out
-    assert "1,250 / 10,000 tokens · 4,000 reserved for children" in output
+    assert ("1,250 / 10,000 tokens · 250 used by descendants · "
+            "4,000 reserved for live children" in output)
     assert "agents     codex, claude" in output
     assert "blocked    child conflict in app.py" in output
     assert "child-1 [complete] (optional) Explore the API · fan-in skipped" in output
     assert "child child-1 conflicts with the parent in app.py" in output
+
+
+def test_goal_evidence_verify_checks_hierarchical_token_accounting():
+    from cli.goal import _verify_evidence
+
+    record = {
+        "schema_version": 1,
+        "goal": {
+            "status": "complete", "tokens_used": 600, "own_tokens_used": 200,
+            "descendant_tokens_used": 400, "child_tokens_reserved": 0, "evals": [],
+        },
+        "relationships": {"children": [{
+            "id": "child-1", "status": "complete",
+            "token_budget": 5_000, "tokens_charged": 400,
+        }]},
+        "turns": [{
+            "id": "turn-1", "state": "completed", "agent_kind": "codex",
+            "provider_node_id": "node-A", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
+                       "worktree_chain": []},
+        "attempt_events": [], "inference": [], "eval_runs": [],
+    }
+    assert _verify_evidence(record) == []
+
+    record["goal"]["tokens_used"] = 601
+    assert any("own plus descendant" in failure for failure in _verify_evidence(record))
+    record["goal"]["tokens_used"] = 600
+    record["relationships"]["children"][0]["tokens_charged"] = 399
+    assert any("settled child charges" in failure for failure in _verify_evidence(record))
+    record["relationships"]["children"][0]["tokens_charged"] = None
+    assert any("terminal child" in failure for failure in _verify_evidence(record))
