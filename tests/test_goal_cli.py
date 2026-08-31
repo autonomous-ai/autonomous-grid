@@ -6,6 +6,23 @@ from types import SimpleNamespace
 import pytest
 
 
+def terminal_event(turn_id: str, seq: int, *, error=None) -> dict:
+    return {
+        "turn_id": turn_id, "seq": seq,
+        "event": {"type": "task.terminal", "state": "completed", "error": error},
+    }
+
+
+def passed_eval_event(turn_id: str, seq: int, result_commit: str, *, checks: int = 1) -> dict:
+    return {
+        "turn_id": turn_id, "seq": seq,
+        "event": {
+            "type": "goal.eval.completed", "passed": True, "blocked": False,
+            "result_commit": result_commit, "checks": checks,
+        },
+    }
+
+
 def test_goal_run_parser_requires_a_measurable_condition_and_model():
     from cli.parser import build_parser
 
@@ -378,7 +395,11 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
              "input_commit": "2" * 40, "result_commit": "3" * 40,
              "transcript_commit": "a" * 40, "transcript_result_commit": "b" * 40},
         ],
-        "attempt_events": [], "inference": [], "eval_runs": [{
+        "attempt_events": [
+            terminal_event("turn-1", 0),
+            passed_eval_event("turn-2", 0, "3" * 40),
+            terminal_event("turn-2", 1),
+        ], "inference": [], "eval_runs": [{
             "id": "run-1", "turn_id": "turn-2",
             "definition_id": "eval-1", "definition_hash": "hash-1",
             "result_commit": "3" * 40, "evaluator_node_id": "relay", "state": "passed",
@@ -448,7 +469,10 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
             "result_commit": "2" * 40, "transcript_commit": None,
             "transcript_result_commit": "a" * 40,
         }],
-        "attempt_events": [], "inference": [],
+        "attempt_events": [
+            passed_eval_event("turn-1", 0, "2" * 40),
+            terminal_event("turn-1", 1),
+        ], "inference": [],
         "eval_runs": [{
             "id": "run-1", "turn_id": "turn-1", "definition_id": "eval-1",
             "definition_hash": definition_hash, "result_commit": "2" * 40,
@@ -475,7 +499,10 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
     record["attempt_events"] = {"corrupt": True}
     assert any("no valid attempt_events list" in failure
                for failure in goal._verify_evidence(record))
-    record["attempt_events"] = []
+    record["attempt_events"] = [
+        passed_eval_event("turn-1", 0, "2" * 40),
+        terminal_event("turn-1", 1),
+    ]
 
     # A valid final witness cannot hide an extra accepted label outside the immutable manifest.
     stray = dict(record["eval_runs"][0])
@@ -543,6 +570,8 @@ def test_goal_evidence_verify_recomputes_authenticated_verify_event_result():
                 "tool": "check_ticket", "call_id": "verify-1", "success": True,
                 "result": {"status_code": 200, "body": {"status": "resolved"}},
             }},
+            passed_eval_event("turn-1", 7, "2" * 40),
+            terminal_event("turn-1", 8),
         ],
         "inference": [],
         "eval_runs": [{
@@ -584,6 +613,101 @@ def test_goal_evidence_verify_recomputes_authenticated_verify_event_result():
     }})
     assert any("does not name the final matching request" in failure
                for failure in goal._verify_evidence(record))
+
+
+def test_goal_evidence_verifies_atomic_terminal_and_eval_verdicts():
+    """Rows, eval labels, and relay markers must describe one atomic terminal decision."""
+    from copy import deepcopy
+
+    from cli.goal import _verify_evidence
+
+    spec = {
+        "type": "file", "version": 1, "name": "artifact",
+        "path": "artifact.txt", "exists": True,
+    }
+    definition_hash = __import__("hashlib").sha256(json.dumps(
+        spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest()
+    record = {
+        "schema_version": 1,
+        "goal": {"status": "complete", "evals": [{
+            **spec, "definition_id": "eval-1", "definition_hash": definition_hash,
+        }]},
+        "relationships": {"parent_goal_id": None, "children": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
+                       "worktree_chain": [], "retry_checkpoint_chain": []},
+        "turns": [{
+            "id": "turn-1", "attempt": 1, "state": "completed", "error": None,
+            "agent_kind": "codex", "provider_node_id": "node-A",
+            "input_commit": "1" * 40, "result_commit": "2" * 40,
+            "transcript_commit": None, "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [
+            passed_eval_event("turn-1", 3, "2" * 40),
+            terminal_event("turn-1", 4),
+        ],
+        "inference": [],
+        "eval_runs": [{
+            "id": "run-1", "turn_id": "turn-1", "definition_id": "eval-1",
+            "definition_hash": definition_hash, "result_commit": "2" * 40,
+            "evaluator_node_id": "relay", "state": "passed", "passed": True,
+            "score": 1.0, "accepted": True,
+            "accepted_at": "2026-08-31T12:00:00+00:00", "error": None,
+        }],
+    }
+    assert _verify_evidence(record) == []
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"].pop()
+    assert any("0 relay terminal events" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"].append(terminal_event("turn-1", 5))
+    assert any("2 relay terminal events" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][1]["event"].update({"state": "failed", "error": "forged"})
+    failures = _verify_evidence(damaged)
+    assert any("terminal event state" in item for item in failures)
+    assert any("terminal event error" in item for item in failures)
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][0]["seq"] = 5
+    failures = _verify_evidence(damaged)
+    assert any("evidence after its relay terminal" in item for item in failures)
+    assert any("not before its relay terminal" in item for item in failures)
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"].pop(0)
+    failures = _verify_evidence(damaged)
+    assert any("accepted evaluation run run-1 has 0 matching" in item for item in failures)
+    assert any("final Goal turn has 0 relay evaluation markers" in item for item in failures)
+
+    damaged = deepcopy(record)
+    duplicate = deepcopy(damaged["attempt_events"][0])
+    duplicate["seq"] = 2
+    damaged["attempt_events"].insert(0, duplicate)
+    assert any("2 relay evaluation markers" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][0]["event"]["result_commit"] = "9" * 40
+    assert any("does not score its turn's exact" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][0]["event"]["checks"] = 2
+    assert any("check count does not match" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][0]["event"].update({"passed": False, "blocked": False})
+    assert any("failed verdict is not proven" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][0]["event"].update({"passed": True, "blocked": True})
+    assert any("both passed and blocked" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][0]["event"].update({"passed": False, "blocked": True})
+    assert any("blocked verdict has no matching" in item for item in _verify_evidence(damaged))
 
 
 def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
@@ -644,7 +768,7 @@ def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
                     "agent": {"kind": "codex", "version": "0.150.1"},
                 },
             },
-        }],
+        }, terminal_event("turn-1", 3)],
         "inference": [], "eval_runs": [],
     }
     assert goal._verify_evidence(record, min_execution_nodes=2) == []
@@ -800,9 +924,9 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
     }, {
         "turn_id": "turn-1",
         "event": {"type": "task.retry", "attempt": 1,
-                  "previous_provider_id": "node-A", "previous_agent_kind": "codex",
-                  "reason": "lease_expired"},
-    }])
+                      "previous_provider_id": "node-A", "previous_agent_kind": "codex",
+                      "reason": "lease_expired"},
+    }, terminal_event("turn-1", 2)])
     assert _verify_evidence(record) == []
     assert _verify_evidence(record, min_execution_nodes=2) == []
 
@@ -865,7 +989,7 @@ def test_worker_revision_gate_ignores_a_claim_lost_before_attempt_start():
                 "type": "task.attempt_started", "attempt": 2, "provider_id": "node-B",
                 "agent_kind": "codex", "worker_runtime": runtime,
             },
-        }],
+        }, terminal_event("turn-1", 2)],
         "inference": [], "eval_runs": [],
     }
 
@@ -905,7 +1029,7 @@ def test_goal_evidence_treats_expired_claims_as_fleet_audit_not_execution():
                 "type": "task.attempt_started", "attempt": 1, "provider_id": "node-B",
                 "agent_kind": "codex", "worker_runtime": runtime,
             },
-        }],
+        }, terminal_event("turn-1", 2)],
         "inference": [], "eval_runs": [],
     }
 
@@ -970,6 +1094,7 @@ def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
                 "type": "goal.verify.request", "provider_node_id": "node-C", "attempt": 2,
                 "tool": "check_ticket", "call_id": "verify-1",
             }},
+            terminal_event("turn-1", 8),
         ],
         "inference": [], "eval_runs": [],
     }
@@ -1037,7 +1162,7 @@ def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
         "attempt_events": [{"turn_id": "turn-1", "event": {
             "type": "task.attempt_started", "attempt": 1,
             "provider_id": "node-A", "agent_kind": "codex",
-        }}], "inference": [], "eval_runs": [],
+        }}, terminal_event("turn-1", 1)], "inference": [], "eval_runs": [],
     }
     failures = _verify_evidence(record, min_execution_nodes=2, require_inference=True)
     assert any("fewer than required 2" in item for item in failures)
@@ -1096,6 +1221,7 @@ def test_goal_evidence_keeps_mixed_harness_inference_bound_to_each_retry_attempt
                 "type": "task.attempt_started", "attempt": 2,
                 "provider_id": "node-B", "agent_kind": "claude",
             }},
+            terminal_event("turn-1", 3),
         ],
         "inference": [
             {
@@ -1184,7 +1310,7 @@ def test_goal_evidence_verify_checks_hierarchical_token_accounting():
         }],
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
                        "worktree_chain": []},
-        "attempt_events": [], "inference": [], "eval_runs": [],
+        "attempt_events": [terminal_event("turn-1", 0)], "inference": [], "eval_runs": [],
     }
     assert _verify_evidence(record) == []
 
@@ -1202,7 +1328,7 @@ def test_goal_evidence_verify_checks_hierarchical_token_accounting():
     }]
     assert any("attempt event" in failure and "corrupt" in failure
                for failure in _verify_evidence(record))
-    record["attempt_events"] = []
+    record["attempt_events"] = [terminal_event("turn-1", 0)]
     record["eval_runs"] = [{
         "id": "run-corrupt", "evidence": {"_corrupt": True},
     }]
@@ -1235,7 +1361,7 @@ def test_goal_evidence_verifier_is_total_over_json_shaped_corruption():
                 "type": "task.attempt_started", "attempt": 1,
                 "provider_id": "node-A", "agent_kind": "codex",
             },
-        }],
+        }, terminal_event("turn-1", 2)],
         "inference": [{
             "turn_id": "turn-1", "model": "grid-model", "provider_node_id": "gpu-A",
             "state": "completed", "goal_attempt": 1,

@@ -395,6 +395,55 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 and item["event"].get("type") == "task.event.corrupt"):
             failures.append(f"attempt event {index} contains corrupt stored evidence")
 
+    # A turn row and its terminal event are committed in one relay transaction. Require both
+    # halves of that invariant in an exported artifact: accepting only the row would let a pruned
+    # or contradictory event stream masquerade as complete training evidence. `task.terminal` is
+    # relay-only, so it is also the durable proof that the worker's terminal nomination crossed
+    # the lease fence exactly once.
+    terminal_events: dict[str, list[tuple[int, int, dict]]] = {}
+    for index, item in enumerate(attempt_events, 1):
+        if (not isinstance(item, dict) or not isinstance(item.get("event"), dict)
+                or item["event"].get("type") != "task.terminal"):
+            continue
+        turn_id = item.get("turn_id")
+        seq = item.get("seq")
+        if not isinstance(turn_id, str) or turn_id not in turn_ids:
+            failures.append(f"terminal event {index} names an unknown Goal turn")
+            continue
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+            failures.append(f"terminal event {index} has no valid relay sequence")
+            continue
+        terminal_events.setdefault(turn_id, []).append((index, seq, item["event"]))
+
+    for turn_index, turn in enumerate(turns, 1):
+        if not isinstance(turn, dict):
+            continue
+        turn_id = turn.get("id")
+        if not isinstance(turn_id, str) or not turn_id:
+            continue
+        terminals = terminal_events.get(turn_id, [])
+        if len(terminals) != 1:
+            failures.append(
+                f"turn {turn_index} has {len(terminals)} relay terminal events; expected exactly "
+                "one")
+            continue
+        _event_index, terminal_seq, terminal = terminals[0]
+        if terminal.get("state") != turn.get("state"):
+            failures.append(
+                f"turn {turn_index} terminal event state does not match its stored state")
+        if terminal.get("error") != turn.get("error"):
+            failures.append(
+                f"turn {turn_index} terminal event error does not match its stored error")
+        later_sequences = [
+            item.get("seq") for item in attempt_events
+            if (isinstance(item, dict) and item.get("turn_id") == turn_id
+                and isinstance(item.get("seq"), int) and not isinstance(item.get("seq"), bool)
+                and item.get("seq") > terminal_seq)
+        ]
+        if later_sequences:
+            failures.append(
+                f"turn {turn_index} has evidence after its relay terminal event")
+
     # A native Goal claim can outlive its worker before Codex/Claude crosses the durable start
     # fence. This is useful fleet evidence, but it is neither an execution attempt nor a failed
     # training trajectory. Validate its relay-authored shape without adding its node to the set of
@@ -946,6 +995,113 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                     "turn/commit/metric verdict")
             else:
                 accepted_coordinates.add(coordinate)
+
+    # `goal.eval.completed` is appended immediately before `task.terminal` in the same guarded
+    # transaction that accepts the exact evaluation rows. Cross-check all three representations so
+    # a valid score row cannot hide a missing, stale, duplicated, or contradictory relay verdict.
+    eval_markers: dict[str, list[tuple[int, int, dict]]] = {}
+    for index, item in enumerate(attempt_events, 1):
+        if (not isinstance(item, dict) or not isinstance(item.get("event"), dict)
+                or item["event"].get("type") != "goal.eval.completed"):
+            continue
+        event = item["event"]
+        turn_id = item.get("turn_id")
+        seq = item.get("seq")
+        if not isinstance(turn_id, str) or turn_id not in turn_ids:
+            failures.append(f"evaluation marker {index} names an unknown Goal turn")
+            continue
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+            failures.append(f"evaluation marker {index} has no valid relay sequence")
+            continue
+        if not isinstance(event.get("passed"), bool):
+            failures.append(f"evaluation marker {index} has no boolean passed verdict")
+        if not isinstance(event.get("blocked"), bool):
+            failures.append(f"evaluation marker {index} has no boolean blocked verdict")
+        if event.get("passed") is True and event.get("blocked") is True:
+            failures.append(f"evaluation marker {index} is both passed and blocked")
+        turn = turns_by_id.get(turn_id) or {}
+        if event.get("result_commit") != turn.get("result_commit"):
+            failures.append(
+                f"evaluation marker {index} does not score its turn's exact result commit")
+        checks = event.get("checks")
+        if (not isinstance(checks, int) or isinstance(checks, bool)
+                or checks != len(evals)):
+            failures.append(
+                f"evaluation marker {index} check count does not match the immutable Goal eval "
+                "manifest")
+        terminals = terminal_events.get(turn_id, [])
+        if len(terminals) == 1 and seq >= terminals[0][1]:
+            failures.append(
+                f"evaluation marker {index} is not before its relay terminal event")
+        eval_markers.setdefault(turn_id, []).append((index, seq, event))
+
+    for turn_id, markers in eval_markers.items():
+        if len(markers) != 1:
+            failures.append(
+                f"turn {turn_id} has {len(markers)} relay evaluation markers; expected at most "
+                "one")
+            continue
+        marker_index, _seq, marker = markers[0]
+        commit = marker.get("result_commit")
+        matching_runs = [
+            run for run in runs
+            if (isinstance(run, dict) and run.get("turn_id") == turn_id
+                and run.get("result_commit") == commit
+                and (run.get("definition_id"), run.get("definition_hash")) in manifest)
+        ]
+        accepted_by_identity = {
+            identity: [run for run in matching_runs
+                       if run.get("accepted") is True
+                       and (run.get("definition_id"), run.get("definition_hash")) == identity]
+            for identity in manifest
+        }
+        if marker.get("passed") is True:
+            if any(len(rows) != 1 or rows[0].get("state") != "passed"
+                   or rows[0].get("passed") is not True
+                   for rows in accepted_by_identity.values()):
+                failures.append(
+                    f"evaluation marker {marker_index} passed verdict is not proven by exactly "
+                    "one accepted passing row for every immutable metric")
+        elif marker.get("blocked") is True:
+            if not any(run.get("state") == "error" and run.get("accepted") is not True
+                       for run in matching_runs):
+                failures.append(
+                    f"evaluation marker {marker_index} blocked verdict has no matching rejected "
+                    "evaluator error")
+        elif (len(accepted_by_identity) != len(manifest)
+              or any(len(rows) != 1 for rows in accepted_by_identity.values())
+              or not any(rows[0].get("state") == "failed"
+                         for rows in accepted_by_identity.values() if rows)):
+            failures.append(
+                f"evaluation marker {marker_index} failed verdict is not proven by one accepted "
+                "row per immutable metric and at least one failure")
+
+    for index, run in enumerate(runs, 1):
+        if not isinstance(run, dict) or run.get("accepted") is not True:
+            continue
+        run_turn_id = run.get("turn_id")
+        matching_markers = [
+            marker for _marker_index, _seq, marker in (
+                eval_markers.get(run_turn_id, []) if isinstance(run_turn_id, str) else [])
+            if marker.get("result_commit") == run.get("result_commit")]
+        if len(matching_markers) != 1:
+            failures.append(
+                f"accepted evaluation run {run.get('id') or index} has "
+                f"{len(matching_markers)} matching relay evaluation markers; expected exactly "
+                "one")
+
+    final_markers = (eval_markers.get(final_turn_id, [])
+                     if isinstance(final_turn_id, str) else [])
+    if evals:
+        if len(final_markers) != 1:
+            failures.append(
+                f"final Goal turn has {len(final_markers)} relay evaluation markers; expected "
+                "exactly one")
+        elif (final_markers[0][2].get("passed") is not True
+              or final_markers[0][2].get("blocked") is not False):
+            failures.append("final Goal evaluation marker is not an unblocked passing verdict")
+    elif eval_markers:
+        failures.append("Goal without evals contains relay evaluation markers")
     return failures
 
 
