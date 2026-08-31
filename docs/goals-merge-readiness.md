@@ -7,23 +7,23 @@ The detailed physical artifacts are indexed in
 
 ## Tested code revisions
 
-- Public worker/CLI and acceptance harness: `11bece7bb0d3809ee3b28bc820da25d0d11e96eb`
-- Private relay: `2b1084a3c67ee6f81ea596d3a56414309df5b097`
-- Both tested runtime revisions were clean and pushed when these gates completed. The public
-  evidence-documentation commit follows the tested worker/CLI revision and changes no runtime code.
+- Public worker/CLI and acceptance harness: `e571870d830d67bdc31a59db073161848c417ee2`
+- Private relay: `2e69f3cc3ca7c07112091acdad8c48e99c1d8717`
+- Both tested runtime revisions were clean and pushed when these gates completed.
 
 ## Software gates
 
 | Gate | Result | What it proves |
 |---|---:|---|
-| Full public suite | 3,348 passed, 58 skipped, 7 deselected on Python 3.11, 3.12 and 3.13; lint and Windows also passed | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
-| Private runbook release bundle | 166 passed (440.12s) | Goal creation, claims, retries, pause/cancel and duplicate-settlement races, budgets, subgoals and inherited tool authority, nested required-child propagation, sibling cancellation and explicit resume refusal, recoverable nested fan-in conflicts, concurrent child settlement on independent database connections, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, Git ref idempotency, and recovery from a relay death during continuation preparation |
+| Full public suite | 3,355 passed, 57 skipped, 7 deselected (427.74s locally); exact-head GitHub CI passed Python 3.11, 3.12, 3.13, lint and Windows | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
+| Private runbook release bundle | 170 passed (257.06s locally); exact-head GitHub relay CI passed | Goal creation, claims, retries, pause/cancel and duplicate-settlement races, budgets, subgoals and inherited tool authority, nested required-child propagation, sibling cancellation and explicit resume refusal, recoverable nested fan-in conflicts, concurrent child settlement on independent database connections, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, Git ref idempotency, and recovery from a relay death during continuation preparation |
 | Relay Goal feature discovery | 1 passed | `/server/info` advertises additive `goals/v1` support for safe canary and fleet rollout |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
-| Cross-repository distributed matrix | 21 passed (301.54s) | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
+| Cross-repository distributed matrix | 21 passed (307.86s) | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
+| Worker runtime provenance | 41 focused public checks plus the full suites above | Every required physical attempt can be gated to a clean Grid Git revision and exact native Codex/Claude version; forged event metadata is removed and replaced from the authenticated node registry |
 
 The full public suite ran against the exact public runtime revision in GitHub Actions on Python
 3.11, 3.12 and 3.13; the private runbook bundle and 21-scenario matrix ran uninterrupted against the
