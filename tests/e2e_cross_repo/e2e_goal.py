@@ -825,11 +825,18 @@ def test_claude_protocol_drift_quarantines_node_and_hands_same_turn_to_codex(
     # The list surface exposes the worktree checkpoint; the transcript checkpoint is intentionally
     # an evidence-only field and is asserted against the relay-authored retry below.
     assert queued[0]["checkpoint_commit"]
+    # There are two correct real-network orderings. A parked pre-quarantine poll can receive the
+    # requeued row and decline it, or its short E2E long-poll can expire during relay-owned Git
+    # settlement and the next local poll observes that the harness is quarantined. Neither ordering
+    # may start attempt 2. The decline wire path and its generation fence have dedicated public and
+    # private tests; this scenario proves the end-to-end quarantine and cross-harness recovery.
     assert H.wait_for(
-        lambda: "declined stale Goal claim" in node_a.output(), timeout=15), node_a.output()
-    after_decline = _tasks(relay, owner_token, project_id, goal["id"])
-    assert len(after_decline) == 1
-    assert after_decline[0]["state"] == "queued" and after_decline[0]["attempt"] == 1
+        lambda: ("declined stale Goal claim" in node_a.output()
+                 or "task claims suspended" in node_a.output()),
+        timeout=15), node_a.output()
+    after_quarantine = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(after_quarantine) == 1
+    assert after_quarantine[0]["state"] == "queued" and after_quarantine[0]["attempt"] == 1
 
     node_b = spawn_goal_provider(
         "B", agent_kinds="codex", scenario="claude_protocol_drift",
@@ -911,18 +918,19 @@ def test_codex_protocol_drift_quarantines_node_and_hands_same_turn_to_claude(
     queued = _tasks(relay, owner_token, project_id, goal["id"])
     assert len(queued) == 1 and queued[0]["id"] == goal["turn_id"], queued
     assert queued[0]["checkpoint_commit"]
-    # Three sibling long-polls began with Codex's pre-quarantine profile. At least one must receive
-    # and decline a stale delivery before B exists, proving the real delivery/revalidation path.
-    # The others may legally observe the brief gap while that sibling owns the row and return
-    # empty; requiring N outstanding PULLS to receive one row confuses concurrency with broadcast.
-    # The attempt assertion immediately below is the herd-wide safety property: regardless of how
-    # many stale polls saw the row, none was allowed to spend attempt 2.
+    # Three sibling long-polls began with Codex's pre-quarantine profile. A poll that is still open
+    # after relay-owned Git settlement receives and declines the stale delivery. With the deliberately
+    # short E2E long-poll, every old poll may instead expire first; subsequent loops then suspend
+    # locally because Codex's exact executable revision is quarantined. Both are safe only if the row
+    # remains queued at attempt 1. The decline endpoint and client revalidation path are independently
+    # covered with exact claim-generation assertions.
     assert H.wait_for(
-        lambda: node_a.output().count("declined stale Goal claim") >= 1,
+        lambda: ("declined stale Goal claim" in node_a.output()
+                 or "task claims suspended" in node_a.output()),
         timeout=15), node_a.output()
-    after_decline = _tasks(relay, owner_token, project_id, goal["id"])
-    assert len(after_decline) == 1
-    assert after_decline[0]["state"] == "queued" and after_decline[0]["attempt"] == 1
+    after_quarantine = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(after_quarantine) == 1
+    assert after_quarantine[0]["state"] == "queued" and after_quarantine[0]["attempt"] == 1
 
     node_b = spawn_goal_provider(
         "B", agent_kinds="claude", scenario="codex_protocol_drift",
