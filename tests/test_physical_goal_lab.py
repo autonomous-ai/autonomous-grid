@@ -586,6 +586,57 @@ def test_cloudflared_relay_uses_loopback_checks_public_health_and_stops_tunnel(
     assert "relay:       https://quick-test.trycloudflare.com" in capsys.readouterr().out
 
 
+def test_relay_public_preflight_failure_preserves_state_with_reuse_guidance(
+        tmp_path, monkeypatch):
+    class Process:
+        returncode = None
+
+        def __init__(self):
+            self.running = True
+
+        def poll(self):
+            return None if self.running else 0
+
+        def send_signal(self, _value):
+            self.running = False
+
+        def wait(self, timeout=None):
+            self.running = False
+            return 0
+
+        def kill(self):
+            self.running = False
+
+    root = tmp_path / "preserved-relay"
+    tunnel = Process()
+    relay = Process()
+    monkeypatch.setattr(
+        lab, "_start_cloudflared_tunnel",
+        lambda *_args: (tunnel, "https://quick-test.trycloudflare.com"))
+    monkeypatch.setattr(lab, "prepare_relay", lambda _args: (
+        root, {}, lab.json.dumps({
+            "url": "https://quick-test.trycloudflare.com",
+            "worker_pair": "secret", "worker_node_id": "worker",
+            "relay_node_id": "relay", "relay_home": str(root / "grid-home-relay"),
+            "server_dir": str(tmp_path), "python": "/fake/python",
+            "relay_revision": "abc123",
+        })))
+    monkeypatch.setattr(lab.subprocess, "Popen", lambda *_args, **_kwargs: relay)
+    monkeypatch.setattr(lab, "_wait_for_health", lambda *_args: None)
+    monkeypatch.setattr(
+        lab, "_wait_for_public_health",
+        lambda *_args: (_ for _ in ()).throw(SystemExit("public route failed")))
+    args = lab.build_parser().parse_args([
+        "relay", "--relay-repo", "/tmp/private-relay", "--cloudflared",
+    ])
+
+    with pytest.raises(SystemExit, match="preserved.*--reuse") as failure:
+        lab.cmd_relay(args)
+
+    assert str(root) in str(failure.value)
+    assert relay.running is False and tunnel.running is False
+
+
 def test_prepare_relay_reuses_legacy_ab_identity_by_role(tmp_path, monkeypatch):
     relay_repo = tmp_path / "private-relay"
     (relay_repo / "grid_cli" / "private_server").mkdir(parents=True)

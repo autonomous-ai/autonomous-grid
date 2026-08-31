@@ -524,6 +524,7 @@ def _wait_for_public_health(
 def cmd_relay(args: argparse.Namespace) -> int:
     tunnel_proc: subprocess.Popen | None = None
     relay_proc: subprocess.Popen | None = None
+    root: Path | None = None
     try:
         cloudflared = getattr(args, "cloudflared", None)
         if cloudflared:
@@ -568,6 +569,13 @@ def cmd_relay(args: argparse.Namespace) -> int:
         return relay_proc.wait()
     except KeyboardInterrupt:
         return 130
+    except SystemExit as exc:
+        if root is not None:
+            raise SystemExit(
+                f"{exc}\nDisposable relay state was preserved at {root}. Fix reachability, then "
+                "restart the same command with --reuse; Quick Tunnel restarts must redistribute "
+                "the newly printed worker bundles.") from None
+        raise
     finally:
         _stop_process(relay_proc)
         _stop_process(tunnel_proc)
