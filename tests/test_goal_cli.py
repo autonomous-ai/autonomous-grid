@@ -13,6 +13,17 @@ def terminal_event(turn_id: str, seq: int, *, error=None) -> dict:
     }
 
 
+def attempt_started_event(turn_id: str, seq: int, attempt: int,
+                          provider: str, harness: str) -> dict:
+    return {
+        "turn_id": turn_id, "seq": seq,
+        "event": {
+            "type": "task.attempt_started", "attempt": attempt,
+            "provider_id": provider, "agent_kind": harness,
+        },
+    }
+
+
 def passed_eval_event(turn_id: str, seq: int, result_commit: str, *, checks: int = 1) -> dict:
     return {
         "turn_id": turn_id, "seq": seq,
@@ -386,19 +397,21 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
                            "ancestor": True, "error": None,
                        }]},
         "turns": [
-            {"id": "turn-1", "state": "completed", "agent_kind": "codex",
+            {"id": "turn-1", "attempt": 1, "state": "completed", "agent_kind": "codex",
              "provider_node_id": "node-A",
              "input_commit": "1" * 40, "result_commit": "2" * 40,
              "transcript_commit": None, "transcript_result_commit": "a" * 40},
-            {"id": "turn-2", "state": "completed", "agent_kind": "claude",
+            {"id": "turn-2", "attempt": 1, "state": "completed", "agent_kind": "claude",
              "provider_node_id": "node-B",
              "input_commit": "2" * 40, "result_commit": "3" * 40,
              "transcript_commit": "a" * 40, "transcript_result_commit": "b" * 40},
         ],
         "attempt_events": [
-            terminal_event("turn-1", 0),
-            passed_eval_event("turn-2", 0, "3" * 40),
-            terminal_event("turn-2", 1),
+            attempt_started_event("turn-1", 0, 1, "node-A", "codex"),
+            terminal_event("turn-1", 1),
+            attempt_started_event("turn-2", 0, 1, "node-B", "claude"),
+            passed_eval_event("turn-2", 1, "3" * 40),
+            terminal_event("turn-2", 2),
         ], "inference": [], "eval_runs": [{
             "id": "run-1", "turn_id": "turn-2",
             "definition_id": "eval-1", "definition_hash": "hash-1",
@@ -464,14 +477,15 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
                        "worktree_chain": []},
         "turns": [{
-            "id": "turn-1", "state": "completed", "agent_kind": "codex",
+            "id": "turn-1", "attempt": 1, "state": "completed", "agent_kind": "codex",
             "provider_node_id": "node-A", "input_commit": "1" * 40,
             "result_commit": "2" * 40, "transcript_commit": None,
             "transcript_result_commit": "a" * 40,
         }],
         "attempt_events": [
-            passed_eval_event("turn-1", 0, "2" * 40),
-            terminal_event("turn-1", 1),
+            attempt_started_event("turn-1", 0, 1, "node-A", "codex"),
+            passed_eval_event("turn-1", 1, "2" * 40),
+            terminal_event("turn-1", 2),
         ], "inference": [],
         "eval_runs": [{
             "id": "run-1", "turn_id": "turn-1", "definition_id": "eval-1",
@@ -500,8 +514,9 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
     assert any("no valid attempt_events list" in failure
                for failure in goal._verify_evidence(record))
     record["attempt_events"] = [
-        passed_eval_event("turn-1", 0, "2" * 40),
-        terminal_event("turn-1", 1),
+        attempt_started_event("turn-1", 0, 1, "node-A", "codex"),
+        passed_eval_event("turn-1", 1, "2" * 40),
+        terminal_event("turn-1", 2),
     ]
 
     # A valid final witness cannot hide an extra accepted label outside the immutable manifest.
@@ -560,6 +575,7 @@ def test_goal_evidence_verify_recomputes_authenticated_verify_event_result():
             "transcript_result_commit": "a" * 40,
         }],
         "attempt_events": [
+            attempt_started_event("turn-1", 4, 1, "node-C", "codex"),
             {"turn_id": "turn-1", "seq": 5, "event": {
                 "type": "goal.verify.request", "provider_node_id": "node-C", "attempt": 1,
                 "tool": "check_ticket", "call_id": "verify-1",
@@ -588,17 +604,17 @@ def test_goal_evidence_verify_recomputes_authenticated_verify_event_result():
     }
     assert goal._verify_evidence(record) == []
 
-    record["attempt_events"][1]["event"]["result"]["body"]["status"] = "open"
+    record["attempt_events"][2]["event"]["result"]["body"]["status"] = "open"
     assert any("does not pass when recomputed" in failure
                for failure in goal._verify_evidence(record))
-    record["attempt_events"][1]["event"]["result"]["body"]["status"] = "resolved"
+    record["attempt_events"][2]["event"]["result"]["body"]["status"] = "resolved"
 
     record["eval_runs"][0]["evidence"]["request_seq"] = 4
     assert any("does not name the final matching request" in failure
                for failure in goal._verify_evidence(record))
     record["eval_runs"][0]["evidence"]["request_seq"] = 5
 
-    duplicate = json.loads(json.dumps(record["attempt_events"][0]))
+    duplicate = json.loads(json.dumps(record["attempt_events"][1]))
     record["attempt_events"].append(duplicate)
     assert any("ambiguous duplicate request sequences" in failure
                for failure in goal._verify_evidence(record))
@@ -643,6 +659,7 @@ def test_goal_evidence_verifies_atomic_terminal_and_eval_verdicts():
             "transcript_commit": None, "transcript_result_commit": "a" * 40,
         }],
         "attempt_events": [
+            attempt_started_event("turn-1", 2, 1, "node-A", "codex"),
             passed_eval_event("turn-1", 3, "2" * 40),
             terminal_event("turn-1", 4),
         ],
@@ -662,7 +679,7 @@ def test_goal_evidence_verifies_atomic_terminal_and_eval_verdicts():
     assert any("has no valid relay sequence" in item for item in _verify_evidence(damaged))
 
     damaged = deepcopy(record)
-    damaged["attempt_events"][1]["seq"] = 3
+    damaged["attempt_events"][2]["seq"] = 3
     failures = _verify_evidence(damaged)
     assert any("duplicates relay sequence 3" in item for item in failures)
     assert any("out of relay sequence order" in item for item in failures)
@@ -689,48 +706,69 @@ def test_goal_evidence_verifies_atomic_terminal_and_eval_verdicts():
     assert any("2 relay terminal events" in item for item in _verify_evidence(damaged))
 
     damaged = deepcopy(record)
-    damaged["attempt_events"][1]["event"].update({"state": "failed", "error": "forged"})
+    damaged["attempt_events"][2]["event"].update({"state": "failed", "error": "forged"})
     failures = _verify_evidence(damaged)
     assert any("terminal event state" in item for item in failures)
     assert any("terminal event error" in item for item in failures)
 
     damaged = deepcopy(record)
-    damaged["attempt_events"][0]["seq"] = 5
+    damaged["attempt_events"][1]["seq"] = 5
     failures = _verify_evidence(damaged)
     assert any("evidence after its relay terminal" in item for item in failures)
     assert any("not before its relay terminal" in item for item in failures)
 
     damaged = deepcopy(record)
-    damaged["attempt_events"].pop(0)
+    damaged["attempt_events"].pop(1)
     failures = _verify_evidence(damaged)
     assert any("accepted evaluation run run-1 has 0 matching" in item for item in failures)
     assert any("final Goal turn has 0 relay evaluation markers" in item for item in failures)
 
     damaged = deepcopy(record)
-    duplicate = deepcopy(damaged["attempt_events"][0])
-    duplicate["seq"] = 2
-    damaged["attempt_events"].insert(0, duplicate)
+    duplicate = deepcopy(damaged["attempt_events"][1])
+    duplicate["seq"] = 4
+    damaged["attempt_events"].insert(1, duplicate)
     assert any("2 relay evaluation markers" in item for item in _verify_evidence(damaged))
 
     damaged = deepcopy(record)
-    damaged["attempt_events"][0]["event"]["result_commit"] = "9" * 40
+    damaged["attempt_events"][1]["event"]["result_commit"] = "9" * 40
     assert any("does not score its turn's exact" in item for item in _verify_evidence(damaged))
 
     damaged = deepcopy(record)
-    damaged["attempt_events"][0]["event"]["checks"] = 2
+    damaged["attempt_events"][1]["event"]["checks"] = 2
     assert any("check count does not match" in item for item in _verify_evidence(damaged))
 
     damaged = deepcopy(record)
-    damaged["attempt_events"][0]["event"].update({"passed": False, "blocked": False})
+    damaged["attempt_events"][1]["event"].update({"passed": False, "blocked": False})
     assert any("failed verdict is not proven" in item for item in _verify_evidence(damaged))
 
     damaged = deepcopy(record)
-    damaged["attempt_events"][0]["event"].update({"passed": True, "blocked": True})
+    damaged["attempt_events"][1]["event"].update({"passed": True, "blocked": True})
     assert any("both passed and blocked" in item for item in _verify_evidence(damaged))
 
     damaged = deepcopy(record)
-    damaged["attempt_events"][0]["event"].update({"passed": False, "blocked": True})
+    damaged["attempt_events"][1]["event"].update({"passed": False, "blocked": True})
     assert any("blocked verdict has no matching" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"].pop(0)
+    assert any("0 relay-stamped start records" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    conflicting_start = attempt_started_event("turn-1", 1, 1, "node-forged", "claude")
+    damaged["attempt_events"].insert(0, conflicting_start)
+    assert any("2 relay-stamped start records" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    future_start = attempt_started_event("turn-1", 1, 2, "node-forged", "codex")
+    damaged["attempt_events"].insert(0, future_start)
+    assert any("attempt start after terminal attempt 1" in item
+               for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][0]["event"].update({"provider_id": "", "agent_kind": "other"})
+    failures = _verify_evidence(damaged)
+    assert any("has no provider identity" in item for item in failures)
+    assert any("has no valid harness identity" in item for item in failures)
 
 
 def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
@@ -949,7 +987,8 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
         "event": {"type": "task.retry", "attempt": 1,
                       "previous_provider_id": "node-A", "previous_agent_kind": "codex",
                       "reason": "lease_expired"},
-    }, terminal_event("turn-1", 2)])
+    }, attempt_started_event("turn-1", 2, 2, "node-B", "codex"),
+       terminal_event("turn-1", 3)])
     assert _verify_evidence(record) == []
     assert _verify_evidence(record, min_execution_nodes=2) == []
 
@@ -961,7 +1000,7 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
     start = record["attempt_events"].pop(0)
     failures = _verify_evidence(record, min_execution_nodes=2)
     assert any("fewer than required 2" in item for item in failures)
-    assert not any("attempt start identity" in item for item in failures)
+    assert any("attempt start identity" in item for item in failures)
     record["attempt_events"].insert(0, start)
 
     # A retry naming the eventual winner cannot fabricate a second physical worker for the strict
@@ -984,8 +1023,8 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
     assert any("2 authoritative retry events" in item for item in _verify_evidence(record))
 
 
-def test_worker_revision_gate_ignores_a_claim_lost_before_attempt_start():
-    """A lease-generation retry is audit evidence, not proof that its provider ran an agent."""
+def test_goal_evidence_rejects_legacy_retry_without_attempt_start():
+    """Old retry evidence cannot claim a harness attempt that never crossed its start fence."""
     from cli.goal import _verify_evidence
 
     runtime = {
@@ -1018,8 +1057,9 @@ def test_worker_revision_gate_ignores_a_claim_lost_before_attempt_start():
         "inference": [], "eval_runs": [],
     }
 
-    assert _verify_evidence(
-        record, require_worker_revision="b1f54d3", min_execution_nodes=1) == []
+    assert any("retry attempt 1 disagrees with its relay-stamped attempt start identity" in failure
+               for failure in _verify_evidence(
+                   record, require_worker_revision="b1f54d3", min_execution_nodes=1))
     assert any("fewer than required 2" in failure for failure in _verify_evidence(
         record, require_worker_revision="b1f54d3", min_execution_nodes=2))
 
@@ -1069,6 +1109,8 @@ def test_goal_evidence_treats_expired_claims_as_fleet_audit_not_execution():
 
 
 def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
+    from copy import deepcopy
+
     from cli.goal import _verify_evidence
 
     key = "grid-goal-" + "a" * 64
@@ -1089,41 +1131,59 @@ def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
                 "provider_id": "node-B", "agent_kind": "codex",
             }},
             {"turn_id": "turn-1", "seq": 1, "event": {
-                "type": "task.retry", "attempt": 1, "previous_provider_id": "node-B",
-                "previous_agent_kind": "codex",
-            }},
-            {"turn_id": "turn-1", "seq": 2, "event": {
                 "type": "goal.observe.request", "provider_node_id": "node-B", "attempt": 1,
                 "tool": "read_ticket", "call_id": "read-1",
             }},
-            {"turn_id": "turn-1", "seq": 3, "event": {
+            {"turn_id": "turn-1", "seq": 2, "event": {
                 "type": "goal.observe.result", "provider_node_id": "node-B", "attempt": 1,
                 "tool": "read_ticket", "call_id": "read-1",
             }},
             # B disappears after its durable request. C safely reconciles the same logical action
             # under a different native call id and the Goal-wide idempotency key.
-            {"turn_id": "turn-1", "seq": 4, "event": {
+            {"turn_id": "turn-1", "seq": 3, "event": {
                 "type": "goal.act.request", "provider_node_id": "node-B", "attempt": 1,
                 "tool": "send_reply", "call_id": "act-B", "idempotency_key": key,
             }},
-            {"turn_id": "turn-1", "seq": 5, "event": {
+            {"turn_id": "turn-1", "seq": 4, "event": {
+                "type": "task.retry", "attempt": 1, "previous_provider_id": "node-B",
+                "previous_agent_kind": "codex",
+            }},
+            attempt_started_event("turn-1", 5, 2, "node-C", "codex"),
+            {"turn_id": "turn-1", "seq": 6, "event": {
                 "type": "goal.act.request", "provider_node_id": "node-C", "attempt": 2,
                 "tool": "send_reply", "call_id": "act-C", "idempotency_key": key,
             }},
-            {"turn_id": "turn-1", "seq": 6, "event": {
+            {"turn_id": "turn-1", "seq": 7, "event": {
                 "type": "goal.act.result", "provider_node_id": "node-C", "attempt": 2,
                 "tool": "send_reply", "call_id": "act-C", "idempotency_key": key,
             }},
             # A killed read is safe to repeat, so an unmatched observe/verify request is valid.
-            {"turn_id": "turn-1", "seq": 7, "event": {
+            {"turn_id": "turn-1", "seq": 8, "event": {
                 "type": "goal.verify.request", "provider_node_id": "node-C", "attempt": 2,
                 "tool": "check_ticket", "call_id": "verify-1",
             }},
-            terminal_event("turn-1", 8),
+            terminal_event("turn-1", 9),
         ],
         "inference": [], "eval_runs": [],
     }
     assert _verify_evidence(record, min_execution_nodes=2) == []
+
+    damaged = deepcopy(record)
+    retry = damaged["attempt_events"].pop(4)
+    retry["seq"] = 1
+    for event in damaged["attempt_events"][1:4]:
+        event["seq"] += 1
+    damaged["attempt_events"].insert(1, retry)
+    assert any("occurs after its relay retry boundary" in failure
+               for failure in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    next_start = damaged["attempt_events"].pop(5)
+    next_start["seq"] = 4
+    damaged["attempt_events"][4]["seq"] = 5
+    damaged["attempt_events"].insert(4, next_start)
+    assert any("next attempt start is not after retry attempt 1" in failure
+               for failure in _verify_evidence(damaged))
 
 
 def test_goal_evidence_refuses_ambiguous_or_unattributed_tool_events():
@@ -1328,14 +1388,17 @@ def test_goal_evidence_verify_checks_hierarchical_token_accounting():
             "token_budget": 5_000, "tokens_charged": 400,
         }]},
         "turns": [{
-            "id": "turn-1", "state": "completed", "agent_kind": "codex",
+            "id": "turn-1", "attempt": 1, "state": "completed", "agent_kind": "codex",
             "provider_node_id": "node-A", "input_commit": "1" * 40,
             "result_commit": "2" * 40, "transcript_commit": None,
             "transcript_result_commit": "a" * 40,
         }],
         "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
                        "worktree_chain": []},
-        "attempt_events": [terminal_event("turn-1", 0)], "inference": [], "eval_runs": [],
+        "attempt_events": [
+            attempt_started_event("turn-1", 0, 1, "node-A", "codex"),
+            terminal_event("turn-1", 1),
+        ], "inference": [], "eval_runs": [],
     }
     assert _verify_evidence(record) == []
 
@@ -1353,7 +1416,10 @@ def test_goal_evidence_verify_checks_hierarchical_token_accounting():
     }]
     assert any("attempt event" in failure and "corrupt" in failure
                for failure in _verify_evidence(record))
-    record["attempt_events"] = [terminal_event("turn-1", 0)]
+    record["attempt_events"] = [
+        attempt_started_event("turn-1", 0, 1, "node-A", "codex"),
+        terminal_event("turn-1", 1),
+    ]
     record["eval_runs"] = [{
         "id": "run-corrupt", "evidence": {"_corrupt": True},
     }]

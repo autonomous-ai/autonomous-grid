@@ -590,8 +590,71 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         for field in ("agent_kind", "provider_node_id", "input_commit", "result_commit"):
             if not turn.get(field):
                 failures.append(f"turn {index} has no {field}")
+        attempt = turn.get("attempt")
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0:
+            failures.append(f"turn {index} has no valid terminal attempt")
         if not turn.get("transcript_result_commit"):
             failures.append(f"turn {index} has no verified transcript output commit")
+
+    turns_by_id = {
+        turn["id"]: turn for turn in turns
+        if isinstance(turn, dict) and isinstance(turn.get("id"), str) and turn.get("id")}
+    starts_by_attempt: dict[tuple[str, int], list[dict]] = {}
+    start_sequences_by_attempt: dict[tuple[str, int], list[int]] = {}
+    for index, item in enumerate(attempt_events, 1):
+        if (not isinstance(item, dict) or not isinstance(item.get("event"), dict)
+                or item["event"].get("type") != "task.attempt_started"):
+            continue
+        event = item["event"]
+        turn_id = item.get("turn_id")
+        attempt = event.get("attempt")
+        valid_coordinate = True
+        if not isinstance(turn_id, str) or turn_id not in turns_by_id:
+            failures.append(f"attempt start event {index} names an unknown Goal turn")
+            valid_coordinate = False
+        if (not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0):
+            failures.append(f"attempt start event {index} has no valid attempt")
+            valid_coordinate = False
+        provider = event.get("provider_id")
+        harness = event.get("agent_kind")
+        if not isinstance(provider, str) or not provider:
+            failures.append(f"attempt start event {index} has no provider identity")
+        if harness not in ("codex", "claude"):
+            failures.append(f"attempt start event {index} has no valid harness identity")
+        if valid_coordinate:
+            coordinate = (turn_id, attempt)
+            starts_by_attempt.setdefault(coordinate, []).append(event)
+            seq = item.get("seq")
+            if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0:
+                start_sequences_by_attempt.setdefault(coordinate, []).append(seq)
+            terminal_attempt = turns_by_id[turn_id].get("attempt")
+            if (isinstance(terminal_attempt, int) and not isinstance(terminal_attempt, bool)
+                    and terminal_attempt > 0 and attempt > terminal_attempt):
+                failures.append(
+                    f"turn {turn_id} has an attempt start after terminal attempt "
+                    f"{terminal_attempt}")
+
+    # The terminal row names the worker whose result the relay accepted. Require exactly one
+    # relay-stamped start fence for that same attempt and identity; without it, a completed row is
+    # not proof that Codex or Claude ever ran, and must not become Goal training evidence.
+    for index, turn in enumerate(turns, 1):
+        if not isinstance(turn, dict):
+            continue
+        turn_id = turn.get("id")
+        attempt = turn.get("attempt")
+        if (not isinstance(turn_id, str) or turn_id not in turns_by_id
+                or not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0):
+            continue
+        starts = starts_by_attempt.get((turn_id, attempt), [])
+        matching = [
+            start for start in starts
+            if start.get("provider_id") == turn.get("provider_node_id")
+            and start.get("agent_kind") == turn.get("agent_kind")
+        ]
+        if len(starts) != 1 or len(matching) != 1:
+            failures.append(
+                f"turn {index} terminal attempt {attempt} has {len(starts)} relay-stamped start "
+                "records; expected exactly one matching its provider and harness")
 
     execution_nodes = {
         turn.get("provider_node_id") for turn in turns
@@ -739,10 +802,12 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                    and item["event"].get("type") == "task.retry"]
     verified_retry_nodes: set[str] = set()
     verified_retry_attempts: set[tuple[str, int, str, str]] = set()
+    retry_sequences_by_attempt: dict[tuple[str, int], list[int]] = {}
     for retry in all_retries:
         event = retry["event"]
         turn_id = retry.get("turn_id")
         attempt = event.get("attempt")
+        retry_seq = retry.get("seq")
         previous_provider = event.get("previous_provider_id")
         previous_agent = event.get("previous_agent_kind")
         valid = True
@@ -761,25 +826,61 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 f"turn {turn_id} retry attempt {attempt} has no "
                 "relay-authored previous harness identity")
             valid = False
-        starts = [item["event"] for item in attempt_events if isinstance(item, dict)
-                  and item.get("turn_id") == turn_id
-                  and isinstance(item.get("event"), dict)
-                  and item["event"].get("type") == "task.attempt_started"
-                  and item["event"].get("attempt") == attempt]
+        starts = starts_by_attempt.get((turn_id, attempt), [])
         matching_starts = [
             start for start in starts
             if start.get("provider_id") == previous_provider
             and start.get("agent_kind") == previous_agent
         ]
-        if starts and (len(matching_starts) != 1 or len(starts) != 1):
+        if len(matching_starts) != 1 or len(starts) != 1:
             failures.append(
                 f"turn {turn_id} retry attempt {attempt} disagrees with its relay-stamped "
                 "attempt start identity")
             valid = False
+        if (isinstance(turn_id, str) and isinstance(attempt, int)
+                and not isinstance(attempt, bool) and attempt > 0
+                and isinstance(retry_seq, int) and not isinstance(retry_seq, bool)
+                and retry_seq >= 0):
+            coordinate = (turn_id, attempt)
+            retry_sequences_by_attempt.setdefault(coordinate, []).append(retry_seq)
+            start_sequences = start_sequences_by_attempt.get(coordinate, [])
+            if len(start_sequences) == 1 and retry_seq <= start_sequences[0]:
+                failures.append(
+                    f"turn {turn_id} retry attempt {attempt} is not after its attempt start")
+                valid = False
+            next_start_sequences = start_sequences_by_attempt.get((turn_id, attempt + 1), [])
+            if len(next_start_sequences) == 1 and retry_seq >= next_start_sequences[0]:
+                failures.append(
+                    f"turn {turn_id} next attempt start is not after retry attempt {attempt}")
+                valid = False
         if valid and len(matching_starts) == 1:
             verified_retry_nodes.add(previous_provider)
             verified_retry_attempts.add((
                 turn_id, attempt, previous_provider, previous_agent))
+
+    # Authenticated tool traffic belongs strictly inside one live attempt. Reject impossible
+    # histories in which an action appears before its start fence or after the relay has already
+    # declared that attempt dead and reusable.
+    for index, item in enumerate(attempt_events, 1):
+        event = item.get("event") if isinstance(item, dict) else None
+        event_type = event.get("type") if isinstance(event, dict) else None
+        if not isinstance(event_type, str) or event_type not in tool_types:
+            continue
+        turn_id = item.get("turn_id")
+        attempt = event.get("attempt")
+        seq = item.get("seq")
+        if (not isinstance(turn_id, str) or not isinstance(attempt, int)
+                or isinstance(attempt, bool) or attempt <= 0
+                or not isinstance(seq, int) or isinstance(seq, bool) or seq < 0):
+            continue
+        starts = start_sequences_by_attempt.get((turn_id, attempt), [])
+        if len(starts) == 1 and seq <= starts[0]:
+            failures.append(
+                f"tool event {index} occurs before its relay-stamped attempt start")
+        retries = retry_sequences_by_attempt.get((turn_id, attempt), [])
+        if len(retries) == 1 and seq >= retries[0]:
+            failures.append(
+                f"tool event {index} occurs after its relay retry boundary")
 
     # A killed provider cannot appear as the terminal provider on the reclaimed row. Count it only
     # when the relay-authored retry and attempt-start records agree; either event alone is not
@@ -808,13 +909,11 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         required_attempts.update(verified_retry_attempts)
 
         for turn_id, attempt, provider, harness in sorted(required_attempts):
-            starts = [item.get("event") for item in attempt_events
-                      if isinstance(item, dict) and item.get("turn_id") == turn_id
-                      and isinstance(item.get("event"), dict)
-                      and item["event"].get("type") == "task.attempt_started"
-                      and item["event"].get("attempt") == attempt
-                      and item["event"].get("provider_id") == provider
-                      and item["event"].get("agent_kind") == harness]
+            starts = [
+                start for start in starts_by_attempt.get((turn_id, attempt), [])
+                if start.get("provider_id") == provider
+                and start.get("agent_kind") == harness
+            ]
             if len(starts) != 1:
                 failures.append(
                     f"turn {turn_id} attempt {attempt} has {len(starts)} relay-stamped start "
@@ -873,9 +972,6 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"turn {retry.get('turn_id')} final transcript does not contain its accepted "
                 f"retry checkpoint: {check.get('transcript_error') or 'the commits are unrelated'}")
-    turns_by_id = {
-        turn["id"]: turn for turn in turns
-        if isinstance(turn, dict) and isinstance(turn.get("id"), str) and turn.get("id")}
     native_retry_turn_ids = {
         retry.get("turn_id") for retry in native_retries
         if isinstance(retry.get("turn_id"), str)}
