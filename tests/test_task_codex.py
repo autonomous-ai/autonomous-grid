@@ -5,6 +5,7 @@ import io
 import json
 import subprocess
 import threading
+import time
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -234,6 +235,54 @@ def test_goal_inference_proxy_refreshes_expired_node_token_once():
     assert seen_tokens == ["Bearer expired-node-token", "Bearer fresh-node-token"]
     assert refreshes == ["expired-node-token"]
     assert proxy.last_failure is None
+
+
+def test_goal_inference_proxy_bounds_a_half_open_upstream_stream(monkeypatch):
+    release_upstream = threading.Event()
+    upstream_started = threading.Event()
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.flush()
+            upstream_started.set()
+            # Model a relay/tunnel that sent headers but then disappeared without closing its
+            # socket.  The test releases this server after the proxy proves it has a read bound.
+            release_upstream.wait(timeout=5)
+
+        def log_message(self, _format, *_args):
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    monkeypatch.setattr(task_codex_proxy, "_UPSTREAM_READ_TIMEOUT_SECONDS", 0.1)
+
+    proxy = task_codex_proxy.InferenceProxy(
+        f"http://127.0.0.1:{upstream.server_address[1]}", "grid-secret")
+    proxy.start()
+    started = time.monotonic()
+    try:
+        response = httpx.post(
+            proxy.base_url + "/responses",
+            headers={"Authorization": f"Bearer {proxy.child_token}"},
+            json={"model": "grid-coder", "input": "continue"}, timeout=2)
+        assert upstream_started.wait(timeout=1)
+    finally:
+        release_upstream.set()
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=5)
+
+    assert response.status_code == 200
+    assert time.monotonic() - started < 1.5
+    assert proxy.last_failure == (
+        "Grid inference transport failed for /responses: ReadTimeout")
 
 
 def test_codex_goal_capability_requires_a_measured_native_goal_version(tmp_path, monkeypatch):

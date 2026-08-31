@@ -11,6 +11,14 @@ from typing import ClassVar
 import httpx
 
 
+# The relay gives an inference transaction 600 seconds to settle.  A little extra room keeps the
+# proxy from racing that authoritative deadline, while still bounding a half-open HTTP stream well
+# below the worker's one-hour native-agent timeout.  ``read=None`` used to let a tunnel or relay
+# disappear after sending response headers and pin the Goal attempt forever.
+_UPSTREAM_CONNECT_TIMEOUT_SECONDS = 30.0
+_UPSTREAM_READ_TIMEOUT_SECONDS = 660.0
+
+
 class InferenceProxy:
     """Expose native agent inference dialects on loopback; keep Grid's bearer out of children."""
 
@@ -105,7 +113,9 @@ class InferenceProxy:
             return
         started = False
         try:
-            with httpx.Client(timeout=httpx.Timeout(30.0, read=None)) as client:
+            with httpx.Client(timeout=httpx.Timeout(
+                    _UPSTREAM_CONNECT_TIMEOUT_SECONDS,
+                    read=_UPSTREAM_READ_TIMEOUT_SECONDS)) as client:
                 for attempt in range(2):
                     token = self._current_upstream_token()
                     headers = self._upstream_headers(handler, token=token)
