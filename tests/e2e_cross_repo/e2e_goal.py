@@ -1709,6 +1709,11 @@ def test_failed_required_child_blocks_parent_and_cancels_running_claude_sibling(
         f"Required child Goal did not complete: {failed_child['id']}=failed")
     assert blocked["child_tokens_reserved"] == 0
     assert blocked["descendant_tokens_used"] == failed_final["tokens_used"] == 40
+    with pytest.raises(relay_client.TaskRefusal) as refused_resume:
+        relay_client.control_goal(relay, owner_token, parent["id"], "resume")
+    assert refused_resume.value.status == 409
+    assert refused_resume.value.refusal_code == "goal_required_child_failed"
+    assert "cannot be resumed" in str(refused_resume.value)
 
     failed_rows = _tasks(relay, owner_token, project_id, failed_child["id"])
     slow_rows = _tasks(relay, owner_token, project_id, slow_child["id"])

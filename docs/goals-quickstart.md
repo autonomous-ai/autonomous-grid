@@ -290,9 +290,14 @@ spawn it ends the turn rather than polling, and Grid exposes the sibling childre
 
 The parent enters `waiting_children` after its turn checkpoints. It receives no new turn until every
 child is terminal and all required children are complete, then resumes with every child id, status,
-and eval summary. A failed or conflicting required child blocks the parent; a failed, missing, or
-conflicting optional child is recorded in the resumed prompt without blocking it. Child slots and
-token allocations are reserved atomically,
+and eval summary. A failed required child blocks the parent and immediately cancels every live
+sibling branch because none can be consumed after that dependency fails; Grid releases their token
+reservations and exports each cancellation in Goal evidence. `grid goal resume` then refuses with
+`goal_required_child_failed` instead of returning a misleading no-op—cancel the blocked tree or
+start a replacement Goal. A conflicting required child also blocks the parent but remains
+retryable because resume reruns deterministic fan-in. A failed, missing, or conflicting optional
+child is recorded in the resumed prompt without blocking it. Child slots and token allocations are
+reserved atomically,
 fan-out is limited to eight children, nesting is limited to three levels, and at least 1,000 parent
 tokens remain for final fan-in. Subgoals are off by default because enabling them authorizes
 autonomous parallel work and budget allocation.
