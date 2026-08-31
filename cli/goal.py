@@ -949,6 +949,41 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                     failures.append(
                         f"worker Goal event {index} has no valid Claude {field}")
 
+    for index, item in enumerate(attempt_events, 1):
+        event = item.get("event") if isinstance(item, dict) else None
+        event_type = event.get("type") if isinstance(event, dict) else None
+        turn_id = item.get("turn_id") if isinstance(item, dict) else None
+        seq = item.get("seq") if isinstance(item, dict) else None
+        if event_type == "task.claim_expired":
+            attempt = event.get("attempt")
+            if (isinstance(turn_id, str) and isinstance(attempt, int)
+                    and not isinstance(attempt, bool) and attempt > 0
+                    and isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0):
+                starts = start_sequences_by_attempt.get((turn_id, attempt), [])
+                if len(starts) == 1 and seq >= starts[0]:
+                    failures.append(
+                        f"expired claim event {index} is not before its reused attempt start")
+        elif event_type == "task.retrying":
+            if not isinstance(event.get("reason"), str) or not event["reason"]:
+                failures.append(f"retrying event {index} has no diagnostic reason")
+            if (not isinstance(turn_id, str) or not isinstance(seq, int)
+                    or isinstance(seq, bool) or seq < 0):
+                continue
+            enclosing_attempts = []
+            for coordinate, starts in start_sequences_by_attempt.items():
+                coordinate_turn, attempt = coordinate
+                retries = retry_sequences_by_attempt.get(coordinate, [])
+                if (coordinate_turn == turn_id and len(starts) == 1 and len(retries) == 1
+                        and starts[0] < seq < retries[0]):
+                    enclosing_attempts.append(attempt)
+            if len(enclosing_attempts) != 1:
+                failures.append(
+                    f"retrying event {index} is not enclosed by one started, relayed retry "
+                    "attempt")
+        elif event_type == "task.cancelled":
+            failures.append(
+                f"completed Goal evidence contains cancellation marker {index}")
+
     # A killed provider cannot appear as the terminal provider on the reclaimed row. Count it only
     # when the relay-authored retry and attempt-start records agree; either event alone is not
     # sufficient proof that another physical worker executed the Goal.

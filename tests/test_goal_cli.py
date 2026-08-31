@@ -802,6 +802,14 @@ def test_goal_evidence_verifies_atomic_terminal_and_eval_verdicts():
     })
     assert any("has no valid Codex method" in item for item in _verify_evidence(damaged))
 
+    damaged = deepcopy(record)
+    damaged["attempt_events"].insert(0, {
+        "turn_id": "turn-1", "seq": 1,
+        "event": {"type": "task.cancelled", "by": "operator"},
+    })
+    assert any("completed Goal evidence contains cancellation marker" in item
+               for item in _verify_evidence(damaged))
+
 
 def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
     from cli import goal
@@ -1096,6 +1104,52 @@ def test_goal_evidence_rejects_legacy_retry_without_attempt_start():
         record, require_worker_revision="b1f54d3", min_execution_nodes=2))
 
 
+def test_goal_evidence_brackets_retrying_diagnostics_inside_authoritative_attempts():
+    from copy import deepcopy
+
+    from cli.goal import _verify_evidence
+
+    record = {
+        "schema_version": 1,
+        "goal": {"status": "complete", "evals": []},
+        "relationships": {"parent_goal_id": None, "children": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
+        "turns": [{
+            "id": "turn-1", "attempt": 2, "state": "completed", "agent_kind": "claude",
+            "provider_node_id": "node-B", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [
+            attempt_started_event("turn-1", 0, 1, "node-A", "codex"),
+            {"turn_id": "turn-1", "seq": 1, "event": {
+                "type": "task.retrying", "reason": "native protocol disconnected",
+            }},
+            {"turn_id": "turn-1", "seq": 2, "event": {
+                "type": "task.retry", "attempt": 1, "previous_provider_id": "node-A",
+                "previous_agent_kind": "codex", "reason": "native_harness_failure",
+            }},
+            attempt_started_event("turn-1", 3, 2, "node-B", "claude"),
+            terminal_event("turn-1", 4),
+        ],
+        "inference": [], "eval_runs": [],
+    }
+    assert _verify_evidence(record, min_execution_nodes=2) == []
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][1]["event"]["reason"] = ""
+    assert any("has no diagnostic reason" in failure for failure in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    retrying = damaged["attempt_events"].pop(1)
+    retrying["seq"] = 3
+    damaged["attempt_events"][2]["seq"] = 4
+    damaged["attempt_events"][3]["seq"] = 5
+    damaged["attempt_events"].insert(2, retrying)
+    assert any("is not enclosed by one started, relayed retry attempt" in failure
+               for failure in _verify_evidence(damaged))
+
+
 def test_goal_evidence_treats_expired_claims_as_fleet_audit_not_execution():
     from cli.goal import _verify_evidence
 
@@ -1138,6 +1192,15 @@ def test_goal_evidence_treats_expired_claims_as_fleet_audit_not_execution():
     record["attempt_events"][0]["event"]["attempt_reused"] = False
     assert any("does not prove a reusable pre-start claim" in failure
                for failure in _verify_evidence(record))
+
+    damaged = __import__("copy").deepcopy(record)
+    damaged["attempt_events"][0]["event"]["attempt_reused"] = True
+    start = damaged["attempt_events"].pop(1)
+    start["seq"] = 0
+    damaged["attempt_events"][0]["seq"] = 1
+    damaged["attempt_events"].insert(0, start)
+    assert any("is not before its reused attempt start" in failure
+               for failure in _verify_evidence(damaged))
 
 
 def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
