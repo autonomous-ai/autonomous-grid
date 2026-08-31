@@ -31,16 +31,18 @@ access tokens, and local credentials must not be added here.
 - Public worker/CLI branch head `e571870d830d67bdc31a59db073161848c417ee2` passed 3,355 public
   tests and the 21-scenario cross-repository Goal matrix. Private relay head `2e69f3c` passed the
   170-test relay release bundle and the same matrix. Exact-head GitHub CI passed for both PRs.
-- Machine A was respawned from the clean public head with Codex-only task policy; its process is
-  `58475`, task root `/private/tmp/fg-a`, and the provider reports task claiming enabled. Machines B
-  and C must fetch this same public head and respawn before the physical Goal is created.
+- Machine A was respawned from the current clean public branch head with Codex-only task policy,
+  task root `/private/tmp/fg-a`, and task claiming enabled. Machines B and C must fetch that same
+  branch head and respawn before the physical Goal is created; a node merely remaining online is
+  not evidence that its long-lived worker reloaded the checkout.
 - The hosted relay still answered `This grid's relay does not support Grid Goal yet.` before its
   pending private branch deployment. Therefore no Forge Goal row or attempt was fabricated in this
   preflight; private relay deployment remains the physical gate.
 - The candidate now snapshots Grid package version, clean Git revision, selected harness and native
-  agent version onto every authenticated attempt start. The Forge acceptance command requires
-  `--require-worker-revision e571870`, so an old long-lived B/C worker or dirty checkout fails the
-  evidence gate even if its node name appears online.
+  agent version onto every authenticated attempt start. The Forge acceptance command derives
+  `--require-worker-revision "$(git rev-parse --short HEAD)"` from the shared checkout, so an old
+  long-lived B/C worker or dirty checkout fails the evidence gate even if its node name appears
+  online.
 
 ## 2026-08-30 — native Codex rollout preflight
 
