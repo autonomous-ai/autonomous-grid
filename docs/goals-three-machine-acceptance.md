@@ -177,6 +177,9 @@ worker identity and serves a Responses-capable local model through the same disp
 ```bash
 # Machine C, another terminal. Replace the model with an already-pulled local model only if its
 # join-time probe advertises Responses support.
+GRID_HOME=/tmp/grid-goal-c-relay/grid-home-relay \
+uv run grid agent install codex
+GRID_HOME=/tmp/grid-goal-c-relay/grid-home-relay \
 uv run grid pull \
   unsloth/Qwen3.6-27B-MTP-GGUF:Qwen3.6-27B-UD-Q5_K_XL.gguf
 GRID_HOME=/tmp/grid-goal-c-relay/grid-home-relay \
@@ -189,12 +192,15 @@ uv run grid join goal-physical --serve Qwen3.6-27B-UD-Q5_K_XL.gguf \
 # an owner-only --bundle-file, then start one harness per machine from its clean branch checkout.
 uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \
   --home /tmp/grid-goal-worker-a
+GRID_HOME=/tmp/grid-goal-worker-a uv run grid agent install codex
 GRID_HOME=/tmp/grid-goal-worker-a GRID_TASK_AGENT_KINDS=codex \
 uv run grid join goal-physical --tasks-only --name goal-machine-a \
   --max-tasks 1 --tasks-root /tmp/grid-goal-a-work
 
 uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \
   --home /tmp/grid-goal-worker-b
+# Claude Code is a vendor CLI rather than a `grid agent install` target. Confirm that the supported
+# binary is on this worker's PATH before joining: `claude --version`.
 GRID_HOME=/tmp/grid-goal-worker-b GRID_TASK_AGENT_KINDS=claude \
 uv run grid join goal-physical --tasks-only --name goal-machine-b \
   --max-tasks 1 --tasks-root /tmp/grid-goal-b-work
