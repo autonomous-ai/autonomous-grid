@@ -636,6 +636,7 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                    and isinstance(item.get("event"), dict)
                    and item["event"].get("type") == "task.retry"]
     verified_retry_nodes: set[str] = set()
+    verified_retry_attempts: set[tuple[str, int, str, str]] = set()
     for retry in all_retries:
         event = retry["event"]
         turn_id = retry.get("turn_id")
@@ -675,6 +676,8 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             valid = False
         if valid and len(matching_starts) == 1:
             verified_retry_nodes.add(previous_provider)
+            verified_retry_attempts.add((
+                turn_id, attempt, previous_provider, previous_agent))
 
     # A killed provider cannot appear as the terminal provider on the reclaimed row. Count it only
     # when the relay-authored retry and attempt-start records agree; either event alone is not
@@ -696,19 +699,11 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                     and isinstance(coordinate[2], str) and coordinate[2]
                     and coordinate[3] in ("codex", "claude")):
                 required_attempts.add(coordinate)
-        for retry in all_retries:
-            event = retry.get("event") if isinstance(retry, dict) else None
-            if not isinstance(event, dict):
-                continue
-            coordinate = (
-                retry.get("turn_id"), event.get("attempt"),
-                event.get("previous_provider_id"), event.get("previous_agent_kind"))
-            if (isinstance(coordinate[0], str)
-                    and isinstance(coordinate[1], int) and not isinstance(coordinate[1], bool)
-                    and coordinate[1] > 0
-                    and isinstance(coordinate[2], str) and coordinate[2]
-                    and coordinate[3] in ("codex", "claude")):
-                required_attempts.add(coordinate)
+        # A claimed worker can die before the durable attempt-start fence. The relay still records
+        # its retry so attempt accounting is complete, but no native harness executed and there is
+        # no runtime to attest. Require provenance only for retry predecessors whose relay-stamped
+        # start agreed with the retry—the same exact set allowed to count as an execution node.
+        required_attempts.update(verified_retry_attempts)
 
         for turn_id, attempt, provider, harness in sorted(required_attempts):
             starts = [item.get("event") for item in attempt_events

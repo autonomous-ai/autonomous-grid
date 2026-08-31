@@ -835,6 +835,46 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
     assert any("2 authoritative retry events" in item for item in _verify_evidence(record))
 
 
+def test_worker_revision_gate_ignores_a_claim_lost_before_attempt_start():
+    """A lease-generation retry is audit evidence, not proof that its provider ran an agent."""
+    from cli.goal import _verify_evidence
+
+    runtime = {
+        "schema_version": 1,
+        "grid": {"version": "0.3.28", "revision": "b1f54d33200dc6c", "dirty": False},
+        "agent": {"kind": "codex", "version": "0.150.1"},
+    }
+    record = {
+        "schema_version": 1,
+        "goal": {"status": "complete", "evals": []},
+        "relationships": {"parent_goal_id": None, "children": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
+        "turns": [{
+            "id": "turn-1", "attempt": 2, "state": "completed", "agent_kind": "codex",
+            "provider_node_id": "node-B", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [{
+            "turn_id": "turn-1", "seq": 0, "event": {
+                "type": "task.retry", "attempt": 1, "previous_provider_id": "node-A",
+                "previous_agent_kind": "codex", "reason": "lease_expired",
+            },
+        }, {
+            "turn_id": "turn-1", "seq": 1, "event": {
+                "type": "task.attempt_started", "attempt": 2, "provider_id": "node-B",
+                "agent_kind": "codex", "worker_runtime": runtime,
+            },
+        }],
+        "inference": [], "eval_runs": [],
+    }
+
+    assert _verify_evidence(
+        record, require_worker_revision="b1f54d3", min_execution_nodes=1) == []
+    assert any("fewer than required 2" in failure for failure in _verify_evidence(
+        record, require_worker_revision="b1f54d3", min_execution_nodes=2))
+
+
 def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
     from cli.goal import _verify_evidence
 
