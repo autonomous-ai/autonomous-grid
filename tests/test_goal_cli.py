@@ -69,10 +69,12 @@ def test_goal_run_parser_requires_a_measurable_condition_and_model():
     evidence = build_parser().parse_args([
         "goal", "evidence", "goal-1", "--verify", "--min-execution-nodes", "3",
         "--require-inference", "--require-worker-revision", "4E5DCC7",
+        "--require-agent-sequence", "codex,claude,codex",
     ])
     assert evidence.min_execution_nodes == 3
     assert evidence.require_inference is True
     assert evidence.require_worker_revision == "4e5dcc7"
+    assert evidence.require_agent_sequence == ("codex", "claude", "codex")
 
     resumed = build_parser().parse_args([
         "goal", "resume", "goal-1", "--token-budget", "10000000",
@@ -457,11 +459,18 @@ def test_goal_evidence_verify_accepts_an_exact_distributed_chain(monkeypatch, ca
     monkeypatch.setattr(goal, "_resolve", lambda _args: ("http://relay", "token", "grid"))
     monkeypatch.setattr(relay, "get_goal_evidence", lambda *_args: record)
 
-    args = SimpleNamespace(goal_action="evidence", goal_id="goal-1", grid=None, verify=True)
+    args = SimpleNamespace(
+        goal_action="evidence", goal_id="goal-1", grid=None, verify=True,
+        require_agent_sequence=("codex", "claude"))
     assert goal.cmd_goal(args) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out) == record
     assert "Goal evidence verified" in captured.err
+    assert goal._verify_evidence(
+        record, require_agent_sequence=("codex", "claude")) == []
+    assert any("does not contain required ordered sequence claude,codex" in failure
+               for failure in goal._verify_evidence(
+                   record, require_agent_sequence=("claude", "codex")))
 
     # The same commit can legitimately recur on a later no-op turn. An older turn's accepted score
     # is not evidence that the final completion nomination was independently evaluated.

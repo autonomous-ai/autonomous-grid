@@ -300,7 +300,8 @@ fetch the pinned worktree and transcript refs through the relay Git endpoint.
 uv run grid goal status <goal-id> --json
 uv run grid goal evidence <goal-id> --verify \
   --min-execution-nodes 2 \
-  --require-inference > two-machine-final-evidence.json
+  --require-inference \
+  --require-agent-sequence codex,claude > two-machine-final-evidence.json
 uv run grid goal list --json
 uv run grid project download --project <project-id> --output grid-courier-result.zip
 ```

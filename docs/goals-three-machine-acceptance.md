@@ -367,6 +367,7 @@ Save and verify the relay-authored JSON artifact with:
 WORKER_REVISION="$(git rev-parse --short HEAD)"
 grid goal evidence <goal-id> --verify \
   --min-execution-nodes 3 --require-inference \
+  --require-agent-sequence codex,claude,codex \
   --require-worker-revision "$WORKER_REVISION" > goal-evidence.json
 ```
 

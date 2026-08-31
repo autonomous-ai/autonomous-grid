@@ -1564,7 +1564,8 @@ grid goal run --project <project-id> --objective <text> --done-when <text> --mod
 grid goal list [--all] [--grid <grid>] [--json]
 grid goal status <goal-id> [--grid <grid>] [--json]
 grid goal evidence <goal-id> [--verify] [--min-execution-nodes <n>] [--require-inference]
-                   [--require-worker-revision <git-revision>] [--grid <grid>]
+                   [--require-worker-revision <git-revision>]
+                   [--require-agent-sequence codex,claude,...] [--grid <grid>]
 grid goal pause <goal-id> [--grid <grid>] [--json]
 grid goal resume <goal-id> [--token-budget <tokens>] [--grid <grid>] [--json]
 grid goal cancel <goal-id> [--grid <grid>] [--json]
@@ -1585,6 +1586,12 @@ and child Goal budgets remain reserved and controlled by their parent.
 The computer running Codex and the computer serving `--model` need not be the same node. Agent state
 and project state move through the relay's Git refs at successful turn boundaries; a replacement
 provider cannot recover uncommitted work from a node that disappeared mid-turn.
+
+`goal evidence --verify --require-agent-sequence codex,claude` is an acceptance gate for a real
+mixed-harness run. It matches an ordered subsequence of relay-stamped attempt starts, including an
+interrupted predecessor that has authoritative retry evidence; agent-authored handoff files cannot
+satisfy it. Combine it with `--min-execution-nodes`, `--require-worker-revision`, and
+`--require-inference` when proving a physical rollout.
 
 A Goal turn is claimable only while the Grid has a live, healthy, tool-capable route for the model
 and the selected harness dialect (Responses for Codex, Messages/chat for Claude Code). Otherwise it

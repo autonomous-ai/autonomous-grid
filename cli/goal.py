@@ -268,7 +268,8 @@ def _show(goal: dict, as_json: bool) -> None:
 
 def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                      require_inference: bool = False,
-                     require_worker_revision: str | None = None) -> list[str]:
+                     require_worker_revision: str | None = None,
+                     require_agent_sequence: tuple[str, ...] | None = None) -> list[str]:
     """Return deterministic release-gate failures in a relay-authored Goal evidence record."""
     failures: list[str] = []
     schema_version = record.get("schema_version")
@@ -621,6 +622,8 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         if isinstance(turn, dict) and isinstance(turn.get("id"), str) and turn.get("id")}
     starts_by_attempt: dict[tuple[str, int], list[dict]] = {}
     start_sequences_by_attempt: dict[tuple[str, int], list[int]] = {}
+    turn_positions = {turn_id: index for index, turn_id in enumerate(recorded_turn_ids)}
+    ordered_attempt_starts: list[tuple[int, int, int, str]] = []
     for index, item in enumerate(attempt_events, 1):
         if (not isinstance(item, dict) or not isinstance(item.get("event"), dict)
                 or item["event"].get("type") != "task.attempt_started"):
@@ -647,6 +650,10 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             seq = item.get("seq")
             if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0:
                 start_sequences_by_attempt.setdefault(coordinate, []).append(seq)
+                if (isinstance(provider, str) and provider
+                        and harness in ("codex", "claude")):
+                    ordered_attempt_starts.append(
+                        (turn_positions[turn_id], seq, attempt, harness))
             terminal_attempt = turns_by_id[turn_id].get("attempt")
             if (isinstance(terminal_attempt, int) and not isinstance(terminal_attempt, bool)
                     and terminal_attempt > 0 and attempt > terminal_attempt):
@@ -682,6 +689,20 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             and isinstance(turn.get("provider_node_id"), str)
             and turn.get("provider_node_id"))
     }
+
+    if require_agent_sequence:
+        observed_agents = [item[-1] for item in sorted(ordered_attempt_starts)]
+        required_index = 0
+        for agent in observed_agents:
+            if agent == require_agent_sequence[required_index]:
+                required_index += 1
+                if required_index == len(require_agent_sequence):
+                    break
+        if required_index != len(require_agent_sequence):
+            failures.append(
+                "relay-stamped execution agent sequence "
+                f"{','.join(observed_agents) or '(none)'} does not contain required ordered "
+                f"sequence {','.join(require_agent_sequence)}")
 
     first = turns[0] if isinstance(turns[0], dict) else {}
     if first.get("transcript_commit") is not None:
@@ -1504,7 +1525,8 @@ def cmd_goal(args: argparse.Namespace) -> int:
                 evidence,
                 min_execution_nodes=getattr(args, "min_execution_nodes", 1),
                 require_inference=getattr(args, "require_inference", False),
-                require_worker_revision=getattr(args, "require_worker_revision", None))
+                require_worker_revision=getattr(args, "require_worker_revision", None),
+                require_agent_sequence=getattr(args, "require_agent_sequence", None))
             if failures:
                 raise SystemExit("Goal evidence verification failed:\n- " + "\n- ".join(failures))
             print("Goal evidence verified: terminal turns, transcript chain and evaluations pass.",

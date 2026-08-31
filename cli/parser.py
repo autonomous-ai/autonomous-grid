@@ -105,6 +105,14 @@ def _worker_revision(raw: str) -> str:
     return revision
 
 
+def _agent_sequence(raw: str) -> tuple[str, ...]:
+    agents = tuple(part.strip().lower() for part in raw.split(","))
+    if not agents or len(agents) > 16 or any(agent not in ("codex", "claude") for agent in agents):
+        raise argparse.ArgumentTypeError(
+            "agent sequence must be 1-16 comma-separated 'codex' or 'claude' entries")
+    return agents
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="grid",
@@ -1170,6 +1178,11 @@ def _add_goal(sub) -> None:
         "--require-worker-revision", type=_worker_revision, default=None, metavar="REV",
         help=("With --verify, require every execution attempt to come from a clean Grid worker "
               "whose relay-stamped Git revision starts with REV."))
+    evidence.add_argument(
+        "--require-agent-sequence", type=_agent_sequence, default=None,
+        metavar="AGENT,...",
+        help=("With --verify, require this ordered subsequence of relay-stamped execution "
+              "attempts, for example codex,claude,codex."))
     evidence.set_defaults(handler=cmd_goal)
 
     for action, help_text in (("pause", "Stop scheduling new turns"),
