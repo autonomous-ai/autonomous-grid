@@ -306,6 +306,11 @@ Goal because the server preflight correctly stopped before creation.
   checking out the public branch on the three workers cannot add the missing hosted endpoints.
 - No SSH, LAN address, local relay or pairing bundle was used. No Goal was created, so this is a
   deployment preflight rather than execution evidence.
+- Machine A was then respawned from the public feature branch as `forge-machine-a` with
+  `GRID_TASK_AGENT_KINDS=codex`, `max_tasks=1`, and isolated root `/private/tmp/fg-a`. The same
+  remote node retained its existing inference engine and printed `tasks=on`; it is polling the
+  existing distributed queue and will become Goal-eligible when the hosted relay advertises
+  `goals/v1`. This is worker readiness, not a passing Goal.
 
 ## 2026-08-31 — authenticated business outcome matrix
 
