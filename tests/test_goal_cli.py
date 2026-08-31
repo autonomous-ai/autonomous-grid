@@ -502,6 +502,88 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
                for failure in goal._verify_evidence(record))
 
 
+def test_goal_evidence_verify_recomputes_authenticated_verify_event_result():
+    from cli import goal
+
+    spec = {
+        "type": "verify", "version": 1, "name": "ticket resolved",
+        "tool": "check_ticket", "arguments": {"ticket_id": "T-42"},
+        "checks": [
+            {"pointer": "/status_code", "op": "equals", "value": 200},
+            {"pointer": "/body/status", "op": "equals", "value": "resolved"},
+        ],
+    }
+    definition_hash = __import__("hashlib").sha256(json.dumps(
+        spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest()
+    record = {
+        "schema_version": 1,
+        "goal": {"id": "goal-1", "status": "complete", "evals": [{
+            **spec, "definition_id": "eval-1", "definition_hash": definition_hash,
+        }]},
+        "relationships": {"parent_goal_id": None, "children": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
+                       "worktree_chain": []},
+        "turns": [{
+            "id": "turn-1", "attempt": 1, "state": "completed", "agent_kind": "codex",
+            "provider_node_id": "node-C", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [
+            {"turn_id": "turn-1", "seq": 5, "event": {
+                "type": "goal.verify.request", "provider_node_id": "node-C", "attempt": 1,
+                "tool": "check_ticket", "call_id": "verify-1",
+                "arguments": {"ticket_id": "T-42"},
+            }},
+            {"turn_id": "turn-1", "seq": 6, "event": {
+                "type": "goal.verify.result", "provider_node_id": "node-C", "attempt": 1,
+                "tool": "check_ticket", "call_id": "verify-1", "success": True,
+                "result": {"status_code": 200, "body": {"status": "resolved"}},
+            }},
+        ],
+        "inference": [],
+        "eval_runs": [{
+            "id": "run-1", "turn_id": "turn-1", "definition_id": "eval-1",
+            "definition_hash": definition_hash, "result_commit": "2" * 40,
+            "evaluator_node_id": "relay", "state": "passed", "score": 1.0,
+            "accepted": True, "accepted_at": "2026-08-31T12:00:00+00:00",
+            "passed": True, "error": None,
+            "evidence": {
+                "tool": "check_ticket", "provider_node_id": "node-C", "attempt": 1,
+                "call_id": "verify-1", "request_seq": 5, "result_seq": 6,
+            },
+        }],
+    }
+    assert goal._verify_evidence(record) == []
+
+    record["attempt_events"][1]["event"]["result"]["body"]["status"] = "open"
+    assert any("does not pass when recomputed" in failure
+               for failure in goal._verify_evidence(record))
+    record["attempt_events"][1]["event"]["result"]["body"]["status"] = "resolved"
+
+    record["eval_runs"][0]["evidence"]["request_seq"] = 4
+    assert any("does not name the final matching request" in failure
+               for failure in goal._verify_evidence(record))
+    record["eval_runs"][0]["evidence"]["request_seq"] = 5
+
+    duplicate = json.loads(json.dumps(record["attempt_events"][0]))
+    record["attempt_events"].append(duplicate)
+    assert any("ambiguous duplicate request sequences" in failure
+               for failure in goal._verify_evidence(record))
+    record["attempt_events"].pop()
+
+    # A later identical request without a result makes the earlier pass stale, exactly as it does
+    # in the relay evaluator. The exported verifier must reproduce that selection rule.
+    record["attempt_events"].append({"turn_id": "turn-1", "seq": 7, "event": {
+        "type": "goal.verify.request", "provider_node_id": "node-C", "attempt": 1,
+        "tool": "check_ticket", "call_id": "verify-later",
+        "arguments": {"ticket_id": "T-42"},
+    }})
+    assert any("does not name the final matching request" in failure
+               for failure in goal._verify_evidence(record))
+
+
 def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
     from cli import goal
 

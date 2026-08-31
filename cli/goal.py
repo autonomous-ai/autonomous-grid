@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 import uuid
@@ -45,6 +46,168 @@ def _evals(path: str | None) -> list[dict]:
         raise SystemExit(
             "Goal evals must be a JSON array, or an object with version 1 and evals array.")
     return value
+
+
+_MISSING = object()
+
+
+def _json_number(value: object) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and (not isinstance(value, float) or math.isfinite(value)))
+
+
+def _json_equal(left: object, right: object) -> bool:
+    """JSON equality without Python's nested True == 1 coercion."""
+    pending = [(left, right)]
+    while pending:
+        left, right = pending.pop()
+        if isinstance(left, bool) or isinstance(right, bool):
+            if type(left) is not type(right) or left != right:
+                return False
+        elif _json_number(left) and _json_number(right):
+            if left != right:
+                return False
+        elif type(left) is not type(right):
+            return False
+        elif isinstance(left, dict):
+            if left.keys() != right.keys():
+                return False
+            pending.extend((left[key], right[key]) for key in left)
+        elif isinstance(left, list):
+            if len(left) != len(right):
+                return False
+            pending.extend(zip(left, right))
+        elif left != right:
+            return False
+    return True
+
+
+def _json_pointer(document: object, pointer: object) -> object:
+    if not isinstance(pointer, str) or (pointer and not pointer.startswith("/")):
+        return _MISSING
+    current = document
+    if pointer == "":
+        return current
+    for encoded in pointer.split("/")[1:]:
+        if re.search(r"~(?:[^01]|$)", encoded):
+            return _MISSING
+        token = encoded.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, dict):
+            if token not in current:
+                return _MISSING
+            current = current[token]
+        elif isinstance(current, list):
+            if (not token.isascii() or not token.isdigit()
+                    or (len(token) > 1 and token.startswith("0"))):
+                return _MISSING
+            index = int(token)
+            if index >= len(current):
+                return _MISSING
+            current = current[index]
+        else:
+            return _MISSING
+    return current
+
+
+def _json_checks_pass(document: object, checks: object) -> bool:
+    if not isinstance(checks, list) or not checks:
+        return False
+    for check in checks:
+        if not isinstance(check, dict):
+            return False
+        pointer, op, expected = (
+            check.get("pointer"), check.get("op"), check.get("value", _MISSING))
+        if expected is _MISSING:
+            return False
+        actual = _json_pointer(document, pointer)
+        if op == "exists":
+            passed = isinstance(expected, bool) and ((actual is not _MISSING) is expected)
+        elif actual is _MISSING:
+            passed = False
+        elif op == "equals":
+            passed = _json_equal(actual, expected)
+        elif op == "not_equals":
+            passed = not _json_equal(actual, expected)
+        elif op == "greater_or_equal":
+            passed = _json_number(actual) and _json_number(expected) and actual >= expected
+        elif op == "less_or_equal":
+            passed = _json_number(actual) and _json_number(expected) and actual <= expected
+        else:
+            passed = False
+        if not passed:
+            return False
+    return True
+
+
+def _verify_eval_events(spec: dict, run: dict, attempt_events: list,
+                        final_turn: dict) -> list[str]:
+    """Reproduce a verify metric from the exported final-attempt request/result pair."""
+    label = spec.get("name") or spec.get("definition_id") or "?"
+    evidence = run.get("evidence")
+    if not isinstance(evidence, dict):
+        return [f"verify evaluation {label} has no structured relay evidence"]
+    provider = final_turn.get("provider_node_id")
+    attempt = final_turn.get("attempt")
+    tool = spec.get("tool")
+    arguments = spec.get("arguments")
+    if (not isinstance(provider, str) or not provider
+            or not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0):
+        return [f"verify evaluation {label} has no valid final-attempt identity"]
+    if (evidence.get("provider_node_id") != provider or evidence.get("attempt") != attempt
+            or evidence.get("tool") != tool):
+        return [f"verify evaluation {label} evidence is not tied to the final leased attempt"]
+
+    requests = []
+    for item in attempt_events:
+        event = item.get("event") if isinstance(item, dict) else None
+        seq = item.get("seq") if isinstance(item, dict) else None
+        if (isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0
+                and item.get("turn_id") == final_turn.get("id")
+                and isinstance(event, dict)
+                and event.get("type") == "goal.verify.request"
+                and event.get("provider_node_id") == provider
+                and event.get("attempt") == attempt
+                and event.get("tool") == tool
+                and _json_equal(event.get("arguments", _MISSING), arguments)
+                and isinstance(event.get("call_id"), str) and event["call_id"]):
+            requests.append((seq, event))
+    if not requests:
+        return [f"verify evaluation {label} has no matching exported final-attempt request"]
+    if len({seq for seq, _event in requests}) != len(requests):
+        return [f"verify evaluation {label} has ambiguous duplicate request sequences"]
+    requests.sort(key=lambda item: item[0])
+    request_seq, request = requests[-1]
+    call_id = request["call_id"]
+    if (evidence.get("request_seq") != request_seq
+            or evidence.get("call_id") != call_id):
+        return [f"verify evaluation {label} does not name the final matching request"]
+
+    results = []
+    for item in attempt_events:
+        event = item.get("event") if isinstance(item, dict) else None
+        seq = item.get("seq") if isinstance(item, dict) else None
+        if (isinstance(seq, int) and not isinstance(seq, bool) and seq > request_seq
+                and item.get("turn_id") == final_turn.get("id")
+                and isinstance(event, dict)
+                and event.get("type") == "goal.verify.result"
+                and event.get("provider_node_id") == provider
+                and event.get("attempt") == attempt
+                and event.get("tool") == tool and event.get("call_id") == call_id):
+            results.append((seq, event))
+    if not results:
+        return [f"verify evaluation {label} has no matching exported result"]
+    if len({seq for seq, _event in results}) != len(results):
+        return [f"verify evaluation {label} has ambiguous duplicate result sequences"]
+    results.sort(key=lambda item: item[0])
+    result_seq, result_event = results[-1]
+    if evidence.get("result_seq") != result_seq:
+        return [f"verify evaluation {label} does not name the final matching result"]
+    result = result_event.get("result")
+    if result_event.get("success") is not True or not isinstance(result, dict):
+        return [f"verify evaluation {label} exported result was not successful"]
+    if not _json_checks_pass(result, spec.get("checks")):
+        return [f"verify evaluation {label} does not pass when recomputed from exported events"]
+    return []
 
 
 def _show(goal: dict, as_json: bool) -> None:
@@ -593,9 +756,10 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 f"evaluation {spec.get('name') or definition_id} body does not match its "
                 "immutable definition hash")
             continue
-        # File v1 is executed by deterministic relay code, never by the acting harness. A random
-        # nonempty node name is not proof of independent evaluation in a release artifact.
-        expected_evaluator = "relay" if spec.get("type") in ("file", "json") else None
+        # These evaluators are executed by deterministic relay code, never by the acting harness.
+        # A random nonempty node name is not proof of independent evaluation in a release artifact.
+        expected_evaluator = (
+            "relay" if spec.get("type") in ("file", "json", "verify") else None)
         accepted = [run for run in runs if isinstance(run, dict)
                     and run.get("accepted") is True and run.get("passed") is True
                     and run.get("state") == "passed"
@@ -614,6 +778,9 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"evaluation {spec.get('name') or definition_id or definition_hash or '?'} has no "
                 "accepted passing run from the final turn for the final result commit")
+        elif spec.get("type") == "verify":
+            for run in accepted:
+                failures.extend(_verify_eval_events(spec, run, attempt_events, final_turn))
 
     # The checks above prove that every final metric has a passing witness. Training safety needs
     # the converse too: every row labelled authoritative must be one of this Goal's immutable
@@ -655,7 +822,7 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"accepted evaluation run {run_id or index} does not match the immutable "
                 "Goal eval manifest")
-        elif (spec.get("type") in ("file", "json")
+        elif (spec.get("type") in ("file", "json", "verify")
               and run.get("evaluator_node_id") != "relay"):
             failures.append(
                 f"accepted evaluation run {run_id or index} was not authored by the relay")
