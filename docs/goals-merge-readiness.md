@@ -8,8 +8,8 @@ The detailed physical artifacts are indexed in
 ## Tested code revisions
 
 - Public worker/CLI: `7d06ebfca1d8bfbef7e43a82cd235db2e30ed6e0`
-- Public acceptance harness: `b8dd52d722ea370c3aae410ab009786c8433baea`
-- Private relay: `6a93514b9b8d357bab51889e25e5549d0a4ed990`
+- Public acceptance harness: `d772a71997585d3174228c7328c58a7797974012`
+- Private relay: `797d66ae71bc7f54cc0af57e1ed0beb67c0e61e9`
 - Both `grid-goal-distributed` branch heads were clean and pushed when these gates completed. The
   commits after the public worker/CLI revision change only tests and evidence documentation, not
   shipped worker behavior.
@@ -19,12 +19,13 @@ The detailed physical artifacts are indexed in
 | Gate | Result | What it proves |
 |---|---:|---|
 | Full public suite | 3,344 passed, 57 skipped, 7 deselected | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
-| Private runbook release bundle | 161 passed (351.17s) | Goal creation, claims, retries, pause/cancel and duplicate-settlement races, budgets, subgoals and inherited tool authority, nested required-child propagation, sibling cancellation and explicit resume refusal, recoverable nested fan-in conflicts, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, Git ref idempotency, and recovery from a relay death during continuation preparation |
+| Private runbook release bundle | 166 passed (440.12s) | Goal creation, claims, retries, pause/cancel and duplicate-settlement races, budgets, subgoals and inherited tool authority, nested required-child propagation, sibling cancellation and explicit resume refusal, recoverable nested fan-in conflicts, concurrent child settlement on independent database connections, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, Git ref idempotency, and recovery from a relay death during continuation preparation |
+| Relay Goal feature discovery | 1 passed | `/server/info` advertises additive `goals/v1` support for safe canary and fleet rollout |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
-| Cross-repository distributed matrix | 21 passed (354.74s) | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
+| Cross-repository distributed matrix | 21 passed (393.47s) | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 
 The full public suite ran against the exact public runtime revision; the private runbook bundle and
 21-scenario matrix ran uninterrupted against the private and public-harness revisions above. The
@@ -108,8 +109,11 @@ The matrix harness also treats an atomically replaced workspace as a transient p
 cancels every Goal created by a failed scenario during teardown. One assertion failure therefore
 cannot leak queued work into the next scenario and create a misleading cascade of cross-test claims.
 Its provider disks live under an atomically reserved one-character `/private/tmp` root, with a hard
-31-character assertion on every task root. The uninterrupted 21-scenario rerun passed in 354.74
+31-character assertion on every task root. The uninterrupted 21-scenario rerun passed in 393.47
 seconds without exercising the macOS path depth that can make sandbox commands fail with `E2BIG`.
+Before that final run, both protocol-drift handoff scenarios passed together three times against
+fresh relay processes (6/6), and four focused client tests passed for runtime quarantine recovery,
+stale-claim decline, backward-compatible capability revalidation, and token refresh during decline.
 
 The historical repository-wide private sweep is not used as a false green gate. The broader 20-file
 compatibility sweep passed 684 tests and failed four: three domain-claim fixtures received `204`
@@ -119,7 +123,7 @@ final child validation/schema/yield fixes. The candidate removes the runtime-dep
 assumption: the event encoder now explicitly refuses excessive nesting, and its complete 59-test
 suite passes. The unrelated three domain fixtures remain historical baseline failures rather than a
 Goal release gate. The 684-test sweep ran at private revision `2bd0479`; later Goal-specific
-hardening is validated by the exact 161-test private release bundle and complete 21-scenario
+hardening is validated by the exact 166-test private release bundle and complete 21-scenario
 cross-repository matrix above.
 Other stale legacy tests on current `main` also independently fail against current contracts, such as
 constructing `AccountRow(node_id=...)` after the model moved to `user_id`. The dedicated Goal suite,
