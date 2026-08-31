@@ -353,3 +353,25 @@ Goal because the server preflight correctly stopped before creation.
   failures plus four passes. The final `verify` run was relay-authored and bound to C's exact turn,
   attempt, tool, arguments, call id, request sequence and result sequence. Offline verification
   independently selected the same exported request/result pair and recomputed all four predicates.
+
+## 2026-08-31 — remote C launcher and 22-scenario rerun
+
+- Public candidate `a33302ce859595a7c4b1e825c6e8c75d4cabf534` and private relay
+  `374a3125f9296e453d8a340975eea14a78ad1bd2` passed the complete 22-scenario cross-repository Goal
+  matrix: 22/22 in 337.17 seconds.
+- The first uninterrupted invocation passed 21/22 in 327.09 seconds. The failing Codex protocol-
+  drift assertion observed a safe transient `running` state after one worker logged local
+  quarantine while a sibling pre-quarantine long-poll was still declining its stale delivery. The
+  gate now waits for all finite stale polls to drain while requiring the same turn at attempt 1;
+  both Claude-to-Codex and Codex-to-Claude drift scenarios then passed together (2/2 in 24.06s).
+- The Machine C launcher now has an integrated `--cloudflared` mode. It binds the relay only to
+  loopback, discovers the generated HTTPS root, verifies the public health route before revealing
+  either worker credential, drains tunnel logs, supervises relay and tunnel shutdown together, and
+  refuses a credential-suppressing Quick Tunnel restart whose hostname would change.
+- The physical launcher suite passed 34/34; the focused Goal CLI/native-harness/launcher bundle
+  passed 104/104; repository lint passed. The ordinary sandboxed full-suite attempt was discarded
+  as release evidence because optional MLX aborted the interpreter and loopback-proxy tests were
+  denied by the sandbox; the same focused proxy tests passed when loopback was permitted.
+- This is software evidence, not the outstanding physical result. `forge-gpu-2x4090` is online as
+  Machine C, but no disposable Goal relay has yet been launched on it and no A-to-B-to-C physical
+  Goal was created in this entry.

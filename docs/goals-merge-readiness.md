@@ -7,28 +7,27 @@ The detailed physical artifacts are indexed in
 
 ## Tested code revisions
 
-- Public worker/CLI and acceptance harness: `e571870d830d67bdc31a59db073161848c417ee2`
-- Private relay: `b56f0fc04780bc6ebb424760b43c05e3de545ee7`
+- Public worker/CLI and acceptance harness: `a33302ce859595a7c4b1e825c6e8c75d4cabf534`
+- Private relay: `374a3125f9296e453d8a340975eea14a78ad1bd2`
 - Both tested runtime revisions were clean and pushed when these gates completed.
 
 ## Software gates
 
 | Gate | Result | What it proves |
 |---|---:|---|
-| Full public suite | 3,355 passed, 57 skipped, 7 deselected (427.74s locally); exact-head GitHub CI passed Python 3.11, 3.12, 3.13, lint and Windows | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
-| Private runbook release bundle | 174 passed (271.50s locally); exact-head GitHub relay CI previously passed | Goal creation, claims, retries, pause/cancel and duplicate-settlement races, budgets, subgoals and inherited tool authority, nested required-child propagation, sibling cancellation and explicit resume refusal, recoverable nested fan-in conflicts, concurrent child settlement on independent database connections, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, Git ref idempotency, and recovery from a relay death during continuation preparation |
+| Full public suite | Candidate `a33302c` passed exact-head GitHub CI on Python 3.11, 3.12, 3.13, lint and Windows | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
+| Private runbook release bundle | 184 passed (316.39s locally); exact-head GitHub relay CI passed | Goal creation, claims, retries, pause/cancel and duplicate-settlement races, budgets, subgoals and inherited tool authority, nested required-child propagation, sibling cancellation and explicit resume refusal, recoverable nested fan-in conflicts, concurrent child settlement on independent database connections, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, Git ref idempotency, and recovery from a relay death during continuation preparation |
 | Relay Goal feature discovery | 1 passed | `/server/info` advertises additive `goals/v1` support for safe canary and fleet rollout |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
-| Cross-repository distributed matrix | 21 passed (307.18s) | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
+| Cross-repository distributed matrix | 22 passed (337.17s) at the exact revisions above | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 | Worker runtime provenance | 41 focused public checks plus the full suites above | Every required physical attempt can be gated to a clean Grid Git revision and exact native Codex/Claude version; forged event metadata is removed and replaced from the authenticated node registry |
 | Pre-start claim recovery | 212 relay Goal/reclaim checks plus a real four-node cross-repository scenario | Three machines can claim and disappear before native start without spending attempt 1; the fourth worker completes attempt 1, stale claim ids remain fenced, and only actual Codex/Claude executions enter retry/training evidence |
 
-The full public suite ran against the exact public runtime revision in GitHub Actions on Python
-3.11, 3.12 and 3.13; the private runbook bundle and 21-scenario matrix ran uninterrupted against the
-private and public-harness revisions above. The
+The public suite ran in GitHub Actions on Python 3.11, 3.12 and 3.13; the private runbook bundle and
+22-scenario matrix ran uninterrupted against the private and public-harness revisions above. The
 evaluator audit also proves that:
 
 - completion checks read the relay-resolved immutable result commit rather than a provider-supplied
@@ -73,7 +72,7 @@ evaluator audit also proves that:
   advertise Codex-only claim capacity, reapplies that exclusion after credential refresh, and omits
   the full-provider pause heartbeat while Codex remains available.
 
-The final 21-scenario matrix was rerun in one uninterrupted invocation against both candidate
+The final 22-scenario matrix was rerun in one uninterrupted invocation against both candidate
 runtime revisions after the mixed-harness capacity change. It includes:
 
 - a real relay timer recovering the exact stale `preparing` row left by a continuation-preparation
@@ -115,7 +114,7 @@ The matrix harness also treats an atomically replaced workspace as a transient p
 cancels every Goal created by a failed scenario during teardown. One assertion failure therefore
 cannot leak queued work into the next scenario and create a misleading cascade of cross-test claims.
 Its provider disks live under an atomically reserved one-character `/private/tmp` root, with a hard
-31-character assertion on every task root. The uninterrupted 21-scenario rerun passed in 301.54
+31-character assertion on every task root. The uninterrupted 22-scenario rerun passed in 337.17
 seconds without exercising the macOS path depth that can make sandbox commands fail with `E2BIG`.
 Before that final run, both protocol-drift handoff scenarios passed together three times against
 fresh relay processes (6/6), and four focused client tests passed for runtime quarantine recovery,
@@ -131,7 +130,7 @@ final child validation/schema/yield fixes. The candidate removes the runtime-dep
 assumption: the event encoder now explicitly refuses excessive nesting, and its complete 59-test
 suite passes. The unrelated three domain fixtures remain historical baseline failures rather than a
 Goal release gate. The 684-test sweep ran at private revision `2bd0479`; later Goal-specific
-hardening is validated by the exact 166-test private release bundle and complete 21-scenario
+hardening is validated by the exact 184-test private release bundle and complete 22-scenario
 cross-repository matrix above.
 Other stale legacy tests on current `main` also independently fail against current contracts, such as
 constructing `AccountRow(node_id=...)` after the model moved to `user_id`. The dedicated Goal suite,
@@ -184,19 +183,17 @@ computers and distinct local disks for Codex to Claude to Codex, with two abrupt
 single-host four-node matrix proves the protocol and harness integration but cannot prove laptop
 sleep, three independent filesystems, or the Claude binary on a second physical worker.
 
-A hosted-remote preflight on 2026-08-30 proved that the currently deployed relay behind
-`nd-task-e2e-pp-0830` does not advertise `goals/v1`; the public CLI correctly refused with “This
-grid's relay does not support Grid Goal yet.” The new remote canary `forge` was not yet visible to
-the signed-in Machine A account after `grid sync`. Therefore the preferred remote physical gate
-requires both a Forge membership invitation and deployment of private relay PR #19. Neither is a
-worker-side, LAN, SSH, or pairing-bundle problem, and neither is evidence against the tested
-candidate runtime.
+A hosted-remote preflight on 2026-08-31 found `forge` and all three intended physical nodes, but its
+currently deployed relay does not advertise `goals/v1`; the public CLI correctly refused with
+“This grid's relay does not support Grid Goal yet.” The preferred hosted physical gate therefore
+still requires deployment of private relay PR #19. The pre-merge fallback is a disposable relay on
+Machine C; its launcher can now supervise a loopback-only Cloudflare Quick Tunnel, verify public
+reachability, and mint separate A/B identities without SSH.
 
 The no-SSH lab now accepts `--joining-workers 2`, persists separate B/C credentials across relay
-restarts, and refuses missing or duplicate physical node ids. Its 369-test Goal preflight and 22
-lab-specific tests passed. At the time of this record, only the relay-host Mac task identities were
-online; no second and third physical worker were available, so the hardware event itself remains
-unexecuted.
+restarts, and refuses missing or duplicate physical node ids. Its 369-test Goal preflight and 34
+lab-specific tests passed. Machine C is visible as `forge-gpu-2x4090`, but the disposable relay has
+not yet been launched locally on C, so the three-machine hardware event remains unexecuted.
 
 Do not label the release gate complete until that physical artifact passes, or until the project
 owner explicitly waives it. Merging before then is an informed MVP decision, not the same claim as
