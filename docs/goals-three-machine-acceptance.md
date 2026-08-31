@@ -150,6 +150,55 @@ When using the disposable no-SSH lab with machine A as the relay host, start it 
 Never paste one bundle on both machines: shared credentials collapse two physical computers into
 one relay identity and invalidate the acceptance result.
 
+For an internet-separated run with machine C hosting both the disposable relay and the final Codex
+worker, expose C's loopback port through an HTTPS reverse proxy or encrypted tunnel. Do not send the
+printed bearer credentials over raw public HTTP. Keep the tunnel and relay alive for the whole run;
+because C owns durable state in this topology, only A and B may be killed. Pin the tested revisions
+before starting:
+
+```bash
+# Machine C — clean public/private PR checkouts; record both exact SHAs before starting.
+# GOAL_RELAY_URL is an HTTPS root forwarding to C's 127.0.0.1:8090.
+uv run python tests/e2e_cross_repo/physical_goal_lab.py relay \
+  --relay-repo /path/to/autonomous-grid-cli \
+  --root /tmp/grid-goal-c-relay --joining-workers 2 \
+  --bind-host 127.0.0.1 --advertise-url "$GOAL_RELAY_URL"
+```
+
+The two bundles are for A and B only. C uses the relay home printed by the launcher as its distinct
+worker identity and serves a Responses-capable local model through the same disposable Grid:
+
+```bash
+# Machine C, another terminal. Replace the model with an already-pulled local model only if its
+# join-time probe advertises Responses support.
+uv run grid pull \
+  unsloth/Qwen3.6-27B-MTP-GGUF:Qwen3.6-27B-UD-Q5_K_XL.gguf
+GRID_HOME=/tmp/grid-goal-c-relay/grid-home-relay \
+GRID_TASK_AGENT_KINDS=codex \
+uv run grid join goal-physical --serve Qwen3.6-27B-UD-Q5_K_XL.gguf \
+  --advertise-as qwen3.6-27b --tasks \
+  --name goal-machine-c --max-tasks 1 --tasks-root /tmp/grid-goal-c-work
+
+# Machine A consumes worker bundle 1; Machine B consumes worker bundle 2. Use the hidden prompt or
+# an owner-only --bundle-file, then start one harness per machine from its clean branch checkout.
+uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \
+  --home /tmp/grid-goal-worker-a
+GRID_HOME=/tmp/grid-goal-worker-a GRID_TASK_AGENT_KINDS=codex \
+uv run grid join goal-physical --tasks-only --name goal-machine-a \
+  --max-tasks 1 --tasks-root /tmp/grid-goal-a-work
+
+uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \
+  --home /tmp/grid-goal-worker-b
+GRID_HOME=/tmp/grid-goal-worker-b GRID_TASK_AGENT_KINDS=claude \
+uv run grid join goal-physical --tasks-only --name goal-machine-b \
+  --max-tasks 1 --tasks-root /tmp/grid-goal-b-work
+```
+
+Before creating a Goal, all three machines must see three distinct online engine identities from
+`GRID_HOME=<that-machine-home> uv run grid engines goal-physical --json`. C's local model must show
+the Responses dialect, and the canary checks below still apply with `goal-physical` substituted for
+`forge`.
+
 ```bash
 # A and C
 GRID_TASK_AGENT_KINDS=codex grid join <grid> --tasks --tasks-root <local-path>
