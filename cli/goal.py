@@ -984,6 +984,44 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"completed Goal evidence contains cancellation marker {index}")
 
+    # A relay start proves which native harness crossed the execution fence; it does not prove that
+    # harness reached its own Goal evaluator. Require the exact native checkpoint from the terminal
+    # attempt of every accepted turn. This is the bridge that makes Grid orchestration reuse Codex
+    # Goal and Claude /goal rather than silently treating an ordinary agent exit as success.
+    for index, turn in enumerate(turns, 1):
+        if not isinstance(turn, dict):
+            continue
+        turn_id = turn.get("id")
+        attempt = turn.get("attempt")
+        provider = turn.get("provider_node_id")
+        harness = turn.get("agent_kind")
+        if (not isinstance(turn_id, str) or not isinstance(attempt, int)
+                or isinstance(attempt, bool) or attempt <= 0
+                or not isinstance(provider, str) or not provider
+                or harness not in ("codex", "claude")):
+            continue
+        native_type = "goal.slice.completed" if harness == "codex" else "goal.claude.evaluated"
+        native = [
+            item["event"] for item in attempt_events
+            if (isinstance(item, dict) and item.get("turn_id") == turn_id
+                and isinstance(item.get("event"), dict)
+                and item["event"].get("type") == native_type
+                and item["event"].get("attempt") == attempt
+                and item["event"].get("provider_node_id") == provider)
+        ]
+        if len(native) != 1:
+            failures.append(
+                f"turn {index} has {len(native)} terminal {harness} Goal checkpoints; expected "
+                "exactly one")
+            continue
+        if index == len(turns):
+            if harness == "codex" and native[0].get("status") != "complete":
+                failures.append("final Codex Goal checkpoint is not complete")
+            if harness == "claude" and (
+                    native[0].get("met") is not True
+                    or native[0].get("impossible") is not False):
+                failures.append("final Claude Goal checkpoint does not prove the condition met")
+
     # A killed provider cannot appear as the terminal provider on the reclaimed row. Count it only
     # when the relay-authored retry and attempt-start records agree; either event alone is not
     # sufficient proof that another physical worker executed the Goal.
