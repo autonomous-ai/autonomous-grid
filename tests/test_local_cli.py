@@ -11510,6 +11510,7 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
         "task": ["task", "get", "T1"],
         "project": ["project", "list"],
         "goal": ["goal", "list"],
+        "relay": ["relay", "info"],
     }
     # A reason must be None or real text. An empty one would be masked by the `or` in ``local_stub``
     # *and* skipped by the `is None` filter below — the one state that is invisible in both

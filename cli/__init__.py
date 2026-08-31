@@ -31,6 +31,7 @@ from .remote_request import (
     cmd_remote_video,
 )
 from .remote_router import cmd_remote_router
+from .remote_relay import cmd_remote_relay
 from .agent import (
     cmd_agent_install,
     cmd_agent_status,
@@ -95,6 +96,7 @@ __all__ = [
     "cmd_remote_project",
     "cmd_remote_task",
     "cmd_remote_router",
+    "cmd_remote_relay",
     "cmd_remote_chat",
     "cmd_remote_image",
     "cmd_remote_edit",

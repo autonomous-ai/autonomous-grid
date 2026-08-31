@@ -212,6 +212,23 @@ did not create the grid sees it blank. `grid info --env` prints your access toke
 `OPENAI_BASE_URL` as the grid's relay base + `/relay/v1`, so any OpenAI SDK can call it.
 See [ADR 0003](./adr/0003-remote-grid-lifecycle.md).
 
+## Relay information
+
+```
+grid relay info [relay-id|relay-url|grid] [--json]
+```
+
+**Remote-only and read-only.** Shows one relay and every locally known Grid configured to use it.
+With no argument it uses the active Grid's relay, or the sole relay when that is unambiguous. The
+argument may be a relay id, relay URL, Grid name, or Grid id. Human output has stable `relay_id`,
+`relay_url`, and `grids` fields followed by the matching Grid names and ids; `--json` emits those
+same fields without credentials.
+
+Relay ownership is stored once: **Goal → Grid → Relay**. A Goal does not copy `relay_id`. During a
+rolling upgrade, records without a server-issued relay id are grouped by their normalized relay URL,
+so existing and newly refreshed Grids remain visible together. Run `grid sync` when a Grid's local
+record has no relay information.
+
 ## Engines
 
 ```

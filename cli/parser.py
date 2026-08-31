@@ -44,6 +44,7 @@ from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from . import project_arg
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .remote_grid import cmd_remote_members
+from .remote_relay import cmd_remote_relay
 from .remote_price import cmd_remote_price
 from .remote_project import cmd_remote_project
 from .remote_task import cmd_remote_task
@@ -137,6 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_state(sub)
     _add_auth(sub)
     _add_members(sub)
+    _add_relay(sub)
     _add_price(sub)
     _add_project(sub)
     _add_task(sub)
@@ -542,6 +544,27 @@ def _add_state(sub) -> None:
     use.add_argument("--none", action="store_true", help="Clear the active grid for the current mode.")
     use.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     use.set_defaults(handler=cmd_use)
+
+
+def _add_relay(sub) -> None:
+    relay = sub.add_parser(
+        "relay",
+        help="Show a relay and the Grids that use it (remote)",
+    )
+    actions = relay.add_subparsers(dest="subcommand", required=True)
+    info = actions.add_parser(
+        "info",
+        help="Show one relay and every Grid configured to use it",
+    )
+    info.add_argument(
+        "relay",
+        nargs="?",
+        default=None,
+        help=("Relay id or URL. A Grid name/id also selects that Grid's relay; omit for the "
+              "active Grid's relay or the sole configured relay."),
+    )
+    info.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    info.set_defaults(handler=cmd_remote_relay)
 
 
 def _add_auth(sub) -> None:

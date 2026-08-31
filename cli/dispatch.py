@@ -139,6 +139,9 @@ REMOTE_ONLY: dict[str, str | None] = {
     # (ADR 0032). A local grid has neither, so this is sign-in-gated like the rest.
     "task": None,
     "goal": None,
+    # Relay ownership is remote metadata: Goal -> Grid -> Relay. The command reads the Grid
+    # records already fetched at login and never adds a second relay pointer to a Goal.
+    "relay": None,
     # A project and its members are rows in the RELAY's own database (ADR 0033 D-a) — deliberately
     # not the control plane's — and the repository they name is served by the relay's git plane. A
     # local grid has none of it.
