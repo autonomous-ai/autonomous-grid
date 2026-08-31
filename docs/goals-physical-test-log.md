@@ -29,8 +29,8 @@ access tokens, and local credentials must not be added here.
   `deepseek/deepseek-v4-flash-0731` (1,048,576-token context) and `qwen/qwen3.8-27b`
   (1,000,000-token context). It is an inference server, not counted as a physical Goal executor.
 - Public worker/CLI branch head `e571870d830d67bdc31a59db073161848c417ee2` passed 3,355 public
-  tests and the 21-scenario cross-repository Goal matrix. Private relay head `2e69f3c` passed the
-  170-test relay release bundle and the same matrix. Exact-head GitHub CI passed for both PRs.
+  tests and the 21-scenario cross-repository Goal matrix. Private relay head `b56f0fc` passed the
+  171-test relay release bundle and the same matrix. Exact-head GitHub CI passed for both PRs.
 - Machine A was respawned from the current clean public branch head with Codex-only task policy,
   task root `/private/tmp/fg-a`, and task claiming enabled. Machines B and C must fetch that same
   branch head and respawn before the physical Goal is created; a node merely remaining online is
