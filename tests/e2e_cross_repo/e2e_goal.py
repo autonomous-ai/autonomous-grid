@@ -1483,17 +1483,19 @@ def test_child_goal_reclaims_same_turn_codex_to_claude_then_fans_in_to_codex(
 
 
 def test_parent_fans_out_parallel_codex_and_claude_children_then_merges_both(
-        relay, owner_token, spawn_goal_provider, tmp_path):
-    """Two required sibling Goals run concurrently and gate one deterministic parent fan-in."""
+        relay, owner_token, spawn_goal_provider, spawn_inference_provider, tmp_path):
+    """Parallel children use distinct harnesses, disks, capabilities, and Grid model providers."""
     from remote import relay as relay_client
     from remote import task_repo
 
     project_id = relay_client.create_project(
         relay, owner_token, name="p-subgoal-parallel-fanout")['id']
     H.seed_trunk(relay, owner_token, project_id)
+    child_model_provider = spawn_inference_provider("B", "fake-grid-child-model")
+    main_model_provider = spawn_inference_provider("C", "fake-grid-model")
     node_a = spawn_goal_provider(
         "A", agent_kinds="codex", scenario="subgoal_fanout",
-        disk_label="fanout-A", one_task=True)
+        disk_label="fanout-A", one_task=True, advertise_models=False)
     parent = relay_client.create_goal(
         relay, owner_token, project_id=project_id,
         objective="Build two release halves concurrently with specialized child Goals",
@@ -1528,10 +1530,10 @@ def test_parent_fans_out_parallel_codex_and_claude_children_then_merges_both(
 
     node_b = spawn_goal_provider(
         "B", agent_kinds="codex", scenario="subgoal_fanout", disk_label="fanout-B",
-        codex_capabilities="fanout_codex", one_task=True)
+        codex_capabilities="fanout_codex", one_task=True, advertise_models=False)
     node_c = spawn_goal_provider(
         "C", agent_kinds="claude", scenario="subgoal_fanout", disk_label="fanout-C",
-        claude_capabilities="fanout_claude", one_task=True)
+        claude_capabilities="fanout_claude", one_task=True, advertise_models=False)
 
     def both_children_running():
         codex_rows = _tasks(relay, owner_token, project_id, codex_child["id"])
@@ -1541,11 +1543,17 @@ def test_parent_fans_out_parallel_codex_and_claude_children_then_merges_both(
 
     assert H.wait_for(both_children_running, timeout=15), (
         f"children never overlapped; B output:\n{node_b.output()}\nC output:\n{node_c.output()}")
-    completed_children = H.wait_for(lambda: (
-        relay_client.get_goal(relay, owner_token, codex_child["id"]),
-        relay_client.get_goal(relay, owner_token, claude_child["id"]),
-    ) if all(relay_client.get_goal(relay, owner_token, child["id"])["status"] == "complete"
-             for child in (codex_child, claude_child)) else None, timeout=60)
+    def completed_or_provider_failed():
+        if child_model_provider.errors or main_model_provider.errors:
+            return "provider_failed"
+        children = tuple(relay_client.get_goal(
+            relay, owner_token, child["id"]) for child in (codex_child, claude_child))
+        return children if all(child["status"] == "complete" for child in children) else None
+
+    completed_children = H.wait_for(completed_or_provider_failed, timeout=60)
+    assert completed_children != "provider_failed", (
+        f"inference provider failed: child={child_model_provider.errors}, "
+        f"main={main_model_provider.errors}")
     assert completed_children, (
         f"parallel children did not finish; B output:\n{node_b.output()}\nC output:\n{node_c.output()}")
 
@@ -1562,9 +1570,47 @@ def test_parent_fans_out_parallel_codex_and_claude_children_then_merges_both(
         assert all(run["passed"] and run["accepted"]
                    for run in child_evidence["eval_runs"])
 
+    codex_evidence = relay_client.get_goal_evidence(relay, owner_token, codex_child["id"])
+    claude_evidence = relay_client.get_goal_evidence(relay, owner_token, claude_child["id"])
+    assert codex_evidence["inference"] == [{
+        "turn_id": codex_rows[0]["id"], "model": "fake-grid-child-model",
+        "provider_node_id": child_model_provider.node_id, "state": "completed",
+        "goal_attempt": 1, "goal_executor_node_id": node_b.node_id,
+        "goal_agent_kind": "codex", "requests": 1, "tokens_in": 7, "tokens_out": 3,
+    }]
+    assert claude_evidence["inference"] == [{
+        "turn_id": claude_rows[0]["id"], "model": "fake-grid-model",
+        "provider_node_id": main_model_provider.node_id, "state": "completed",
+        "goal_attempt": 1, "goal_executor_node_id": node_c.node_id,
+        # Anthropic settlement preserves the relay's anti-underreporting input estimate (9)
+        # while accepting the provider's measured output usage (3).
+        "goal_agent_kind": "claude", "requests": 1, "tokens_in": 9, "tokens_out": 3,
+    }]
+    assert not child_model_provider.errors and not main_model_provider.errors
+    observed_model_calls = H.wait_for(lambda: (
+        [record for record in child_model_provider.records
+         if (record.get("body") or {}).get("input")
+         == "prove Codex child inference routing"],
+        [record for record in main_model_provider.records
+         if ((record.get("body") or {}).get("messages") or [{}])[0].get("content")
+         == "prove Claude child inference routing"],
+    ) if (any((record.get("body") or {}).get("input")
+              == "prove Codex child inference routing"
+              for record in child_model_provider.records)
+          and any(((record.get("body") or {}).get("messages") or [{}])[0].get("content")
+                  == "prove Claude child inference routing"
+                  for record in main_model_provider.records)) else None, timeout=5)
+    assert observed_model_calls, "provider poll records did not catch up with settled evidence"
+    codex_model_calls, claude_model_calls = observed_model_calls
+    # The provider poll wire deliberately omits Goal ids; the relay alone owns that attribution.
+    # Match the unique probe body here, while the signed evidence assertions above fence it to the
+    # exact turn/attempt/executor. A registration warmup cannot satisfy both sides of that proof.
+    assert [record["wire_format"] for record in codex_model_calls] == ["responses"]
+    assert [record["wire_format"] for record in claude_model_calls] == ["anthropic"]
+
     node_d = spawn_goal_provider(
         "D", agent_kinds="codex", scenario="subgoal_fanout",
-        disk_label="fanout-D", one_task=True)
+        disk_label="fanout-D", one_task=True, advertise_models=False)
     complete = H.wait_for(lambda: _completed_goal(
         relay, owner_token, parent["id"]), timeout=60)
     assert complete, f"parent did not complete after parallel fan-in; D output:\n{node_d.output()}"

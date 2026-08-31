@@ -43,6 +43,7 @@ import subprocess
 import sys
 import time
 import uuid
+from urllib import request as urllib_request
 
 _TRANSCRIPT_NAME = re.compile(r"[^A-Za-z0-9]")
 
@@ -50,6 +51,23 @@ _TRANSCRIPT_NAME = re.compile(r"[^A-Za-z0-9]")
 def _emit(record: dict) -> None:
     sys.stdout.write(json.dumps(record) + "\n")
     sys.stdout.flush()
+
+
+def _exercise_grid_inference() -> None:
+    """Make one genuine Messages request through Claude's loopback Grid proxy."""
+    payload = json.dumps({
+        "model": os.environ["ANTHROPIC_MODEL"], "max_tokens": 16, "stream": False,
+        "messages": [{"role": "user", "content": "prove Claude child inference routing"}],
+    }, separators=(",", ":")).encode()
+    request = urllib_request.Request(
+        os.environ["ANTHROPIC_BASE_URL"].rstrip("/") + "/v1/messages",
+        data=payload, method="POST",
+        headers={"Authorization": f"Bearer {os.environ['ANTHROPIC_AUTH_TOKEN']}",
+                 "Content-Type": "application/json", "Accept": "application/json"})
+    with urllib_request.urlopen(request, timeout=20) as response:
+        answer = json.loads(response.read())
+    if answer.get("type") != "message" or answer.get("content", [{}])[0].get("text") != "grid inference ok":
+        raise RuntimeError(f"Claude received invalid Grid inference response: {answer!r}")
 
 
 # What this fake claims to be when asked. `resolve_binary()` gates on a minimum version since issue
@@ -301,6 +319,7 @@ def main() -> int:
             sys.stderr.write("fake Claude received an invalid child Goal assignment\n")
             return 2
         if scenario == "subgoal_fanout":
+            _exercise_grid_inference()
             pathlib.Path("CLAUDE_CHILD.md").write_text(
                 "# Claude C\n\nClaude C completed its parallel child on an isolated Grid root.\n")
             # Match Codex B's synchronization window so the driver can observe both relay rows in

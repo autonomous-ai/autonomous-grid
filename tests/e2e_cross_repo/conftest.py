@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -48,6 +49,97 @@ def _advertise_goal_models(relay: str, token: str, node_id: str,
     }
     relay_client.register_node(
         relay, token, node_id, models=list(models), capabilities=capabilities, role="provider")
+
+
+class _FakeInferenceProvider:
+    """One real provider poll/settle loop for a single deterministic E2E model."""
+
+    def __init__(self, relay: str, token: str, node_id: str, model: str):
+        self.relay = relay
+        self.token = token
+        self.node_id = node_id
+        self.model = model
+        self.records: list[dict] = []
+        self.errors: list[str] = []
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        import httpx
+        from remote import relay as relay_client
+
+        while not self.stop.is_set():
+            try:
+                # The relay holds an empty provider poll for 30 seconds. Keep the client's five-
+                # second safety margin: timing out first can race a newly assigned job, leaving the
+                # row `streaming` after its HTTP response was discarded with the socket.
+                job = relay_client.poll(self.relay, self.token)
+                if job is None:
+                    continue
+                body = job.get("body") or {}
+                if body.get("model") != self.model:
+                    raise RuntimeError(
+                        f"provider {self.node_id} received model {body.get('model')!r}, "
+                        f"expected {self.model!r}")
+                dialect = job.get("wire_format")
+                if dialect == "responses":
+                    answer = {
+                        "id": f"resp-{job['transaction_id']}", "object": "response",
+                        "created_at": int(time.time()), "status": "completed",
+                        "model": self.model,
+                        "output": [{
+                            "id": f"msg-{job['transaction_id']}", "type": "message",
+                            "status": "completed", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "grid inference ok",
+                                         "annotations": [], "logprobs": []}],
+                        }],
+                        "usage": {"input_tokens": 7, "output_tokens": 3,
+                                  "total_tokens": 10},
+                    }
+                elif dialect == "anthropic":
+                    answer = {
+                        "id": f"msg-{job['transaction_id']}", "type": "message",
+                        "role": "assistant", "model": self.model,
+                        "content": [{"type": "text", "text": "grid inference ok"}],
+                        "stop_reason": "end_turn", "stop_sequence": None,
+                        "usage": {"input_tokens": 7, "output_tokens": 3},
+                    }
+                else:
+                    answer = {
+                        "id": f"chatcmpl-{job['transaction_id']}",
+                        "object": "chat.completion", "model": self.model,
+                        "choices": [{"index": 0, "message": {
+                            "role": "assistant", "content": "grid inference ok"},
+                            "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 7, "completion_tokens": 3,
+                                  "total_tokens": 10},
+                    }
+                headers = {
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                }
+                attempt_token = job.get("provider_attempt_token")
+                if attempt_token:
+                    headers["X-Grid-Provider-Attempt"] = attempt_token
+                response = httpx.post(
+                    f"{self.relay}/relay/v1/response/{job['transaction_id']}",
+                    content=json.dumps(answer, separators=(",", ":")).encode(),
+                    headers=headers, timeout=10)
+                response.raise_for_status()
+                self.records.append({**job, "response": answer})
+            except relay_client.RelayError as exc:
+                if not self.stop.is_set():
+                    self.errors.append(f"{type(exc).__name__}: {exc}")
+                    self.stop.set()
+            except Exception as exc:  # noqa: BLE001 - preserve background failure for the test
+                if not self.stop.is_set():
+                    self.errors.append(f"{type(exc).__name__}: {exc}")
+                    self.stop.set()
+
+    def close(self) -> None:
+        self.stop.set()
+        self.thread.join(timeout=36)
 
 
 @pytest.fixture(scope="session")
@@ -157,6 +249,38 @@ def advertise_goal_models(relay, provider_nodes):
         return node_id
 
     return advertise
+
+
+@pytest.fixture
+def spawn_inference_provider(relay, owner_token, provider_nodes):
+    """Serve deterministic model bytes through the relay's real inference queue."""
+    providers: list[_FakeInferenceProvider] = []
+
+    # Session-scoped node identities retain the previous test's registrations. This scenario needs
+    # exclusive routes so its provider attribution proves something stronger than "a request ran".
+    for node_id, node_token in provider_nodes.values():
+        _advertise_goal_models(relay, node_token, node_id, [])
+
+    def spawn(label: str, model: str) -> _FakeInferenceProvider:
+        import httpx
+
+        # In production an inference engine and an agent worker may coexist, but they remain
+        # separately registered services. Use a dedicated node identity here so attribution can
+        # never collapse "the agent ran" into "that same process served its model request".
+        created = httpx.post(
+            f"{relay}/nodes", json={"role": "provider"},
+            headers={"Authorization": f"Bearer {owner_token}"}, timeout=10)
+        created.raise_for_status()
+        node_id = created.json()["node_id"]
+        node_token = H.token(f"inference-{label}", node_id)
+        _advertise_goal_models(relay, node_token, node_id, [model])
+        provider = _FakeInferenceProvider(relay, node_token, node_id, model)
+        providers.append(provider)
+        return provider
+
+    yield spawn
+    for provider in providers:
+        provider.close()
 
 
 @pytest.fixture(scope="session")
@@ -332,7 +456,8 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
     def _spawn(label: str, *, agent_kinds: str = "codex", scenario: str = "codex",
                disk_label: str | None = None, codex_capabilities: str = "",
                claude_capabilities: str = "", tool_origins: str = "",
-               one_task: bool = False, task_workers: int = 1):
+               one_task: bool = False, task_workers: int = 1,
+               advertise_models: bool = True):
         node_id, node_token = provider_nodes[label]
         task_root = goal_workspace_root / (disk_label or label)
         assert len(str(task_root)) <= 31, (
@@ -340,7 +465,8 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
         # This process emulates only the task/agent plane.  The separate registration emulates a
         # compatible Grid inference route and refreshes its heartbeat before each scenario; the
         # model-readiness scheduler must not infer model capacity merely from a task poller.
-        _advertise_goal_models(relay, node_token, node_id, _BASE_GOAL_MODELS)
+        if advertise_models:
+            _advertise_goal_models(relay, node_token, node_id, _BASE_GOAL_MODELS)
         env = {
             **os.environ,
             "PATH": (f"{fake_codex_bin}{os.pathsep}{fake_agent_bin}{os.pathsep}"

@@ -13,6 +13,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from urllib import request as urllib_request
 
 
 def emit(value: dict) -> None:
@@ -49,7 +50,24 @@ def save_history(value: list[dict]) -> None:
     history_path().write_text(json.dumps(value, separators=(",", ":")) + "\n")
 
 
-def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
+def _exercise_grid_inference(config: dict[str, str]) -> None:
+    """Make one genuine Responses request through the worker's loopback Grid proxy."""
+    payload = json.dumps({
+        "model": config["model"], "input": "prove Codex child inference routing",
+        "stream": False,
+    }, separators=(",", ":")).encode()
+    request = urllib_request.Request(
+        config["base_url"].rstrip("/") + "/responses", data=payload, method="POST",
+        headers={"Authorization": f"Bearer {os.environ['GRID_GOAL_API_KEY']}",
+                 "Content-Type": "application/json", "Accept": "application/json"})
+    with urllib_request.urlopen(request, timeout=20) as response:
+        answer = json.loads(response.read())
+    if answer.get("status") != "completed" or answer.get("model") != config["model"]:
+        raise RuntimeError(f"Codex received invalid Grid inference response: {answer!r}")
+
+
+def run_turn(node: str, call_tool=None, *, inference: dict[str, str] | None = None
+             ) -> tuple[str, str, int]:
     cwd = Path.cwd()
     history = load_history()
     scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
@@ -322,6 +340,9 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
             save_history(history)
             return "active", f"A spawned two independent child Goals: {child_ids}", 100
         if node == "B" and not history:
+            if not inference:
+                raise RuntimeError("Codex child received no Grid inference configuration")
+            _exercise_grid_inference(inference)
             (cwd / "CODEX_CHILD.md").write_text(
                 "# Codex B\n\nCodex B completed its parallel child on an isolated Grid root.\n")
             # Keep the relay row running long enough for the driver to prove the Claude sibling is
@@ -589,6 +610,7 @@ def main() -> int:
     early_pause = False
     initialized = False
     tool_calls = 0
+    inference: dict[str, str] | None = None
 
     def call_tool(name: str, arguments: dict) -> dict:
         nonlocal early_pause, tool_calls
@@ -634,7 +656,11 @@ def main() -> int:
             emit({"id": request["id"], "error": {
                 "code": -32600, "message": "Not initialized"}})
         elif method == "thread/start":
-            dynamic_tools = request.get("params", {}).get("dynamicTools") or []
+            params = request.get("params", {})
+            dynamic_tools = params.get("dynamicTools") or []
+            provider = ((params.get("config") or {}).get("model_providers") or {}).get("grid") or {}
+            if isinstance(provider.get("base_url"), str) and isinstance(params.get("model"), str):
+                inference = {"base_url": provider["base_url"], "model": params["model"]}
             rollout = rollout_path(thread_id)
             # Real Codex 0.150.1 persists dynamic tool declarations in the rollout and restores
             # them when a fresh app-server process resumes by path. Model that contract: otherwise
@@ -644,8 +670,12 @@ def main() -> int:
             }, separators=(",", ":")) + "\n")
             reply(request, {"thread": {"id": thread_id, "path": str(rollout)}})
         elif method == "thread/resume":
-            thread_id = request.get("params", {}).get("threadId") or thread_id
-            supplied = Path(request.get("params", {}).get("path") or "")
+            params = request.get("params", {})
+            thread_id = params.get("threadId") or thread_id
+            supplied = Path(params.get("path") or "")
+            provider = ((params.get("config") or {}).get("model_providers") or {}).get("grid") or {}
+            if isinstance(provider.get("base_url"), str) and isinstance(params.get("model"), str):
+                inference = {"base_url": provider["base_url"], "model": params["model"]}
             home = Path(os.environ["CODEX_HOME"]).resolve()
             if (not supplied.is_file() or not supplied.resolve().is_relative_to(home)
                     or not supplied.name.endswith(f"-{thread_id}.jsonl")):
@@ -678,7 +708,8 @@ def main() -> int:
                                                                "turn": {"id": str(uuid.uuid4())}}})
                 try:
                     bridge = call_tool if dynamic_tools else None
-                    native_status, output, tokens = run_turn(node, bridge)
+                    native_status, output, tokens = run_turn(
+                        node, bridge, inference=inference)
                     if early_pause and native_status not in ("complete", "failed"):
                         native_status = "paused"
                     emit({"method": "thread/tokenUsage/updated", "params": {
