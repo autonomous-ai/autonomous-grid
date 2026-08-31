@@ -521,6 +521,23 @@ def _wait_for_public_health(
         f"({last_error})")
 
 
+def _wait_for_children(
+        relay_proc: subprocess.Popen, tunnel_proc: subprocess.Popen | None) -> int:
+    """Keep the lab alive only while every process needed by joining workers is alive."""
+    if tunnel_proc is None:
+        return relay_proc.wait()
+    while True:
+        relay_status = relay_proc.poll()
+        if relay_status is not None:
+            return relay_status
+        tunnel_status = tunnel_proc.poll()
+        if tunnel_status is not None:
+            raise SystemExit(
+                f"Cloudflared exited while the Goal relay was still running "
+                f"(status {tunnel_status})")
+        time.sleep(0.5)
+
+
 def cmd_relay(args: argparse.Namespace) -> int:
     tunnel_proc: subprocess.Popen | None = None
     relay_proc: subprocess.Popen | None = None
@@ -566,7 +583,7 @@ def cmd_relay(args: argparse.Namespace) -> int:
                       flush=True)
                 print(worker_pair, flush=True)
         print("\nKeep this terminal open. Ctrl-C stops only the disposable relay.", flush=True)
-        return relay_proc.wait()
+        return _wait_for_children(relay_proc, tunnel_proc)
     except KeyboardInterrupt:
         return 130
     except SystemExit as exc:

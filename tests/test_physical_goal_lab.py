@@ -572,6 +572,7 @@ def test_cloudflared_relay_uses_loopback_checks_public_health_and_stops_tunnel(
     monkeypatch.setattr(lab, "_wait_for_health", lambda *args: health.append(args))
     monkeypatch.setattr(
         lab, "_wait_for_public_health", lambda *args: public_health.append(args))
+    monkeypatch.setattr(lab, "_wait_for_children", lambda *_args: 0)
 
     args = lab.build_parser().parse_args([
         "relay", "--relay-repo", "/tmp/private-relay", "--joining-workers", "2",
@@ -584,6 +585,29 @@ def test_cloudflared_relay_uses_loopback_checks_public_health_and_stops_tunnel(
         relay, tunnel, "https://quick-test.trycloudflare.com")]
     assert tunnel.signals == [lab.signal.SIGTERM]
     assert "relay:       https://quick-test.trycloudflare.com" in capsys.readouterr().out
+
+
+def test_relay_lifetime_fails_closed_when_supervised_tunnel_dies():
+    class Process:
+        def __init__(self, status):
+            self.returncode = status
+
+        def poll(self):
+            return self.returncode
+
+    relay = Process(None)
+    tunnel = Process(17)
+
+    with pytest.raises(SystemExit, match="Cloudflared exited.*status 17"):
+        lab._wait_for_children(relay, tunnel)
+
+
+def test_relay_lifetime_returns_relay_status_without_a_tunnel():
+    class Relay:
+        def wait(self):
+            return 23
+
+    assert lab._wait_for_children(Relay(), None) == 23
 
 
 def test_relay_public_preflight_failure_preserves_state_with_reuse_guidance(
