@@ -12,6 +12,15 @@ Relay host (either physical machine)::
       --root /private/tmp/grid-goal-physical \
       --joining-workers 2
 
+Internet-separated workers should put the same listener behind TLS and advertise the public root::
+
+    uv run python tests/e2e_cross_repo/physical_goal_lab.py relay \
+      --relay-repo /private/tmp/autonomous-grid-cli-goal-relay \
+      --root /private/tmp/grid-goal-physical \
+      --joining-workers 2 \
+      --bind-host 127.0.0.1 \
+      --advertise-url https://goal-lab.example.test
+
 Joining workers (the other physical machines, each with its own printed bundle)::
 
     uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \
@@ -334,8 +343,12 @@ def prepare_relay(args: argparse.Namespace) -> tuple[Path, dict[str, str], str]:
             "relay_node_id": relay_node,
         }, indent=2) + "\n")
 
-    host = args.advertise_host or discover_lan_host()
-    url = relay_url(host, args.port)
+    advertised = getattr(args, "advertise_url", None)
+    if advertised:
+        url = validate_relay_url(advertised)
+    else:
+        host = args.advertise_host or discover_lan_host()
+        url = relay_url(host, args.port)
     expires_at = int(time.time()) + int(args.token_hours * 3600)
     relay_token = issue_token(
         secret, user_id=user_id, node_id=relay_node, expires_at=expires_at)
@@ -412,7 +425,9 @@ def cmd_relay(args: argparse.Namespace) -> int:
     ]
     proc = subprocess.Popen(command, cwd=metadata["server_dir"], env=env)
     try:
-        _wait_for_health(proc, metadata["url"])
+        # Probe the listener directly. An advertised HTTPS URL may terminate TLS at a reverse
+        # proxy on port 443 while uvicorn remains private on `args.port`.
+        _wait_for_health(proc, f"http://127.0.0.1:{args.port}")
         print("\nGrid Goal physical relay is ready (no SSH):", flush=True)
         print(f"  relay:       {metadata['url']}", flush=True)
         print(f"  relay node:  GRID_HOME={metadata['relay_home']}", flush=True)
@@ -525,8 +540,14 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Fresh private directory for relay state")
     relay.add_argument("--bind-host", default="0.0.0.0",
                        help="Listener address (default: all interfaces)")
-    relay.add_argument("--advertise-host", default=None,
-                       help="Address the joining worker can reach (default: discover automatically)")
+    advertise = relay.add_mutually_exclusive_group()
+    advertise.add_argument(
+        "--advertise-host", default=None,
+        help="Address the joining worker can reach (default: discover automatically)")
+    advertise.add_argument(
+        "--advertise-url", default=None,
+        help=("Exact HTTPS relay root exposed by a reverse proxy/tunnel; use this for "
+              "internet-separated workers"))
     relay.add_argument("--port", type=int, default=DEFAULT_PORT)
     relay.add_argument("--token-hours", type=float, default=DEFAULT_TOKEN_HOURS)
     relay.add_argument("--lease-seconds", type=int, default=120)

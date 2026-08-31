@@ -219,6 +219,23 @@ def test_relay_can_mint_multiple_distinct_joining_worker_identities():
         ])
 
 
+def test_relay_accepts_one_exact_https_advertised_root():
+    parser = lab.build_parser()
+    args = parser.parse_args([
+        "relay", "--relay-repo", "/tmp/private-relay",
+        "--bind-host", "127.0.0.1",
+        "--advertise-url", "https://goal-lab.example.test/",
+    ])
+    assert args.bind_host == "127.0.0.1"
+    assert args.advertise_url == "https://goal-lab.example.test/"
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "relay", "--relay-repo", "/tmp/private-relay",
+            "--advertise-host", "100.64.0.3",
+            "--advertise-url", "https://goal-lab.example.test",
+        ])
+
+
 def test_pairing_refuses_expiry_identity_mismatch_and_oversize():
     expired = int(time.time()) - 1
     token = lab.issue_token(
@@ -316,6 +333,30 @@ def test_prepare_relay_mints_distinct_machine_identities_and_private_files(
     assert stat.S_IMODE((root / "joining-worker-2-pairing.txt").stat().st_mode) == 0o600
 
 
+def test_prepare_relay_preserves_https_advertised_url_for_remote_workers(
+        tmp_path, monkeypatch):
+    relay_repo = tmp_path / "private-relay"
+    (relay_repo / "grid_cli" / "private_server").mkdir(parents=True)
+    relay_python = relay_repo / ".venv" / "bin" / "python"
+    relay_python.parent.mkdir(parents=True)
+    relay_python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        lab, "discover_lan_host",
+        lambda: pytest.fail("an exact advertised URL must not inspect a LAN address"))
+    args = argparse.Namespace(
+        root=str(tmp_path / "physical-state"), relay_repo=str(relay_repo), reuse=False,
+        advertise_host=None, advertise_url="https://goal-lab.example.test/", port=8090,
+        token_hours=48, lease_seconds=120, reaper_seconds=5, claim_timeout_seconds=30,
+        joining_workers=2,
+    )
+
+    _root, _env, raw = lab.prepare_relay(args)
+    metadata = lab.json.loads(raw)
+    assert metadata["url"] == "https://goal-lab.example.test"
+    assert all(lab.decode_pair(pair)["relay_url"] == metadata["url"]
+               for pair in metadata["worker_pairs"])
+
+
 def test_relay_banner_prints_both_distinct_nonsecret_node_ids(tmp_path, monkeypatch, capsys):
     """A copied GRID_HOME can make two process names overwrite one signed node registration.
 
@@ -348,7 +389,10 @@ def test_relay_banner_prints_both_distinct_nonsecret_node_ids(tmp_path, monkeypa
         }),
     ))
     monkeypatch.setattr(lab.subprocess, "Popen", lambda *_args, **_kwargs: RelayProcess())
-    monkeypatch.setattr(lab, "_wait_for_health", lambda *_args, **_kwargs: None)
+    health_probes = []
+    monkeypatch.setattr(
+        lab, "_wait_for_health",
+        lambda *args, **kwargs: health_probes.append((args, kwargs)))
 
     assert lab.cmd_relay(argparse.Namespace(
         bind_host="0.0.0.0", port=8090, no_print_bundle=True)) == 0
@@ -356,6 +400,7 @@ def test_relay_banner_prints_both_distinct_nonsecret_node_ids(tmp_path, monkeypa
     assert "relay id:    goal-relay-distinct" in out
     assert "worker 1 id: goal-worker-distinct" in out
     assert secret_bundle not in out
+    assert health_probes[0][0][1] == "http://127.0.0.1:8090"
 
 
 def test_relay_banner_assigns_one_bundle_to_each_joining_worker(
