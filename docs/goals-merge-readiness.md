@@ -8,8 +8,8 @@ The detailed physical artifacts are indexed in
 ## Tested code revisions
 
 - Public worker/CLI: `7d06ebfca1d8bfbef7e43a82cd235db2e30ed6e0`
-- Public acceptance harness: `fb386a833bc841438d71dc7227311c8cd1e0f066`
-- Private relay: `8d18961aacaefb8a539f8bcb8fbe50908a03026e`
+- Public acceptance harness: `c5b09a5672b01fd0bc865edcf00e4e1b16416d74`
+- Private relay: `62913b91139b3a663d3fa86d31fbf9924dfe55e6`
 - Both `grid-goal-distributed` branch heads were clean and pushed when these gates completed. The
   commits after the public worker/CLI revision change only tests and evidence documentation, not
   shipped worker behavior.
@@ -24,10 +24,10 @@ The detailed physical artifacts are indexed in
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
-| Cross-repository distributed matrix | 19 passed | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
+| Cross-repository distributed matrix | 20 passed | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 
 The full public suite ran against the exact public runtime revision; the private runbook bundle and
-19-scenario matrix ran uninterrupted against the private and public-harness revisions above. The
+20-scenario matrix ran uninterrupted against the private and public-harness revisions above. The
 evaluator audit also proves that:
 
 - completion checks read the relay-resolved immutable result commit rather than a provider-supplied
@@ -69,7 +69,7 @@ evaluator audit also proves that:
   smuggle a new API origin or mutation tool into its stored policy or claim payload, while the
   parent-only `subgoals` scheduling capability is not needlessly required by the child.
 
-The final 19-scenario matrix was run in one uninterrupted invocation against both candidate
+The final 20-scenario matrix was run in one uninterrupted invocation against both candidate
 revisions. It includes:
 
 - a real relay timer recovering the exact stale `preparing` row left by a continuation-preparation
@@ -89,13 +89,16 @@ revisions. It includes:
 - a four-node hierarchy in which Codex A spawns a child, Codex B checkpoints and fails that child's
   first attempt, Claude C reclaims the exact child turn at attempt two and passes its independent
   eval, and Codex D resumes the parent only after relay-owned fan-in;
+- parallel sibling fan-out in which Codex A reserves two distinct children in one native turn,
+  Codex B and Claude C are simultaneously `running` on separate roots and different models, both
+  pass immutable child evals, and Codex D resumes only after deterministic two-branch fan-in;
 - model and quota outages that preserve attempt zero until inference is ready.
 
 The matrix harness also treats an atomically replaced workspace as a transient polling miss and
 cancels every Goal created by a failed scenario during teardown. One assertion failure therefore
 cannot leak queued work into the next scenario and create a misleading cascade of cross-test claims.
 Its provider disks live under an atomically reserved one-character `/private/tmp` root, with a hard
-31-character assertion on every task root. The uninterrupted 19-scenario rerun passed in 345.71
+31-character assertion on every task root. The uninterrupted 20-scenario rerun passed in 321.81
 seconds without exercising the macOS path depth that can make sandbox commands fail with `E2BIG`.
 
 The historical repository-wide private sweep is not used as a false green gate. The broader 20-file
@@ -106,7 +109,7 @@ final child validation/schema/yield fixes. The candidate removes the runtime-dep
 assumption: the event encoder now explicitly refuses excessive nesting, and its complete 59-test
 suite passes. The unrelated three domain fixtures remain historical baseline failures rather than a
 Goal release gate. The 684-test sweep ran at private revision `2bd0479`; later Goal-specific
-hardening is validated by the exact 158-test private release bundle and complete 19-scenario
+hardening is validated by the exact 158-test private release bundle and complete 20-scenario
 cross-repository matrix above.
 Other stale legacy tests on current `main` also independently fail against current contracts, such as
 constructing `AccountRow(node_id=...)` after the model moved to `user_id`. The dedicated Goal suite,
