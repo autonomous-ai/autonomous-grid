@@ -286,6 +286,13 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     turns = raw_turns if isinstance(raw_turns, list) else []
     if goal.get("status") != "complete":
         failures.append(f"Goal status is {goal.get('status')!r}, not 'complete'")
+    progress = goal.get("turns_completed")
+    if progress is not None:
+        if (not isinstance(progress, int) or isinstance(progress, bool) or progress < 0):
+            failures.append("Goal has no valid nonnegative turns_completed")
+        elif progress != len(turns):
+            failures.append(
+                "Goal completed-turn counter does not equal its accepted turn trajectory")
 
     # New relays separate native-parent usage from usage charged by terminal descendants. This is
     # training/release evidence, so verify the arithmetic rather than trusting the displayed total.
@@ -875,6 +882,8 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     # provider and attempt onto these events, so require them to agree with the unique start fence.
     # This covers native Codex/Claude Goal progress as well as business tool traffic, and rejects
     # impossible histories before start or after the relay declared the attempt dead and reusable.
+    native_verdicts: dict[tuple[str, int, str, str], list[tuple[int, dict]]] = {}
+    claude_sets: dict[tuple[str, int, str], list[tuple[int, dict]]] = {}
     for index, item in enumerate(attempt_events, 1):
         event = item.get("event") if isinstance(item, dict) else None
         event_type = event.get("type") if isinstance(event, dict) else None
@@ -907,6 +916,12 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"worker Goal event {index} occurs after its relay retry boundary")
 
+        coordinate = (turn_id, attempt, provider)
+        if event_type in ("goal.slice.completed", "goal.claude.evaluated"):
+            native_verdicts.setdefault((*coordinate, event_type), []).append((seq, event))
+        elif event_type == "goal.claude.set":
+            claude_sets.setdefault(coordinate, []).append((seq, event))
+
         expected_harness = {
             "goal.codex.event": "codex", "goal.slice.completed": "codex",
             "goal.claude.set": "claude", "goal.claude.evaluated": "claude",
@@ -938,10 +953,35 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             if not isinstance(event.get("impossible"), bool):
                 failures.append(
                     f"worker Goal event {index} has no boolean Claude impossible verdict")
+            if (event.get("met") is False and event.get("impossible") is False
+                    and (not isinstance(event.get("reason"), str) or not event["reason"])):
+                failures.append(
+                    f"worker Goal event {index} has no reason for an unmet Claude verdict")
             for field in ("reason", "protocol_error"):
                 if event.get(field) is not None and not isinstance(event.get(field), str):
                     failures.append(
                         f"worker Goal event {index} has no valid Claude {field}")
+
+    # A native harness can emit many progress events, but only one terminal verdict per attempt.
+    # Duplicate Claude attachments are especially dangerous training data: the final row would not
+    # say which verdict actually ended the slice. The optional sentinel is absent from some Claude
+    # print-mode streams, but when present it must be unique and precede the evaluator attachment.
+    for (turn_id, attempt, provider, event_type), checkpoints in native_verdicts.items():
+        if len(checkpoints) > 1:
+            failures.append(
+                f"turn {turn_id} attempt {attempt} on {provider} has {len(checkpoints)} "
+                f"{event_type} verdict checkpoints; expected at most one")
+    for coordinate, sentinels in claude_sets.items():
+        turn_id, attempt, provider = coordinate
+        if len(sentinels) > 1:
+            failures.append(
+                f"turn {turn_id} attempt {attempt} on {provider} has {len(sentinels)} "
+                "Claude Goal set checkpoints; expected at most one")
+        verdicts = native_verdicts.get((*coordinate, "goal.claude.evaluated"), [])
+        if len(sentinels) == 1 and len(verdicts) == 1 and sentinels[0][0] >= verdicts[0][0]:
+            failures.append(
+                f"turn {turn_id} attempt {attempt} Claude Goal condition was set after its "
+                "evaluator verdict")
             for field in ("iterations", "duration_ms", "tokens"):
                 value = event.get(field)
                 if (value is not None and (not isinstance(value, int)
@@ -1012,6 +1052,10 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     # harness reached its own Goal evaluator. Require the exact native checkpoint from the terminal
     # attempt of every accepted turn. This is the bridge that makes Grid orchestration reuse Codex
     # Goal and Claude /goal rather than silently treating an ordinary agent exit as success.
+    last_codex_tokens = 0
+    own_tokens = goal.get("own_tokens_used")
+    valid_own_tokens = (isinstance(own_tokens, int) and not isinstance(own_tokens, bool)
+                        and own_tokens >= 0)
     for index, turn in enumerate(turns, 1):
         if not isinstance(turn, dict):
             continue
@@ -1038,6 +1082,26 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 f"turn {index} has {len(native)} terminal {harness} Goal checkpoints; expected "
                 "exactly one")
             continue
+        if harness == "codex":
+            checkpoint_turns = native[0].get("turns_completed")
+            checkpoint_tokens = native[0].get("tokens_used")
+            if checkpoint_turns != index:
+                failures.append(
+                    f"turn {index} Codex Goal checkpoint completed-turn counter does not match "
+                    "its accepted trajectory position")
+            if (isinstance(checkpoint_tokens, int) and not isinstance(checkpoint_tokens, bool)
+                    and checkpoint_tokens >= 0):
+                if checkpoint_tokens < last_codex_tokens:
+                    failures.append(
+                        f"turn {index} Codex Goal token counter moved backward")
+                last_codex_tokens = max(last_codex_tokens, checkpoint_tokens)
+                if valid_own_tokens and checkpoint_tokens > own_tokens:
+                    failures.append(
+                        f"turn {index} Codex Goal token counter exceeds relay own-token usage")
+                if (index == len(turns) and goal.get("status") == "complete"
+                        and valid_own_tokens and checkpoint_tokens != own_tokens):
+                    failures.append(
+                        "final Codex Goal token counter does not equal relay own-token usage")
         if index == len(turns) and goal.get("status") == "complete":
             if harness == "codex" and native[0].get("status") != "complete":
                 failures.append("final Codex Goal checkpoint is not complete")

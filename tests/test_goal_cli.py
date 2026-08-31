@@ -669,7 +669,7 @@ def test_goal_evidence_verifies_atomic_terminal_and_eval_verdicts():
     ).encode("utf-8")).hexdigest()
     record = {
         "schema_version": 1,
-        "goal": {"status": "complete", "evals": [{
+        "goal": {"status": "complete", "turns_completed": 1, "evals": [{
             **spec, "definition_id": "eval-1", "definition_hash": definition_hash,
         }]},
         "relationships": {"parent_goal_id": None, "children": []},
@@ -697,6 +697,14 @@ def test_goal_evidence_verifies_atomic_terminal_and_eval_verdicts():
         }],
     }
     assert _verify_evidence(record) == []
+
+    damaged = deepcopy(record)
+    damaged["goal"]["turns_completed"] = 2
+    assert any("completed-turn counter" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][1]["event"]["turns_completed"] = 2
+    assert any("trajectory position" in item for item in _verify_evidence(damaged))
 
     damaged = deepcopy(record)
     damaged["attempt_events"][0].pop("seq")
@@ -1184,6 +1192,44 @@ def test_goal_evidence_brackets_retrying_diagnostics_inside_authoritative_attemp
     }
     assert _verify_evidence(record, min_execution_nodes=2) == []
 
+    with_set = deepcopy(record)
+    with_set["attempt_events"][4]["seq"] = 5
+    with_set["attempt_events"][5]["seq"] = 6
+    with_set["attempt_events"].insert(4, {
+        "turn_id": "turn-1", "seq": 4, "event": {
+            "type": "goal.claude.set", "provider_node_id": "node-B", "attempt": 2,
+            "condition": "tests pass",
+        },
+    })
+    assert _verify_evidence(with_set, min_execution_nodes=2) == []
+
+    damaged = deepcopy(with_set)
+    duplicate = deepcopy(damaged["attempt_events"][4])
+    duplicate["seq"] = 5
+    damaged["attempt_events"][5]["seq"] = 6
+    damaged["attempt_events"][6]["seq"] = 7
+    damaged["attempt_events"].insert(5, duplicate)
+    assert any("2 Claude Goal set checkpoints" in failure
+               for failure in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][5]["seq"] = 6
+    damaged["attempt_events"].insert(5, {
+        "turn_id": "turn-1", "seq": 5, "event": {
+            "type": "goal.claude.set", "provider_node_id": "node-B", "attempt": 2,
+            "condition": "tests pass",
+        },
+    })
+    assert any("condition was set after its evaluator verdict" in failure
+               for failure in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][4]["event"].update({
+        "met": False, "impossible": False, "reason": None,
+    })
+    assert any("no reason for an unmet Claude verdict" in failure
+               for failure in _verify_evidence(damaged))
+
     damaged = deepcopy(record)
     damaged["attempt_events"][1]["event"]["reason"] = ""
     assert any("has no diagnostic reason" in failure for failure in _verify_evidence(damaged))
@@ -1201,6 +1247,14 @@ def test_goal_evidence_brackets_retrying_diagnostics_inside_authoritative_attemp
     damaged = deepcopy(record)
     damaged["attempt_events"][4]["event"]["protocol_error"] = "future schema drift"
     assert any("terminal Claude Goal checkpoint contains a protocol error" in failure
+               for failure in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    duplicate_verdict = deepcopy(damaged["attempt_events"][4])
+    duplicate_verdict["seq"] = 5
+    damaged["attempt_events"][5]["seq"] = 6
+    damaged["attempt_events"].insert(5, duplicate_verdict)
+    assert any("2 goal.claude.evaluated verdict checkpoints" in failure
                for failure in _verify_evidence(damaged))
 
 
@@ -1539,7 +1593,8 @@ def test_goal_evidence_verify_checks_hierarchical_token_accounting():
         "schema_version": 1,
         "goal": {
             "status": "complete", "tokens_used": 600, "own_tokens_used": 200,
-            "descendant_tokens_used": 400, "child_tokens_reserved": 0, "evals": [],
+            "descendant_tokens_used": 400, "child_tokens_reserved": 0,
+            "turns_completed": 1, "evals": [],
         },
         "relationships": {"children": [{
             "id": "child-1", "status": "complete",
@@ -1559,6 +1614,7 @@ def test_goal_evidence_verify_checks_hierarchical_token_accounting():
             terminal_event("turn-1", 2),
         ], "inference": [], "eval_runs": [],
     }
+    record["attempt_events"][1]["event"]["tokens_used"] = 200
     assert _verify_evidence(record) == []
 
     record["goal"]["tokens_used"] = 601
