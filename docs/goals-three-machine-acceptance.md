@@ -54,6 +54,27 @@ Install the same release-candidate commits on the relay and every provider. Reco
 SHAs in the evidence artifact; a source checkout on one node and an older packaged binary on another
 is a failed preflight, not a compatibility test.
 
+An unmerged PR can be tested without changing either machine's main checkout. On every execution
+node, fetch the public feature branch into a clean detached worktree and run `grid` through that
+worktree's `uv` environment:
+
+```bash
+cd /path/to/autonomous-grid
+git fetch origin grid-goal-distributed
+git worktree add --detach /tmp/autonomous-grid-goal \
+  origin/grid-goal-distributed
+cd /tmp/autonomous-grid-goal
+uv sync
+git rev-parse HEAD                 # record as public_runtime_sha
+uv run grid agent install codex   # A/C; B instead needs a supported claude on PATH
+```
+
+The hosted relay must likewise be temporarily deployed from the private
+`autonomous-grid-cli:grid-goal-distributed` branch and its exact SHA recorded. It does not need to
+be merged for a branch deployment, but merely checking out the public branch on A/B/C cannot add
+server endpoints to an already-running hosted master. Do not replace this deployment step with a
+LAN relay: doing so stops testing remote mode.
+
 Before creating work, the owner machine must get a non-404 response from:
 
 ```bash
