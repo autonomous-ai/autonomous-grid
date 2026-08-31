@@ -181,6 +181,14 @@ computers and distinct local disks for Codex to Claude to Codex, with two abrupt
 single-host four-node matrix proves the protocol and harness integration but cannot prove laptop
 sleep, three independent filesystems, or the Claude binary on a second physical worker.
 
+A hosted-remote preflight on 2026-08-30 proved that the currently deployed relay behind
+`nd-task-e2e-pp-0830` does not advertise `goals/v1`; the public CLI correctly refused with “This
+grid's relay does not support Grid Goal yet.” The new remote canary `forge` was not yet visible to
+the signed-in Machine A account after `grid sync`. Therefore the preferred remote physical gate
+requires both a Forge membership invitation and deployment of private relay PR #19. Neither is a
+worker-side, LAN, SSH, or pairing-bundle problem, and neither is evidence against the tested
+candidate runtime.
+
 The no-SSH lab now accepts `--joining-workers 2`, persists separate B/C credentials across relay
 restarts, and refuses missing or duplicate physical node ids. Its 369-test Goal preflight and 22
 lab-specific tests passed. At the time of this record, only the relay-host Mac task identities were

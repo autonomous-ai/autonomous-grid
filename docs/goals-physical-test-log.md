@@ -4,6 +4,20 @@ This is an evidence index for physical-machine runs. It records observed relay i
 immutable Goal artifacts; agent-authored hostnames are never treated as proof. Pairing bundles,
 access tokens, and local credentials must not be added here.
 
+## 2026-08-30 — hosted remote relay preflight
+
+- Machine A was signed into its existing remote-mode account.
+- A fresh `grid sync --json` returned five existing remote Grids but did not return `forge`;
+  `grid engines forge --json` therefore failed with `Grid not found`.
+- The already-visible live Grid `nd-task-e2e-pp-0830` had two online inference engines: an Apple M1
+  Max MacBook Pro serving Claude models and a Linux server serving tool-capable Responses models.
+- `grid goal list --grid nd-task-e2e-pp-0830 --all --json` reached its hosted relay and failed with
+  `This grid's relay does not support Grid Goal yet.` This is the expected additive feature probe
+  against a relay that has not deployed the private Goal branch; it is not a failed Goal attempt.
+- Required next action: invite Machine A's login to `forge` with role `both`, deploy private relay
+  PR #19 on the hosted master, and repeat the read-only Goal list probe before joining task workers.
+- No IP address, SSH connection, LAN bundle, Goal row, or agent execution was used in this probe.
+
 ## 2026-08-30 — native Codex rollout preflight
 
 ### Topology
