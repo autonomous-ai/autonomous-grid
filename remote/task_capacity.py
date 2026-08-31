@@ -3,7 +3,8 @@
 Every Claude Code child a provider spawns draws on the same Claude subscription, so the ceiling on
 task work is that subscription's rate limit — not memory, not CPU, and not the inference
 `max_concurrency`. This module holds the provider's reading of its own pressure and answers one
-question with it: **may this provider claim another task right now?**
+question with it: **may this provider claim another Claude task right now?** Codex uses Grid
+inference and remains independent of this signal.
 
 The signal is free. Claude Code emits a `rate_limit_event` on its `stream-json` stdout while a task
 runs, so the provider learns its own state from work it was doing anyway rather than from a number an
@@ -80,9 +81,10 @@ def worth_reporting(status: Any) -> bool:
 # the free text it forwards.
 _MAX_TRUSTED_PAUSE_SECONDS = 14 * 24 * 3600.0
 
-# The heartbeat `load` key this provider publishes its own withdrawal under (ADR 0033 D-l, issue
-# 19b). **Hand-duplicated** with grid-src's `task_capacity.PAUSED_LOAD_KEY` and kept in lockstep by
-# editing both repos — there is no compile-time link between the copies.
+# The heartbeat `load` key this provider publishes when Claude's pause withdraws ALL of its task
+# harnesses (ADR 0033 D-l, issue 19b). A mixed provider omits it while Codex remains available.
+# **Hand-duplicated** with grid-src's `task_capacity.PAUSED_LOAD_KEY` and kept in lockstep by editing
+# both repos — there is no compile-time link between the copies.
 #
 # ADR 0032 published none of this on purpose, and the reason was sound for one member per project: a
 # task is claimed from a durable queue at poll time, so a provider that does not ask is simply not
@@ -90,9 +92,9 @@ _MAX_TRUSTED_PAUSE_SECONDS = 14 * 24 * 3600.0
 # reading withdraws the provider from the whole team, and the explanation reaches only the client
 # whose task happened to be running.
 #
-# It is PUBLISHED and nothing more. Nothing routes on it, nothing consults it before handing out
-# work, and the claim path is untouched: a paused provider still simply does not ask. That is why
-# this is telemetry beside `platform` and `codex_rate_limits` rather than a second gate.
+# It is PUBLISHED and nothing more. Nothing routes on it or consults it before handing out work; the
+# local claim path independently withholds Claude and may keep advertising Codex. That is why this
+# is telemetry beside `platform` and `codex_rate_limits` rather than a second gate.
 #
 # *Absent ⇒ nothing withheld*, in both directions — an old provider never sends it, an old relay
 # stores it in `NodeRow.load` and ignores it, and a provider that is serving emits nothing. So the
@@ -154,8 +156,9 @@ class TaskCapacity:
             self._blocked_until = now + pause
         if fresh:
             _warn(f"this provider's Claude subscription is out of headroom "
-                  f"({pressure.limit_type or 'rate'} limit), so it is no longer claiming tasks. "
-                  f"Tasks already running are unaffected, and claiming resumes in "
+                  f"({pressure.limit_type or 'rate'} limit), so it is no longer claiming Claude "
+                  f"tasks. Codex tasks remain claimable when Codex is available; tasks already "
+                  f"running are unaffected, and Claude claiming resumes in "
                   f"{pause / 60:.0f} minute(s), when the window resets. Inference serving is "
                   f"untouched.")
 

@@ -1669,7 +1669,19 @@ class _ServeState:
         # moving, and for nothing else.
         paused_until = self._task_pause_stamp()
         if paused_until:
-            load[task_capacity.PAUSED_LOAD_KEY] = paused_until
+            try:
+                from . import tasks
+
+                fully_paused = not tasks.has_non_claude_claim_capacity()
+            except (Exception, SystemExit) as exc:
+                # Telemetry fails open just like the timestamp parser: a profile-probe fault is not
+                # evidence that every harness is withdrawn. The task loop still enforces Claude's
+                # actual capacity gate locally.
+                _warn(f"could not determine whether Codex task capacity remains available ({exc}); "
+                      "the heartbeat is being sent without a full-provider pause")
+                fully_paused = False
+            if fully_paused:
+                load[task_capacity.PAUSED_LOAD_KEY] = paused_until
         return load
 
     def _seat_quota(self) -> dict[str, Any] | None:

@@ -69,6 +69,9 @@ evaluator audit also proves that:
 - a subgoal inherits the parent's exact canonical observe/act manifest. A child request cannot
   smuggle a new API origin or mutation tool into its stored policy or claim payload, while the
   parent-only `subgoals` scheduling capability is not needlessly required by the child.
+- Claude subscription pressure is scoped to the Claude harness. A mixed provider continues to
+  advertise Codex-only claim capacity, reapplies that exclusion after credential refresh, and omits
+  the full-provider pause heartbeat while Codex remains available.
 
 The final 21-scenario matrix was rerun in one uninterrupted invocation against both candidate
 runtime revisions after the worker startup-recovery change. It includes:

@@ -13425,9 +13425,10 @@ def test_a_task_capacity_block_changes_nothing_the_relay_ROUTES_ON(monkeypatch, 
     """
     from shared.system import gpu
 
-    from remote import task_capacity
+    from remote import task_capacity, tasks
 
     monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(tasks, "has_non_claude_claim_capacity", lambda: False)
     gate = task_capacity.TaskCapacity()
     monkeypatch.setattr(task_capacity, "shared", lambda: gate)
     state = _serve_state(monkeypatch, tmp_path)
@@ -13449,9 +13450,10 @@ def test_a_provider_out_of_task_headroom_says_when_it_comes_back(monkeypatch, tm
     nothing was moving, because nothing published this."""
     from shared.system import gpu
 
-    from remote import task_capacity
+    from remote import task_capacity, tasks
 
     monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(tasks, "has_non_claude_claim_capacity", lambda: False)
     gate = task_capacity.TaskCapacity()
     monkeypatch.setattr(task_capacity, "shared", lambda: gate)
     state = _serve_state(monkeypatch, tmp_path)
@@ -13476,9 +13478,10 @@ def test_a_provider_that_came_back_stops_publishing_the_pause(monkeypatch, tmp_p
     back an hour ago still reads as withdrawn to every member of every project."""
     from shared.system import gpu
 
-    from remote import task_capacity
+    from remote import task_capacity, tasks
 
     monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(tasks, "has_non_claude_claim_capacity", lambda: False)
     gate = task_capacity.TaskCapacity()
     monkeypatch.setattr(task_capacity, "shared", lambda: gate)
     state = _serve_state(monkeypatch, tmp_path)
@@ -13488,6 +13491,25 @@ def test_a_provider_that_came_back_stops_publishing_the_pause(monkeypatch, tmp_p
 
     gate.observe({"status": "allowed", "rateLimitType": "five_hour"})
 
+    assert task_capacity.PAUSED_LOAD_KEY not in state.load()
+
+
+def test_a_claude_pause_is_not_reported_as_full_withdrawal_when_codex_remains(
+        monkeypatch, tmp_path):
+    """Project status must not say a mixed provider withdrew while it still claims Codex work."""
+    from shared.system import gpu
+
+    from remote import task_capacity, tasks
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(tasks, "has_non_claude_claim_capacity", lambda: True)
+    gate = task_capacity.TaskCapacity()
+    monkeypatch.setattr(task_capacity, "shared", lambda: gate)
+    state = _serve_state(monkeypatch, tmp_path)
+    gate.observe({"status": "rejected", "rateLimitType": "five_hour",
+                  "resetsAt": int(time.time() + 3600)})
+
+    assert gate.pause_seconds() > 0.0
     assert task_capacity.PAUSED_LOAD_KEY not in state.load()
 
 
@@ -28294,6 +28316,9 @@ def test_a_spent_subscription_stops_the_provider_claiming_until_the_window_reset
     state.tasks_stop = _RecordingTaskStop()
     log = []
     reported = []
+    # This is specifically a Claude-only worker. A Codex-capable worker has independent task
+    # capacity and is covered by the next test.
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude")
 
     def claim(inner_state):
         log.append("claim")
@@ -28310,6 +28335,104 @@ def test_a_spent_subscription_stops_the_provider_claiming_until_the_window_reset
     assert log[:3] == ["gate:1800.0", "gate:0.0", "claim"]
     assert 1800.0 in state.tasks_stop.waits
     assert reported == ["T1"]              # and it resumed on its own once the window reset
+
+
+def test_spent_claude_capacity_does_not_withdraw_an_available_codex_worker(monkeypatch):
+    """A Claude subscription verdict cannot park Codex Goals that use Grid model inference."""
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=_RecordingTaskStop(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    profiles = (
+        {"kind": "claude", "capabilities": ["native_goal"]},
+        {"kind": "codex", "capabilities": ["native_goal"]},
+    )
+    log = []
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude,codex")
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: log.append("profiles") or profiles)
+
+    def claim(_state, *, excluded_agent_kinds=()):
+        log.append(("claim", excluded_agent_kinds))
+        state.tasks_stop.set()
+        return None
+
+    monkeypatch.setattr(tasks, "claim_once", claim)
+
+    tasks.task_loop(state, capacity=_scripted_gate([1800.0], log))
+
+    assert log[:3] == ["gate:1800.0", "profiles", ("claim", ("claude",))]
+    assert 1800.0 not in state.tasks_stop.waits
+    assert not state.stop.is_set()
+
+
+def test_codex_installed_during_a_claude_pause_rejoins_without_waiting_for_the_window(
+        monkeypatch):
+    """A missing mixed-policy Codex binary gets a short local recheck, not Claude's long reset."""
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=_RecordingTaskStop(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    ready = ({"kind": "codex", "capabilities": ["native_goal"]},)
+    profiles = iter([
+        (),     # Codex is configured but not installed on the first capacity check.
+        ready,  # It appears while Claude's subscription is still paused.
+    ])
+    log = []
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude,codex")
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: next(profiles))
+
+    def claim(_state, *, excluded_agent_kinds=()):
+        log.append(("claim", excluded_agent_kinds))
+        state.tasks_stop.set()
+        return None
+
+    monkeypatch.setattr(tasks, "claim_once", claim)
+
+    tasks.task_loop(state, capacity=_scripted_gate([1800.0, 1795.0], log))
+
+    assert state.tasks_stop.waits == [tasks._CLAIM_BACKOFF_SECONDS]
+    assert log == ["gate:1800.0", "gate:1795.0", ("claim", ("claude",))]
+    assert not state.stop.is_set()
+
+
+def test_capacity_exclusion_is_reapplied_after_claim_token_refresh(monkeypatch):
+    """Credential refresh must not accidentally advertise the spent Claude harness again."""
+    from remote import relay, tasks
+
+    profiles = (
+        {"kind": "claude", "capabilities": ["native_goal"]},
+        {"kind": "codex", "capabilities": ["native_goal"]},
+    )
+    profile_reads = []
+    calls = []
+    token = {"value": "old"}
+    state = SimpleNamespace(
+        signaling_url="https://relay.example", token=lambda: token["value"],
+        refresh=lambda stale_token=None: (
+            token.update(value="new") or stale_token == "old"),
+    )
+    monkeypatch.setattr(
+        tasks, "_agent_profiles", lambda: profile_reads.append(True) or profiles)
+
+    def claim(_url, bearer, **fields):
+        calls.append((bearer, fields))
+        if bearer == "old":
+            raise relay.RelayUnauthorized()
+        return None
+
+    monkeypatch.setattr(tasks.relay, "claim_task", claim)
+
+    assert tasks.claim_once(state, excluded_agent_kinds=("claude",)) is None
+
+    assert len(profile_reads) == 2
+    assert [call[0] for call in calls] == ["old", "new"]
+    assert [call[1]["agent_kinds"] for call in calls] == [("codex",), ("codex",)]
 
 
 def test_a_capacity_pause_never_stops_inference(monkeypatch):

@@ -205,12 +205,24 @@ def task_timeout() -> float:
     return seconds
 
 
-def claim_once(state: Any) -> dict[str, Any] | None:
+def claim_once(state: Any, *,
+               excluded_agent_kinds: tuple[str, ...] = ()) -> dict[str, Any] | None:
     """One claim long-poll; on 401 refresh the token and retry exactly once.
 
     Mirrors `serve.poll_once` — the same credential, the same single-retry rule, a different queue.
+
+    ``excluded_agent_kinds`` is local capacity, not relay policy. In particular, Claude's own
+    subscription can be spent while Codex remains able to run against Grid inference. Reapply the
+    exclusion after credential refresh so a long refresh cannot accidentally re-advertise the
+    harness this process already knows is unavailable.
     """
-    profiles = _agent_profiles()
+    excluded = frozenset(excluded_agent_kinds)
+
+    def available_profiles() -> tuple[dict[str, Any], ...]:
+        return tuple(profile for profile in _agent_profiles()
+                     if profile.get("kind") not in excluded)
+
+    profiles = available_profiles()
     # The relay intentionally rejects an empty profile list. Empty here means this node can execute
     # no configured harness, so a claim could only produce a permanent 422 and a noisy retry loop.
     # Fail closed without spending an attempt or learning anything about the queue.
@@ -226,7 +238,7 @@ def claim_once(state: Any) -> dict[str, Any] | None:
         if state.refresh(stale_token=token):
             # Capabilities are scheduling authority. Re-read them rather than replaying a stale
             # advertisement after a potentially long credential refresh.
-            profiles = _agent_profiles()
+            profiles = available_profiles()
             if not profiles:
                 return None
             return relay.claim_task(
@@ -376,6 +388,16 @@ def _agent_profiles() -> tuple[dict[str, Any], ...]:
                                    | _declared_capabilities("GRID_CODEX_GOAL_CAPABILITIES")),
         })
     return tuple(profiles)
+
+
+def has_non_claude_claim_capacity() -> bool:
+    """Whether this process can keep claiming while Claude's subscription is paused.
+
+    Kept beside the actual profile builder so heartbeat telemetry cannot invent a second admission
+    rule. Today Codex is the independent harness; future harnesses can extend this predicate when
+    they have their own capacity signal.
+    """
+    return any(profile.get("kind") == "codex" for profile in _agent_profiles())
 
 
 def _claim_supported_now(job: dict[str, Any]) -> bool:
@@ -1248,10 +1270,11 @@ def task_loop(state: Any, capacity: Any = None) -> None:
     below leaves inference serving. `state.stop` is only ever read here, never written.
 
     `capacity` is this provider's reading of its own Claude subscription (issue 09), consulted before
-    every claim. It defaults to the PROCESS-wide gate, which is what makes several task workers
-    throttle on one reading of the one subscription they all spend. Withdrawing is simply not asking:
-    a task is claimed from a durable queue at poll time (D-a), so a provider that does not claim is
-    not given one, and the task waits for a provider that can run it.
+    every claim. It defaults to the PROCESS-wide gate, which is what makes several Claude workers
+    throttle on one reading of the one subscription they all spend. A mixed worker continues to
+    advertise Codex-only capacity because Codex uses Grid inference rather than that Claude window.
+    Withdrawing a harness is simply not advertising it at claim time: the queue waits for a provider
+    that can run it.
     """
     capacity = capacity if capacity is not None else task_capacity.shared()
     if not _configured_agent_kinds():
@@ -1270,14 +1293,26 @@ def task_loop(state: Any, capacity: Any = None) -> None:
     agent_claims_suspended = False
     while not (state.stop.is_set() or state.tasks_stop.is_set()):
         pause = _capacity_pause(capacity)
+        excluded_agent_kinds: tuple[str, ...] = ()
         if pause > 0:
-            # Waiting on `tasks_stop` rather than sleeping, so teardown does not have to sit out a
-            # five-hour window. `continue` re-reads the gate: a task still running elsewhere in this
-            # process can lift the block early by observing a healthy reading.
-            state.tasks_stop.wait(pause)
-            continue
+            # This signal belongs to Claude's subscription, not to the provider process and not to
+            # Codex. A mixed worker keeps offering its independent Codex harness instead of turning
+            # a vendor-specific refusal into fleet-wide Goal withdrawal.
+            codex_configured = "codex" in _configured_agent_kinds()
+            codex_available = codex_configured and any(
+                profile.get("kind") == "codex" for profile in _agent_profiles())
+            if not codex_available:
+                # Waiting on `tasks_stop` rather than sleeping, so teardown does not have to sit out
+                # the window. A Claude-only policy can wait for the vendor's exact reset. When Codex
+                # is configured but temporarily absent/quarantined, recheck locally at the ordinary
+                # claim backoff so installing or replacing it does not wait out a five-hour window.
+                wait = min(pause, _CLAIM_BACKOFF_SECONDS) if codex_configured else pause
+                state.tasks_stop.wait(wait)
+                continue
+            excluded_agent_kinds = ("claude",)
         try:
-            job = claim_once(state)
+            job = (claim_once(state, excluded_agent_kinds=excluded_agent_kinds)
+                   if excluded_agent_kinds else claim_once(state))
         except relay.RelayUnauthorized:
             _warn("relay rejected the token and refresh is unavailable — task serving retired "
                   f"(inference is unaffected). {RESUME_HINT}")

@@ -57,9 +57,16 @@ protocol instead.
 
 The provider advertises each native Goal harness it can actually run. Restrict a node explicitly
 with `GRID_TASK_AGENT_KINDS=codex` or `GRID_TASK_AGENT_KINDS=claude` when desired.
-An empty, unsupported, or unavailable-only policy fails closed: the node retires task serving
-without contacting the queue, while Grid inference remains online. Its local log names the policy
-problem; restart task serving after correcting it.
+An empty or wholly unsupported policy fails closed: the node retires task serving without contacting
+the queue, while Grid inference remains online. A valid configured harness whose binary is
+temporarily absent or quarantined takes a paced local suspension instead; installing or replacing
+the executable makes the running provider rejoin task claims without restarting inference.
+
+Claude subscription capacity is harness-specific. A rejected Claude rate-limit window withdraws
+Claude from subsequent claims until its stated reset, but a mixed node continues advertising Codex
+and can execute Codex Goals through Grid inference. The heartbeat reports the provider as fully
+task-paused only when no independent Codex harness remains available; it never tells the team that
+the whole node withdrew while Codex is still claiming work.
 
 The Goal's `--model` must name a tool-capable model available through the Grid endpoint used by an
 allowed harness: Responses for Codex, or the translated Messages/chat path for Claude Code. Codex
