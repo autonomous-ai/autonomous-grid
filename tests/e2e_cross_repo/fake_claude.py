@@ -292,13 +292,26 @@ def main() -> int:
             handle.write(json.dumps({"sessionId": session, "prompt": prompt}) + "\n")
 
     if os.environ.get("GRID_E2E_GOAL_SCENARIO") in (
-            "subgoal", "subgoal_retry", "subgoal_mixed_retry"):
+            "subgoal", "subgoal_retry", "subgoal_mixed_retry", "subgoal_fanout"):
         scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
         node = os.environ.get("GRID_E2E_GOAL_NODE")
-        expected_node = "C" if scenario in ("subgoal_retry", "subgoal_mixed_retry") else "B"
+        expected_node = "C" if scenario in (
+            "subgoal_retry", "subgoal_mixed_retry", "subgoal_fanout") else "B"
         if node != expected_node or not prompt.startswith("/goal ") or resume is not None:
             sys.stderr.write("fake Claude received an invalid child Goal assignment\n")
             return 2
+        if scenario == "subgoal_fanout":
+            pathlib.Path("CLAUDE_CHILD.md").write_text(
+                "# Claude C\n\nClaude C completed its parallel child on an isolated Grid root.\n")
+            # Match Codex B's synchronization window so the driver can observe both relay rows in
+            # `running` without giving the two workers any shared filesystem state.
+            time.sleep(2)
+            _emit({"type": "assistant", "message": {"usage": {
+                "input_tokens": 18, "output_tokens": 10}, "content": [
+                {"type": "text", "text": "Claude C completed its parallel child"}]}})
+            _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": True,
+                   "reason": "CLAUDE_CHILD.md exists", "iterations": 1, "tokens": 28}})
+            return 0
         if scenario == "subgoal_mixed_retry":
             partial = pathlib.Path("CHILD_PARTIAL.md")
             if (not partial.is_file() or "Codex B checkpoint" not in partial.read_text()

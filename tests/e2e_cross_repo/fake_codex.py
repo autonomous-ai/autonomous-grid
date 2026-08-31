@@ -277,6 +277,71 @@ def run_turn(node: str, call_tool=None) -> tuple[str, str, int]:
             return "complete", "C completed the parent after optional child failure", 200
         raise RuntimeError(f"unexpected optional subgoal turn on {node}: {history!r}")
 
+    if scenario == "subgoal_fanout":
+        if node == "A" and not history:
+            if call_tool is None:
+                raise RuntimeError("fan-out subgoal scenario received no dynamic tool bridge")
+            requests = [
+                {
+                    "objective": "Build the Codex half of the parallel release",
+                    "done_when": "CODEX_CHILD.md exists",
+                    "model": "fake-grid-child-model",
+                    "agents": ["codex"],
+                    "required_capabilities": ["fanout_codex"],
+                    "evals": [{
+                        "type": "file", "name": "Codex child", "path": "CODEX_CHILD.md",
+                        "max_bytes": 2_000, "contains": ["Codex B", "parallel child"],
+                    }],
+                    "token_budget": 2_000,
+                },
+                {
+                    "objective": "Build the Claude half of the parallel release",
+                    "done_when": "CLAUDE_CHILD.md exists",
+                    "model": "fake-grid-model",
+                    "agents": ["claude"],
+                    "required_capabilities": ["fanout_claude"],
+                    "evals": [{
+                        "type": "file", "name": "Claude child", "path": "CLAUDE_CHILD.md",
+                        "max_bytes": 2_000, "contains": ["Claude C", "parallel child"],
+                    }],
+                    "token_budget": 2_000,
+                },
+            ]
+            child_ids = []
+            for arguments in requests:
+                result = call_tool("grid_spawn_subgoal", arguments)
+                envelope = json.loads(
+                    ((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+                child_id = ((envelope.get("body") or {}).get("id"))
+                if not result.get("success") or not child_id:
+                    raise RuntimeError(f"parallel child creation failed: {result!r}")
+                child_ids.append(child_id)
+            if len(set(child_ids)) != 2:
+                raise RuntimeError(f"fan-out returned duplicate child identities: {child_ids!r}")
+            history.append({"node": "A", "fanout_children": child_ids})
+            save_history(history)
+            return "active", f"A spawned two independent child Goals: {child_ids}", 100
+        if node == "B" and not history:
+            (cwd / "CODEX_CHILD.md").write_text(
+                "# Codex B\n\nCodex B completed its parallel child on an isolated Grid root.\n")
+            # Keep the relay row running long enough for the driver to prove the Claude sibling is
+            # running at the same time. This is synchronization only; the workers share no disk.
+            time.sleep(2)
+            history.append({"node": "B", "parallel_child": "codex"})
+            save_history(history)
+            return "complete", "Codex B completed its parallel child", 100
+        if (node == "D" and len(history) == 1
+                and history[0].get("node") == "A"):
+            if not (cwd / "CODEX_CHILD.md").is_file() or not (cwd / "CLAUDE_CHILD.md").is_file():
+                raise RuntimeError("parent D resumed before both parallel children were fanned in")
+            (cwd / "FINAL.md").write_text(
+                "# Parallel fan-in complete\n\nCodex D received independently evaluated output from "
+                "Codex B and Claude C before resuming the parent.\n")
+            history.append({"node": "D", "fan_in": ["codex", "claude"]})
+            save_history(history)
+            return "complete", "D completed the parent after parallel fan-in", 200
+        raise RuntimeError(f"unexpected fan-out subgoal turn on {node}: {history!r}")
+
     if scenario == "subgoal_mixed_retry":
         if node == "A" and not history:
             if call_tool is None:
@@ -523,12 +588,14 @@ def main() -> int:
     dynamic_tools: list[dict] = []
     early_pause = False
     initialized = False
+    tool_calls = 0
 
     def call_tool(name: str, arguments: dict) -> dict:
-        nonlocal early_pause
-        request_id = 90_000
+        nonlocal early_pause, tool_calls
+        tool_calls += 1
+        request_id = 90_000 + tool_calls
         emit({"id": request_id, "method": "item/tool/call", "params": {
-            "tool": name, "arguments": arguments, "callId": "subgoal-spawn"}})
+            "tool": name, "arguments": arguments, "callId": f"tool-call-{tool_calls}"}})
         while True:
             response_line = sys.stdin.readline()
             if not response_line:

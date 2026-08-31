@@ -284,7 +284,9 @@ includes that fact in the parent's next handoff. Each child is an ordinary
 Goal conversation on the same distributed task table, so other machines can claim children
 concurrently. The spawn action can select both a different harness and a different Grid-served
 model for the child—for example, a Codex parent can delegate a bounded specialist task to Claude on
-a cheaper model. If omitted, the child model inherits the parent's model.
+a cheaper model. If omitted, the child model inherits the parent's model. A parent may call the
+spawn action repeatedly for distinct independent objectives in one native turn; after its final
+spawn it ends the turn rather than polling, and Grid exposes the sibling children concurrently.
 
 The parent enters `waiting_children` after its turn checkpoints. It receives no new turn until every
 child is terminal and all required children are complete, then resumes with every child id, status,
@@ -547,6 +549,7 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 | Support reply | A polls; B -> C execute | Codex | B dies after API commit; first eval fails | `DONE.md`; JSON outcome; one API side effect |
 | Required child | A parent; B child; C parent | Codex -> Claude -> Codex | Parent moves while child runs | Child and parent files |
 | Mixed child reclaim | A parent -> B child -> C child -> D parent | Codex -> Codex -> Claude -> Codex | B's native child harness fails after partial work | Same child turn at attempt 2; accepted child eval; one fan-in; completed parent |
+| Parallel child fan-out | A parent -> B/C children -> D parent | Codex -> Codex + Claude -> Codex | Two required children run simultaneously on distinct roots and models | Two accepted child evals; deterministic two-branch fan-in; completed parent |
 | Optional child | A parent; B child; C parent | Codex | Child fails | Parent file; child failure retained |
 
 Every agent-running scenario except Model arrival and Quota recovery uses `fake-grid-model` (the

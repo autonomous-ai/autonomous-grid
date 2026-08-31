@@ -1482,6 +1482,123 @@ def test_child_goal_reclaims_same_turn_codex_to_claude_then_fans_in_to_codex(
     assert all(run["passed"] and run["accepted"] for run in parent_evidence["eval_runs"])
 
 
+def test_parent_fans_out_parallel_codex_and_claude_children_then_merges_both(
+        relay, owner_token, spawn_goal_provider, tmp_path):
+    """Two required sibling Goals run concurrently and gate one deterministic parent fan-in."""
+    from remote import relay as relay_client
+    from remote import task_repo
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-subgoal-parallel-fanout")['id']
+    H.seed_trunk(relay, owner_token, project_id)
+    node_a = spawn_goal_provider(
+        "A", agent_kinds="codex", scenario="subgoal_fanout",
+        disk_label="fanout-A", one_task=True)
+    parent = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Build two release halves concurrently with specialized child Goals",
+        done_when="Both evaluated child branches are merged before FINAL.md is written",
+        model="fake-grid-model", token_budget=12_000, tools=[], agents=["codex"],
+        allow_subgoals=True,
+        evals=[
+            {"type": "file", "name": "Codex half", "path": "CODEX_CHILD.md",
+             "max_bytes": 2_000, "contains": ["Codex B", "parallel child"]},
+            {"type": "file", "name": "Claude half", "path": "CLAUDE_CHILD.md",
+             "max_bytes": 2_000, "contains": ["Claude C", "parallel child"]},
+            {"type": "file", "name": "combined release", "path": "FINAL.md",
+             "max_bytes": 2_000, "contains": ["Codex D", "Codex B", "Claude C"]},
+        ])
+
+    waiting = H.wait_for(lambda: (lambda goal: goal if (
+        goal.get("status") == "waiting_children" and len(goal.get("children") or []) == 2)
+        else None)(relay_client.get_goal(relay, owner_token, parent["id"])), timeout=30)
+    assert waiting, f"parent did not publish two children; A output:\n{node_a.output()}"
+    assert H.wait_for(lambda: node_a.proc.poll() is not None, timeout=15), node_a.output()
+    child_relations = {child["objective"]: child for child in waiting["children"]}
+    codex_child = relay_client.get_goal(
+        relay, owner_token,
+        child_relations["Build the Codex half of the parallel release"]["id"])
+    claude_child = relay_client.get_goal(
+        relay, owner_token,
+        child_relations["Build the Claude half of the parallel release"]["id"])
+    assert codex_child["agents"] == ["codex"]
+    assert claude_child["agents"] == ["claude"]
+    assert codex_child["model"] == "fake-grid-child-model"
+    assert claude_child["model"] == "fake-grid-model"
+
+    node_b = spawn_goal_provider(
+        "B", agent_kinds="codex", scenario="subgoal_fanout", disk_label="fanout-B",
+        codex_capabilities="fanout_codex", one_task=True)
+    node_c = spawn_goal_provider(
+        "C", agent_kinds="claude", scenario="subgoal_fanout", disk_label="fanout-C",
+        claude_capabilities="fanout_claude", one_task=True)
+
+    def both_children_running():
+        codex_rows = _tasks(relay, owner_token, project_id, codex_child["id"])
+        claude_rows = _tasks(relay, owner_token, project_id, claude_child["id"])
+        return bool(codex_rows and claude_rows
+                    and codex_rows[0]["state"] == claude_rows[0]["state"] == "running")
+
+    assert H.wait_for(both_children_running, timeout=15), (
+        f"children never overlapped; B output:\n{node_b.output()}\nC output:\n{node_c.output()}")
+    completed_children = H.wait_for(lambda: (
+        relay_client.get_goal(relay, owner_token, codex_child["id"]),
+        relay_client.get_goal(relay, owner_token, claude_child["id"]),
+    ) if all(relay_client.get_goal(relay, owner_token, child["id"])["status"] == "complete"
+             for child in (codex_child, claude_child)) else None, timeout=60)
+    assert completed_children, (
+        f"parallel children did not finish; B output:\n{node_b.output()}\nC output:\n{node_c.output()}")
+
+    codex_rows = _tasks(relay, owner_token, project_id, codex_child["id"])
+    claude_rows = _tasks(relay, owner_token, project_id, claude_child["id"])
+    assert len(codex_rows) == len(claude_rows) == 1
+    assert codex_rows[0]["provider_id"] == node_b.node_id
+    assert codex_rows[0]["agent_kind"] == "codex"
+    assert claude_rows[0]["provider_id"] == node_c.node_id
+    assert claude_rows[0]["agent_kind"] == "claude"
+    for child in (codex_child, claude_child):
+        child_evidence = relay_client.get_goal_evidence(relay, owner_token, child["id"])
+        _assert_transcript_chain(child_evidence, 1)
+        assert all(run["passed"] and run["accepted"]
+                   for run in child_evidence["eval_runs"])
+
+    node_d = spawn_goal_provider(
+        "D", agent_kinds="codex", scenario="subgoal_fanout",
+        disk_label="fanout-D", one_task=True)
+    complete = H.wait_for(lambda: _completed_goal(
+        relay, owner_token, parent["id"]), timeout=60)
+    assert complete, f"parent did not complete after parallel fan-in; D output:\n{node_d.output()}"
+    assert len(complete["children"]) == 2
+    assert all(child["merge_state"] == "merged" for child in complete["children"])
+    assert complete["child_tokens_reserved"] == 0
+    assert complete["descendant_tokens_used"] == sum(
+        child["tokens_used"] for child in completed_children)
+
+    parent_turns = _tasks(relay, owner_token, project_id, parent["id"])
+    assert [row["provider_id"] for row in parent_turns] == [node_a.node_id, node_d.node_id]
+    destination = tmp_path / "parallel-fanout-result"
+    destination.mkdir()
+    task_repo.checkout_result(
+        destination, url=relay_client.git_remote_url(relay, project_id), token=owner_token,
+        branch=parent_turns[-1]["branch"], commit=parent_turns[-1]["result_commit"],
+        project_id=project_id)
+    assert {"CODEX_CHILD.md", "CLAUDE_CHILD.md", "FINAL.md"} <= {
+        path.name for path in destination.iterdir()}
+
+    parent_evidence = relay_client.get_goal_evidence(relay, owner_token, parent["id"])
+    _assert_transcript_chain(parent_evidence, 2, min_nodes=2)
+    spawn_requests = [item["event"] for item in parent_evidence["attempt_events"]
+                      if item["event"].get("type") == "goal.act.request"]
+    spawn_results = [item["event"] for item in parent_evidence["attempt_events"]
+                     if item["event"].get("type") == "goal.act.result"]
+    assert len(spawn_requests) == len(spawn_results) == 2
+    assert len({item["call_id"] for item in spawn_requests}) == 2
+    assert len({item["idempotency_key"] for item in spawn_requests}) == 2
+    assert {item["result"]["body"]["id"] for item in spawn_results} == {
+        codex_child["id"], claude_child["id"]}
+    assert all(run["passed"] and run["accepted"] for run in parent_evidence["eval_runs"])
+
+
 def test_replacement_parent_reconstructs_one_child_after_spawn_failure(
         relay, owner_token, spawn_goal_provider, tmp_path):
     """A different Codex session may restate child policy, but it must replay one child identity."""

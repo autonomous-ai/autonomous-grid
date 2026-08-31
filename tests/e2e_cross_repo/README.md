@@ -71,6 +71,7 @@ interactive JSON-RPC fixture then proves those declared methods during execution
 | Support reply | A polls; B Codex -> C Codex | Origin restriction, crash after API commit, failed first eval | One business side effect, stable idempotency key, repair turn passes |
 | Required child | A parent model; B Claude child specialist model; C parent | Parent waits while child runs | Child model/harness survives the tool bridge; evaluated commit fans in once; allocation becomes one actual token charge |
 | Mixed child reclaim | A Codex parent -> B Codex child -> C Claude child -> D Codex parent | B's native child harness fails after partial work | C reclaims the exact child turn at attempt 2 from Git/transcript checkpoints; its accepted eval gates one fan-in before D resumes the parent |
+| Parallel child fan-out | A Codex parent -> B Codex and C Claude children -> D Codex parent | Two required children run simultaneously on separate roots and models | Both child evals pass before deterministic two-branch fan-in; two distinct tool-call/action identities and exact aggregate budget charging are preserved |
 | Child spawn reconstruction | A Codex -> B Codex -> C Claude -> D Codex | A fails after the durable spawn; B reconstructs different optional child policy | Both attempts receive one child identity and one fan-in; action evidence carries one stable key |
 | Optional child | A parent; B child; C parent | Child returns native `failed` verdict | Failure remains evidence and does not block parent completion |
 
