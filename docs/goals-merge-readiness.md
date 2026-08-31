@@ -8,7 +8,7 @@ The detailed physical artifacts are indexed in
 ## Tested code revisions
 
 - Public worker/CLI: `7d06ebfca1d8bfbef7e43a82cd235db2e30ed6e0`
-- Public acceptance harness: `c5b09a5672b01fd0bc865edcf00e4e1b16416d74`
+- Public acceptance harness: `5c1886c9179f0a2057449fabde5817aeb6aa9711`
 - Private relay: `62913b91139b3a663d3fa86d31fbf9924dfe55e6`
 - Both `grid-goal-distributed` branch heads were clean and pushed when these gates completed. The
   commits after the public worker/CLI revision change only tests and evidence documentation, not
@@ -91,14 +91,16 @@ revisions. It includes:
   eval, and Codex D resumes the parent only after relay-owned fan-in;
 - parallel sibling fan-out in which Codex A reserves two distinct children in one native turn,
   Codex B and Claude C are simultaneously `running` on separate roots and different models, both
-  pass immutable child evals, and Codex D resumes only after deterministic two-branch fan-in;
+  make real Responses/Messages requests through distinct Grid inference providers, retain exact
+  model/provider/executor/attempt/token attribution, pass immutable child evals, and Codex D
+  resumes only after deterministic two-branch fan-in;
 - model and quota outages that preserve attempt zero until inference is ready.
 
 The matrix harness also treats an atomically replaced workspace as a transient polling miss and
 cancels every Goal created by a failed scenario during teardown. One assertion failure therefore
 cannot leak queued work into the next scenario and create a misleading cascade of cross-test claims.
 Its provider disks live under an atomically reserved one-character `/private/tmp` root, with a hard
-31-character assertion on every task root. The uninterrupted 20-scenario rerun passed in 321.81
+31-character assertion on every task root. The uninterrupted 20-scenario rerun passed in 362.45
 seconds without exercising the macOS path depth that can make sandbox commands fail with `E2BIG`.
 
 The historical repository-wide private sweep is not used as a false green gate. The broader 20-file
