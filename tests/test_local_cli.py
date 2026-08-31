@@ -9491,6 +9491,62 @@ def test_remote_join_rejoin_aliased_engine_with_new_alias_is_rejected(monkeypatc
     assert "advertise-as" in str(exc.value).lower()
 
 
+def test_remote_join_respawn_preserves_a_single_engines_alias(monkeypatch, tmp_path):
+    """A restart is not an append. `--respawn` is the documented repair path for task-serving drift,
+    so an aliased inference node must be restartable without dropping its public model name."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    stopped = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: stopped.append(pid) or True)
+
+    assert cli.main([
+        "join", "--at", "http://h:11434/v1", "-m", "real", "--advertise-as", "public"
+    ]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["join", "--respawn"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["advertise_as"] == ["public"]
+    assert record["engines"] == [
+        {"endpoint_url": "http://h:11434/v1", "models": ["real"], "engine_label": None}
+    ]
+    assert stopped == [4242]
+
+
+def test_remote_join_same_aliased_builtin_can_respawn_to_enable_tasks(
+        monkeypatch, tmp_path):
+    """The physical C failure: a built-in model already advertised under an alias was unable to
+    apply the Codex task opt-in after its worker upgraded. The exact re-join must restart it, preserve
+    the alias, and hand task serving to the new child."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    stopped = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: stopped.append(pid) or True)
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+    root = tmp_path / "work"
+
+    assert cli.main([
+        "join", "--serve", "model.gguf", "--advertise-as", "public"
+    ]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main([
+        "join", "--serve", "model.gguf", "--advertise-as", "public", "--tasks",
+        "--tasks-root", str(root), "--respawn"
+    ]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["advertise_as"] == ["public"]
+    assert record["tasks"] is True
+    assert _the_child_would_claim_tasks(spawned)
+    assert stopped == [4242]
+
+
 def test_remote_join_aborts_when_prior_process_wont_die(monkeypatch, tmp_path):
     """On the respawn path (here a pre-handler prior that can't be SIGHUP-hot-reloaded), if the prior
     can't be confirmed stopped the join aborts BEFORE spawning — spawning anyway would put two processes

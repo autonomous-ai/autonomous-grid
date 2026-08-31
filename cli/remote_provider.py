@@ -434,6 +434,14 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
             raise deferred_target_error
         base = live or list(run_records.read_records(network_id).values())
         merged_specs, changed = _merge_engines(_engine_union(base), specs)
+        # Aliases belong to the singleton identity's flat model list. A bare `--respawn` names no
+        # aliases because it names no engine at all, so inherit the existing list; dropping it would
+        # make the restarted node advertise a filename the Grid has never seen. An explicit list may
+        # replace it when it covers the whole (still single-engine) union.
+        base_aliases = next(
+            (list(rec.get("advertise_as") or []) for rec in base if rec.get("advertise_as")), [])
+        requested_aliases = list(getattr(args, "advertise_as", []) or [])
+        effective_aliases = requested_aliases or base_aliases
         # A rotated key only matters when this kind's API spec is already LIVE. A reload WOULD re-read the
         # key store and swap the bearer in place (issue 05), but rotation deliberately RESPAWNS so the
         # operator has certainty the new key is live — never a no-op, never SIGHUP. Kept at the call sites
@@ -451,6 +459,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         if (
             live and not changed and media == base_media and bundles == base_bundles
             and meta_name == _identity_field(live, "meta_name") and not rotated_live
+            and effective_aliases == list(_identity_field(live, "advertise_as") or [])
             and not respawn
         ):
             # Lazy, per this module's import rule: `cli.dispatch` imports it while `cli` is still
@@ -487,13 +496,16 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
             return 0
-        _reject_unserveable_union(merged_specs, args, base)
+        _reject_unserveable_union(merged_specs, effective_aliases)
         _warn_shadowed_models(merged_specs)  # the serve loop logs this too; show it on the operator's terminal
 
         record = _build_record(
             args, network_id, engine_id, signaling_url, merged_specs,
             media=media, meta_name=meta_name, bundles=bundles,
         )
+        # `_build_record` sees only this invocation. Put the inherited-or-explicit complete alias
+        # list back after it projects args, so a bare restart is identity-preserving.
+        record["advertise_as"] = effective_aliases
         # Preserve the live identity's --max-concurrency across an additive join, like media/bundles/meta
         # above. It sizes the running N-worker poll pool (remote/serve._serve_loop), so a re-join that
         # doesn't re-pass --max-concurrency must NOT reset it to the default 1 — that would silently
@@ -1131,25 +1143,24 @@ def _identity_field(live: list[dict[str, object]], key: str) -> object:
 
 
 def _reject_unserveable_union(
-    merged_specs: list[dict[str, object]], args: argparse.Namespace, live: list[dict[str, object]]
+    merged_specs: list[dict[str, object]], advertise_as: list[str]
 ) -> None:
     """Guard the merged union: the built-in engine can't join a multi-engine identity (external-only,
-    ADR 0007 D4), and ``--advertise-as`` aliases only a single engine (so appending onto an already-aliased
-    identity is rejected rather than silently dropping the alias)."""
+    ADR 0007 D4), and ``--advertise-as`` aliases only a single engine. A same-engine restart is safe;
+    an append is refused rather than silently dropping or positionally misapplying an alias."""
     if len(merged_specs) > 1 and any(not spec.get("endpoint_url") for spec in merged_specs):
         raise SystemExit(
             "The built-in engine (`--serve`) serves a single model and can't join a multi-engine "
             "identity. Run `grid leave`, then re-join every engine as external `--at <url> -m <model>`."
         )
-    # --advertise-as aliases don't merge across joins (the record's `advertise_as` is a flat, positionally
-    # keyed list), so appending onto — or with — an alias would drop an alias or mismatch the alias/model
-    # counts (which crashes the reload's _advertised_models). Reject any changing append touching aliases;
-    # the no-op case already returned earlier, so `live` here means a real change (ADR 0010).
-    aliased = bool(getattr(args, "advertise_as", []) or []) or any(rec.get("advertise_as") for rec in live)
-    if aliased and (len(merged_specs) > 1 or live):
+    # The record's aliases are flat and positionally keyed to its flat models. Multiple engines make
+    # that ownership ambiguous, and an additive same-engine join can leave fewer aliases than models.
+    # Both are refused before a record is written (the latter would crash `_advertised_models`).
+    model_count = sum(len(spec.get("models") or []) for spec in merged_specs)
+    if advertise_as and (len(merged_specs) > 1 or len(advertise_as) != model_count):
         raise SystemExit(
             "--advertise-as aliases are single-engine and don't merge across joins. Run `grid leave`, "
-            "then re-join every engine in one command with its -m/--advertise-as pairs."
+            "then re-join the engine in one command with every -m/--advertise-as pair."
         )
 
 
