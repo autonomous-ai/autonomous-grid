@@ -1090,7 +1090,8 @@ def _add_goal(sub) -> None:
     run.add_argument("--tools", default=None, metavar="FILE",
                      help="JSON file containing the observe/act HTTP capability manifest.")
     run.add_argument("--evals", default=None, metavar="FILE",
-                     help="JSON file containing independent evals checked against result commits.")
+                     help=("JSON file containing independent artifact or authenticated verify "
+                           "evals."))
     run.add_argument("--agent", choices=("codex", "claude", "auto"), default="codex",
                      help="Allowed native Goal harness (default: codex; auto allows both).")
     run.add_argument("--require", action="append", default=[], metavar="CAPABILITY",

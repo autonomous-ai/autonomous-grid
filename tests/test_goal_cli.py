@@ -58,7 +58,8 @@ def test_goal_run_help_calls_manifest_arguments_files(capsys):
     output = capsys.readouterr().out
     assert "--tools FILE" in output
     assert "--evals FILE" in output
-    assert "JSON file containing independent evals" in output
+    assert "independent artifact or" in output
+    assert "authenticated verify evals" in output
 
 
 def test_goal_run_loads_tools_and_posts_the_resolved_project(monkeypatch, tmp_path, capsys):
