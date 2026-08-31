@@ -390,9 +390,35 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     if not isinstance(raw_attempt_events, list):
         failures.append("Goal evidence has no valid attempt_events list")
     attempt_events = raw_attempt_events if isinstance(raw_attempt_events, list) else []
+    event_coordinates: set[tuple[str, int]] = set()
+    last_event_seq: dict[str, int] = {}
     for index, item in enumerate(attempt_events, 1):
-        if (isinstance(item, dict) and isinstance(item.get("event"), dict)
-                and item["event"].get("type") == "task.event.corrupt"):
+        if not isinstance(item, dict):
+            failures.append(f"attempt event {index} is not an object")
+            continue
+        turn_id = item.get("turn_id")
+        seq = item.get("seq")
+        event = item.get("event")
+        if not isinstance(turn_id, str) or turn_id not in turn_ids:
+            failures.append(f"attempt event {index} names an unknown Goal turn")
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+            failures.append(f"attempt event {index} has no valid relay sequence")
+        elif isinstance(turn_id, str):
+            coordinate = (turn_id, seq)
+            if coordinate in event_coordinates:
+                failures.append(
+                    f"attempt event {index} duplicates relay sequence {seq} for turn {turn_id}")
+            else:
+                event_coordinates.add(coordinate)
+            previous_seq = last_event_seq.get(turn_id)
+            if previous_seq is not None and seq <= previous_seq:
+                failures.append(
+                    f"attempt event {index} is out of relay sequence order for turn {turn_id}")
+            last_event_seq[turn_id] = max(seq, previous_seq if previous_seq is not None else seq)
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str) or not event["type"]:
+            failures.append(f"attempt event {index} has no valid event object and type")
+            continue
+        if event.get("type") == "task.event.corrupt":
             failures.append(f"attempt event {index} contains corrupt stored evidence")
 
     # A turn row and its terminal event are committed in one relay transaction. Require both

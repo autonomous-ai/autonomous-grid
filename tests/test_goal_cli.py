@@ -658,6 +658,29 @@ def test_goal_evidence_verifies_atomic_terminal_and_eval_verdicts():
     assert _verify_evidence(record) == []
 
     damaged = deepcopy(record)
+    damaged["attempt_events"][0].pop("seq")
+    assert any("has no valid relay sequence" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][1]["seq"] = 3
+    failures = _verify_evidence(damaged)
+    assert any("duplicates relay sequence 3" in item for item in failures)
+    assert any("out of relay sequence order" in item for item in failures)
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"].reverse()
+    assert any("out of relay sequence order" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][0]["turn_id"] = "turn-forged"
+    assert any("names an unknown Goal turn" in item for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][0]["event"]["type"] = ""
+    assert any("has no valid event object and type" in item
+               for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
     damaged["attempt_events"].pop()
     assert any("0 relay terminal events" in item for item in _verify_evidence(damaged))
 
@@ -918,11 +941,11 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
     assert any("no authoritative retry event" in item for item in _verify_evidence(record))
 
     record["attempt_events"].extend([{
-        "turn_id": "turn-1",
+        "turn_id": "turn-1", "seq": 0,
         "event": {"type": "task.attempt_started", "attempt": 1,
                   "provider_id": "node-A", "agent_kind": "codex"},
     }, {
-        "turn_id": "turn-1",
+        "turn_id": "turn-1", "seq": 1,
         "event": {"type": "task.retry", "attempt": 1,
                       "previous_provider_id": "node-A", "previous_agent_kind": "codex",
                       "reason": "lease_expired"},
@@ -953,9 +976,11 @@ def test_goal_evidence_verify_requires_relay_retry_proof_for_reclaimed_turn():
     record["turns"][0]["attempt"] = 2
 
     duplicate = {
-        "turn_id": "turn-1", "event": dict(record["attempt_events"][1]["event"]),
+        "turn_id": "turn-1", "seq": 2,
+        "event": dict(record["attempt_events"][1]["event"]),
     }
-    record["attempt_events"].append(duplicate)
+    record["attempt_events"][-1]["seq"] = 3
+    record["attempt_events"].insert(-1, duplicate)
     assert any("2 authoritative retry events" in item for item in _verify_evidence(record))
 
 
@@ -1059,38 +1084,38 @@ def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
             "transcript_result_commit": "a" * 40,
         }],
         "attempt_events": [
-            {"turn_id": "turn-1", "event": {
+            {"turn_id": "turn-1", "seq": 0, "event": {
                 "type": "task.attempt_started", "attempt": 1,
                 "provider_id": "node-B", "agent_kind": "codex",
             }},
-            {"turn_id": "turn-1", "event": {
+            {"turn_id": "turn-1", "seq": 1, "event": {
                 "type": "task.retry", "attempt": 1, "previous_provider_id": "node-B",
                 "previous_agent_kind": "codex",
             }},
-            {"turn_id": "turn-1", "event": {
+            {"turn_id": "turn-1", "seq": 2, "event": {
                 "type": "goal.observe.request", "provider_node_id": "node-B", "attempt": 1,
                 "tool": "read_ticket", "call_id": "read-1",
             }},
-            {"turn_id": "turn-1", "event": {
+            {"turn_id": "turn-1", "seq": 3, "event": {
                 "type": "goal.observe.result", "provider_node_id": "node-B", "attempt": 1,
                 "tool": "read_ticket", "call_id": "read-1",
             }},
             # B disappears after its durable request. C safely reconciles the same logical action
             # under a different native call id and the Goal-wide idempotency key.
-            {"turn_id": "turn-1", "event": {
+            {"turn_id": "turn-1", "seq": 4, "event": {
                 "type": "goal.act.request", "provider_node_id": "node-B", "attempt": 1,
                 "tool": "send_reply", "call_id": "act-B", "idempotency_key": key,
             }},
-            {"turn_id": "turn-1", "event": {
+            {"turn_id": "turn-1", "seq": 5, "event": {
                 "type": "goal.act.request", "provider_node_id": "node-C", "attempt": 2,
                 "tool": "send_reply", "call_id": "act-C", "idempotency_key": key,
             }},
-            {"turn_id": "turn-1", "event": {
+            {"turn_id": "turn-1", "seq": 6, "event": {
                 "type": "goal.act.result", "provider_node_id": "node-C", "attempt": 2,
                 "tool": "send_reply", "call_id": "act-C", "idempotency_key": key,
             }},
             # A killed read is safe to repeat, so an unmatched observe/verify request is valid.
-            {"turn_id": "turn-1", "event": {
+            {"turn_id": "turn-1", "seq": 7, "event": {
                 "type": "goal.verify.request", "provider_node_id": "node-C", "attempt": 2,
                 "tool": "check_ticket", "call_id": "verify-1",
             }},
@@ -1159,7 +1184,7 @@ def test_goal_evidence_strict_physical_gates_require_nodes_and_grid_inference():
             "result_commit": "2" * 40, "transcript_commit": None,
             "transcript_result_commit": "a" * 40,
         }],
-        "attempt_events": [{"turn_id": "turn-1", "event": {
+        "attempt_events": [{"turn_id": "turn-1", "seq": 0, "event": {
             "type": "task.attempt_started", "attempt": 1,
             "provider_id": "node-A", "agent_kind": "codex",
         }}, terminal_event("turn-1", 1)], "inference": [], "eval_runs": [],
@@ -1209,15 +1234,15 @@ def test_goal_evidence_keeps_mixed_harness_inference_bound_to_each_retry_attempt
             "transcript_result_commit": "a" * 40,
         }],
         "attempt_events": [
-            {"turn_id": "turn-1", "event": {
+            {"turn_id": "turn-1", "seq": 0, "event": {
                 "type": "task.attempt_started", "attempt": 1,
                 "provider_id": "node-A", "agent_kind": "codex",
             }},
-            {"turn_id": "turn-1", "event": {
+            {"turn_id": "turn-1", "seq": 1, "event": {
                 "type": "task.retry", "attempt": 1, "reason": "lease_expired",
                 "previous_provider_id": "node-A", "previous_agent_kind": "codex",
             }},
-            {"turn_id": "turn-1", "event": {
+            {"turn_id": "turn-1", "seq": 2, "event": {
                 "type": "task.attempt_started", "attempt": 2,
                 "provider_id": "node-B", "agent_kind": "claude",
             }},
