@@ -8,8 +8,9 @@ The detailed physical artifacts are indexed in
 ## Tested code revisions
 
 - Public worker/CLI and acceptance harness: `ecec3a4a5fa547271f75dc8fce7af5b4d1680917`
+- Physical relay launcher/tunnel follow-up: `67505c09eb54d99098cc2d6a5489ce967c7d2c7f`
 - Private relay: `374a3125f9296e453d8a340975eea14a78ad1bd2`
-- Both tested runtime revisions were clean and pushed when these gates completed.
+- All tested revisions were clean and pushed when their gates completed.
 
 ## Software gates
 
@@ -191,7 +192,7 @@ Machine C; its launcher can now supervise a loopback-only Cloudflare Quick Tunne
 reachability, and mint separate A/B identities without SSH.
 
 The no-SSH lab now accepts `--joining-workers 2`, persists separate B/C credentials across relay
-restarts, and refuses missing or duplicate physical node ids. Its 369-test Goal preflight and 34
+restarts, and refuses missing or duplicate physical node ids. Its 369-test Goal preflight and 37
 lab-specific tests passed. Machine C is visible as `forge-gpu-2x4090`, but the disposable relay has
 not yet been launched locally on C, so the three-machine hardware event remains unexecuted.
 

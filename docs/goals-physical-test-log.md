@@ -379,3 +379,27 @@ Goal because the server preflight correctly stopped before creation.
 - This is software evidence, not the outstanding physical result. `forge-gpu-2x4090` is online as
   Machine C, but no disposable Goal relay has yet been launched on it and no A-to-B-to-C physical
   Goal was created in this entry.
+
+## 2026-08-31 — real Quick Tunnel relay smoke
+
+- Follow-up `50a8ee2745e2d013eaf14fd218f76396365a8270` first passed 35/35 physical-launcher tests and
+  repository lint. It preserves a failed public-preflight lab and tells the operator to restart
+  with `--reuse`, while still terminating both relay and tunnel children. The subsequent lifetime
+  audit at `67505c09eb54d99098cc2d6a5489ce967c7d2c7f` raised the suite to 37/37 and made the launcher
+  monitor both children continuously: a tunnel exit now stops the lab instead of leaving a
+  healthy-looking but unreachable relay terminal. The combined Goal verifier, native Claude
+  harness and physical-launcher bundle passed 107/107 after that change.
+- An official Cloudflare `cloudflared` 2026.8.3 macOS ARM archive was downloaded to a disposable
+  directory; its SHA-256 `40c9144d86df8937c5b43293a1f7d2d2107029aa74725023dd46b1b27154352f`
+  matched GitHub's release-asset digest.
+- The integrated launcher started the real private relay on `127.0.0.1:8090`, started a Quick
+  Tunnel, generated two distinct worker identities with credential output suppressed, and exposed
+  the unauthenticated `/relay/v1/health` route. A TLS request pinned to the hostname's resolved
+  Cloudflare edge returned the relay's exact `{"status":"ok"}` response; the relay log recorded the
+  external request as HTTP 200.
+- This Mac's sandbox exposes DNS to `dig` but not to Python's system resolver, so the built-in
+  external check correctly timed out and shut down instead of falsely announcing readiness. The
+  explicit edge-pinned request proves the tunnel/origin path; Machine C's ordinary Linux resolver
+  must still pass the launcher's built-in check before credentials are distributed.
+- Both disposable relay roots, every short-lived pairing credential, and the temporary
+  `cloudflared` binary/archive were deleted after the smoke test. No physical Goal was created.
