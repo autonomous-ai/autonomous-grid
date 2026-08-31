@@ -102,7 +102,7 @@ def live_model_names(overview: dict[str, Any]) -> tuple[str, ...]:
 
 
 def _model_case_map(overview: dict[str, Any]) -> dict[str, str]:
-    """``lower(id) -> id``, read from the overview's own top-level ``models`` list.
+    """``casefold(alias) -> alias``, read from the overview's top-level model catalog.
 
     That list is the ONE place the relay reports a model's id in its true case; every node's own
     ``models`` array is lowercased for display (grid-leave issue: reproduced live serving
@@ -113,10 +113,20 @@ def _model_case_map(overview: dict[str, Any]) -> dict[str, str]:
     entries = overview.get("models")
     if not isinstance(entries, list):
         return {}
+    candidates: dict[str, set[str]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        model_id = entry["id"]
+        aliases = (model_id, model_id[:-5]) if model_id.casefold().endswith(".gguf") else (model_id,)
+        for alias in aliases:
+            candidates.setdefault(alias.casefold(), set()).add(alias)
+    # A case-insensitive collision is not enough evidence to choose one case-sensitive model.
+    # Leave that node spelling untouched instead of silently routing it to an arbitrary peer.
     return {
-        entry["id"].lower(): entry["id"]
-        for entry in entries
-        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+        folded: next(iter(aliases))
+        for folded, aliases in candidates.items()
+        if len(aliases) == 1
     }
 
 
@@ -130,10 +140,12 @@ def _node_models(node: dict[str, Any], overview: dict[str, Any] | None = None) -
     if not isinstance(models, list):
         return []
     case_map = _model_case_map(overview) if overview is not None else {}
-    return [case_map.get(str(model).lower(), str(model)) for model in models]
+    return [case_map.get(str(model).casefold(), str(model)) for model in models]
 
 
-def _node_responses_models(node: dict[str, Any]) -> set[str]:
+def _node_responses_models(
+    node: dict[str, Any], overview: dict[str, Any] | None = None
+) -> set[str]:
     """The subset of a node's served models that serve the Responses dialect (issue 10), read from
     the overview's ``responses_models`` and str-coerced to match ``_node_models``' ids. Defends
     against a non-list field, non-string items, and an older master that omits it entirely — each
@@ -141,7 +153,8 @@ def _node_responses_models(node: dict[str, Any]) -> set[str]:
     models = node.get("responses_models")
     if not isinstance(models, list):
         return set()
-    return {str(model) for model in models}
+    case_map = _model_case_map(overview) if overview is not None else {}
+    return {case_map.get(str(model).casefold(), str(model)) for model in models}
 
 
 def cmd_remote_engines(args: argparse.Namespace) -> int:
@@ -201,7 +214,9 @@ def cmd_remote_models(args: argparse.Namespace) -> int:
     for node in nodes:
         engine = str(node.get("engine") or "")
         name = str(node.get("name") or "")
-        capable = _node_responses_models(node)  # resolved once per node, not per served model
+        capable = _node_responses_models(
+            node, overview
+        )  # resolved once per node, not per served model
         for model in _node_models(node, overview):
             rows.append((model, engine, name, model in capable))
     # When auto routing is enabled, advertise the reserved `auto` model FIRST — same as the relay's

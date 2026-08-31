@@ -21228,6 +21228,34 @@ def test_remote_models_json_maps_name_to_node_key(monkeypatch, tmp_path, capsys)
     assert {"model": "glm-5.2", "engine": "ollama", "node": "ollama-box", "responses": False} in payload
 
 
+def test_remote_models_preserves_case_for_extensionless_gguf_alias(monkeypatch, tmp_path, capsys):
+    """The overview node strips ``.gguf`` and lowercases for display, while the catalog retains
+    the request alias's true case. The rendered name must be copy-paste routable."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    overview = {
+        "models": [{"id": "SmolLM2-135M-Instruct-Q3_K_M.gguf"}],
+        "nodes": [{
+            "name": "intel-imac",
+            "engine": "llama.cpp",
+            "models": ["smollm2-135m-instruct-q3_k_m"],
+            "responses_models": ["smollm2-135m-instruct-q3_k_m"],
+            "online": True,
+        }],
+    }
+    _mock_overview(monkeypatch, overview)
+
+    assert cli.main(["models", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == [{
+        "model": "SmolLM2-135M-Instruct-Q3_K_M",
+        "engine": "llama.cpp",
+        "node": "intel-imac",
+        "responses": True,
+    }]
+    assert cli.remote_overview.live_model_names(overview) == (
+        "SmolLM2-135M-Instruct-Q3_K_M",
+    )
+
+
 def test_remote_models_empty_when_no_nodes(monkeypatch, tmp_path, capsys):
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_overview(monkeypatch, {"nodes": []})
