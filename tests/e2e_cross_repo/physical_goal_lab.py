@@ -421,12 +421,28 @@ def _wait_for_health(proc: subprocess.Popen, url: str, timeout: float = 90.0) ->
         if proc.poll() is not None:
             raise SystemExit(f"Goal relay exited during startup with status {proc.returncode}")
         try:
-            if httpx.get(f"{local}/relay/v1/health", timeout=2.0).status_code < 500:
+            response = httpx.get(f"{local}/relay/v1/health", timeout=2.0)
+            if _relay_health_error(response) is None:
                 return
         except httpx.HTTPError:
             pass
         time.sleep(0.2)
     raise SystemExit("Goal relay did not become healthy within 90 seconds")
+
+
+def _relay_health_error(response: Any) -> str | None:
+    """Return why one response is not the Goal relay's health contract, or ``None`` when valid."""
+    if response.status_code != 200:
+        return f"HTTP {response.status_code}"
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        return "HTTP 200 with a non-JSON body"
+    if not isinstance(payload, dict):
+        return "HTTP 200 with a non-object JSON body"
+    if payload.get("status") != "ok" or payload.get("service") != "localagi-p2p-api":
+        return "HTTP 200 from a service that is not the Grid relay"
+    return None
 
 
 def _stop_process(proc: subprocess.Popen | None) -> None:
@@ -491,9 +507,13 @@ def _start_cloudflared_tunnel(
 
 
 def _wait_for_public_health(
-        relay_proc: subprocess.Popen, tunnel_proc: subprocess.Popen, url: str,
+        relay_proc: subprocess.Popen, tunnel_proc: subprocess.Popen | None, url: str,
         timeout: float = 90.0) -> None:
-    """Prove an internet-separated worker can reach the relay before revealing credentials."""
+    """Prove an internet-separated worker can reach the advertised relay before credentials print.
+
+    ``tunnel_proc`` is absent when the operator owns the HTTPS reverse proxy. The relay still has
+    to pass the same end-to-end check; there is merely no proxy child for this helper to supervise.
+    """
     import httpx
 
     deadline = time.monotonic() + timeout
@@ -504,15 +524,16 @@ def _wait_for_public_health(
             raise SystemExit(
                 f"Goal relay exited during public reachability check with status "
                 f"{relay_proc.returncode}")
-        if tunnel_proc.poll() is not None:
+        if tunnel_proc is not None and tunnel_proc.poll() is not None:
             raise SystemExit(
                 f"Cloudflared exited during public reachability check with status "
                 f"{tunnel_proc.returncode}")
         try:
             response = httpx.get(health_url, timeout=5.0)
-            if response.status_code == 200:
+            health_error = _relay_health_error(response)
+            if health_error is None:
                 return
-            last_error = f"HTTP {response.status_code}"
+            last_error = health_error
         except httpx.HTTPError as exc:
             last_error = str(exc)
         time.sleep(0.5)
@@ -558,7 +579,9 @@ def cmd_relay(args: argparse.Namespace) -> int:
         # Probe the listener directly. An advertised HTTPS URL may terminate TLS at a reverse
         # proxy on port 443 while uvicorn remains private on `args.port`.
         _wait_for_health(relay_proc, f"http://127.0.0.1:{args.port}")
-        if tunnel_proc is not None:
+        # An explicit stable hostname can be every bit as misconfigured as a freshly-created Quick
+        # Tunnel. Never mint apparently usable worker credentials after proving only loopback.
+        if getattr(args, "advertise_url", None):
             _wait_for_public_health(relay_proc, tunnel_proc, metadata["url"])
         print("\nGrid Goal physical relay is ready (no SSH):", flush=True)
         print(f"  relay:       {metadata['url']}", flush=True)

@@ -587,6 +587,77 @@ def test_cloudflared_relay_uses_loopback_checks_public_health_and_stops_tunnel(
     assert "relay:       https://quick-test.trycloudflare.com" in capsys.readouterr().out
 
 
+def test_stable_https_relay_checks_public_health_without_managed_tunnel(
+        tmp_path, monkeypatch):
+    class RelayProcess:
+        returncode = None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return None
+
+        def send_signal(self, _value):
+            pass
+
+    relay = RelayProcess()
+    public_health = []
+    monkeypatch.setattr(lab, "prepare_relay", lambda _args: (
+        tmp_path, {}, lab.json.dumps({
+            "url": "https://goal.example.test",
+            "worker_pair": "bundle-b",
+            "worker_node_id": "goal-worker-b",
+            "relay_node_id": "goal-relay-c",
+            "relay_home": str(tmp_path / "grid-home-relay"),
+            "server_dir": str(tmp_path),
+            "python": "/fake/python",
+            "relay_revision": "abc123",
+        })))
+    monkeypatch.setattr(lab.subprocess, "Popen", lambda *_args, **_kwargs: relay)
+    monkeypatch.setattr(lab, "_wait_for_health", lambda *_args: None)
+    monkeypatch.setattr(
+        lab, "_wait_for_public_health", lambda *args: public_health.append(args))
+    monkeypatch.setattr(lab, "_wait_for_children", lambda *_args: 0)
+
+    args = lab.build_parser().parse_args([
+        "relay", "--relay-repo", "/tmp/private-relay",
+        "--bind-host", "127.0.0.1",
+        "--advertise-url", "https://goal.example.test",
+    ])
+    assert lab.cmd_relay(args) == 0
+    assert public_health == [(relay, None, "https://goal.example.test")]
+
+
+@pytest.mark.parametrize(("status", "payload", "expected"), [
+    (404, {"status": "ok", "service": "localagi-p2p-api"}, "HTTP 404"),
+    (200, None, "non-JSON"),
+    (200, ["ok"], "non-object"),
+    (200, {"status": "ok", "service": "some-other-app"}, "not the Grid relay"),
+])
+def test_relay_health_contract_rejects_proxy_false_positives(status, payload, expected):
+    class Response:
+        status_code = status
+
+        def json(self):
+            if payload is None:
+                raise ValueError("not json")
+            return payload
+
+    assert expected in lab._relay_health_error(Response())
+
+
+def test_relay_health_contract_accepts_exact_relay_response():
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"status": "ok", "service": "localagi-p2p-api", "live_bus": {}}
+
+    assert lab._relay_health_error(Response()) is None
+
+
 def test_relay_lifetime_fails_closed_when_supervised_tunnel_dies():
     class Process:
         def __init__(self, status):
