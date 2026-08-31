@@ -7,8 +7,8 @@ The detailed physical artifacts are indexed in
 
 ## Tested code revisions
 
-- Public worker/CLI and acceptance harness: `88cd8c847d4baf5150559bfc69f17fd3554e65d2`
-- Private relay: `9b91f3326438f2ee840256782e8ebcf9c3229665`
+- Public worker/CLI and acceptance harness: `11bece7bb0d3809ee3b28bc820da25d0d11e96eb`
+- Private relay: `2b1084a3c67ee6f81ea596d3a56414309df5b097`
 - Both tested runtime revisions were clean and pushed when these gates completed. The public
   evidence-documentation commit follows the tested worker/CLI revision and changes no runtime code.
 
@@ -23,7 +23,7 @@ The detailed physical artifacts are indexed in
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
-| Cross-repository distributed matrix | 21 passed (312.71s) | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
+| Cross-repository distributed matrix | 21 passed (301.54s) | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 
 The full public suite ran against the exact public runtime revision in GitHub Actions on Python
 3.11, 3.12 and 3.13; the private runbook bundle and 21-scenario matrix ran uninterrupted against the
@@ -114,7 +114,7 @@ The matrix harness also treats an atomically replaced workspace as a transient p
 cancels every Goal created by a failed scenario during teardown. One assertion failure therefore
 cannot leak queued work into the next scenario and create a misleading cascade of cross-test claims.
 Its provider disks live under an atomically reserved one-character `/private/tmp` root, with a hard
-31-character assertion on every task root. The uninterrupted 21-scenario rerun passed in 312.71
+31-character assertion on every task root. The uninterrupted 21-scenario rerun passed in 301.54
 seconds without exercising the macOS path depth that can make sandbox commands fail with `E2BIG`.
 Before that final run, both protocol-drift handoff scenarios passed together three times against
 fresh relay processes (6/6), and four focused client tests passed for runtime quarantine recovery,

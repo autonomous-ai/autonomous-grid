@@ -291,16 +291,16 @@ Goal because the server preflight correctly stopped before creation.
   `This grid's relay does not support Grid Goal yet.` Membership and remote networking work; the
   hosted master is still running pre-Goal private relay code.
 - Private branch `grid-goal-distributed` is green at
-  `9b91f3326438f2ee840256782e8ebcf9c3229665`. It may be temporarily deployed before merge. Merely
+  `2b1084a3c67ee6f81ea596d3a56414309df5b097`. It may be temporarily deployed before merge. Merely
   checking out the public branch on the three workers cannot add the missing hosted endpoints.
 - No SSH, LAN address, local relay or pairing bundle was used. No Goal was created, so this is a
   deployment preflight rather than execution evidence.
 
 ## 2026-08-31 — authenticated business outcome matrix
 
-- Public runtime/harness `88cd8c847d4baf5150559bfc69f17fd3554e65d2` and private relay
-  `9b91f3326438f2ee840256782e8ebcf9c3229665` passed the complete 21-scenario cross-repository
-  matrix in one uninterrupted 312.71-second invocation.
+- Public runtime/harness `11bece7bb0d3809ee3b28bc820da25d0d11e96eb` and private relay
+  `2b1084a3c67ee6f81ea596d3a56414309df5b097` passed the complete 21-scenario cross-repository
+  matrix in one uninterrupted 301.54-second invocation.
 - In the upgraded support Goal, unauthorized node A spent zero attempts. Codex B observed ticket
   T-42, committed one idempotent reply, and died. Codex C reclaimed the exact turn from an isolated
   root, replayed without another side effect, and called a node-local `check_ticket` verify tool.
