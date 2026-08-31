@@ -218,8 +218,30 @@ The relay independently computes these predicates, but a repository artifact is 
 as its producer. If the acting agent writes `metrics.json` itself, the check proves what that file
 says—not that an external business system agrees. Use JSON metrics only when a trusted test,
 importer, or separately controlled system produces the artifact. File/JSON checks are strong for
-exact artifact contracts; they are not a substitute for an external KPI oracle. Recorded `verify`
-tool calls remain trajectory evidence in this MVP, but do not independently gate completion.
+exact artifact contracts; they are not a substitute for an external KPI oracle. For a business
+outcome, bind a `verify` eval to a named GET-only Goal tool whose result is recorded in full:
+
+```json
+{"version": 1, "evals": [{
+  "type": "verify", "name": "ticket resolved", "tool": "check_ticket",
+  "arguments": {"ticket_id": "T-42"},
+  "checks": [
+    {"pointer": "/status_code", "op": "equals", "value": 200},
+    {"pointer": "/body/status", "op": "equals", "value": "resolved"}
+  ]
+}]}
+```
+
+The named tool must exist in the Goal manifest with `"mode": "verify"`, a GET method, and
+`"record": "full"`. The node supervisor—not the acting native process—contacts the approved local
+business API and durably records the request and result. At completion, the hosted relay scores only
+the final live attempt's latest exact-argument request/result pair, with matching tool, call id,
+provider, attempt and event order. A passing read from a worker that later died cannot complete its
+replacement's nomination. Oversized, unsuccessful, missing, stale or unmatched results fail the
+metric and produce a repair turn. The relay stores every binary score and provenance tuple; offline
+evidence verification independently finds the same event pair and recomputes every JSON predicate.
+The private API remains local to the eligible Grid node—the hosted relay never needs network access
+to it.
 
 Pointers use RFC 6901 escaping. Supported operations are `equals`, `not_equals`,
 `greater_or_equal`, `less_or_equal`, and `exists`. Numeric comparisons reject booleans and
@@ -479,6 +501,18 @@ manifest with explicit HTTP capabilities:
         "required": ["ticket_id", "reply"]
       },
       "http": {"method": "POST", "url": "http://support.internal/tickets/reply"}
+    },
+    {
+      "name": "check_ticket",
+      "mode": "verify",
+      "record": "full",
+      "description": "Read the authoritative post-action ticket state",
+      "input_schema": {
+        "type": "object",
+        "properties": {"ticket_id": {"type": "string"}},
+        "required": ["ticket_id"]
+      },
+      "http": {"method": "GET", "url": "http://support.internal/tickets/check"}
     }
   ]
 }
@@ -488,7 +522,7 @@ manifest with explicit HTTP capabilities:
 grid goal run --project <project-id> \
   --objective "Resolve every ticket in the assigned queue" \
   --done-when "the queue reports zero assigned unresolved tickets" \
-  --model <model-name> --tools ./support-tools.json
+  --model <model-name> --tools ./support-tools.json --evals ./support-evals.json
 ```
 
 Allowed modes are `observe`, `act` and `verify`. `observe` and `verify` are GET-only; `act` uses a

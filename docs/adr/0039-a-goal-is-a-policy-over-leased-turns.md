@@ -195,8 +195,8 @@ explicit version branch rather than silently changing what an existing metric me
 Before each run, Grid reparses the stored definition through the create-time validator and
 recomputes its canonical hash. Valid-looking database corruption therefore cannot execute a changed
 metric under the original label; it produces an audit-only evaluator error and blocks completion.
-The offline evidence verifier independently recomputes the exported definition hash and, for the
-relay-local file and JSON evaluators, requires the evaluator identity to be exactly `relay`.
+The offline evidence verifier independently recomputes the exported definition hash and, for file,
+JSON and authenticated verify evaluators, requires the evaluator identity to be exactly `relay`.
 
 The JSON evaluator reads one bounded regular-file blob from the exact result commit and applies
 ordered exact, existence, and numeric predicates through validated RFC 6901 pointers. It rejects
@@ -205,11 +205,19 @@ excessive depth/value counts, oversized files, and aggregate reads above 16 MiB.
 deterministic failed outcome evidence, not an infrastructure error; Git/object failures still block
 the Goal.
 
-Planned evaluator-node kinds, which are not part of the first release gate, are:
+The verify evaluator binds that same predicate language to one declared GET-only `mode=verify`
+tool with `record=full`. The eligible Grid node's supervisor reaches the local/private business API;
+the relay never needs that network route and the native Codex process never receives Grid
+credentials. Request and result events are flushed through the live claim fence, and the relay
+stamps provider and attempt. Completion selects only the final leased attempt's latest request with
+the exact immutable arguments and its later matching successful result. Earlier-attempt passes,
+orphaned requests, truncated results and self-authored repository KPI files cannot satisfy that
+metric. The offline verifier repeats event selection and JSON checks from the exported trajectory.
+
+One planned evaluator-node kind, which is not part of the first release gate, is:
 
 - `command`: argv (never a shell string), timeout, expected exit code, optional bounded output
   matcher, executed in a read-only checkout by an evaluator-capable node;
-- `http`: named observe-only capability, bounded request, and status/JSON predicate.
 
 Every evaluation run stores Goal id, turn id, result commit, definition hash, evaluator node,
 started/completed timestamps, pass/score, and bounded structured evidence. A run for commit A can
