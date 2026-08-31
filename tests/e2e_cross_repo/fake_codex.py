@@ -83,6 +83,16 @@ def run_turn(node: str, call_tool=None, *, inference: dict[str, str] | None = No
         save_history(history)
         return "complete", "A completed the first attempt after model recovery", 100
 
+    if scenario == "prestart_recovery":
+        if history:
+            raise RuntimeError(
+                f"pre-start recovery unexpectedly received prior native history: {history!r}")
+        (cwd / "READY.md").write_text(
+            "# Ready\n\nA real worker completed attempt one after three claims expired.\n")
+        history.append({"node": node, "prestart_recovery": True})
+        save_history(history)
+        return "complete", f"{node} completed reused attempt one", 100
+
     if scenario == "claude_protocol_drift":
         if node != "B" or history:
             raise RuntimeError(

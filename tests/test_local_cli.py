@@ -22955,6 +22955,29 @@ def test_task_follow_discloses_a_retry_and_keeps_one_unbroken_cursor(monkeypatch
     assert "attempt 2 started" in captured.out
 
 
+def test_task_follow_distinguishes_an_expired_claim_from_a_failed_agent_attempt(
+        monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.claim_expired", "reason": "lease_expired_before_start",
+                   "attempt": 1, "max_attempts": 3, "attempt_reused": True,
+                   "previous_provider_id": "node-2", "previous_agent_kind": "codex"}),
+        _block(1, {"type": "task.attempt_started", "attempt": 1,
+                   "provider_id": "node-9"}),
+        _block(2, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    assert cli.main(["task", "follow", "T1"]) == 0
+    captured = capsys.readouterr()
+    assert "expired before the agent started" in captured.err
+    assert "attempt remains available" in captured.err
+    assert "attempt 1 started on node-9" in captured.out
+
+
 def test_task_follow_no_longer_claims_a_lost_attempts_git_changes_are_undone(
         monkeypatch, tmp_path, capsys):
     """ADR 0033 D-c makes the old sentence FALSE, and it was printed verbatim.

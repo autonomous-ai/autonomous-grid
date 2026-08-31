@@ -355,6 +355,16 @@ and harness from the live claim. Therefore each retry predecessor counted by
 marker without the later authoritative retry never counts by itself. The replacement's attempt
 number must still be 2 and the retry reason must be `lease_expired`.
 
+A machine that loses its lease before that start fence did not run Codex or Claude. The relay emits
+`task.claim_expired` with `attempt_reused: true`, returns the row to its prior attempt count, and
+fences the old opaque claim id. It must not emit `task.retry`, count that machine toward
+`--min-execution-nodes`, require worker-runtime provenance from it, or label it as a failed training
+trajectory. Repeat this with three distinct machines and `max_attempts=1`: the first worker that
+actually starts must still receive attempt 1. For provider-first rolling upgrades, the relay
+atomically inserts an `implicit: true` start before the first authenticated Goal event, child action,
+retry checkpoint, or result, so an older worker cannot perform recorded work and later be mistaken
+for an unstarted claim.
+
 Each counted attempt-start also carries a relay-snapshotted `worker_runtime`: Grid package version,
 clean Git revision, selected native harness and native agent version. The provider cannot forge this
 through its event payload; the relay removes that field and rebuilds it from the authenticated

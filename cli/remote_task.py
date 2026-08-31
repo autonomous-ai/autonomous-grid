@@ -1239,6 +1239,14 @@ def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = 
         provider = event.get("provider_id")
         where = f" on {provider}" if provider else ""
         print(f"[{seq}] attempt {event.get('attempt')} started{where}")
+    elif kind == "task.claim_expired":
+        provider = event.get("previous_provider_id")
+        where = f" on {provider}" if provider else ""
+        print(
+            f"[{seq}] the claim for attempt {event.get('attempt')}{where} expired before the "
+            "agent started; that attempt remains available for another machine.",
+            file=sys.stderr,
+        )
     elif kind == "task.retry":
         # On stderr with the other disclosures, and worded so the asymmetry is unmissable: the relay
         # resets the TASK's branch to its input commit before the next attempt, and a user who is

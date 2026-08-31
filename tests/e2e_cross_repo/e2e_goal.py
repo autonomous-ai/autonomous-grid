@@ -296,6 +296,67 @@ def test_same_node_reclaim_rejects_the_old_process_on_every_goal_plane(
         relay_client.control_goal(relay, owner_token, goal["id"], "cancel")
 
 
+def test_three_prestart_machine_losses_reuse_attempt_one_before_a_real_worker_runs(
+        relay, owner_token, provider_nodes, advertise_goal_models, spawn_goal_provider):
+    """A claimed laptop that vanishes before the start fence is not an agent failure."""
+    from remote import relay as relay_client
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-goal-prestart-claim-loss")["id"]
+    H.seed_trunk(relay, owner_token, project_id)
+    for label in ("A", "B", "C"):
+        advertise_goal_models(label, "fake-grid-model")
+    goal = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Finish only after three pre-start worker losses",
+        done_when="READY.md exists", model="fake-grid-model", token_budget=1_000,
+        tools=[], evals=[{"type": "file", "name": "ready", "path": "READY.md"}])
+    profile = ({"kind": "codex", "capabilities": ["native_goal"]},)
+
+    lost_nodes = []
+    for loss_count, label in enumerate(("A", "B", "C"), 1):
+        node_id, node_token = provider_nodes[label]
+        claim = relay_client.claim_task(
+            relay, node_token, agent_kinds=("codex",),
+            agent_profiles=profile, timeout=5)
+        assert claim and claim["task_id"] == goal["turn_id"], claim
+        assert claim["attempt"] == 1
+        lost_nodes.append(node_id)
+
+        reclaimed = H.wait_for(lambda: (lambda rows: rows if (
+            len(rows) == 1 and rows[0]["state"] == "queued"
+            and rows[0]["attempt"] == 0 and rows[0]["provider_id"] is None
+        ) else None)(_tasks(relay, owner_token, project_id, goal["id"])), timeout=12)
+        assert reclaimed, _tasks(relay, owner_token, project_id, goal["id"])
+        evidence = relay_client.get_goal_evidence(relay, owner_token, goal["id"])
+        expired = [item["event"] for item in evidence["attempt_events"]
+                   if item["event"].get("type") == "task.claim_expired"]
+        assert len(expired) == loss_count
+        assert all(item["attempt"] == 1 and item["attempt_reused"] is True
+                   for item in expired)
+        assert not [item for item in evidence["attempt_events"]
+                    if item["event"].get("type") in (
+                        "task.attempt_started", "task.retry")]
+
+    winner = spawn_goal_provider(
+        "D", scenario="prestart_recovery", disk_label="prestart-winner", one_task=True)
+    complete = H.wait_for(
+        lambda: _completed_goal(relay, owner_token, goal["id"]), timeout=30)
+    assert complete, f"replacement did not finish; D output:\n{winner.output()}"
+    rows = _tasks(relay, owner_token, project_id, goal["id"])
+    assert len(rows) == 1 and rows[0]["attempt"] == 1
+    assert rows[0]["provider_id"] == winner.node_id
+
+    evidence = relay_client.get_goal_evidence(relay, owner_token, goal["id"])
+    expired = [item["event"] for item in evidence["attempt_events"]
+               if item["event"].get("type") == "task.claim_expired"]
+    starts = [item["event"] for item in evidence["attempt_events"]
+              if item["event"].get("type") == "task.attempt_started"]
+    assert [item["previous_provider_id"] for item in expired] == lost_nodes
+    assert len(starts) == 1 and starts[0]["attempt"] == 1
+    assert starts[0]["provider_id"] == winner.node_id
+
+
 def test_goal_waits_at_attempt_zero_until_separate_inference_node_adds_model(
         relay, owner_token, spawn_goal_provider, advertise_goal_models):
     """A live agent machine is insufficient until the Grid can serve the Goal's model."""

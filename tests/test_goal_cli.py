@@ -875,6 +875,50 @@ def test_worker_revision_gate_ignores_a_claim_lost_before_attempt_start():
         record, require_worker_revision="b1f54d3", min_execution_nodes=2))
 
 
+def test_goal_evidence_treats_expired_claims_as_fleet_audit_not_execution():
+    from cli.goal import _verify_evidence
+
+    runtime = {
+        "schema_version": 1,
+        "grid": {"version": "0.3.28", "revision": "944ed04a55", "dirty": False},
+        "agent": {"kind": "codex", "version": "0.150.1"},
+    }
+    record = {
+        "schema_version": 1,
+        "goal": {"status": "complete", "evals": []},
+        "relationships": {"parent_goal_id": None, "children": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": []},
+        "turns": [{
+            "id": "turn-1", "attempt": 1, "state": "completed", "agent_kind": "codex",
+            "provider_node_id": "node-B", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [{
+            "turn_id": "turn-1", "seq": 0, "event": {
+                "type": "task.claim_expired", "reason": "lease_expired_before_start",
+                "attempt": 1, "max_attempts": 3, "attempt_reused": True,
+                "previous_provider_id": "node-A", "previous_agent_kind": "codex",
+            },
+        }, {
+            "turn_id": "turn-1", "seq": 1, "event": {
+                "type": "task.attempt_started", "attempt": 1, "provider_id": "node-B",
+                "agent_kind": "codex", "worker_runtime": runtime,
+            },
+        }],
+        "inference": [], "eval_runs": [],
+    }
+
+    assert _verify_evidence(
+        record, require_worker_revision="944ed04", min_execution_nodes=1) == []
+    assert any("fewer than required 2" in failure for failure in _verify_evidence(
+        record, require_worker_revision="944ed04", min_execution_nodes=2))
+
+    record["attempt_events"][0]["event"]["attempt_reused"] = False
+    assert any("does not prove a reusable pre-start claim" in failure
+               for failure in _verify_evidence(record))
+
+
 def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
     from cli.goal import _verify_evidence
 

@@ -395,6 +395,33 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 and item["event"].get("type") == "task.event.corrupt"):
             failures.append(f"attempt event {index} contains corrupt stored evidence")
 
+    # A native Goal claim can outlive its worker before Codex/Claude crosses the durable start
+    # fence. This is useful fleet evidence, but it is neither an execution attempt nor a failed
+    # training trajectory. Validate its relay-authored shape without adding its node to the set of
+    # workers that actually ran the Goal.
+    for index, item in enumerate(attempt_events, 1):
+        if (not isinstance(item, dict) or not isinstance(item.get("event"), dict)
+                or item["event"].get("type") != "task.claim_expired"):
+            continue
+        event = item["event"]
+        turn_id = item.get("turn_id")
+        attempt = event.get("attempt")
+        if not isinstance(turn_id, str) or turn_id not in turn_ids:
+            failures.append(f"expired claim event {index} names an unknown Goal turn")
+        if (not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0):
+            failures.append(f"expired claim event {index} has no valid attempt")
+        if (event.get("reason") != "lease_expired_before_start"
+                or event.get("attempt_reused") is not True):
+            failures.append(
+                f"expired claim event {index} does not prove a reusable pre-start claim")
+        previous_provider = event.get("previous_provider_id")
+        previous_agent = event.get("previous_agent_kind")
+        if previous_provider is not None and (
+                not isinstance(previous_provider, str) or not previous_provider):
+            failures.append(f"expired claim event {index} has malformed provider identity")
+        if previous_agent is not None and previous_agent not in ("codex", "claude"):
+            failures.append(f"expired claim event {index} has malformed harness identity")
+
     # Tool events are durable training evidence, so their worker/attempt boundary must be explicit
     # and relay-authenticated. Sequence order cannot recover that boundary after a dead provider's
     # lease is reclaimed by another machine on the same turn.
