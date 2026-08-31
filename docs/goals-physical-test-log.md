@@ -356,9 +356,9 @@ Goal because the server preflight correctly stopped before creation.
 
 ## 2026-08-31 — remote C launcher and 22-scenario rerun
 
-- Public candidate `a33302ce859595a7c4b1e825c6e8c75d4cabf534` and private relay
+- Public candidate `ecec3a4a5fa547271f75dc8fce7af5b4d1680917` and private relay
   `374a3125f9296e453d8a340975eea14a78ad1bd2` passed the complete 22-scenario cross-repository Goal
-  matrix: 22/22 in 337.17 seconds.
+  matrix: 22/22 in 333.36 seconds.
 - The first uninterrupted invocation passed 21/22 in 327.09 seconds. The failing Codex protocol-
   drift assertion observed a safe transient `running` state after one worker logged local
   quarantine while a sibling pre-quarantine long-poll was still declining its stale delivery. The
@@ -368,6 +368,10 @@ Goal because the server preflight correctly stopped before creation.
   loopback, discovers the generated HTTPS root, verifies the public health route before revealing
   either worker credential, drains tunnel logs, supervises relay and tunnel shutdown together, and
   refuses a credential-suppressing Quick Tunnel restart whose hostname would change.
+- Offline verification now also binds native Codex cumulative turn/token counters to the accepted
+  relay trajectory, rejects counter rollback or overstatement, rejects duplicate native verdicts,
+  and checks optional Claude `/goal` sentinel uniqueness and ordering. The complete real matrix
+  passed after these rules were enabled.
 - The physical launcher suite passed 34/34; the focused Goal CLI/native-harness/launcher bundle
   passed 104/104; repository lint passed. The ordinary sandboxed full-suite attempt was discarded
   as release evidence because optional MLX aborted the interpreter and loopback-proxy tests were

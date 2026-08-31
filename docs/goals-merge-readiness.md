@@ -7,7 +7,7 @@ The detailed physical artifacts are indexed in
 
 ## Tested code revisions
 
-- Public worker/CLI and acceptance harness: `a33302ce859595a7c4b1e825c6e8c75d4cabf534`
+- Public worker/CLI and acceptance harness: `ecec3a4a5fa547271f75dc8fce7af5b4d1680917`
 - Private relay: `374a3125f9296e453d8a340975eea14a78ad1bd2`
 - Both tested runtime revisions were clean and pushed when these gates completed.
 
@@ -15,14 +15,14 @@ The detailed physical artifacts are indexed in
 
 | Gate | Result | What it proves |
 |---|---:|---|
-| Full public suite | Candidate `a33302c` passed exact-head GitHub CI on Python 3.11, 3.12, 3.13, lint and Windows | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
+| Full public suite | Candidate `ecec3a4` passed exact-head GitHub CI on Python 3.11, 3.12, 3.13, lint and Windows | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
 | Private runbook release bundle | 184 passed (316.39s locally); exact-head GitHub relay CI passed | Goal creation, claims, retries, pause/cancel and duplicate-settlement races, budgets, subgoals and inherited tool authority, nested required-child propagation, sibling cancellation and explicit resume refusal, recoverable nested fan-in conflicts, concurrent child settlement on independent database connections, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, Git ref idempotency, and recovery from a relay death during continuation preparation |
 | Relay Goal feature discovery | 1 passed | `/server/info` advertises additive `goals/v1` support for safe canary and fleet rollout |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
-| Cross-repository distributed matrix | 22 passed (337.17s) at the exact revisions above | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
+| Cross-repository distributed matrix | 22 passed (333.36s) at the exact revisions above | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 | Worker runtime provenance | 41 focused public checks plus the full suites above | Every required physical attempt can be gated to a clean Grid Git revision and exact native Codex/Claude version; forged event metadata is removed and replaced from the authenticated node registry |
 | Pre-start claim recovery | 212 relay Goal/reclaim checks plus a real four-node cross-repository scenario | Three machines can claim and disappear before native start without spending attempt 1; the fourth worker completes attempt 1, stale claim ids remain fenced, and only actual Codex/Claude executions enter retry/training evidence |
 
@@ -114,7 +114,7 @@ The matrix harness also treats an atomically replaced workspace as a transient p
 cancels every Goal created by a failed scenario during teardown. One assertion failure therefore
 cannot leak queued work into the next scenario and create a misleading cascade of cross-test claims.
 Its provider disks live under an atomically reserved one-character `/private/tmp` root, with a hard
-31-character assertion on every task root. The uninterrupted 22-scenario rerun passed in 337.17
+31-character assertion on every task root. The uninterrupted 22-scenario rerun passed in 333.36
 seconds without exercising the macOS path depth that can make sandbox commands fail with `E2BIG`.
 Before that final run, both protocol-drift handoff scenarios passed together three times against
 fresh relay processes (6/6), and four focused client tests passed for runtime quarantine recovery,
