@@ -984,6 +984,30 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"completed Goal evidence contains cancellation marker {index}")
 
+    for retry in all_retries:
+        event = retry["event"]
+        turn_id = retry.get("turn_id")
+        attempt = event.get("attempt")
+        previous_provider = event.get("previous_provider_id")
+        native = [
+            item["event"] for item in attempt_events
+            if (isinstance(item, dict) and item.get("turn_id") == turn_id
+                and isinstance(item.get("event"), dict)
+                and item["event"].get("type") in native_goal_types
+                and item["event"].get("attempt") == attempt
+                and item["event"].get("provider_node_id") == previous_provider)
+        ]
+        for checkpoint in native:
+            if checkpoint.get("type") == "goal.slice.completed":
+                failures.append(
+                    f"turn {turn_id} retried Codex attempt {attempt} also claims a completed "
+                    "native Goal slice")
+            elif (checkpoint.get("type") == "goal.claude.evaluated"
+                  and not checkpoint.get("protocol_error")):
+                failures.append(
+                    f"turn {turn_id} retried Claude attempt {attempt} has a non-error native "
+                    "Goal verdict")
+
     # A relay start proves which native harness crossed the execution fence; it does not prove that
     # harness reached its own Goal evaluator. Require the exact native checkpoint from the terminal
     # attempt of every accepted turn. This is the bridge that makes Grid orchestration reuse Codex
@@ -1021,6 +1045,9 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                     native[0].get("met") is not True
                     or native[0].get("impossible") is not False):
                 failures.append("final Claude Goal checkpoint does not prove the condition met")
+        if harness == "claude" and native[0].get("protocol_error") is not None:
+            failures.append(
+                f"turn {index} terminal Claude Goal checkpoint contains a protocol error")
 
     # A killed provider cannot appear as the terminal provider on the reclaimed row. Count it only
     # when the relay-authored retry and attempt-start records agree; either event alone is not

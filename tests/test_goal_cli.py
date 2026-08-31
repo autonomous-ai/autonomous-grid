@@ -923,6 +923,17 @@ def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
         record, min_execution_nodes=2, require_worker_revision="4e5dcc7"))
     final_runtime["agent"]["kind"] = "codex"
 
+    damaged = __import__("copy").deepcopy(record)
+    damaged["attempt_events"][1]["seq"] = 2
+    damaged["attempt_events"][2]["seq"] = 3
+    damaged["attempt_events"][3]["seq"] = 4
+    damaged["attempt_events"][4]["seq"] = 5
+    damaged["attempt_events"].insert(
+        1, native_goal_event("turn-1", 1, 1, "node-A", "codex", complete=False))
+    damaged["trajectory"]["retry_checkpoint_chain"][0]["event_seq"] = 2
+    assert any("retried Codex attempt 1 also claims a completed native Goal slice" in failure
+               for failure in goal._verify_evidence(damaged, min_execution_nodes=2))
+
     record["trajectory"]["retry_checkpoint_chain"][0]["worktree_ancestor"] = False
     assert any("final worktree does not contain" in failure
                for failure in goal._verify_evidence(record, min_execution_nodes=2))
@@ -1185,6 +1196,11 @@ def test_goal_evidence_brackets_retrying_diagnostics_inside_authoritative_attemp
     damaged["attempt_events"][4]["seq"] = 6
     damaged["attempt_events"].insert(2, retrying)
     assert any("is not enclosed by one started, relayed retry attempt" in failure
+               for failure in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][4]["event"]["protocol_error"] = "future schema drift"
+    assert any("terminal Claude Goal checkpoint contains a protocol error" in failure
                for failure in _verify_evidence(damaged))
 
 
