@@ -1038,7 +1038,7 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 f"turn {index} has {len(native)} terminal {harness} Goal checkpoints; expected "
                 "exactly one")
             continue
-        if index == len(turns):
+        if index == len(turns) and goal.get("status") == "complete":
             if harness == "codex" and native[0].get("status") != "complete":
                 failures.append("final Codex Goal checkpoint is not complete")
             if harness == "claude" and (
