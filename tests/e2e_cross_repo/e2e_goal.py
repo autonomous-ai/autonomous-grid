@@ -908,9 +908,23 @@ def test_claude_protocol_drift_quarantines_node_and_hands_same_turn_to_codex(
         lambda: ("declined stale Goal claim" in node_a.output()
                  or "task claims suspended" in node_a.output()),
         timeout=15), node_a.output()
-    after_quarantine = _tasks(relay, owner_token, project_id, goal["id"])
-    assert len(after_quarantine) == 1
-    assert after_quarantine[0]["state"] == "queued" and after_quarantine[0]["attempt"] == 1
+    # Seeing one worker suspend does not prove every pre-quarantine long-poll has drained. A
+    # sibling may receive its stale delivery in this exact window, making the row briefly
+    # ``running`` before local capability revalidation declines it. Wait for the finite stale
+    # polls to settle, while requiring the same row and attempt so a hidden retry-budget spend
+    # cannot make the scenario pass.
+    def settled_after_quarantine():
+        rows = _tasks(relay, owner_token, project_id, goal["id"])
+        return bool(
+            len(rows) == 1
+            and rows[0]["id"] == goal["turn_id"]
+            and rows[0]["state"] == "queued"
+            and rows[0]["attempt"] == 1)
+
+    assert H.wait_for(settled_after_quarantine, timeout=15), {
+        "provider": node_a.output(),
+        "tasks": _tasks(relay, owner_token, project_id, goal["id"]),
+    }
 
     node_b = spawn_goal_provider(
         "B", agent_kinds="codex", scenario="claude_protocol_drift",
@@ -1002,9 +1016,20 @@ def test_codex_protocol_drift_quarantines_node_and_hands_same_turn_to_claude(
         lambda: ("declined stale Goal claim" in node_a.output()
                  or "task claims suspended" in node_a.output()),
         timeout=15), node_a.output()
-    after_quarantine = _tasks(relay, owner_token, project_id, goal["id"])
-    assert len(after_quarantine) == 1
-    assert after_quarantine[0]["state"] == "queued" and after_quarantine[0]["attempt"] == 1
+    # As above, one sibling can still be declining a pre-quarantine delivery after another has
+    # logged the local suspension. Require eventual quiescence without allowing a new attempt.
+    def settled_after_quarantine():
+        rows = _tasks(relay, owner_token, project_id, goal["id"])
+        return bool(
+            len(rows) == 1
+            and rows[0]["id"] == goal["turn_id"]
+            and rows[0]["state"] == "queued"
+            and rows[0]["attempt"] == 1)
+
+    assert H.wait_for(settled_after_quarantine, timeout=15), {
+        "provider": node_a.output(),
+        "tasks": _tasks(relay, owner_token, project_id, goal["id"]),
+    }
 
     node_b = spawn_goal_provider(
         "B", agent_kinds="claude", scenario="codex_protocol_drift",

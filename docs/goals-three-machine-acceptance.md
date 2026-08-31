@@ -158,12 +158,18 @@ before starting:
 
 ```bash
 # Machine C — clean public/private PR checkouts; record both exact SHAs before starting.
-# GOAL_RELAY_URL is an HTTPS root forwarding to C's 127.0.0.1:8090.
+# The integrated mode starts a Cloudflare Quick Tunnel, discovers its HTTPS URL, proves the public
+# health route, binds the private relay to loopback, and supervises both processes together.
 uv run python tests/e2e_cross_repo/physical_goal_lab.py relay \
   --relay-repo /path/to/autonomous-grid-cli \
   --root /tmp/grid-goal-c-relay --joining-workers 2 \
-  --bind-host 127.0.0.1 --advertise-url "$GOAL_RELAY_URL"
+  --cloudflared
 ```
+
+Install `cloudflared` first if that command reports it missing. For an existing HTTPS reverse
+proxy, omit `--cloudflared` and use `--bind-host 127.0.0.1 --advertise-url <https-root>` instead.
+Do not create pairing bundles until the helper reports that the advertised public health route is
+reachable; a locally healthy but externally unreachable relay is not a valid remote-mode test.
 
 The two bundles are for A and B only. C uses the relay home printed by the launcher as its distinct
 worker identity and serves a Responses-capable local model through the same disposable Grid:

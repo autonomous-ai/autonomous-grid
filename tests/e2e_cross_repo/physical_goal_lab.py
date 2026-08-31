@@ -21,6 +21,14 @@ Internet-separated workers should put the same listener behind TLS and advertise
       --bind-host 127.0.0.1 \
       --advertise-url https://goal-lab.example.test
 
+Or let the helper supervise a Cloudflare Quick Tunnel and verify public reachability::
+
+    uv run python tests/e2e_cross_repo/physical_goal_lab.py relay \
+      --relay-repo /private/tmp/autonomous-grid-cli-goal-relay \
+      --root /private/tmp/grid-goal-physical \
+      --joining-workers 2 \
+      --cloudflared
+
 Joining workers (the other physical machines, each with its own printed bundle)::
 
     uv run python tests/e2e_cross_repo/physical_goal_lab.py configure \
@@ -42,13 +50,17 @@ import hashlib
 import hmac
 import json
 import os
+import queue
+import re
 import secrets
 import signal
 import socket
 import stat
 import subprocess
+import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit
@@ -60,6 +72,7 @@ PAIR_VERSION = 1
 DEFAULT_PORT = 8090
 DEFAULT_TOKEN_HOURS = 48
 MAX_PAIR_BYTES = 16_384
+CLOUDFLARED_URL = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.IGNORECASE)
 SCOPES = [
     "inference:create",
     "inference:models",
@@ -416,18 +429,119 @@ def _wait_for_health(proc: subprocess.Popen, url: str, timeout: float = 90.0) ->
     raise SystemExit("Goal relay did not become healthy within 90 seconds")
 
 
-def cmd_relay(args: argparse.Namespace) -> int:
-    root, env, raw_metadata = prepare_relay(args)
-    metadata = json.loads(raw_metadata)
-    command = [
-        metadata["python"], "-m", "uvicorn", "server:app",
-        "--host", args.bind_host, "--port", str(args.port), "--log-level", "info",
-    ]
-    proc = subprocess.Popen(command, cwd=metadata["server_dir"], env=env)
+def _stop_process(proc: subprocess.Popen | None) -> None:
+    """Stop one disposable child without masking the acceptance failure that led here."""
+    if proc is None or proc.poll() is not None:
+        return
+    proc.send_signal(signal.SIGTERM)
     try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def _start_cloudflared_tunnel(
+        executable: str, port: int, timeout: float = 60.0) -> tuple[subprocess.Popen, str]:
+    """Start a Cloudflare Quick Tunnel and return its relay root.
+
+    Cloudflared reports the generated URL on its combined log stream. A daemon reader is used
+    instead of a blocking ``readline`` loop so a silent or wedged binary still respects the startup
+    deadline. It continues draining the pipe after startup, preventing a long physical run from
+    deadlocking when the child's log buffer fills.
+    """
+    try:
+        proc = subprocess.Popen(
+            [executable, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+        )
+    except FileNotFoundError:
+        raise SystemExit(
+            f"Cloudflared executable not found: {executable!r}. Install cloudflared or use "
+            "--advertise-url with an existing HTTPS reverse proxy.") from None
+
+    found: queue.Queue[str] = queue.Queue(maxsize=1)
+    tail: deque[str] = deque(maxlen=20)
+
+    def read_output() -> None:
+        assert proc.stdout is not None
+        for raw_line in proc.stdout:
+            line = raw_line.rstrip()
+            tail.append(line)
+            match = CLOUDFLARED_URL.search(line)
+            if match and found.empty():
+                found.put(match.group(0).lower())
+
+    threading.Thread(target=read_output, name="grid-goal-cloudflared", daemon=True).start()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            detail = "\n".join(tail) or "no output"
+            raise SystemExit(
+                f"Cloudflared exited before publishing a tunnel URL (status {proc.returncode}):\n"
+                f"{detail}")
+        try:
+            remaining = max(0.01, deadline - time.monotonic())
+            return proc, found.get(timeout=min(0.2, remaining))
+        except queue.Empty:
+            pass
+    _stop_process(proc)
+    detail = "\n".join(tail) or "no output"
+    raise SystemExit(f"Cloudflared did not publish a Quick Tunnel URL within {timeout:g}s:\n{detail}")
+
+
+def _wait_for_public_health(
+        relay_proc: subprocess.Popen, tunnel_proc: subprocess.Popen, url: str,
+        timeout: float = 90.0) -> None:
+    """Prove an internet-separated worker can reach the relay before revealing credentials."""
+    import httpx
+
+    deadline = time.monotonic() + timeout
+    health_url = f"{validate_relay_url(url)}/relay/v1/health"
+    last_error = "no response"
+    while time.monotonic() < deadline:
+        if relay_proc.poll() is not None:
+            raise SystemExit(
+                f"Goal relay exited during public reachability check with status "
+                f"{relay_proc.returncode}")
+        if tunnel_proc.poll() is not None:
+            raise SystemExit(
+                f"Cloudflared exited during public reachability check with status "
+                f"{tunnel_proc.returncode}")
+        try:
+            response = httpx.get(health_url, timeout=5.0)
+            if response.status_code == 200:
+                return
+            last_error = f"HTTP {response.status_code}"
+        except httpx.HTTPError as exc:
+            last_error = str(exc)
+        time.sleep(0.5)
+    raise SystemExit(
+        f"Advertised Goal relay did not become publicly reachable within {timeout:g}s "
+        f"({last_error})")
+
+
+def cmd_relay(args: argparse.Namespace) -> int:
+    tunnel_proc: subprocess.Popen | None = None
+    relay_proc: subprocess.Popen | None = None
+    try:
+        cloudflared = getattr(args, "cloudflared", None)
+        if cloudflared:
+            tunnel_proc, args.advertise_url = _start_cloudflared_tunnel(cloudflared, args.port)
+            args.advertise_host = None
+        root, env, raw_metadata = prepare_relay(args)
+        metadata = json.loads(raw_metadata)
+        bind_host = "127.0.0.1" if tunnel_proc is not None else args.bind_host
+        command = [
+            metadata["python"], "-m", "uvicorn", "server:app",
+            "--host", bind_host, "--port", str(args.port), "--log-level", "info",
+        ]
+        relay_proc = subprocess.Popen(command, cwd=metadata["server_dir"], env=env)
         # Probe the listener directly. An advertised HTTPS URL may terminate TLS at a reverse
         # proxy on port 443 while uvicorn remains private on `args.port`.
-        _wait_for_health(proc, f"http://127.0.0.1:{args.port}")
+        _wait_for_health(relay_proc, f"http://127.0.0.1:{args.port}")
+        if tunnel_proc is not None:
+            _wait_for_public_health(relay_proc, tunnel_proc, metadata["url"])
         print("\nGrid Goal physical relay is ready (no SSH):", flush=True)
         print(f"  relay:       {metadata['url']}", flush=True)
         print(f"  relay node:  GRID_HOME={metadata['relay_home']}", flush=True)
@@ -451,17 +565,12 @@ def cmd_relay(args: argparse.Namespace) -> int:
                       flush=True)
                 print(worker_pair, flush=True)
         print("\nKeep this terminal open. Ctrl-C stops only the disposable relay.", flush=True)
-        return proc.wait()
+        return relay_proc.wait()
     except KeyboardInterrupt:
         return 130
     finally:
-        if proc.poll() is None:
-            proc.send_signal(signal.SIGTERM)
-            try:
-                proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
+        _stop_process(relay_proc)
+        _stop_process(tunnel_proc)
 
 
 def cmd_configure(args: argparse.Namespace) -> int:
@@ -548,6 +657,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--advertise-url", default=None,
         help=("Exact HTTPS relay root exposed by a reverse proxy/tunnel; use this for "
               "internet-separated workers"))
+    advertise.add_argument(
+        "--cloudflared", nargs="?", const="cloudflared", default=None, metavar="PATH",
+        help=("Start and supervise a Cloudflare Quick Tunnel automatically (optional executable "
+              "path); forces the relay listener to loopback"))
     relay.add_argument("--port", type=int, default=DEFAULT_PORT)
     relay.add_argument("--token-hours", type=float, default=DEFAULT_TOKEN_HOURS)
     relay.add_argument("--lease-seconds", type=int, default=120)
@@ -595,6 +708,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise SystemExit(f"--{name.replace('_', '-')} must be positive")
         if args.joining_workers is not None and not 1 <= args.joining_workers <= 8:
             raise SystemExit("--joining-workers must be between 1 and 8")
+        if args.cloudflared and args.reuse and args.no_print_bundle:
+            raise SystemExit(
+                "--cloudflared creates a new public URL, so --reuse cannot suppress the updated "
+                "pairing bundles")
     return int(args.func(args))
 
 

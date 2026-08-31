@@ -236,6 +236,80 @@ def test_relay_accepts_one_exact_https_advertised_root():
         ])
 
 
+def test_relay_can_supervise_cloudflared_but_not_mix_advertisement_modes():
+    parser = lab.build_parser()
+    args = parser.parse_args([
+        "relay", "--relay-repo", "/tmp/private-relay", "--cloudflared",
+    ])
+    assert args.cloudflared == "cloudflared"
+    explicit = parser.parse_args([
+        "relay", "--relay-repo", "/tmp/private-relay",
+        "--cloudflared", "/opt/bin/cloudflared",
+    ])
+    assert explicit.cloudflared == "/opt/bin/cloudflared"
+    help_text = parser._subparsers._group_actions[0].choices["relay"].format_help()
+    normalized_help = " ".join(help_text.split())
+    assert "--cloudflared [PATH]" in normalized_help
+    assert "forces the relay listener to loopback" in normalized_help
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "relay", "--relay-repo", "/tmp/private-relay",
+            "--advertise-url", "https://goal-lab.example.test", "--cloudflared",
+        ])
+
+
+def test_cloudflared_url_pattern_accepts_only_quick_tunnel_https_roots():
+    line = "INF +-------------------------------- https://Sane-Cat-42.trycloudflare.com ---+"
+    assert lab.CLOUDFLARED_URL.search(line).group(0).lower() == (
+        "https://sane-cat-42.trycloudflare.com")
+    assert lab.CLOUDFLARED_URL.search("http://unsafe.trycloudflare.com") is None
+    assert lab.CLOUDFLARED_URL.search("https://example.test") is None
+
+
+def test_cloudflared_launcher_extracts_url_and_drains_combined_output(monkeypatch):
+    class Tunnel:
+        returncode = None
+        stdout = iter([
+            "INF requesting quick tunnel\n",
+            "INF https://Blue-Bird-7.trycloudflare.com ready\n",
+        ])
+
+        def poll(self):
+            return None
+
+    tunnel = Tunnel()
+    launched = {}
+    monkeypatch.setattr(
+        lab.subprocess, "Popen",
+        lambda command, **kwargs: launched.update(command=command, kwargs=kwargs) or tunnel)
+
+    process, url = lab._start_cloudflared_tunnel("/opt/cloudflared", 9876, timeout=1)
+
+    assert process is tunnel
+    assert url == "https://blue-bird-7.trycloudflare.com"
+    assert launched["command"] == [
+        "/opt/cloudflared", "tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:9876",
+    ]
+    assert launched["kwargs"]["stderr"] is lab.subprocess.STDOUT
+
+
+def test_cloudflared_launcher_fails_cleanly_when_binary_is_missing(monkeypatch):
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(lab.subprocess, "Popen", missing)
+    with pytest.raises(SystemExit, match="executable not found"):
+        lab._start_cloudflared_tunnel("missing-cloudflared", 8090)
+
+
+def test_quick_tunnel_reuse_must_reveal_updated_pairing_bundles():
+    with pytest.raises(SystemExit, match="new public URL"):
+        lab.main([
+            "relay", "--relay-repo", "/tmp/private-relay", "--cloudflared",
+            "--reuse", "--no-print-bundle",
+        ])
+
+
 def test_pairing_refuses_expiry_identity_mismatch_and_oversize():
     expired = int(time.time()) - 1
     token = lab.issue_token(
@@ -441,6 +515,75 @@ def test_relay_banner_assigns_one_bundle_to_each_joining_worker(
     assert out.count("bundle-b") == out.count("bundle-c") == 1
     assert "--home /private/tmp/grid-goal-worker-1" in out
     assert "--home /private/tmp/grid-goal-worker-2" in out
+
+
+def test_cloudflared_relay_uses_loopback_checks_public_health_and_stops_tunnel(
+        tmp_path, monkeypatch, capsys):
+    class Process:
+        returncode = None
+
+        def __init__(self, kind):
+            self.kind = kind
+            self.signals = []
+            self.running = True
+
+        def wait(self, timeout=None):
+            if timeout is None and self.kind == "relay":
+                self.running = False
+            return 0
+
+        def poll(self):
+            return None if self.running else 0
+
+        def send_signal(self, value):
+            self.signals.append(value)
+            self.running = False
+
+        def kill(self):
+            self.running = False
+
+    tunnel = Process("tunnel")
+    relay = Process("relay")
+    prepared = {}
+    launched = {}
+    health = []
+    public_health = []
+
+    def prepare(args):
+        prepared["url"] = args.advertise_url
+        return tmp_path, {}, lab.json.dumps({
+            "url": args.advertise_url,
+            "worker_pair": "bundle-b",
+            "worker_node_id": "goal-worker-b",
+            "relay_node_id": "goal-relay-c",
+            "relay_home": str(tmp_path / "grid-home-relay"),
+            "server_dir": str(tmp_path),
+            "python": "/fake/python",
+            "relay_revision": "abc123",
+        })
+
+    monkeypatch.setattr(
+        lab, "_start_cloudflared_tunnel",
+        lambda executable, port: (tunnel, "https://quick-test.trycloudflare.com"))
+    monkeypatch.setattr(lab, "prepare_relay", prepare)
+    monkeypatch.setattr(
+        lab.subprocess, "Popen",
+        lambda command, **kwargs: launched.update(command=command, kwargs=kwargs) or relay)
+    monkeypatch.setattr(lab, "_wait_for_health", lambda *args: health.append(args))
+    monkeypatch.setattr(
+        lab, "_wait_for_public_health", lambda *args: public_health.append(args))
+
+    args = lab.build_parser().parse_args([
+        "relay", "--relay-repo", "/tmp/private-relay", "--joining-workers", "2",
+        "--cloudflared",
+    ])
+    assert lab.cmd_relay(args) == 0
+    assert prepared["url"] == "https://quick-test.trycloudflare.com"
+    assert launched["command"][launched["command"].index("--host") + 1] == "127.0.0.1"
+    assert health and public_health == [(
+        relay, tunnel, "https://quick-test.trycloudflare.com")]
+    assert tunnel.signals == [lab.signal.SIGTERM]
+    assert "relay:       https://quick-test.trycloudflare.com" in capsys.readouterr().out
 
 
 def test_prepare_relay_reuses_legacy_ab_identity_by_role(tmp_path, monkeypatch):
