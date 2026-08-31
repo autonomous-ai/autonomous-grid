@@ -236,7 +236,8 @@ def test_goal_inference_proxy_refreshes_expired_node_token_once():
     assert proxy.last_failure is None
 
 
-def test_codex_goal_capability_requires_a_measured_native_goal_version(monkeypatch):
+def test_codex_goal_capability_requires_a_measured_native_goal_version(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
     monkeypatch.setattr(task_codex.shutil, "which", lambda _name: "/fake/codex")
     monkeypatch.setattr(task_codex, "_protocol_capability", lambda _binary: (True, ""))
     monkeypatch.setattr(task_codex, "_binary_version", lambda _binary: (0, 150, 0))
@@ -254,6 +255,22 @@ def test_codex_goal_capability_requires_a_measured_native_goal_version(monkeypat
     assert task_codex.available() is True
     assert task_codex.supports_distributed_goals("/fake/codex") is True
     assert task_codex.resolve_binary() == "/fake/codex"
+
+
+def test_codex_resolution_prefers_the_install_owned_by_this_grid_home(tmp_path, monkeypatch):
+    from shared.agent import codex_installer
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    installed = codex_installer.codex_bin()
+    installed.parent.mkdir(parents=True)
+    installed.write_text("owned binary", encoding="utf-8")
+    monkeypatch.setattr(task_codex.shutil, "which", lambda _name: "/global/codex")
+    monkeypatch.setattr(
+        task_codex, "_require_distributed_goal_capability", lambda binary: binary)
+    monkeypatch.setattr(task_codex, "supports_distributed_goals", lambda _binary: True)
+
+    assert task_codex.resolve_binary() == str(installed)
+    assert task_codex.available() is True
 
 
 def test_codex_goal_capability_requires_the_exact_experimental_protocol(monkeypatch):
@@ -304,6 +321,9 @@ def test_codex_protocol_schema_probe_checks_every_method_and_caches_failures(
 
 def test_runtime_method_drift_quarantines_codex_before_another_goal_claim(
         tmp_path, monkeypatch):
+    # This test supplies its own PATH candidate. Do not let a developer's real default-GRID_HOME
+    # install replace that fixture now that providers correctly prefer their owned install.
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "grid-home"))
     monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
     monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
     monkeypatch.setattr(task_codex, "_PROTOCOL_CACHE", {})

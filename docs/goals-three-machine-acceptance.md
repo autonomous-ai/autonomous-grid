@@ -180,6 +180,8 @@ worker identity and serves a Responses-capable local model through the same disp
 GRID_HOME=/tmp/grid-goal-c-relay/grid-home-relay \
 uv run grid agent install codex
 GRID_HOME=/tmp/grid-goal-c-relay/grid-home-relay \
+uv run grid engine install llama.cpp
+GRID_HOME=/tmp/grid-goal-c-relay/grid-home-relay \
 uv run grid pull \
   unsloth/Qwen3.6-27B-MTP-GGUF:Qwen3.6-27B-UD-Q5_K_XL.gguf
 GRID_HOME=/tmp/grid-goal-c-relay/grid-home-relay \

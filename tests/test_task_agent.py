@@ -5969,6 +5969,7 @@ def test_a_linux_provider_missing_a_sandbox_package_is_told_at_join(
 
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delenv("GRID_TASK_SANDBOX", raising=False)
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude")
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
     _packages(monkeypatch, present)
     monkeypatch.setattr(task_agent, "preflight", lambda: None)

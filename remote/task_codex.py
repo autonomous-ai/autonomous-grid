@@ -358,15 +358,31 @@ def supports_distributed_goals(binary: str) -> bool:
     return True
 
 
+def _configured_binary() -> str | None:
+    """Prefer the binary installed for this ``GRID_HOME``, then fall back to the operator's PATH.
+
+    ``grid agent install codex`` deliberately installs under ``GRID_HOME/bin`` so separate relay
+    configurations cannot overwrite one another. Detached providers do not inherit an automatic
+    PATH rewrite, though, which previously made a successful isolated install invisible at join
+    time. Resolve the owned location directly instead of relying on shell startup configuration.
+    """
+    from shared.agent import codex_installer
+
+    installed = codex_installer.codex_bin()
+    if installed.is_file():
+        return str(installed)
+    return shutil.which("codex")
+
+
 def resolve_binary() -> str:
-    binary = shutil.which("codex")
+    binary = _configured_binary()
     if not binary:
         raise CodexGoalError("Codex is not installed on this provider")
     return _require_distributed_goal_capability(binary)
 
 
 def available() -> bool:
-    binary = shutil.which("codex")
+    binary = _configured_binary()
     return bool(binary and supports_distributed_goals(binary))
 
 
