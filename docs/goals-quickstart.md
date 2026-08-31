@@ -241,7 +241,9 @@ replacement's nomination. Oversized, unsuccessful, missing, stale or unmatched r
 metric and produce a repair turn. The relay stores every binary score and provenance tuple; offline
 evidence verification independently finds the same event pair and recomputes every JSON predicate.
 The private API remains local to the eligible Grid node—the hosted relay never needs network access
-to it.
+to it. Credential-shaped argument keys are rejected when the metric is created: the worker would
+redact them from evidence, so accepting such a contract would both store a secret-shaped policy
+value and create a Goal that could never match its durable request.
 
 Pointers use RFC 6901 escaping. Supported operations are `equals`, `not_equals`,
 `greater_or_equal`, `less_or_equal`, and `exists`. Numeric comparisons reject booleans and
