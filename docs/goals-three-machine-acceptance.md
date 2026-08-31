@@ -73,6 +73,57 @@ below.
 
 Start each worker with an explicit harness policy and unique local root:
 
+### Hosted remote Grid (preferred)
+
+For a customer-realistic test, create or select one hosted remote Grid and use three machines that
+may be on different networks. The Grid owner must invite the login used by every worker with the
+`both` role. When multiple machines use the same login, add that email once; membership belongs to
+the account, while each `grid join` still creates a distinct node identity.
+
+```bash
+# Grid owner machine
+grid mode remote
+grid members add <grid> <machine-a-login> --role both
+grid members add <grid> <machine-b-login> --role both
+grid members add <grid> <machine-c-login> --role both
+
+# Each worker machine
+grid mode remote
+grid login                       # only when this machine is not already signed in
+grid sync
+grid goal list --grid <grid> --all --json
+```
+
+The last command must succeed on every machine before any worker joins. “This grid's relay does not
+support Grid Goal yet” means the hosted master still needs the private relay release; installing the
+public CLI on worker laptops cannot upgrade it. “Grid not found” means that machine's signed-in
+account has not been invited. Neither failure is repaired with SSH, an IP address, a LAN pairing
+bundle, or a second local relay.
+
+Join agent execution separately from inference. A tasks-only node needs no local model and sends its
+native harness's model requests through an inference node already serving the same remote Grid:
+
+```bash
+# Machine A
+GRID_TASK_AGENT_KINDS=codex grid join <grid> --tasks-only --name goal-machine-a \
+  --max-tasks 1 --tasks-root <short-local-path-a>
+
+# Machine B
+GRID_TASK_AGENT_KINDS=claude grid join <grid> --tasks-only --name goal-machine-b \
+  --max-tasks 1 --tasks-root <short-local-path-b>
+
+# Machine C
+GRID_TASK_AGENT_KINDS=codex grid join <grid> --tasks-only --name goal-machine-c \
+  --max-tasks 1 --tasks-root <short-local-path-c>
+```
+
+Use `grid engines <grid> --json` to prove all three execution nodes are online and distinct. A
+powerful GPU node and a Goal worker are orthogonal roles: the same machine may serve both, but a
+model-only engine does not claim Goal turns unless it was explicitly joined with `--tasks` or
+`--tasks-only`.
+
+### Disposable direct relay (fallback)
+
 When using the disposable no-SSH lab with machine A as the relay host, start it with
 `physical_goal_lab.py relay --joining-workers 2`. It prints separate signed bundles for B and C.
 Never paste one bundle on both machines: shared credentials collapse two physical computers into

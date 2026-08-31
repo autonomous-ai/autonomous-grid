@@ -39490,6 +39490,8 @@ def test_join_help_says_this_provider_can_serve_tasks(capsys):
     assert "--tasks" in text, "`grid join --help` still says nothing about task serving"
     assert "--tasks-only" in text, "agent-only nodes are not discoverable from `grid join --help`"
     assert "--tasks-root" in text and "--max-tasks" in text
+    assert "installed agent harnesses" in text
+    assert "spending this box's own Claude subscription" not in text
 
 
 def test_tasks_only_joins_agent_capacity_without_detecting_or_advertising_a_model(

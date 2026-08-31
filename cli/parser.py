@@ -367,8 +367,8 @@ def _add_engines(sub) -> None:
     # the group's comment above — `--tasks` in particular, because a `store_true` defaulting to
     # False would make `_reject_remote_only_flags` refuse every LOCAL join.
     remote_only.add_argument("--tasks", action="store_true", default=None,
-                             help="Also claim distributed tasks for this grid, spending this box's "
-                                  "own Claude subscription (remote only). Off unless you ask.")
+                             help="Also claim distributed tasks and Goals with this box's installed "
+                                  "agent harnesses (remote only). Off unless you ask.")
     remote_only.add_argument(
         "--tasks-only", action="store_true", default=None,
         help="Join this box as an agent worker without advertising an inference model (remote "
