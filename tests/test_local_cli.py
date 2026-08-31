@@ -28382,6 +28382,7 @@ def test_codex_installed_during_a_claude_pause_rejoins_without_waiting_for_the_w
     profiles = iter([
         (),     # Codex is configured but not installed on the first capacity check.
         ready,  # It appears while Claude's subscription is still paused.
+        ready,  # A 204 recheck confirms the harness remains runnable.
     ])
     log = []
     monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude,codex")

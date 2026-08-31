@@ -7,9 +7,9 @@ The detailed physical artifacts are indexed in
 
 ## Tested code revisions
 
-- Public worker/CLI: `57bd04245293ef5e787d640dc239b4b7520da797`
-- Public acceptance harness: `57bd04245293ef5e787d640dc239b4b7520da797`
-- Private relay: `797d66ae71bc7f54cc0af57e1ed0beb67c0e61e9`
+- Public worker/CLI: `f83d0f5418a6d8a5461217031dbfeb8956373ac2`
+- Public acceptance harness: `f83d0f5418a6d8a5461217031dbfeb8956373ac2`
+- Private relay: `9f8017db7d3bcfa643dd861dcfda0e5a871549e0`
 - Both tested runtime revisions were clean and pushed when these gates completed. The public
   evidence-documentation commit follows the tested worker/CLI revision and changes no runtime code.
 
@@ -24,7 +24,7 @@ The detailed physical artifacts are indexed in
 | Settlement/Git compatibility sweep | 349 passed | Ordinary tasks, Git transport, transcript retention, WIP advancement, trunk apply, project initialization, and undo remain compatible with strict result-ref settlement |
 | Task event boundary sweep | 59 passed | Terminal sequence, resumable streams, Unicode/size limits, and runtime-independent deeply nested JSON refusal |
 | Broad private task/Git/migration sweep | 684 passed; 4 baseline failures | Ordinary task, reclaim, project-file, transcript, trunk-apply, and migration compatibility; the four failures reproduce unchanged on the pre-final-fixes revision |
-| Cross-repository distributed matrix | 21 passed (313.46s) | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
+| Cross-repository distributed matrix | 21 passed (305.84s) | Real relay HTTP/Git/task planes with isolated fake native Codex and Claude processes |
 
 The full public suite ran against the exact public runtime revision in GitHub Actions on Python
 3.11, 3.12 and 3.13; the private runbook bundle and 21-scenario matrix ran uninterrupted against the
@@ -74,7 +74,7 @@ evaluator audit also proves that:
   the full-provider pause heartbeat while Codex remains available.
 
 The final 21-scenario matrix was rerun in one uninterrupted invocation against both candidate
-runtime revisions after the worker startup-recovery change. It includes:
+runtime revisions after the mixed-harness capacity change. It includes:
 
 - a real relay timer recovering the exact stale `preparing` row left by a continuation-preparation
   crash, publishing one terminal event and creating one attempt-zero replacement without another
@@ -112,7 +112,7 @@ The matrix harness also treats an atomically replaced workspace as a transient p
 cancels every Goal created by a failed scenario during teardown. One assertion failure therefore
 cannot leak queued work into the next scenario and create a misleading cascade of cross-test claims.
 Its provider disks live under an atomically reserved one-character `/private/tmp` root, with a hard
-31-character assertion on every task root. The uninterrupted 21-scenario rerun passed in 313.46
+31-character assertion on every task root. The uninterrupted 21-scenario rerun passed in 305.84
 seconds without exercising the macOS path depth that can make sandbox commands fail with `E2BIG`.
 Before that final run, both protocol-drift handoff scenarios passed together three times against
 fresh relay processes (6/6), and four focused client tests passed for runtime quarantine recovery,

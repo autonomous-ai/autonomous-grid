@@ -76,7 +76,7 @@ def test_withdrawing_is_announced_once_per_window_not_once_per_record(capsys):
         capacity.observe(_blocked(resets_in=600.0))
 
     err = capsys.readouterr().err
-    assert err.count("no longer claiming tasks") == 1
+    assert err.count("no longer claiming Claude tasks") == 1
     assert "five_hour" in err                      # which window, so the wait is explicable
 
 
@@ -92,7 +92,7 @@ def test_a_new_window_is_announced_again(capsys):
 
     capacity.observe(_blocked())
 
-    assert "no longer claiming tasks" in capsys.readouterr().err
+    assert "no longer claiming Claude tasks" in capsys.readouterr().err
 
 
 # Payloads that carry no verdict this build can act on. Each is a real shape, not a fuzz artefact:
