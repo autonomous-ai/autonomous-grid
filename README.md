@@ -563,6 +563,8 @@ Walkthrough: [docs/claude-code-quickstart.md](docs/claude-code-quickstart.md).
 
 ## Goals (Experimental)
 
+Deployment and fleet rollout: [docs/goals-deployment.md](docs/goals-deployment.md).
+
 Give Codex one measurable outcome and let any Codex-capable computer continue it:
 
 ```bash

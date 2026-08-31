@@ -134,6 +134,8 @@ Goal harness profiles and therefore cannot claim Codex Goal rows from the upgrad
 CLI also detects an older relay that lacks Goal routes and explains the version mismatch instead of
 silently treating an ordinary task as a Goal. This order keeps ordinary tasks compatible throughout
 the rollout and avoids publishing a Goal command whose control plane has not been deployed yet.
+The operational commands, canary gates, and worker restart boundary are documented in
+[goals-deployment.md](goals-deployment.md).
 
 ## Physical evidence completed
 
