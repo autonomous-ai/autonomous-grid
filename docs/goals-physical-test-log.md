@@ -290,6 +290,17 @@ Goal because the server preflight correctly stopped before creation.
 - `grid goal list --grid forge --all --json` returned the explicit rolling-upgrade refusal:
   `This grid's relay does not support Grid Goal yet.` Membership and remote networking work; the
   hosted master is still running pre-Goal private relay code.
+- A dedicated empty acceptance project was initialized successfully through the hosted project
+  plane: `grid-goal-forge-acceptance-20260831`, id
+  `c1b9a9cf-dc04-4b07-b7d5-94a7846b8a08`, trunk commit
+  `031471c999ab9d48f16961f4c623e10fe7cf3b7a`. This proves project membership and Git bootstrap are
+  ready without pretending the missing Goal route works.
+- Two isolated initialized canary projects are also ready: Codex project
+  `f42a27c2-432c-4095-826b-6c93109e7ca9` at trunk
+  `4c5f2f20b2dfc90f1853bcd998a5f7a48fbc7327`, and Claude project
+  `2c044f19-8765-48cd-8891-5fe11451b33e` at trunk
+  `db418514f18fe29d36e65deccc60dd4da74ec75d`. Their fixed commands and independent eval are in the
+  three-machine runbook; they prevent harness/model discovery from contaminating the game project.
 - Private branch `grid-goal-distributed` is green at
   `2b1084a3c67ee6f81ea596d3a56414309df5b097`. It may be temporarily deployed before merge. Merely
   checking out the public branch on the three workers cannot add the missing hosted endpoints.

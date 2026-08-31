@@ -159,10 +159,61 @@ GRID_TASK_AGENT_KINDS=claude grid join <grid> --tasks --tasks-root <local-path>
 ```
 
 Do not continue until a Codex-only canary Goal is claimed by A or C and a Claude-only canary Goal is
-claimed by B. Cancel both canaries and save their evidence. This detects a worker that is online for
-inference but not actually polling the distributed task queue.
+claimed by B. Let both isolated canaries complete and save their evidence. This detects a worker
+that is online for inference but not actually polling the distributed task queue.
+
+For `forge`, use the two isolated initialized canary projects. Let each canary complete so it proves
+native attachment, a real model request through Grid inference, Git result publication, transcript
+publication, and relay eval settlement—not merely queue claiming:
+
+```bash
+# Codex-only (A or C)
+uv run grid goal run --grid forge \
+  --project f42a27c2-432c-4095-826b-6c93109e7ca9 \
+  --name forge-codex-canary --agent codex \
+  --objective "Create CANARY.md containing GRID_NATIVE_GOAL_CANARY and the sentence model request completed through Grid inference." \
+  --done-when "The attached canary eval passes." \
+  --model deepseek/deepseek-v4-flash-0731 --token-budget 1000000 \
+  --evals docs/fixtures/goal-canary-evals.json \
+  --idempotency-key forge-codex-canary-v1 --json
+
+# Claude-only (B)
+uv run grid goal run --grid forge \
+  --project 2c044f19-8765-48cd-8891-5fe11451b33e \
+  --name forge-claude-canary --agent claude \
+  --objective "Create CANARY.md containing GRID_NATIVE_GOAL_CANARY and the sentence model request completed through Grid inference." \
+  --done-when "The attached canary eval passes." \
+  --model deepseek/deepseek-v4-flash-0731 --token-budget 1000000 \
+  --evals docs/fixtures/goal-canary-evals.json \
+  --idempotency-key forge-claude-canary-v1 --json
+```
+
+For each returned id, run `grid goal evidence <id> --grid forge --verify --require-inference` and
+record the executor, harness, model-serving node, exact model and branch SHAs. If the Claude canary
+stays at attempt zero, inspect model readiness and the Messages/chat capability on the inference
+route; do not loosen the canary to Codex.
 
 ## Scenario
+
+The prepared `forge` run uses project `c1b9a9cf-dc04-4b07-b7d5-94a7846b8a08`, the shared
+tool-capable model route, ten million local-model tokens, and a fixed idempotency key so an uncertain
+create response cannot duplicate the Goal:
+
+```bash
+uv run grid goal run --grid forge \
+  --project c1b9a9cf-dc04-4b07-b7d5-94a7846b8a08 \
+  --name forge-grid-courier-three-machine \
+  --objective "Build a dependency-free browser game named Grid Courier in three durable native Goal slices. Slice 1 creates the accessible page, responsive styling, core movement loop, PLAN.md, and HANDOFF.md containing A_ACCEPTED_CHECKPOINT, then remains active with collision, scoring, lives, restart, persistence, tests, and final docs unfinished. Slice 2 must first inspect the accepted files and marker, implement collision, score, lives, and input behavior, append B_RECONSTRUCTED_CHECKPOINT, then remain active with restart, persistence, tests, and final docs unfinished. Slice 3 must inspect both accepted markers, finish restart, persistent high score, browser-independent tests, package test command, and complete documentation, then append C_FINAL_RECONSTRUCTION and nominate completion. Never infer a physical machine identity from these logical stage names; Grid lease evidence is authoritative." \
+  --done-when "The game is playable with keyboard and pointer controls, collision, score, lives, restart, persistent high score, responsive accessible styling, operator instructions, and passing browser-independent tests; all seven attached evals pass and HANDOFF.md contains all three ordered stage markers." \
+  --model deepseek/deepseek-v4-flash-0731 \
+  --token-budget 10000000 --agent auto \
+  --evals docs/fixtures/three-machine-game-evals.json \
+  --idempotency-key forge-three-machine-game-v1 --json
+```
+
+Run the command only after the Codex-only and Claude-only canaries have proved that this model is
+claimable by both harness dialects. If it is not, select one exact model reported ready for both;
+do not let a failed harness attempt perform model discovery.
 
 1. Import or initialize the game project and start a Goal allowing both harnesses. Attach immutable
    file evals for `index.html`, `game.js`, `style.css`, and `README.md`; require bounded literal

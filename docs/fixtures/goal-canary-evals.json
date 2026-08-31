@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "evals": [
+    {
+      "type": "file",
+      "name": "native Goal canary artifact",
+      "path": "CANARY.md",
+      "min_bytes": 40,
+      "max_bytes": 2000,
+      "contains": [
+        "GRID_NATIVE_GOAL_CANARY",
+        "model request completed through Grid inference"
+      ]
+    }
+  ]
+}
