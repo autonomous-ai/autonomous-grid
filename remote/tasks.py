@@ -314,8 +314,8 @@ def decline_claim_once(serve_state: Any, task_id: str, *, attempt: int,
             attempt=attempt, claim_id=claim_id)
 
 
-def _agent_kinds() -> tuple[str, ...]:
-    """Harnesses this process can really execute; never advertise either one optimistically."""
+def _configured_agent_kinds() -> tuple[str, ...]:
+    """Supported harnesses the operator enabled, independent of temporary binary availability."""
     configured = (os.getenv("GRID_TASK_AGENT_KINDS") or "claude,codex").replace(",", " ").split()
     allowed = {kind for kind in configured if kind in ("claude", "codex")}
     invalid = [kind for kind in configured if kind not in ("claude", "codex")]
@@ -323,8 +323,14 @@ def _agent_kinds() -> tuple[str, ...]:
         _warn(f"ignoring unsupported harness {kind!r} in GRID_TASK_AGENT_KINDS")
     # Empty or wholly invalid is fail closed: this provider claims no tasks instead of running a
     # harness its operator meant to disable.
-    kinds = ["claude"] if "claude" in allowed and task_agent.claude_available() else []
-    if "codex" in allowed and task_codex.available():
+    return tuple(kind for kind in ("claude", "codex") if kind in allowed)
+
+
+def _agent_kinds() -> tuple[str, ...]:
+    """Harnesses this process can really execute; never advertise either one optimistically."""
+    configured = _configured_agent_kinds()
+    kinds = ["claude"] if "claude" in configured and task_agent.claude_available() else []
+    if "codex" in configured and task_codex.available():
         kinds.append("codex")
     return tuple(kinds)
 
@@ -1248,13 +1254,13 @@ def task_loop(state: Any, capacity: Any = None) -> None:
     not given one, and the task waits for a provider that can run it.
     """
     capacity = capacity if capacity is not None else task_capacity.shared()
-    if not _agent_profiles():
-        # A provider with no runnable configured harness must not send the relay an invalid empty
-        # profile list, nor hot-spin locally on a fail-closed no-op. Retire only task serving;
-        # inference stays online and an operator can restart task serving after fixing the policy.
-        _warn("task serving retired because this node has no runnable configured agent harness; "
-              "install/enable Codex or Claude, or fix GRID_TASK_AGENT_KINDS (inference is "
-              "unaffected)")
+    if not _configured_agent_kinds():
+        # An empty/invalid policy cannot repair itself when a binary changes. Do not send the relay
+        # an invalid empty profile list or hot-spin locally; retire only task serving. A supported
+        # configured harness whose binary is temporarily unavailable takes the recoverable suspend
+        # path below instead, so installing/replacing it does not require an inference restart.
+        _warn("task serving retired because GRID_TASK_AGENT_KINDS enables no supported harness; "
+              "choose codex, claude, or both (inference is unaffected)")
         state.tasks_stop.set()
         return
     # Two counters, not one: a provider alternating between a missing plane and a refusal would

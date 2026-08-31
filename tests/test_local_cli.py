@@ -28525,6 +28525,9 @@ def test_post_spawn_goal_harness_failure_is_left_for_another_machine(monkeypatch
             "failed", None, "app-server protocol disconnected", retryable=True)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: ({
+        "kind": "codex", "capabilities": ["native_goal"],
+    },))
     monkeypatch.setattr(tasks, "run_task", run)
     monkeypatch.setattr(tasks, "_publisher_for", lambda *_args: Publisher())
     monkeypatch.setattr(tasks, "_lease_renewer", lambda *_args, **_kwargs: Renewer())
@@ -28593,6 +28596,9 @@ def test_old_relay_without_checkpoint_route_falls_back_to_lease_recovery(
         raise relay.RelayError("checkpoint_task_retry failed (404)", status=404)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: ({
+        "kind": "codex", "capabilities": ["native_goal"],
+    },))
     monkeypatch.setattr(tasks, "run_task", run)
     monkeypatch.setattr(
         tasks, "_push_result", lambda _job, outcome, *_args: (outcome, True))
@@ -28641,7 +28647,7 @@ def test_goal_checkpoint_handoff_refreshes_an_expired_token_exactly_once(monkeyp
     assert calls[1][2] == {"reason": "native process exited", "result_commit": "a" * 40}
 
 
-def test_no_runnable_harness_retires_only_task_serving_without_claiming(monkeypatch, capsys):
+def test_invalid_harness_policy_retires_only_task_serving_without_claiming(monkeypatch, capsys):
     """An invalid fail-closed policy must not hot-loop on relay 422 responses."""
     from remote import tasks
 
@@ -28659,7 +28665,7 @@ def test_no_runnable_harness_retires_only_task_serving_without_claiming(monkeypa
 
     assert claims == []
     assert state.tasks_stop.is_set() and not state.stop.is_set()
-    assert "no runnable configured agent harness" in capsys.readouterr().err
+    assert "enables no supported harness" in capsys.readouterr().err
 
 
 def test_runtime_harness_quarantine_backs_off_and_recovers_without_hot_spinning(
@@ -28674,7 +28680,6 @@ def test_runtime_harness_quarantine_backs_off_and_recovers_without_hot_spinning(
     )
     ready = ({"kind": "codex", "capabilities": ["native_goal"]},)
     profiles = iter([
-        ready,  # task_loop preflight
         ready,  # first claim
         (),  # runtime quarantine discovered after the long poll
         ready,  # executable was replaced during backoff; second claim advertises it
@@ -28699,6 +28704,42 @@ def test_runtime_harness_quarantine_backs_off_and_recovers_without_hot_spinning(
     assert "task claims suspended" in capsys.readouterr().err
 
 
+def test_configured_harness_missing_at_start_rejoins_without_worker_restart(
+        monkeypatch, capsys):
+    """Installing Codex after provider startup should activate task serving automatically."""
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=threading.Event(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    ready = ({"kind": "codex", "capabilities": ["native_goal"]},)
+    profiles = iter([
+        (),  # first claim stays local because no harness is executable yet
+        (),  # post-claim recheck enters the paced suspension path
+        ready,  # Codex appeared; the next claim advertises it
+        ready,  # post-204 recheck confirms that serving remains enabled
+    ])
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: next(profiles))
+    claims = []
+
+    def claim(*_args, **_kwargs):
+        claims.append(True)
+        state.stop.set()
+        return None
+
+    monkeypatch.setattr(tasks.relay, "claim_task", claim)
+    monkeypatch.setattr(tasks, "_CLAIM_BACKOFF_SECONDS", 0.001)
+
+    tasks.task_loop(state)
+
+    assert claims == [True]
+    assert state.stop.is_set() and not state.tasks_stop.is_set()
+    assert "task claims suspended" in capsys.readouterr().err
+
+
 def test_task_loop_declines_stale_goal_claim_before_attempt_start(monkeypatch, capsys):
     """A second parked worker must not spend retry budget on a just-quarantined executable."""
     from remote import tasks
@@ -28718,8 +28759,6 @@ def test_task_loop_declines_stale_goal_claim_before_attempt_start(monkeypatch, c
     claims = iter([job])
     monkeypatch.setattr(tasks, "claim_once", lambda _state: next(claims))
     profiles = iter([
-        ({"kind": "codex", "capabilities": [
-            "native_goal", "image_generation"]},),  # loop admission
         ({"kind": "codex", "capabilities": ["native_goal"]},),  # stale at delivery
     ])
     monkeypatch.setattr(tasks, "_agent_profiles", lambda: next(profiles))
@@ -28859,6 +28898,9 @@ def test_native_goal_impossible_checkpoint_is_reported_not_retried(monkeypatch):
                                  goal_time_used_seconds=1)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: ({
+        "kind": "codex", "capabilities": ["native_goal"],
+    },))
     monkeypatch.setattr(tasks, "run_task", run)
     monkeypatch.setattr(tasks, "_publisher_for", lambda *_args: Publisher())
     monkeypatch.setattr(tasks, "_lease_renewer", lambda *_args, **_kwargs: Renewer())

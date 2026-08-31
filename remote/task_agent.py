@@ -862,33 +862,37 @@ def preflight_before_serving() -> None:
         raise RuntimeError(
             "GRID_TASK_AGENT_KINDS enables no supported task harness; choose codex, claude, or both")
 
-    # This is shared infrastructure, not a harness opinion. Ask once and preserve its exact OSError:
-    # trying Codex after Claude cannot make an unwritable/not-a-directory root usable, and wrapping
-    # the refusal would discard the path-specific diagnosis existing operators rely on.
-    _require_a_reachable_workspace_root()
-
     failures: list[str] = []
     causes: list[BaseException] = []
+    usable = False
     if "claude" in configured:
         try:
             preflight()
             resolve_binary()
             _require_the_sandbox_packages()
-            return
+            usable = True
         except (Exception, SystemExit) as exc:
             failures.append(f"claude: {str(exc) or exc.__class__.__name__}")
             causes.append(exc)
 
-    if "codex" in configured:
+    if not usable and "codex" in configured:
         try:
             # Imported here to avoid task_agent -> task_codex -> task_agent at module import time.
             from . import task_codex
 
             task_codex.resolve_binary()
-            return
+            usable = True
         except (Exception, SystemExit) as exc:
             failures.append(f"codex: {str(exc) or exc.__class__.__name__}")
             causes.append(exc)
+
+    if usable:
+        # This is shared infrastructure, not a harness opinion. Ask once after at least one harness
+        # passes its own checks, and preserve the exact path-specific OSError. Checking it first
+        # would hide a more actionable harness refusal (and made CI depend on whether `/var` happened
+        # to be writable before it could exercise the configured permission policy).
+        _require_a_reachable_workspace_root()
+        return
 
     # Preserve Claude's established sandbox-package OSError when Codex fallback is also absent.
     # The operator gets the exact package/install guidance and existing callers retain the useful
