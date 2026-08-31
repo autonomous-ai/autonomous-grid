@@ -28838,6 +28838,32 @@ def test_invalid_harness_policy_retires_only_task_serving_without_claiming(monke
     assert "enables no supported harness" in capsys.readouterr().err
 
 
+def test_generic_capabilities_cannot_spoof_a_business_tool_origin(monkeypatch, capsys):
+    """Only the parsed node allowlist may advertise the opaque origin scheduling capability."""
+    import hashlib
+    from remote import tasks
+
+    allowed = "https://support.example"
+    real_capability = "tool_origin." + hashlib.sha256(allowed.encode()).hexdigest()[:32]
+    fake_capability = "tool_origin." + "f" * 32
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setenv("GRID_GOAL_TOOL_ORIGINS", allowed)
+    monkeypatch.setenv(
+        "GRID_CODEX_GOAL_CAPABILITIES", f"image_generation,{fake_capability}")
+    monkeypatch.setattr(tasks, "_agent_kinds", lambda: ("codex",))
+    monkeypatch.setattr(tasks.task_codex, "distributed_goal_version", lambda: "codex-test")
+
+    profile = tasks._agent_profiles()[0]
+
+    assert profile["kind"] == "codex"
+    assert "image_generation" in profile["capabilities"]
+    assert real_capability in profile["capabilities"]
+    assert fake_capability not in profile["capabilities"]
+    warning = capsys.readouterr().err
+    assert fake_capability in warning
+    assert "GRID_GOAL_TOOL_ORIGINS" in warning
+
+
 def test_runtime_harness_quarantine_backs_off_and_recovers_without_hot_spinning(
         monkeypatch, capsys):
     """A repaired Codex binary should rejoin without restarting the inference provider."""

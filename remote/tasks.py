@@ -355,10 +355,20 @@ _CODEX_ONLY_GOAL_CAPABILITIES = frozenset({
 
 
 def _declared_capabilities(env_name: str) -> set[str]:
-    """Operator-declared harness features. Invalid names fail closed and are said locally."""
+    """Operator-declared harness features, excluding capabilities derived from live config.
+
+    ``tool_origin.*`` is scheduling authority for an exact parsed origin in
+    ``GRID_GOAL_TOOL_ORIGINS``. Accepting the opaque hash through a generic feature variable would
+    let a typo or copied profile route a business Goal to a node whose supervisor then refuses the
+    API call. Keep that namespace derived by :func:`goal_tool_origin_capabilities` only.
+    """
     answer: set[str] = set()
     for value in (os.getenv(env_name) or "").replace(",", " ").split():
-        if _CAPABILITY.fullmatch(value):
+        if value.startswith("tool_origin."):
+            _warn(
+                f"ignoring derived Goal capability {value!r} in {env_name}; configure the exact "
+                "origin with GRID_GOAL_TOOL_ORIGINS")
+        elif _CAPABILITY.fullmatch(value):
             answer.add(value)
         else:
             _warn(f"ignoring invalid Goal capability {value!r} in {env_name}")
