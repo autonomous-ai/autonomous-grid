@@ -361,7 +361,8 @@ def goal_workspace_root():
 def business_api():
     """A process-external API with an idempotent write, as a local business service would expose."""
     state = {
-        "reads": [], "write_requests": [], "writes_by_key": {}, "side_effects": [],
+        "reads": [], "verifications": [], "write_requests": [], "writes_by_key": {},
+        "side_effects": [],
         # The result-window E2E pauses the FIRST committed mutation before its HTTP response. That
         # gives the driver a deterministic place to kill the provider after the side effect but
         # before ToolExecutor can append goal.act.result. Ordinary scenarios leave this disabled.
@@ -390,15 +391,27 @@ def business_api():
 
         def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler protocol name
             parsed = urlparse(self.path)
-            if parsed.path != "/tickets/read":
+            if parsed.path not in ("/tickets/read", "/tickets/check"):
                 self.send_json(404, {"error": "not found"})
                 return
             ticket_id = (parse_qs(parsed.query).get("ticket_id") or [""])[0]
             with lock:
-                state["reads"].append(ticket_id)
-            self.send_json(200, {
-                "ticket_id": ticket_id, "text": "Customer cannot reset their password",
-            })
+                if parsed.path == "/tickets/check":
+                    state["verifications"].append(ticket_id)
+                    side_effects = len(state["side_effects"])
+                else:
+                    state["reads"].append(ticket_id)
+                    side_effects = None
+            if parsed.path == "/tickets/check":
+                self.send_json(200, {
+                    "ticket_id": ticket_id,
+                    "status": "resolved" if side_effects == 1 else "open",
+                    "side_effects": side_effects,
+                })
+            else:
+                self.send_json(200, {
+                    "ticket_id": ticket_id, "text": "Customer cannot reset their password",
+                })
 
         def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler protocol name
             if urlparse(self.path).path != "/tickets/reply":

@@ -229,6 +229,14 @@ def run_turn(node: str, call_tool=None, *, inference: dict[str, str] | None = No
         envelope = json.loads(((result.get("contentItems") or [{}])[0]).get("text") or "{}")
         if not result.get("success") or not (envelope.get("body") or {}).get("replayed"):
             raise RuntimeError(f"replacement action was not safely replayed: {result!r}")
+        verified = call_tool("check_ticket", {"ticket_id": "T-42"})
+        verify_envelope = json.loads(
+            ((verified.get("contentItems") or [{}])[0]).get("text") or "{}")
+        verify_body = verify_envelope.get("body") or {}
+        if (not verified.get("success") or verify_body.get("status") != "resolved"
+                or verify_body.get("side_effects") != 1):
+            raise RuntimeError(
+                f"authoritative ticket verification did not pass: {verified!r}")
         if history == expected:
             # Nominate completion with deliberately insufficient evidence. Grid's independent eval
             # must reject it and create another turn without allowing the action to duplicate.

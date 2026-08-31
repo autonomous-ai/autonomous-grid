@@ -1211,6 +1211,12 @@ def test_business_goal_matches_api_origin_and_replays_action_across_nodes(
                     "required": ["ticket_id", "reply"]},
                 "http": {"method": "POST", "url": f"{origin}/tickets/reply"},
             },
+            {
+                "name": "check_ticket", "mode": "verify", "record": "full",
+                "input_schema": {"type": "object", "properties": {
+                    "ticket_id": {"type": "string"}}, "required": ["ticket_id"]},
+                "http": {"method": "GET", "url": f"{origin}/tickets/check"},
+            },
         ],
         evals=[
             {"type": "file", "name": "resolution proof", "path": "DONE.md",
@@ -1220,6 +1226,14 @@ def test_business_goal_matches_api_origin_and_replays_action_across_nodes(
                  {"pointer": "/ticket_id", "op": "equals", "value": "T-42"},
                  {"pointer": "/side_effects", "op": "equals", "value": 1},
                  {"pointer": "/audit_complete", "op": "equals", "value": True},
+             ]},
+            {"type": "verify", "name": "authoritative ticket outcome",
+             "tool": "check_ticket", "arguments": {"ticket_id": "T-42"},
+             "checks": [
+                 {"pointer": "/status_code", "op": "equals", "value": 200},
+                 {"pointer": "/body/ticket_id", "op": "equals", "value": "T-42"},
+                 {"pointer": "/body/status", "op": "equals", "value": "resolved"},
+                 {"pointer": "/body/side_effects", "op": "equals", "value": 1},
              ]},
         ])
     conversation_id = goal["id"]
@@ -1265,6 +1279,7 @@ def test_business_goal_matches_api_origin_and_replays_action_across_nodes(
     assert len({item["key"] for item in business_api["write_requests"]}) == 1
     assert business_api["write_requests"][0]["body"] == business_api["write_requests"][1]["body"]
     assert len(business_api["side_effects"]) == 1
+    assert business_api["verifications"] == ["T-42", "T-42"]
 
     destination = tmp_path / "business-result"
     destination.mkdir()
@@ -1300,10 +1315,27 @@ def test_business_goal_matches_api_origin_and_replays_action_across_nodes(
         } == expected_attribution
     evidence_keys = {item["idempotency_key"] for item in action_requests + action_results}
     assert evidence_keys == {business_api["write_requests"][0]["key"]}
+    verify_requests = [item for item in evidence["attempt_events"]
+                       if item["event"].get("type") == "goal.verify.request"]
+    verify_results = [item for item in evidence["attempt_events"]
+                      if item["event"].get("type") == "goal.verify.result"]
+    assert len(verify_requests) == len(verify_results) == 2
+    assert all(item["event"].get("arguments") == {"ticket_id": "T-42"}
+               for item in verify_requests)
+    assert all(item["event"].get("success") is True for item in verify_results)
+    assert {
+        (item["turn_id"], item["event"]["provider_node_id"], item["event"]["attempt"])
+        for item in verify_requests + verify_results
+    } == {
+        (rows[1]["id"], node_c.node_id, 2),
+        (rows[2]["id"], node_c.node_id, 1),
+    }
     assert any(run["passed"] is False for run in evidence["eval_runs"])
-    assert len(evidence["eval_runs"]) == 4
-    assert sum(run["passed"] is True for run in evidence["eval_runs"]) == 2
+    assert len(evidence["eval_runs"]) == 6
+    assert sum(run["passed"] is True for run in evidence["eval_runs"]) == 4
     assert evidence["eval_runs"][-1]["passed"] is True
+    from cli.goal import _verify_evidence
+    assert _verify_evidence(evidence, min_execution_nodes=2) == []
 
 
 def test_parent_codex_spawns_claude_child_then_codex_fans_it_in(
