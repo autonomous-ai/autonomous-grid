@@ -276,3 +276,38 @@ relay or inference-only node is not mistaken for distributed Goal evidence.
 - No Goal was created and no worker was joined after the failed preflight. The next valid run needs
   the private relay upgraded to the recorded release-candidate revision, then at least one native
   Goal-capable task worker joined with `--tasks-only`.
+
+## 2026-08-31 — `forge` hosted remote preflight
+
+This is the intended three-physical-machine remote-mode grid. It is not yet counted as a passing
+Goal because the server preflight correctly stopped before creation.
+
+- Remote sync discovered `forge` as `permissioned-public` with three physical nodes online:
+  `forge-machine-a` (Apple M2 Max, 64 GiB, macOS arm64), `forge-machine-b` (AMD Radeon Pro 5500 XT,
+  8 GiB, macOS x86_64), and `forge-gpu-2x4090` (two RTX 4090 D GPUs, Linux). A separate hosted
+  inference server named `Grid` also advertised million-token Responses routes; it is not counted
+  as one of the three execution machines.
+- `grid goal list --grid forge --all --json` returned the explicit rolling-upgrade refusal:
+  `This grid's relay does not support Grid Goal yet.` Membership and remote networking work; the
+  hosted master is still running pre-Goal private relay code.
+- Private branch `grid-goal-distributed` is green at
+  `9b91f3326438f2ee840256782e8ebcf9c3229665`. It may be temporarily deployed before merge. Merely
+  checking out the public branch on the three workers cannot add the missing hosted endpoints.
+- No SSH, LAN address, local relay or pairing bundle was used. No Goal was created, so this is a
+  deployment preflight rather than execution evidence.
+
+## 2026-08-31 — authenticated business outcome matrix
+
+- Public runtime/harness `88cd8c847d4baf5150559bfc69f17fd3554e65d2` and private relay
+  `9b91f3326438f2ee840256782e8ebcf9c3229665` passed the complete 21-scenario cross-repository
+  matrix in one uninterrupted 312.71-second invocation.
+- In the upgraded support Goal, unauthorized node A spent zero attempts. Codex B observed ticket
+  T-42, committed one idempotent reply, and died. Codex C reclaimed the exact turn from an isolated
+  root, replayed without another side effect, and called a node-local `check_ticket` verify tool.
+- C's first completion nomination deliberately failed its file/JSON evidence. A fresh turn repeated
+  both the action reconciliation and authoritative verification. The business API recorded exactly
+  one side effect and two verify reads.
+- Grid stored six independent eval runs across the two nominations: the designed first-turn
+  failures plus four passes. The final `verify` run was relay-authored and bound to C's exact turn,
+  attempt, tool, arguments, call id, request sequence and result sequence. Offline verification
+  independently selected the same exported request/result pair and recomputed all four predicates.

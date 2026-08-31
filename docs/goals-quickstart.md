@@ -595,7 +595,7 @@ The automated scenarios record the logical nodes explicitly (each uses an isolat
 | Crash-safe business action | A -> B | Codex -> Codex | API commits, then A's native harness crashes | One side effect; stable key; complete action evidence; passing proof |
 | Business result-window death | B -> C | Codex -> Codex | B is SIGKILLed after API commit, before the result event | One side effect; unmatched request reconciled by C's stable-key replay |
 | Image artifact | B polls; A executes | Claude rejected; Codex selected | Capability mismatch | PNG file and size |
-| Support reply | A polls; B -> C execute | Codex | B dies after API commit; first eval fails | `DONE.md`; JSON outcome; one API side effect |
+| Support reply | A polls; B -> C execute | Codex | B dies after API commit; first eval fails | `DONE.md`; JSON artifact; two fresh authenticated API verifications; one API side effect |
 | Required child | A parent; B child; C parent | Codex -> Claude -> Codex | Parent moves while child runs | Child and parent files |
 | Mixed child reclaim | A parent -> B child -> C child -> D parent | Codex -> Codex -> Claude -> Codex | B's native child harness fails after partial work | Same child turn at attempt 2; accepted child eval; one fan-in; completed parent |
 | Parallel child fan-out | A parent -> B/C children -> D parent; inference E/F | Codex -> Codex + Claude -> Codex | Two required children run simultaneously on distinct roots/models and issue real Responses/Messages calls through distinct Grid providers | Exact per-turn inference attribution; two accepted child evals; deterministic two-branch fan-in; completed parent |
