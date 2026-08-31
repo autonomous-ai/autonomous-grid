@@ -17,7 +17,7 @@ The detailed physical artifacts are indexed in
 
 | Gate | Result | What it proves |
 |---|---:|---|
-| Full public suite | 3,344 passed, 58 skipped, 7 deselected on Python 3.11; Python 3.12, 3.13, lint and Windows also passed | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
+| Full public suite | 3,348 passed, 58 skipped, 7 deselected on Python 3.11, 3.12 and 3.13; lint and Windows also passed | CLI, providers, native harness adapters, sandbox, Git plane, physical-lab bootstrap, and existing Grid behavior |
 | Private runbook release bundle | 166 passed (440.12s) | Goal creation, claims, retries, pause/cancel and duplicate-settlement races, budgets, subgoals and inherited tool authority, nested required-child propagation, sibling cancellation and explicit resume refusal, recoverable nested fan-in conflicts, concurrent child settlement on independent database connections, eval authority and proof compaction, retention, dead-branch pruning, inference attribution, capability matching, Git ref idempotency, and recovery from a relay death during continuation preparation |
 | Relay Goal feature discovery | 1 passed | `/server/info` advertises additive `goals/v1` support for safe canary and fleet rollout |
 | Private Goal migration suite | 14 passed | Older SQLite/PostgreSQL relay schemas upgrade to the complete Goal schema, including 64-bit counters |
