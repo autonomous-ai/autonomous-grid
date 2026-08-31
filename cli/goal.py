@@ -386,6 +386,21 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         failures.append(
             "turn branches have been pruned: " + ", ".join(map(str, pruned_branches)))
 
+    tool_types = {
+        f"goal.{mode}.{phase}"
+        for mode in ("observe", "act", "verify")
+        for phase in ("request", "result")
+    }
+    native_goal_types = {
+        "goal.codex.event", "goal.slice.completed",
+        "goal.claude.set", "goal.claude.evaluated",
+    }
+    worker_goal_types = tool_types | native_goal_types
+    exported_event_types = worker_goal_types | {
+        "goal.eval.completed",
+        "task.attempt_started", "task.claim_expired", "task.retry", "task.retrying",
+        "task.cancelled", "task.terminal", "task.event.corrupt",
+    }
     raw_attempt_events = record.get("attempt_events")
     if not isinstance(raw_attempt_events, list):
         failures.append("Goal evidence has no valid attempt_events list")
@@ -418,6 +433,9 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         if not isinstance(event, dict) or not isinstance(event.get("type"), str) or not event["type"]:
             failures.append(f"attempt event {index} has no valid event object and type")
             continue
+        if event["type"] not in exported_event_types:
+            failures.append(
+                f"attempt event {index} has unknown Goal evidence type {event['type']!r}")
         if event.get("type") == "task.event.corrupt":
             failures.append(f"attempt event {index} contains corrupt stored evidence")
 
@@ -500,11 +518,6 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     # Tool events are durable training evidence, so their worker/attempt boundary must be explicit
     # and relay-authenticated. Sequence order cannot recover that boundary after a dead provider's
     # lease is reclaimed by another machine on the same turn.
-    tool_types = {
-        f"goal.{mode}.{phase}"
-        for mode in ("observe", "act", "verify")
-        for phase in ("request", "result")
-    }
     tool_events: list[tuple[str, str, str, int, str, str, str | None]] = []
     for index, item in enumerate(attempt_events, 1):
         if not isinstance(item, dict) or not isinstance(item.get("event"), dict):
@@ -858,29 +871,83 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             verified_retry_attempts.add((
                 turn_id, attempt, previous_provider, previous_agent))
 
-    # Authenticated tool traffic belongs strictly inside one live attempt. Reject impossible
-    # histories in which an action appears before its start fence or after the relay has already
-    # declared that attempt dead and reusable.
+    # Every worker-authored Goal event belongs strictly inside one live attempt. The relay stamps
+    # provider and attempt onto these events, so require them to agree with the unique start fence.
+    # This covers native Codex/Claude Goal progress as well as business tool traffic, and rejects
+    # impossible histories before start or after the relay declared the attempt dead and reusable.
     for index, item in enumerate(attempt_events, 1):
         event = item.get("event") if isinstance(item, dict) else None
         event_type = event.get("type") if isinstance(event, dict) else None
-        if not isinstance(event_type, str) or event_type not in tool_types:
+        if not isinstance(event_type, str) or event_type not in worker_goal_types:
             continue
         turn_id = item.get("turn_id")
         attempt = event.get("attempt")
+        provider = event.get("provider_node_id")
         seq = item.get("seq")
         if (not isinstance(turn_id, str) or not isinstance(attempt, int)
                 or isinstance(attempt, bool) or attempt <= 0
+                or not isinstance(provider, str) or not provider
                 or not isinstance(seq, int) or isinstance(seq, bool) or seq < 0):
             continue
+        start_events = starts_by_attempt.get((turn_id, attempt), [])
+        matching_starts = [start for start in start_events
+                           if start.get("provider_id") == provider]
+        if len(start_events) != 1 or len(matching_starts) != 1:
+            failures.append(
+                f"worker Goal event {index} has no unique matching relay-stamped attempt identity")
+            harness = None
+        else:
+            harness = matching_starts[0].get("agent_kind")
         starts = start_sequences_by_attempt.get((turn_id, attempt), [])
         if len(starts) == 1 and seq <= starts[0]:
             failures.append(
-                f"tool event {index} occurs before its relay-stamped attempt start")
+                f"worker Goal event {index} occurs before its relay-stamped attempt start")
         retries = retry_sequences_by_attempt.get((turn_id, attempt), [])
         if len(retries) == 1 and seq >= retries[0]:
             failures.append(
-                f"tool event {index} occurs after its relay retry boundary")
+                f"worker Goal event {index} occurs after its relay retry boundary")
+
+        expected_harness = {
+            "goal.codex.event": "codex", "goal.slice.completed": "codex",
+            "goal.claude.set": "claude", "goal.claude.evaluated": "claude",
+        }.get(event_type)
+        if expected_harness is not None and harness != expected_harness:
+            failures.append(
+                f"worker Goal event {index} type {event_type} is only valid for "
+                f"{expected_harness} attempts")
+        if event_type == "goal.codex.event":
+            method = event.get("method")
+            if (not isinstance(method, str)
+                    or not method.startswith(("turn/", "item/"))):
+                failures.append(f"worker Goal event {index} has no valid Codex method")
+        elif event_type == "goal.slice.completed":
+            if event.get("status") not in (
+                    "active", "blocked", "usage_limited", "budget_limited", "complete", "failed"):
+                failures.append(f"worker Goal event {index} has no valid Codex Goal status")
+            for field in ("turns_completed", "tokens_used"):
+                value = event.get(field)
+                if (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+                    failures.append(
+                        f"worker Goal event {index} has no valid {field}")
+        elif event_type == "goal.claude.set":
+            if event.get("condition") is not None and not isinstance(event.get("condition"), str):
+                failures.append(f"worker Goal event {index} has no valid Claude Goal condition")
+        elif event_type == "goal.claude.evaluated":
+            if not isinstance(event.get("met"), bool):
+                failures.append(f"worker Goal event {index} has no boolean Claude met verdict")
+            if not isinstance(event.get("impossible"), bool):
+                failures.append(
+                    f"worker Goal event {index} has no boolean Claude impossible verdict")
+            for field in ("reason", "protocol_error"):
+                if event.get(field) is not None and not isinstance(event.get(field), str):
+                    failures.append(
+                        f"worker Goal event {index} has no valid Claude {field}")
+            for field in ("iterations", "duration_ms", "tokens"):
+                value = event.get(field)
+                if (value is not None and (not isinstance(value, int)
+                                           or isinstance(value, bool) or value < 0)):
+                    failures.append(
+                        f"worker Goal event {index} has no valid Claude {field}")
 
     # A killed provider cannot appear as the terminal provider on the reclaimed row. Count it only
     # when the relay-authored retry and attempt-start records agree; either event alone is not

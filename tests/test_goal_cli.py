@@ -770,6 +770,38 @@ def test_goal_evidence_verifies_atomic_terminal_and_eval_verdicts():
     assert any("has no provider identity" in item for item in failures)
     assert any("has no valid harness identity" in item for item in failures)
 
+    damaged = deepcopy(record)
+    damaged["attempt_events"].insert(0, {
+        "turn_id": "turn-1", "seq": 1,
+        "event": {"type": "goal.reward.override", "score": 1.0},
+    })
+    assert any("unknown Goal evidence type 'goal.reward.override'" in item
+               for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][0]["seq"] = 1
+    damaged["attempt_events"].insert(1, {
+        "turn_id": "turn-1", "seq": 2,
+        "event": {
+            "type": "goal.claude.evaluated", "provider_node_id": "node-A", "attempt": 1,
+            "met": True, "impossible": False, "reason": "done",
+            "iterations": 1, "duration_ms": 10, "tokens": 20, "protocol_error": None,
+        },
+    })
+    assert any("goal.claude.evaluated is only valid for claude attempts" in item
+               for item in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][0]["seq"] = 1
+    damaged["attempt_events"].insert(1, {
+        "turn_id": "turn-1", "seq": 2,
+        "event": {
+            "type": "goal.codex.event", "provider_node_id": "node-A", "attempt": 1,
+            "method": ["not", "a", "method"],
+        },
+    })
+    assert any("has no valid Codex method" in item for item in _verify_evidence(damaged))
+
 
 def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
     from cli import goal
@@ -1183,6 +1215,11 @@ def test_goal_evidence_verifies_tool_attempts_and_idempotent_reconciliation():
     damaged["attempt_events"][4]["seq"] = 5
     damaged["attempt_events"].insert(4, next_start)
     assert any("next attempt start is not after retry attempt 1" in failure
+               for failure in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][6]["event"]["provider_node_id"] = "node-forged"
+    assert any("has no unique matching relay-stamped attempt identity" in failure
                for failure in _verify_evidence(damaged))
 
 
