@@ -18547,6 +18547,29 @@ def test_serve_heartbeat_once_ok_reports_inflight_load(monkeypatch, tmp_path):
     assert seen["load"] == {"active_tasks": 0, "platform": "linux"}
 
 
+def test_task_worker_heartbeat_carries_goal_runtime_provenance(monkeypatch, tmp_path):
+    from remote import relay, serve
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(serve, "_goal_worker_meta", lambda: {"goal_runtime": {
+        "schema_version": 1,
+        "grid": {"version": "0.3.28", "revision": "4e5dcc7a3fa929b7", "dirty": False},
+        "agents": {"codex": {"version": "0.150.1"}},
+    }})
+    state = _serve_state(monkeypatch, tmp_path)
+    seen = {}
+    monkeypatch.setattr(
+        relay, "heartbeat",
+        lambda url, tok, *, load, meta=None: seen.update(meta=meta) or "ok",
+    )
+
+    assert serve.heartbeat_once(state) == "ok"
+    assert seen["meta"]["goal_runtime"]["grid"]["revision"] == "4e5dcc7a3fa929b7"
+    assert seen["meta"]["goal_runtime"]["agents"] == {
+        "codex": {"version": "0.150.1"}}
+
+
 def test_serve_heartbeat_once_re_registers_when_pruned(monkeypatch, tmp_path):
     from remote import relay, serve
 

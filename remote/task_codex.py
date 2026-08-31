@@ -260,6 +260,18 @@ def _require_distributed_goal_version(binary: str) -> str:
     return binary
 
 
+def distributed_goal_version(binary: str | None = None) -> str:
+    """The exact resumable Codex revision this worker would execute.
+
+    This repeats no external probe in the steady state: ``_binary_version`` is keyed by the
+    executable's stat revision, so replacing the binary invalidates both scheduling and provenance
+    together.
+    """
+    resolved = binary or resolve_binary()
+    _require_distributed_goal_version(resolved)
+    return ".".join(str(part) for part in _binary_version(resolved))
+
+
 def _protocol_capability(binary: str) -> tuple[bool, str]:
     """Probe the exact installed app-server schema once per executable revision.
 

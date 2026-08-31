@@ -1547,7 +1547,7 @@ grid goal run --project <project-id> --objective <text> --done-when <text> --mod
 grid goal list [--all] [--grid <grid>] [--json]
 grid goal status <goal-id> [--grid <grid>] [--json]
 grid goal evidence <goal-id> [--verify] [--min-execution-nodes <n>] [--require-inference]
-                   [--grid <grid>]
+                   [--require-worker-revision <git-revision>] [--grid <grid>]
 grid goal pause <goal-id> [--grid <grid>] [--json]
 grid goal resume <goal-id> [--token-budget <tokens>] [--grid <grid>] [--json]
 grid goal cancel <goal-id> [--grid <grid>] [--json]

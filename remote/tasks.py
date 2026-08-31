@@ -35,6 +35,7 @@ from typing import Any, Callable
 
 from . import (relay, task_agent, task_capacity, task_codex, task_codex_proxy, task_evict,
                task_repo, task_stream)
+from shared.runtime_identity import grid_runtime_identity
 
 # Queue sentinels. Plain `object()`s rather than None or "" — a task's output legitimately contains
 # blank lines, and both would be indistinguishable from one. `_EOF` is posted once per pipe.
@@ -379,15 +380,43 @@ def _agent_profiles() -> tuple[dict[str, Any], ...]:
         })
         if task_agent.distributed_goal_available():
             claude_capabilities.add("native_goal")
-        profiles.append({"kind": "claude", "capabilities": sorted(claude_capabilities)})
+        profile: dict[str, Any] = {
+            "kind": "claude", "capabilities": sorted(claude_capabilities)}
+        if "native_goal" in claude_capabilities:
+            # Runtime provenance rides beside capability scheduling. Older relays ignore this
+            # additive key; a Goal-aware relay snapshots the authenticated node's copy onto the
+            # attempt boundary for audit/training attribution.
+            profile["version"] = task_agent.distributed_goal_version()
+        profiles.append(profile)
     if "codex" in kinds:
         profiles.append({
             "kind": "codex",
             "capabilities": sorted({"native_goal", "dynamic_tools", "subgoals"}
                                    | task_codex.goal_tool_origin_capabilities()
                                    | _declared_capabilities("GRID_CODEX_GOAL_CAPABILITIES")),
+            "version": task_codex.distributed_goal_version(),
         })
     return tuple(profiles)
+
+
+def goal_worker_metadata() -> dict[str, Any]:
+    """Bounded Goal runtime metadata for registration and heartbeat snapshots.
+
+    Agent versions come from the same live, revision-keyed probes that authorize claims. An empty
+    ``agents`` object deliberately clears stale metadata after both native harnesses disappear.
+    """
+    agents = {
+        str(profile["kind"]): {"version": str(profile["version"])}
+        for profile in _agent_profiles()
+        if profile.get("kind") in ("codex", "claude") and profile.get("version")
+    }
+    return {
+        "goal_runtime": {
+            "schema_version": 1,
+            "grid": grid_runtime_identity(),
+            "agents": agents,
+        }
+    }
 
 
 def has_non_claude_claim_capacity() -> bool:

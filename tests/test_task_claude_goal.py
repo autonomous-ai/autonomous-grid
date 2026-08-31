@@ -486,10 +486,11 @@ def test_claude_profile_cannot_claim_grid_runner_capabilities_it_does_not_wire(m
         "GRID_CLAUDE_TASK_CAPABILITIES",
         "native_goal dynamic_tools subgoals image_generation")
     monkeypatch.setattr(task_agent, "distributed_goal_available", lambda: True)
+    monkeypatch.setattr(task_agent, "distributed_goal_version", lambda: "2.1.251")
     monkeypatch.setattr(task_agent, "claude_available", lambda: True)
 
     assert tasks._agent_profiles() == ({
-        "kind": "claude", "capabilities": ["native_goal"],
+        "kind": "claude", "capabilities": ["native_goal"], "version": "2.1.251",
     },)
 
 
@@ -507,10 +508,31 @@ def test_codex_profile_advertises_only_operator_approved_tool_origins(monkeypatc
         "GRID_GOAL_TOOL_ORIGINS",
         "https://SUPPORT.example:443/,http://finance.internal:8080,https://bad.example/path")
     monkeypatch.setattr(task_codex, "available", lambda: True)
+    monkeypatch.setattr(task_codex, "distributed_goal_version", lambda: "0.150.1")
     capabilities = set(tasks._agent_profiles()[0]["capabilities"])
     assert {"native_goal", "dynamic_tools", "subgoals"} <= capabilities
     assert task_codex.goal_tool_origin_capabilities() <= capabilities
     assert len([item for item in capabilities if item.startswith("tool_origin.")]) == 2
+
+
+def test_goal_worker_metadata_binds_grid_revision_to_exact_native_versions(monkeypatch):
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: ({
+        "kind": "codex", "capabilities": ["native_goal"], "version": "0.150.1",
+    }, {
+        "kind": "claude", "capabilities": ["native_goal"], "version": "2.1.251",
+    }))
+    monkeypatch.setattr(tasks, "grid_runtime_identity", lambda: {
+        "version": "0.3.28", "revision": "4e5dcc7a3fa929b7", "dirty": False,
+    })
+
+    assert tasks.goal_worker_metadata() == {"goal_runtime": {
+        "schema_version": 1,
+        "grid": {"version": "0.3.28", "revision": "4e5dcc7a3fa929b7", "dirty": False},
+        "agents": {
+            "codex": {"version": "0.150.1"},
+            "claude": {"version": "2.1.251"},
+        },
+    }}
 
 
 def test_full_tool_recording_captures_training_payloads_but_redacts_secrets(monkeypatch):

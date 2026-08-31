@@ -1116,6 +1116,7 @@ def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
     # meta over what it holds, so a probe that failed this run must not erase a name that worked on
     # the last one. Cached in `node_hardware`, so the heartbeat path pays nothing.
     meta.update(node_hardware.meta_fields())
+    meta.update(_goal_worker_meta())
     # The seat tier of an API engine (codex: free/plus/pro/…), surfaced on the grid page next to the
     # engine kind. A public label, never a secret — distinct from the token/account_id we never emit.
     # Union identities can gather several engines; take the first spec that carries one (only API
@@ -1127,6 +1128,21 @@ def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
     if plan_type:
         meta["plan_type"] = plan_type
     return meta
+
+
+def _goal_worker_meta() -> dict[str, Any]:
+    """Goal runtime provenance, only for providers that opted into task serving."""
+    if not task_opt_in.serving_enabled():
+        return {}
+    try:
+        # Keep native harness imports off the inference-only startup path. This is the same lazy
+        # boundary `_start_task_worker` uses below.
+        from . import tasks
+
+        return tasks.goal_worker_metadata()
+    except (Exception, SystemExit) as exc:
+        _warn(f"could not collect Goal worker runtime provenance ({exc!r})")
+        return {}
 
 
 def _pricing(record: dict[str, Any]) -> dict[str, float]:
@@ -1846,8 +1862,10 @@ def heartbeat_once(state: _ServeState, *, _allow_refresh: bool = True) -> str:
         # The hardware fields ride along on every beat — only those, not the whole meta: name and
         # engine are already right from registration, while `chip`/`device` are the ones a node that
         # joined before they existed can never correct any other way. Cached, so this costs nothing.
+        meta = node_hardware.meta_fields()
+        meta.update(_goal_worker_meta())
         result = relay.heartbeat(
-            state.signaling_url, token, load=state.load(), meta=node_hardware.meta_fields(),
+            state.signaling_url, token, load=state.load(), meta=meta,
         )
     except relay.RelayUnauthorized:
         if _allow_refresh and state.refresh(stale_token=token):

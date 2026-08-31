@@ -22,10 +22,11 @@ def test_goal_run_parser_requires_a_measurable_condition_and_model():
 
     evidence = build_parser().parse_args([
         "goal", "evidence", "goal-1", "--verify", "--min-execution-nodes", "3",
-        "--require-inference",
+        "--require-inference", "--require-worker-revision", "4E5DCC7",
     ])
     assert evidence.min_execution_nodes == 3
     assert evidence.require_inference is True
+    assert evidence.require_worker_revision == "4e5dcc7"
 
     resumed = build_parser().parse_args([
         "goal", "resume", "goal-1", "--token-budget", "10000000",
@@ -618,6 +619,12 @@ def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
             "turn_id": "turn-1", "seq": 0, "event": {
                 "type": "task.attempt_started", "attempt": 1,
                 "provider_id": "node-A", "agent_kind": "codex",
+                "worker_runtime": {
+                    "schema_version": 1,
+                    "grid": {"version": "0.3.28", "revision": "4e5dcc7a3fa929b7",
+                             "dirty": False},
+                    "agent": {"kind": "codex", "version": "0.150.1"},
+                },
             },
         }, {
             "turn_id": "turn-1", "seq": 1, "event": {
@@ -626,10 +633,35 @@ def test_goal_evidence_verify_proves_native_retry_checkpoint_ancestry():
                 "checkpoint_commit": checkpoint,
                 "transcript_checkpoint_commit": transcript_checkpoint,
             },
+        }, {
+            "turn_id": "turn-1", "seq": 2, "event": {
+                "type": "task.attempt_started", "attempt": 2,
+                "provider_id": "node-B", "agent_kind": "codex",
+                "worker_runtime": {
+                    "schema_version": 1,
+                    "grid": {"version": "0.3.28", "revision": "4e5dcc7b1111111",
+                             "dirty": False},
+                    "agent": {"kind": "codex", "version": "0.150.1"},
+                },
+            },
         }],
         "inference": [], "eval_runs": [],
     }
     assert goal._verify_evidence(record, min_execution_nodes=2) == []
+    assert goal._verify_evidence(
+        record, min_execution_nodes=2, require_worker_revision="4e5dcc7") == []
+
+    final_runtime = record["attempt_events"][2]["event"]["worker_runtime"]
+    final_runtime["grid"]["dirty"] = True
+    assert any("no valid clean" in failure for failure in goal._verify_evidence(
+        record, min_execution_nodes=2, require_worker_revision="4e5dcc7"))
+    final_runtime["grid"]["dirty"] = False
+    assert any("not required revision" in failure for failure in goal._verify_evidence(
+        record, min_execution_nodes=2, require_worker_revision="deadbee"))
+    final_runtime["agent"]["kind"] = "claude"
+    assert any("no valid clean" in failure for failure in goal._verify_evidence(
+        record, min_execution_nodes=2, require_worker_revision="4e5dcc7"))
+    final_runtime["agent"]["kind"] = "codex"
 
     record["trajectory"]["retry_checkpoint_chain"][0]["worktree_ancestor"] = False
     assert any("final worktree does not contain" in failure

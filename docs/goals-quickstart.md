@@ -135,6 +135,8 @@ grid goal list                    # active, paused and blocked
 grid goal list --all              # includes ended Goal history
 grid goal status <goal-id>
 grid goal evidence <goal-id> --verify > goal-evidence.json
+# For an unmerged/controlled rollout, also prove every attempt used that clean worker checkout:
+grid goal evidence <goal-id> --verify --require-worker-revision "$(git rev-parse --short HEAD)"
 grid goal pause <goal-id>         # current leased turn may finish; no next turn is queued
 grid goal resume <goal-id>
 grid goal resume <goal-id> --token-budget 10000000  # extend a budget-limited root Goal

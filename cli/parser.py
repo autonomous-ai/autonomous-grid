@@ -6,6 +6,7 @@ module this imports from. The surface mirrors docs/cli.md.
 from __future__ import annotations
 
 import argparse
+import re
 
 from local import runtime
 from shared._version import __version__
@@ -93,6 +94,14 @@ def _positive_node_count(raw: str) -> int:
     if count < 1:
         raise argparse.ArgumentTypeError(f"{raw!r} must be at least 1 node")
     return count
+
+
+def _worker_revision(raw: str) -> str:
+    revision = raw.strip().lower()
+    if re.fullmatch(r"[0-9a-f]{7,64}", revision) is None:
+        raise argparse.ArgumentTypeError(
+            "worker revision must be a 7-64 character hexadecimal Git revision")
+    return revision
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1134,6 +1143,10 @@ def _add_goal(sub) -> None:
     evidence.add_argument(
         "--require-inference", action="store_true",
         help="With --verify, require every turn to have model usage attributed to a Grid node.")
+    evidence.add_argument(
+        "--require-worker-revision", type=_worker_revision, default=None, metavar="REV",
+        help=("With --verify, require every execution attempt to come from a clean Grid worker "
+              "whose relay-stamped Git revision starts with REV."))
     evidence.set_defaults(handler=cmd_goal)
 
     for action, help_text in (("pause", "Stop scheduling new turns"),

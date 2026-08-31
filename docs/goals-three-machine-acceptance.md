@@ -188,10 +188,18 @@ uv run grid goal run --grid forge \
   --idempotency-key forge-claude-canary-v1 --json
 ```
 
-For each returned id, run `grid goal evidence <id> --grid forge --verify --require-inference` and
-record the executor, harness, model-serving node, exact model and branch SHAs. If the Claude canary
-stays at attempt zero, inspect model readiness and the Messages/chat capability on the inference
-route; do not loosen the canary to Codex.
+For each returned id, run the following from the clean public-branch checkout used to start the
+workers. This turns "we meant to update all three" into a checked property of every attempt:
+
+```bash
+WORKER_REVISION="$(git rev-parse --short HEAD)"
+grid goal evidence <id> --grid forge --verify --require-inference \
+  --require-worker-revision "$WORKER_REVISION"
+```
+
+Record the executor, harness, model-serving node, exact model, native agent version and Grid worker
+revision. If the Claude canary stays at attempt zero, inspect model readiness and the Messages/chat
+capability on the inference route; do not loosen the canary to Codex.
 
 ## Scenario
 
@@ -293,8 +301,10 @@ Run this separately to prove task capacity never substitutes for inference readi
 Save and verify the relay-authored JSON artifact with:
 
 ```bash
+WORKER_REVISION="$(git rev-parse --short HEAD)"
 grid goal evidence <goal-id> --verify \
-  --min-execution-nodes 3 --require-inference > goal-evidence.json
+  --min-execution-nodes 3 --require-inference \
+  --require-worker-revision "$WORKER_REVISION" > goal-evidence.json
 ```
 
 The command exits nonzero if the Goal is not complete, fewer than three task nodes executed it, any
@@ -344,6 +354,13 @@ and harness from the live claim. Therefore each retry predecessor counted by
 `--min-execution-nodes` must have exactly one matching relay-stamped attempt-start event; a start
 marker without the later authoritative retry never counts by itself. The replacement's attempt
 number must still be 2 and the retry reason must be `lease_expired`.
+
+Each counted attempt-start also carries a relay-snapshotted `worker_runtime`: Grid package version,
+clean Git revision, selected native harness and native agent version. The provider cannot forge this
+through its event payload; the relay removes that field and rebuilds it from the authenticated
+node's current registry metadata. `--require-worker-revision` requires exactly one start for every
+terminal and retried attempt, rejects missing/malformed/dirty provenance, and accepts a unique Git
+prefix only when every attempt used it.
 
 Every terminal evaluation row used as proof must belong to the final turn and final result commit,
 match both the immutable definition id and hash, name its evaluator, and have `accepted: true` with

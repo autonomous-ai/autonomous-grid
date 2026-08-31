@@ -267,7 +267,8 @@ def _show(goal: dict, as_json: bool) -> None:
 
 
 def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
-                     require_inference: bool = False) -> list[str]:
+                     require_inference: bool = False,
+                     require_worker_revision: str | None = None) -> list[str]:
     """Return deterministic release-gate failures in a relay-authored Goal evidence record."""
     failures: list[str] = []
     schema_version = record.get("schema_version")
@@ -679,6 +680,71 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     # when the relay-authored retry and attempt-start records agree; either event alone is not
     # sufficient proof that another physical worker executed the Goal.
     execution_nodes.update(verified_retry_nodes)
+
+    if require_worker_revision is not None:
+        expected_revision = require_worker_revision.lower()
+        required_attempts: set[tuple[str, int, str, str]] = set()
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            coordinate = (
+                turn.get("id"), turn.get("attempt"), turn.get("provider_node_id"),
+                turn.get("agent_kind"))
+            if (isinstance(coordinate[0], str)
+                    and isinstance(coordinate[1], int) and not isinstance(coordinate[1], bool)
+                    and coordinate[1] > 0
+                    and isinstance(coordinate[2], str) and coordinate[2]
+                    and coordinate[3] in ("codex", "claude")):
+                required_attempts.add(coordinate)
+        for retry in all_retries:
+            event = retry.get("event") if isinstance(retry, dict) else None
+            if not isinstance(event, dict):
+                continue
+            coordinate = (
+                retry.get("turn_id"), event.get("attempt"),
+                event.get("previous_provider_id"), event.get("previous_agent_kind"))
+            if (isinstance(coordinate[0], str)
+                    and isinstance(coordinate[1], int) and not isinstance(coordinate[1], bool)
+                    and coordinate[1] > 0
+                    and isinstance(coordinate[2], str) and coordinate[2]
+                    and coordinate[3] in ("codex", "claude")):
+                required_attempts.add(coordinate)
+
+        for turn_id, attempt, provider, harness in sorted(required_attempts):
+            starts = [item.get("event") for item in attempt_events
+                      if isinstance(item, dict) and item.get("turn_id") == turn_id
+                      and isinstance(item.get("event"), dict)
+                      and item["event"].get("type") == "task.attempt_started"
+                      and item["event"].get("attempt") == attempt
+                      and item["event"].get("provider_id") == provider
+                      and item["event"].get("agent_kind") == harness]
+            if len(starts) != 1:
+                failures.append(
+                    f"turn {turn_id} attempt {attempt} has {len(starts)} relay-stamped start "
+                    "records for required worker provenance; expected exactly one")
+                continue
+            runtime = starts[0].get("worker_runtime")
+            grid_runtime = runtime.get("grid") if isinstance(runtime, dict) else None
+            agent_runtime = runtime.get("agent") if isinstance(runtime, dict) else None
+            revision = grid_runtime.get("revision") if isinstance(grid_runtime, dict) else None
+            if (not isinstance(runtime, dict) or runtime.get("schema_version") != 1
+                    or not isinstance(grid_runtime, dict)
+                    or not isinstance(grid_runtime.get("version"), str)
+                    or not isinstance(revision, str)
+                    or re.fullmatch(r"[0-9a-f]{7,64}", revision) is None
+                    or grid_runtime.get("dirty") is not False
+                    or not isinstance(agent_runtime, dict)
+                    or agent_runtime.get("kind") != harness
+                    or not isinstance(agent_runtime.get("version"), str)
+                    or not agent_runtime.get("version")):
+                failures.append(
+                    f"turn {turn_id} attempt {attempt} has no valid clean relay-stamped worker "
+                    "runtime and native agent version")
+            elif not revision.startswith(expected_revision):
+                failures.append(
+                    f"turn {turn_id} attempt {attempt} used Grid worker revision {revision}, not "
+                    f"required revision {expected_revision}")
+
     if len(execution_nodes) < min_execution_nodes:
         failures.append(
             f"Goal used {len(execution_nodes)} distinct execution node(s), fewer than required "
@@ -906,7 +972,8 @@ def cmd_goal(args: argparse.Namespace) -> int:
             failures = _verify_evidence(
                 evidence,
                 min_execution_nodes=getattr(args, "min_execution_nodes", 1),
-                require_inference=getattr(args, "require_inference", False))
+                require_inference=getattr(args, "require_inference", False),
+                require_worker_revision=getattr(args, "require_worker_revision", None))
             if failures:
                 raise SystemExit("Goal evidence verification failed:\n- " + "\n- ".join(failures))
             print("Goal evidence verified: terminal turns, transcript chain and evaluations pass.",

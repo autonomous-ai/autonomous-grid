@@ -789,6 +789,13 @@ def require_distributed_goal(binary: str) -> str:
     return binary
 
 
+def distributed_goal_version(binary: str | None = None) -> str:
+    """The exact resumable Claude Code revision this worker would execute."""
+    resolved = binary or resolve_binary()
+    require_distributed_goal(resolved)
+    return ".".join(str(part) for part in _binary_version(resolved))
+
+
 def remember_distributed_goal_failure(binary: str, reason: str) -> None:
     """Withdraw native_goal after deterministic attachment drift, until the binary changes."""
     key = _version_cache_key(binary)
