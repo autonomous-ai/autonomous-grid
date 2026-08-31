@@ -365,6 +365,12 @@ atomically inserts an `implicit: true` start before the first authenticated Goal
 retry checkpoint, or result, so an older worker cannot perform recorded work and later be mistaken
 for an unstarted claim.
 
+The provider event endpoint must reject relay-authored Goal markers such as `task.retry`,
+`task.claim_expired`, `task.terminal`, `task.cancelled`, `goal.eval.completed`, and corruption
+sentinels, even from the current lease holder. These records determine retry accounting, completion,
+evaluation authority, and training labels; a worker may narrate execution and trigger a
+relay-stamped attempt start, but it cannot manufacture the independent record that scores it.
+
 Each counted attempt-start also carries a relay-snapshotted `worker_runtime`: Grid package version,
 clean Git revision, selected native harness and native agent version. The provider cannot forge this
 through its event payload; the relay removes that field and rebuilds it from the authenticated

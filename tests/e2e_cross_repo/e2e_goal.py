@@ -257,6 +257,18 @@ def test_same_node_reclaim_rejects_the_old_process_on_every_goal_plane(
                 f"/relay/v1/git/{project_id}/info/refs",
                 headers=stale, params={"service": "git-upload-pack"}).status_code == 404
 
+            live = {**auth, "X-Grid-Task-Claim": current["claim_id"]}
+            relay_markers = (
+                "goal.eval.completed", "task.cancelled", "task.claim_expired",
+                "task.event.corrupt", "task.retry", "task.terminal",
+            )
+            forged_markers = [client.post(
+                f"/relay/v1/tasks/{old['task_id']}/events", headers=live,
+                json={"events": [{"type": event_type}]})
+                for event_type in relay_markers]
+            assert [response.status_code for response in forged_markers] == [422] * len(
+                relay_markers)
+
             child_url = f"/relay/v1/goals/{goal['id']}/children"
             child_headers = {
                 "X-Grid-Goal-Turn": old["task_id"],
@@ -272,7 +284,6 @@ def test_same_node_reclaim_rejects_the_old_process_on_every_goal_plane(
                 child_url, headers={**stale, **child_headers}, json=child_body)
             assert missing_child.status_code == 403
             assert stale_child.status_code == 409
-            live = {**auth, "X-Grid-Task-Claim": current["claim_id"]}
             child = client.post(
                 child_url, headers={**live, **child_headers}, json=child_body)
             assert child.status_code == 201, child.text
@@ -289,6 +300,8 @@ def test_same_node_reclaim_rejects_the_old_process_on_every_goal_plane(
         evidence = relay_client.get_goal_evidence(relay, owner_token, goal["id"])
         assert not [item for item in evidence["attempt_events"]
                     if item["event"].get("text") in ("unfenced", "stale")]
+        assert not [item for item in evidence["attempt_events"]
+                    if item["event"].get("type") in relay_markers]
         assert evidence["eval_runs"] == []
         assert [row["id"] for row in relay_client.get_goal(
             relay, owner_token, goal["id"])["children"]] == [child.json()["id"]]
