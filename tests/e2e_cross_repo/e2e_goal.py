@@ -1645,6 +1645,98 @@ def test_parent_fans_out_parallel_codex_and_claude_children_then_merges_both(
     assert all(run["passed"] and run["accepted"] for run in parent_evidence["eval_runs"])
 
 
+def test_failed_required_child_blocks_parent_and_cancels_running_claude_sibling(
+        relay, owner_token, spawn_goal_provider):
+    """A failed required branch cannot orphan another agent on work no parent can consume."""
+    from remote import relay as relay_client
+
+    project_id = relay_client.create_project(
+        relay, owner_token, name="p-subgoal-required-failure")['id']
+    H.seed_trunk(relay, owner_token, project_id)
+    node_a = spawn_goal_provider(
+        "A", agent_kinds="codex", scenario="subgoal_required_failure",
+        disk_label="required-fail-A", one_task=True)
+    parent = relay_client.create_goal(
+        relay, owner_token, project_id=project_id,
+        objective="Build two required release halves without orphaning failed work",
+        done_when="Both required child branches pass before release",
+        model="fake-grid-model", token_budget=10_000, tools=[], agents=["codex"],
+        allow_subgoals=True)
+
+    waiting = H.wait_for(lambda: (lambda goal: goal if (
+        goal.get("status") == "waiting_children" and len(goal.get("children") or []) == 2)
+        else None)(relay_client.get_goal(relay, owner_token, parent["id"])), timeout=30)
+    assert waiting, f"parent did not publish required children; A output:\n{node_a.output()}"
+    relations = {child["objective"]: child for child in waiting["children"]}
+    failed_child = relay_client.get_goal(
+        relay, owner_token, relations["Build the required Codex release half"]["id"])
+    slow_child = relay_client.get_goal(
+        relay, owner_token, relations["Build the required Claude release half"]["id"])
+
+    node_b = spawn_goal_provider(
+        "B", agent_kinds="codex", scenario="subgoal_required_failure",
+        disk_label="required-fail-B", codex_capabilities="failure_codex", one_task=True)
+    node_c = spawn_goal_provider(
+        "C", agent_kinds="claude", scenario="subgoal_required_failure",
+        disk_label="required-fail-C", claude_capabilities="slow_claude", one_task=True)
+
+    def both_children_running():
+        failed_rows = _tasks(relay, owner_token, project_id, failed_child["id"])
+        slow_rows = _tasks(relay, owner_token, project_id, slow_child["id"])
+        return bool(failed_rows and slow_rows
+                    and failed_rows[0]["state"] == slow_rows[0]["state"] == "running")
+
+    assert H.wait_for(both_children_running, timeout=15), (
+        f"required children never overlapped; B output:\n{node_b.output()}\nC output:\n{node_c.output()}")
+    def blocked_and_settled():
+        goal = relay_client.get_goal(relay, owner_token, parent["id"])
+        children = {child["id"]: child for child in goal.get("children") or []}
+        return goal if (
+            goal.get("status") == "blocked"
+            and goal.get("child_tokens_reserved") == 0
+            and children.get(slow_child["id"], {}).get("status") == "cancelled"
+        ) else None
+
+    # Terminal task acknowledgement intentionally precedes post-result tree convergence. Wait for
+    # both the dependency stop and budget settlement, not merely the first visible blocked status.
+    blocked = H.wait_for(blocked_and_settled, timeout=30)
+    assert blocked, f"parent did not block after required failure; B output:\n{node_b.output()}"
+    failed_final = relay_client.get_goal(relay, owner_token, failed_child["id"])
+    slow_final = relay_client.get_goal(relay, owner_token, slow_child["id"])
+    assert failed_final["status"] == "failed"
+    assert slow_final["status"] == "cancelled"
+    assert blocked["blocked_reason"] == (
+        f"Required child Goal did not complete: {failed_child['id']}=failed")
+    assert blocked["child_tokens_reserved"] == 0
+    assert blocked["descendant_tokens_used"] == failed_final["tokens_used"] == 40
+
+    failed_rows = _tasks(relay, owner_token, project_id, failed_child["id"])
+    slow_rows = _tasks(relay, owner_token, project_id, slow_child["id"])
+    assert len(failed_rows) == len(slow_rows) == 1
+    assert failed_rows[0]["provider_id"] == node_b.node_id
+    assert failed_rows[0]["state"] == "completed"
+    assert slow_rows[0]["provider_id"] == node_c.node_id
+    assert slow_rows[0]["state"] == "failed" and slow_rows[0]["error"] == "cancelled"
+    assert H.wait_for(lambda: node_c.proc.poll() is not None, timeout=15), node_c.output()
+
+    slow_evidence = relay_client.get_goal_evidence(relay, owner_token, slow_child["id"])
+    cancelled_events = [item["event"] for item in slow_evidence["attempt_events"]
+                        if item["event"].get("type") == "task.cancelled"]
+    terminal_events = [item["event"] for item in slow_evidence["attempt_events"]
+                       if item["event"].get("type") == "task.terminal"]
+    assert len(cancelled_events) == 1
+    assert terminal_events[-1] == {
+        "type": "task.terminal", "state": "failed", "error": "cancelled"}
+    parent_evidence = relay_client.get_goal_evidence(relay, owner_token, parent["id"])
+    assert len(parent_evidence["turns"]) == 1
+    assert parent_evidence["turns"][0]["transcript_commit"] is None
+    assert parent_evidence["turns"][0]["transcript_result_commit"]
+    from cli.goal import _verify_evidence
+    assert _verify_evidence(parent_evidence) == [
+        "Goal status is 'blocked', not 'complete'"]
+    assert parent_evidence["relationships"]["children"] == blocked["children"]
+
+
 def test_replacement_parent_reconstructs_one_child_after_spawn_failure(
         relay, owner_token, spawn_goal_provider, tmp_path):
     """A different Codex session may restate child policy, but it must replay one child identity."""

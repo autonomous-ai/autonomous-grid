@@ -363,6 +363,50 @@ def run_turn(node: str, call_tool=None, *, inference: dict[str, str] | None = No
             return "complete", "D completed the parent after parallel fan-in", 200
         raise RuntimeError(f"unexpected fan-out subgoal turn on {node}: {history!r}")
 
+    if scenario == "subgoal_required_failure":
+        if node == "A" and not history:
+            if call_tool is None:
+                raise RuntimeError("required-failure scenario received no dynamic tool bridge")
+            requests = [
+                {
+                    "objective": "Build the required Codex release half",
+                    "done_when": "FAIL_CHILD.md exists",
+                    "model": "fake-grid-child-model",
+                    "agents": ["codex"],
+                    "required_capabilities": ["failure_codex"],
+                    "evals": [{"type": "file", "name": "required Codex half",
+                               "path": "FAIL_CHILD.md", "max_bytes": 2_000}],
+                    "token_budget": 2_000,
+                },
+                {
+                    "objective": "Build the required Claude release half",
+                    "done_when": "SLOW_CHILD.md exists",
+                    "model": "fake-grid-model",
+                    "agents": ["claude"],
+                    "required_capabilities": ["slow_claude"],
+                    "evals": [{"type": "file", "name": "required Claude half",
+                               "path": "SLOW_CHILD.md", "max_bytes": 2_000}],
+                    "token_budget": 2_000,
+                },
+            ]
+            child_ids = []
+            for arguments in requests:
+                result = call_tool("grid_spawn_subgoal", arguments)
+                envelope = json.loads(
+                    ((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+                child_id = ((envelope.get("body") or {}).get("id"))
+                if not result.get("success") or not child_id:
+                    raise RuntimeError(f"required child creation failed: {result!r}")
+                child_ids.append(child_id)
+            history.append({"node": "A", "required_children": child_ids})
+            save_history(history)
+            return "active", f"A spawned two required child Goals: {child_ids}", 100
+        if node == "B" and not history:
+            # Let Claude C enter its native process before this semantic failure blocks the parent.
+            time.sleep(2)
+            return "failed", "the required Codex child is impossible", 40
+        raise RuntimeError(f"unexpected required-child failure turn on {node}: {history!r}")
+
     if scenario == "subgoal_mixed_retry":
         if node == "A" and not history:
             if call_tool is None:

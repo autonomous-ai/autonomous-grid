@@ -310,11 +310,13 @@ def main() -> int:
             handle.write(json.dumps({"sessionId": session, "prompt": prompt}) + "\n")
 
     if os.environ.get("GRID_E2E_GOAL_SCENARIO") in (
-            "subgoal", "subgoal_retry", "subgoal_mixed_retry", "subgoal_fanout"):
+            "subgoal", "subgoal_retry", "subgoal_mixed_retry", "subgoal_fanout",
+            "subgoal_required_failure"):
         scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
         node = os.environ.get("GRID_E2E_GOAL_NODE")
         expected_node = "C" if scenario in (
-            "subgoal_retry", "subgoal_mixed_retry", "subgoal_fanout") else "B"
+            "subgoal_retry", "subgoal_mixed_retry", "subgoal_fanout",
+            "subgoal_required_failure") else "B"
         if node != expected_node or not prompt.startswith("/goal ") or resume is not None:
             sys.stderr.write("fake Claude received an invalid child Goal assignment\n")
             return 2
@@ -331,6 +333,16 @@ def main() -> int:
             _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": True,
                    "reason": "CLAUDE_CHILD.md exists", "iterations": 1, "tokens": 28}})
             return 0
+        if scenario == "subgoal_required_failure":
+            pathlib.Path("SLOW_STARTED.md").write_text(
+                "Claude C started work before its required sibling failed.\n")
+            _emit({"type": "assistant", "message": {"usage": {
+                "input_tokens": 12, "output_tokens": 6}, "content": [
+                {"type": "text", "text": "Claude C started the slow required child"}]}})
+            # Grid must cancel this process after the sibling's semantic failure. Returning on its
+            # own would test ordinary completion, not the lease-fenced dependency stop.
+            time.sleep(90)
+            return 2
         if scenario == "subgoal_mixed_retry":
             partial = pathlib.Path("CHILD_PARTIAL.md")
             if (not partial.is_file() or "Codex B checkpoint" not in partial.read_text()
