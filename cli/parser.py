@@ -976,6 +976,16 @@ def _add_engines(sub) -> None:
     remote_only.add_argument("--respawn", action="store_true", default=None,
                              help="Stop the engine already serving this grid and start a fresh one, "
                                   "instead of no-opping an identical re-join (remote only).")
+    remote_only.add_argument(
+        "--relay-at",
+        default=None,
+        metavar="URL",
+        help=(
+            "Use this URL for provider-to-relay traffic while keeping the grid's public URL "
+            "canonical. Useful on the relay host (for example http://127.0.0.1:8090); "
+            "non-loopback transports must use HTTPS. Changing it respawns only this provider."
+        ),
+    )
     # Task serving (ADR 0032). A task is claimed from the relay, and local mode has no relay.
     # `default=None` throughout, per
     # the group's comment above — `--tasks` in particular, because a `store_true` defaulting to

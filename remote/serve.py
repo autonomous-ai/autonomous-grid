@@ -174,6 +174,12 @@ def _stamp_own_pid(grid_id: str, engine_id: str) -> None:
         _warn(f"could not stamp live pid into the run record for {engine_id}@{grid_id}: {exc}")
 
 
+def _provider_relay_url(record: dict[str, Any]) -> str:
+    """Provider-only relay path; canonical discovery remains ``signaling_url``."""
+
+    return str(record.get("relay_transport_url") or record.get("signaling_url") or "").rstrip("/")
+
+
 def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
     """Detached ``__remote-engine`` entry: serve one engine to the grid's relay until SIGTERM."""
     # Name ourselves before anything else can fail — including the record read below, which raises
@@ -190,6 +196,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
     signaling_url = (record.get("signaling_url") or "").rstrip("/")
     if not signaling_url:
         raise SystemExit("This grid has no relay address; run `grid start` then re-join.")
+    relay_transport_url = _provider_relay_url(record)
     access_token, refresh_token = _load_tokens(network_id)
     if not access_token:
         raise SystemExit("Run `grid login` to refresh your grid tokens, then re-join.")
@@ -285,7 +292,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             union_models, capabilities = _merge_media(union_models, capabilities, media_models)
 
         state = _ServeState(
-            signaling_url=signaling_url,
+            signaling_url=relay_transport_url,
             node_id=node_id,
             network_id=network_id,
             engine_id=engine_id,  # which record this process writes its service truth onto
@@ -356,7 +363,15 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             raise
         registered = True
         _seed_codex_quota(state, record)  # best-effort: populate quota for /grid/overview before jobs
-        print(f"Engine {state.node_id} serving {union_models} via the relay at {signaling_url}")
+        transport_note = (
+            f" (provider transport {relay_transport_url})"
+            if relay_transport_url != signaling_url
+            else ""
+        )
+        print(
+            f"Engine {state.node_id} serving {union_models} via the relay at "
+            f"{signaling_url}{transport_note}"
+        )
         print("Send SIGTERM (grid leave) to unregister.")
         # Make the engine reload-ready (install the SIGHUP handler + start the reload daemon) while SIGHUP
         # is still blocked, so that daemon inherits the block too. `_serve_loop` then spawns the heartbeat +

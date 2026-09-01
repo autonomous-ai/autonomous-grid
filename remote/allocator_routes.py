@@ -173,7 +173,9 @@ class RemoteProviderRoutePublisher:
         *,
         deadline: float | None,
     ) -> bool:
-        signaling_url = str(record.get("signaling_url") or "").rstrip("/")
+        signaling_url = str(
+            record.get("relay_transport_url") or record.get("signaling_url") or ""
+        ).rstrip("/")
         node_name = str(record.get("meta_name") or "")
         if not signaling_url or not node_name:
             raise RuntimeError("remote provider record is missing relay identity")

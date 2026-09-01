@@ -26,6 +26,7 @@ import time
 from typing import NamedTuple
 import uuid
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from shared import logging_setup, orphan_sweep, paths, run_records
 from shared.filelock import file_lock
@@ -44,6 +45,36 @@ _REMOTE_IDENTITY = run_records.REMOTE_IDENTITY
 
 # One-shot vendor model-listing call at `join --api` (key validation + whitelist intersection).
 _VENDOR_LIST_TIMEOUT = 15.0
+
+
+def _relay_transport_url(value: str | None, canonical_url: str) -> str | None:
+    """Validate and normalize an optional provider-only relay transport.
+
+    The grid's canonical URL remains the public discovery address.  This override only changes the
+    outbound path used by the provider process, primarily so a provider co-located with its relay
+    does not hairpin every poll and response through a public tunnel.
+    """
+
+    if value is None:
+        return None
+    normalized = value.strip().rstrip("/")
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
+        raise SystemExit("--relay-at must be an HTTP(S) base URL without embedded credentials.")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise SystemExit("--relay-at must be an origin URL without a path, query, or fragment.")
+    loopback = parsed.hostname.casefold() == "localhost" or parsed.hostname in {
+        "127.0.0.1",
+        "::1",
+    }
+    if parsed.scheme != "https" and not loopback:
+        raise SystemExit("--relay-at permits plain HTTP only for a loopback address; use HTTPS.")
+    canonical = canonical_url.rstrip("/")
+    return None if normalized == canonical else normalized
+
+
+def _effective_relay_transport(record: dict[str, object]) -> str:
+    return str(record.get("relay_transport_url") or record.get("signaling_url") or "").rstrip("/")
 
 # Appended to a full-leave success line when the argv sweep could not read the process table: the
 # backstop still dropped the model, but we couldn't verify no stray child remains, so the success is
@@ -423,6 +454,15 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
             # to act on: the operator gets the guidance auto-detect would have given them anyway.
             raise deferred_target_error
         base = live or list(run_records.read_records(network_id).values())
+        inherited_transport = _identity_field(base, "relay_transport_url")
+        requested_transport = getattr(args, "relay_at", None)
+        relay_transport_url = _relay_transport_url(
+            requested_transport if requested_transport is not None else inherited_transport,
+            signaling_url,
+        )
+        previous_transport = _effective_relay_transport(_identity_record(live) or {})
+        next_transport = relay_transport_url or signaling_url.rstrip("/")
+        transport_changed = bool(live) and next_transport != previous_transport
         merged_specs, changed = _merge_engines(_engine_union(base), specs)
         # A rotated key only matters when this kind's API spec is already LIVE. A reload WOULD re-read the
         # key store and swap the bearer in place (issue 05), but rotation deliberately RESPAWNS so the
@@ -441,7 +481,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         if (
             live and not changed and media == base_media and bundles == base_bundles
             and meta_name == _identity_field(live, "meta_name") and not rotated_live
-            and not respawn
+            and not respawn and not transport_changed
         ):
             # Lazy, per this module's import rule: `cli.dispatch` imports it while `cli` is still
             # initialising, and `remote.relay` pulls httpx in eagerly.
@@ -483,6 +523,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         record = _build_record(
             args, network_id, engine_id, signaling_url, merged_specs,
             media=media, meta_name=meta_name, bundles=bundles,
+            relay_transport_url=relay_transport_url,
         )
         # Preserve the live identity's --max-concurrency across an additive join, like media/bundles/meta
         # above. It sizes the running N-worker poll pool (remote/serve._serve_loop), so a re-join that
@@ -532,6 +573,8 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         print("media=on (serving comfyui:* workflows via the relay)")
     if task_serving.allowed:  # said only when it is true — the refusal has already gone to stderr
         print("tasks=on (claiming tasks for this grid)")
+    if relay_transport_url:
+        print(f"relay_transport={relay_transport_url} (canonical grid URL unchanged)")
     print(f"log={paths.engines_dir(network_id) / f'{engine_id}.log'}")
     # Quoted: a grid's display name is freeform and can carry a space ("Hydrate Grid"), and a hint
     # printed bare isn't actually copy-pasteable — argparse splits it into two positionals and
@@ -1165,6 +1208,10 @@ def _hot_reloadable(
     # explicit --max-concurrency pinning both sides — only a respawn applies the new size.
     if run_records.effective_max_concurrency(record) != run_records.effective_max_concurrency(singleton):
         return False
+    # The provider's relay base is captured by every poll/heartbeat worker at process start. A
+    # SIGHUP can replace model routing but cannot atomically retarget those live workers.
+    if _effective_relay_transport(record) != _effective_relay_transport(singleton):
+        return False
     # A NEW API engine is hot-reloadable now that the reload re-reads the key store and swaps the vendor
     # bearer atomically with routing (issue 05 — remote/serve._assemble_snapshot → _api_bearers), so it
     # is NOT gated here. A ROTATED key for an already-live api spec is still a respawn, forced by the
@@ -1414,6 +1461,7 @@ def _build_record(
     media: bool = False,
     meta_name: str | None = None,
     bundles: list[str] | None = None,
+    relay_transport_url: str | None = None,
 ) -> dict[str, object]:
     """The remote engine's run record — non-secret routing only; the token stays in credentials.toml.
 
@@ -1438,6 +1486,7 @@ def _build_record(
         "meta_name": meta_name,  # grid-page display name (--name, or hostname); NOT the record key
         "pid": 0,
         "signaling_url": signaling_url,
+        "relay_transport_url": relay_transport_url,
         "endpoint_url": single_endpoint,
         "models": union,
         "engines": specs,
