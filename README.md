@@ -433,6 +433,8 @@ grid use <grid-name>
   other commands have nothing to talk to. `grid start <grid-name>` on a new grid still needs it too.
 - Requests pass through our relay, which local mode never does. We forward and keep nothing — no
   stored prompts, no training on your traffic.
+- A Grid can instead use an owner-operated relay. Pair it with `grid relay connect`; no Autonomous
+  login or SSH is required. See [Self-hosted relays](docs/self-hosted-relay.md).
 
 Three commands change. `chat`, `models`, `info` and your apps are identical.
 
