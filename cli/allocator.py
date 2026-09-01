@@ -445,7 +445,7 @@ def _start_allocator_node_locked(
     log_path = _node_log_path(scope)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("ab")
-    selector = str(cfg["grid_id"])
+    selector = _allocator_node_selector(cfg)
     instance_id = uuid.uuid4().hex
     command = runtime.cli_command() + [
         "__allocator-node",
@@ -571,6 +571,19 @@ def _remote_provider_network_id(selector: str | None) -> str:
             "`grid join --respawn`."
         )
     return network_id
+
+
+def _allocator_node_selector(cfg: dict[str, Any]) -> str:
+    """Return a selector the detached child can resolve in its fresh process.
+
+    Locally managed grids are persisted by id.  A synthesized remote enrollment config exists only
+    in the parent process, so its child must receive the allocator-control URL instead of the remote
+    network id.
+    """
+
+    if cfg.get("managed_server", True):
+        return str(cfg["grid_id"])
+    return runtime.grid_url(cfg)
 
 
 def cmd_allocator_node_stop(args: argparse.Namespace) -> int:

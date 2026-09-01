@@ -187,6 +187,17 @@ def test_allocator_join_reuses_remote_membership_and_keeps_node_token_in_memory(
     assert args.token_file is None
 
 
+def test_detached_allocator_child_uses_resolvable_remote_control_url():
+    cfg = grid_config(managed=False)
+    cfg["grid_id"] = "grid-forge"
+    cfg["lan_signaling_url"] = "https://forge.example/allocator-control"
+
+    assert allocator._allocator_node_selector(cfg) == (
+        "https://forge.example/allocator-control"
+    )
+    assert allocator._allocator_node_selector(grid_config()) == "ag-test"
+
+
 def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys):
     monkeypatch.setattr(config, "select_grid", lambda _value: grid_config())
     payload = {
