@@ -1363,6 +1363,16 @@ def _resolve_or_defer(
         args.at, args.serve, getattr(args, "models", None), getattr(args, "media", False),
         getattr(args, "kind", None),
     ))
+    # A bare respawn is a restart of the recorded identity, never a fresh auto-detection. Detection
+    # can find a newly started local engine and accidentally append it to the live union; for an
+    # aliased identity that is refused as an ambiguous multi-engine alias, and without aliases it
+    # silently changes what the node serves. The existing record is the complete restart input.
+    if respawn and named_nothing:
+        return [], False, SystemExit(
+            "No running engine detected on this box. Point at one with "
+            "`grid join --at <url> -m <model>`, or start the built-in engine with "
+            "`grid join --serve <model>`."
+        )
     try:
         specs, media_detected = _resolve_serve_targets(args)
     except SystemExit as exc:
