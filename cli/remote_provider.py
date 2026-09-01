@@ -1354,8 +1354,10 @@ def _resolve_or_defer(
     `--respawn` is also a **restart** — the one-command form of the `grid leave` + `grid join` folklore
     it replaces, which an operator runs with no arguments. But auto-detect probes loopback only, so an
     identity serving `--at <otherhost>` or an API engine has nothing to find, and the refusal would
-    land before the CLI ever looked at what is running. Deferring it lets the caller answer from the
-    live identity's own union instead, and re-raise untouched when there is no live identity.
+    land before the CLI ever looked at what is running. More importantly, detection may find a
+    DIFFERENT local engine that was never part of the identity: a restart must not silently append
+    it. Skip detection entirely and let the caller answer from the live identity's own union; when
+    there is no live identity, surface the ordinary no-engine guidance.
 
     Only a join that names **nothing** defers, which is what makes this safe to express as "catch
     ``SystemExit``". `_resolve_serve_targets` has five refusals; three of them (`--at` without `-m`,
@@ -1371,6 +1373,12 @@ def _resolve_or_defer(
         args.at, args.serve, getattr(args, "models", None), getattr(args, "media", False),
         getattr(args, "kind", None),
     ))
+    if respawn and named_nothing:
+        return [], False, SystemExit(
+            "No running engine detected on this box. Point at one with "
+            "`grid join --at <url> -m <model>`, or start the built-in engine with "
+            "`grid join --serve <model>`."
+        )
     try:
         specs, media_detected = _resolve_serve_targets(args)
     except SystemExit as exc:

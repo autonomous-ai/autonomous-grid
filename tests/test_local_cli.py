@@ -10049,6 +10049,44 @@ def test_remote_join_bare_respawn_restarts_rather_than_asking_which_engine_to_jo
     )
 
 
+def test_remote_join_bare_respawn_never_appends_one_unrelated_detected_engine(
+    monkeypatch, tmp_path
+):
+    """One detected engine is just as unrelated as several; detection must not run for a restart.
+
+    This is the live regression: restarting an allocator provider that served SmolLM found a local
+    Ollama process and silently added gpt-oss to the public grid.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:18081/v1", "models": ["smollm"], "engine_label": "allocator"},
+    ], started_at="2020-01-01T00:00:00+00:00", registered_at="2020-01-01T00:00:01+00:00")
+    _seed_heartbeat_sidecar(age_seconds=5)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    detected = []
+
+    def should_not_detect(_host):
+        detected.append(True)
+        return [
+            SimpleNamespace(
+                label="ollama",
+                endpoint_url="http://127.0.0.1:11434/v1",
+                models=["gpt-oss:20b"],
+                media=False,
+            )
+        ]
+
+    monkeypatch.setattr(cli.provider, "_detect", should_not_detect)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda _pid: True)
+    _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--respawn"]) == 0
+
+    assert detected == []
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == ["smollm"]
+
+
 def test_remote_join_hot_reload_keeps_the_identitys_registration(monkeypatch, tmp_path, capsys):
     """A hot-reload is the SAME process, so its service truth has to survive one.
 
