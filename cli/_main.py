@@ -72,6 +72,7 @@ def cmd_internal_allocator_node(
     engine_tls_key: str | None,
     engine_tls_ca: str | None,
     provider_grid_id: str | None = None,
+    dedicated: bool = False,
 ) -> int:
     import signal
     from pathlib import Path
@@ -79,6 +80,7 @@ def cmd_internal_allocator_node(
     from local.allocator_node import AllocatorNodeAgent
     from shared.allocator.auth import decode_node_token, secure_control_transport
     from shared.allocator.runtime import LlamaCppBackend, ManagedModelRuntime
+    from shared.allocator.local import HostPolicy, LocalHostProtectionLoop
     from remote.allocator_routes import RemoteProviderRoutePublisher
 
     cfg = config.select_grid(grid_selector)
@@ -110,6 +112,20 @@ def cmd_internal_allocator_node(
             tls_cert_file=engine_tls_cert,
             tls_key_file=engine_tls_key,
             tls_ca_file=engine_tls_ca,
+        ),
+        protection_loop=(
+            LocalHostProtectionLoop(
+                HostPolicy(
+                    pause_for_user_activity=False,
+                    cpu_throttle_percent=100.0,
+                    load_per_cpu_throttle=4.0,
+                    activity_debounce_seconds=0.0,
+                    activity_recovery_seconds=0.0,
+                    recovery_cooldown_seconds=5.0,
+                )
+            )
+            if dedicated
+            else None
         ),
     )
     agent = AllocatorNodeAgent(
@@ -293,6 +309,7 @@ def _maybe_internal(argv: list[str]) -> int | None:
         parser.add_argument("--engine-tls-key", default=None)
         parser.add_argument("--engine-tls-ca", default=None)
         parser.add_argument("--provider-grid-id", default=None)
+        parser.add_argument("--dedicated", action="store_true")
         parser.add_argument("--allow-insecure-http", action="store_true")
         args = parser.parse_args(argv[1:])
         return cmd_internal_allocator_node(
@@ -307,6 +324,7 @@ def _maybe_internal(argv: list[str]) -> int | None:
             engine_tls_key=args.engine_tls_key,
             engine_tls_ca=args.engine_tls_ca,
             provider_grid_id=args.provider_grid_id,
+            dedicated=args.dedicated,
         )
     if argv[0] == "__media-server":
         parser = argparse.ArgumentParser(prog="grid __media-server")

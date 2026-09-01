@@ -398,6 +398,8 @@ def _start_allocator_node_locked(
     command.extend(["--advertise-host", effective_advertise_host])
     if provider_network_id:
         command.extend(["--provider-grid-id", provider_network_id])
+    if getattr(args, "dedicated", False):
+        command.append("--dedicated")
     if tls_cert:
         command.extend(["--engine-tls-cert", tls_cert, "--engine-tls-key", tls_key])
     if tls_ca:
@@ -434,6 +436,7 @@ def _start_allocator_node_locked(
             "grid_url": grid_url,
             "host_id": host_id,
             "provider_grid_id": provider_network_id,
+            "dedicated": bool(getattr(args, "dedicated", False)),
             "state_path": str(state_path),
             "startup_path": str(startup_path),
             "graceful_shutdown": True,

@@ -639,6 +639,14 @@ def _add_allocator(sub) -> None:
             "using zero-drop hot reload."
         ),
     )
+    node_start.add_argument(
+        "--dedicated",
+        action="store_true",
+        help=(
+            "Treat this host as dedicated Grid capacity: ignore desktop activity and ordinary "
+            "CPU-load throttling while retaining thermal, memory, battery, disk, and network safety."
+        ),
+    )
     node_start.add_argument("--advertise-host", default=None)
     node_start.add_argument(
         "--engine-tls-cert",
