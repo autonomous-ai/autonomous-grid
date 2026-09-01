@@ -65,18 +65,23 @@ def test_remote_publisher_preserves_user_engine_and_adds_managed_route(monkeypat
         "engine_label": "vLLM",
     }
     path, signals = _seed(monkeypatch, tmp_path, engines=[user])
-    client = _Client({"name": "forge-node", "models": ["qwen", "smollm"]})
+    client = _Client(
+        {
+            "name": "forge-node",
+            "models": ["qwen", "smollm2-135m-instruct-q3_k_m"],
+        }
+    )
     publisher = RemoteProviderRoutePublisher(
         "grid-forge", "host-c", client=client
     )
 
-    assert publisher.sync([_ready("smollm", 18081)]) == ()
+    assert publisher.sync([_ready("SmolLM2-135M-Instruct-Q3_K_M.gguf", 18081)]) == ()
 
     stored = jsonio.load_json(path)
     assert stored["engines"][0] == user
     assert stored["engines"][1]["allocator_host_id"] == "host-c"
     assert stored["engines"][1]["endpoint_url"] == "http://127.0.0.1:18081/v1"
-    assert stored["models"] == ["qwen", "smollm"]
+    assert stored["models"] == ["qwen", "SmolLM2-135M-Instruct-Q3_K_M.gguf"]
     assert len(signals) == 1
 
 

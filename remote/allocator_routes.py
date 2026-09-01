@@ -206,17 +206,23 @@ class RemoteProviderRoutePublisher:
                         visible = {
                             str(model).casefold() for model in (node.get("models") or [])
                         }
-                        expected_folded = {model.casefold() for model in expected_models}
-                        forbidden_folded = {
-                            model.casefold() for model in forbidden_models
+                        expected_aliases = {
+                            model: _relay_aliases(model) for model in expected_models
                         }
-                        if expected_folded.issubset(visible) and visible.isdisjoint(
-                            forbidden_folded
+                        forbidden_aliases = {
+                            model: _relay_aliases(model) for model in forbidden_models
+                        }
+                        if all(
+                            aliases.intersection(visible)
+                            for aliases in expected_aliases.values()
+                        ) and all(
+                            aliases.isdisjoint(visible)
+                            for aliases in forbidden_aliases.values()
                         ):
                             return True
                         last_error = (
                             f"relay advertises {sorted(visible)}; managed routes require "
-                            f"{sorted(expected_folded)} and forbid {sorted(forbidden_folded)}"
+                            f"{sorted(expected_aliases)} and forbid {sorted(forbidden_aliases)}"
                         )
                         break
             except (httpx.HTTPError, TypeError, ValueError) as exc:
@@ -225,3 +231,13 @@ class RemoteProviderRoutePublisher:
         if last_error:
             raise RuntimeError(f"remote provider route convergence timed out: {last_error}")
         return False
+
+
+def _relay_aliases(model_id: str) -> set[str]:
+    """Names the relay may expose for one GGUF-backed provider route."""
+
+    folded = str(model_id).casefold()
+    aliases = {folded}
+    if folded.endswith(".gguf"):
+        aliases.add(folded[:-5])
+    return aliases
