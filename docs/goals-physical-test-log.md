@@ -44,6 +44,37 @@ access tokens, and local credentials must not be added here.
   long-lived B/C worker or dirty checkout fails the evidence gate even if its node name appears
   online.
 
+## 2026-08-31 — Forge remote relay and cross-machine recovery checkpoint
+
+- Forge ran as Grid `grid-forge-cdcf431f` on Machine A's branch relay, published temporarily
+  through `https://safe-buddy-type-phones.trycloudflare.com`. This Quick Tunnel is acceptance-only;
+  a durable relay deployment must use a stable managed hostname.
+- Public worker/CLI revision `ee8130ade3c4bdbef2ba1ee53c89a53d54040efe` and private relay
+  revision `51c114c` were deployed. Machine B advertised Claude Code 2.1.252, Machine A advertised
+  Claude Code 2.1.252 and Codex 0.150.1, and Machine C served `qwen3.6-27b` on two RTX 4090 D GPUs.
+- Goal `fb6d0438-a0ec-4ff7-967c-56d86a349f1b` proved relay-owned recovery from B to A. B produced
+  the first two attempt histories; A restored those worktree and transcript checkpoints, completed
+  attempt 3, and used C for Grid-attributed inference. This run exposed two bugs rather than hiding
+  them: claims omitted the immutable eval manifest, and relay token settlement trusted a missing
+  worker counter instead of relay-observed inference usage.
+- The relay now includes eval definition ids and hashes in every Goal claim and settles usage from
+  authenticated Goal-stamped inference transactions. A request carrying only a spoofed turn id is
+  excluded from that accounting.
+- Post-fix Goal `c9ca13ab-d63f-43d2-98ff-643986f5b1cf` completed on A with Claude while all seven
+  model requests ran on C. The relay independently passed the file eval against exact result commit
+  `06fa8d41aaef64b4e5501f3ba844b023d1b0b00f`; 81,449 input plus 1,821 output tokens exactly equal
+  the Goal's stored 83,270 tokens.
+- Claude 2.1.252 exited cleanly without emitting its private native evaluator checkpoint. Grid now
+  records that condition as `goal.claude.evaluator_missing`, treats the result only as a nomination,
+  and permits completion solely after a later relay-authored passing eval marker for the exact
+  commit and immutable manifest. The offline evidence verifier independently enforced that chain.
+- macOS task roots should stay short. The acceptance worker moved from
+  `/private/tmp/grid-forge-goal-a-work` to `/private/tmp/gfa` after the longer generated workspace
+  path approached the platform's process argument-size boundary.
+- This checkpoint uses three physical machines across execution and inference and proves B-to-A
+  execution recovery. It does not yet satisfy the full Codex-to-Claude-to-Codex, two-abrupt-loss
+  release gate in `goals-three-machine-acceptance.md`.
+
 ## 2026-08-30 — native Codex rollout preflight
 
 ### Topology

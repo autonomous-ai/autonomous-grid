@@ -577,6 +577,73 @@ def test_goal_evidence_verify_recomputes_metric_identity_and_requires_relay_eval
                for failure in goal._verify_evidence(record))
 
 
+def test_goal_evidence_accepts_missing_claude_verdict_only_with_independent_relay_proof():
+    """A worker fallback is provenance for a nomination, never a replacement score."""
+    from copy import deepcopy
+
+    from cli.goal import _verify_evidence
+
+    spec = {
+        "type": "file", "version": 1, "name": "artifact",
+        "path": "artifact.txt", "exists": True,
+    }
+    definition_hash = __import__("hashlib").sha256(json.dumps(
+        spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest()
+    record = {
+        "schema_version": 1,
+        "goal": {"id": "goal-1", "status": "complete", "evals": [{
+            **spec, "definition_id": "eval-1", "definition_hash": definition_hash,
+        }]},
+        "relationships": {"parent_goal_id": None, "children": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
+                       "worktree_chain": []},
+        "turns": [{
+            "id": "turn-1", "attempt": 1, "state": "completed", "agent_kind": "claude",
+            "provider_node_id": "node-A", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [
+            attempt_started_event("turn-1", 0, 1, "node-A", "claude"),
+            {"turn_id": "turn-1", "seq": 1, "event": {
+                "type": "goal.claude.evaluator_missing", "provider_node_id": "node-A",
+                "attempt": 1,
+                "reason": "Claude Goal exited without a native evaluator checkpoint",
+                "fallback": "independent_grid_eval",
+            }},
+            passed_eval_event("turn-1", 2, "2" * 40),
+            terminal_event("turn-1", 3),
+        ],
+        "inference": [],
+        "eval_runs": [{
+            "id": "run-1", "turn_id": "turn-1", "definition_id": "eval-1",
+            "definition_hash": definition_hash, "result_commit": "2" * 40,
+            "evaluator_node_id": "relay", "state": "passed", "score": 1.0,
+            "accepted": True, "accepted_at": "2026-09-01T00:00:00+00:00",
+            "passed": True, "error": None,
+        }],
+    }
+    assert _verify_evidence(record) == []
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"][1]["event"]["fallback"] = "trust_worker"
+    assert any("no valid independent Grid eval fallback" in failure
+               for failure in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["attempt_events"].pop(2)
+    damaged["attempt_events"][-1]["seq"] = 2
+    assert any("has no later passing relay evaluation marker" in failure
+               for failure in _verify_evidence(damaged))
+
+    damaged = deepcopy(record)
+    damaged["goal"]["evals"] = []
+    damaged["attempt_events"][2]["event"]["checks"] = 0
+    assert any("has no later passing relay evaluation marker" in failure
+               for failure in _verify_evidence(damaged))
+
+
 def test_goal_evidence_verify_recomputes_authenticated_verify_event_result():
     from cli import goal
 

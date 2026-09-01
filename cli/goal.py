@@ -401,7 +401,7 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     }
     native_goal_types = {
         "goal.codex.event", "goal.slice.completed",
-        "goal.claude.set", "goal.claude.evaluated",
+        "goal.claude.set", "goal.claude.evaluated", "goal.claude.evaluator_missing",
     }
     worker_goal_types = tool_types | native_goal_types
     exported_event_types = worker_goal_types | {
@@ -938,7 +938,9 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 f"worker Goal event {index} occurs after its relay retry boundary")
 
         coordinate = (turn_id, attempt, provider)
-        if event_type in ("goal.slice.completed", "goal.claude.evaluated"):
+        if event_type in (
+                "goal.slice.completed", "goal.claude.evaluated",
+                "goal.claude.evaluator_missing"):
             native_verdicts.setdefault((*coordinate, event_type), []).append((seq, event))
         elif event_type == "goal.claude.set":
             claude_sets.setdefault(coordinate, []).append((seq, event))
@@ -946,6 +948,7 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         expected_harness = {
             "goal.codex.event": "codex", "goal.slice.completed": "codex",
             "goal.claude.set": "claude", "goal.claude.evaluated": "claude",
+            "goal.claude.evaluator_missing": "claude",
         }.get(event_type)
         if expected_harness is not None and harness != expected_harness:
             failures.append(
@@ -982,6 +985,13 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 if event.get(field) is not None and not isinstance(event.get(field), str):
                     failures.append(
                         f"worker Goal event {index} has no valid Claude {field}")
+        elif event_type == "goal.claude.evaluator_missing":
+            if not isinstance(event.get("reason"), str) or not event["reason"]:
+                failures.append(
+                    f"worker Goal event {index} has no Claude evaluator fallback reason")
+            if event.get("fallback") != "independent_grid_eval":
+                failures.append(
+                    f"worker Goal event {index} has no valid independent Grid eval fallback")
 
     # A native harness can emit many progress events, but only one terminal verdict per attempt.
     # Duplicate Claude attachments are especially dangerous training data: the final row would not
@@ -998,7 +1008,10 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             failures.append(
                 f"turn {turn_id} attempt {attempt} on {provider} has {len(sentinels)} "
                 "Claude Goal set checkpoints; expected at most one")
-        verdicts = native_verdicts.get((*coordinate, "goal.claude.evaluated"), [])
+        verdicts = [
+            *native_verdicts.get((*coordinate, "goal.claude.evaluated"), []),
+            *native_verdicts.get((*coordinate, "goal.claude.evaluator_missing"), []),
+        ]
         if len(sentinels) == 1 and len(verdicts) == 1 and sentinels[0][0] >= verdicts[0][0]:
             failures.append(
                 f"turn {turn_id} attempt {attempt} Claude Goal condition was set after its "
@@ -1054,6 +1067,7 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
             item["event"] for item in attempt_events
             if (isinstance(item, dict) and item.get("turn_id") == turn_id
                 and isinstance(item.get("event"), dict)
+                and isinstance(item["event"].get("type"), str)
                 and item["event"].get("type") in native_goal_types
                 and item["event"].get("attempt") == attempt
                 and item["event"].get("provider_node_id") == previous_provider)
@@ -1068,6 +1082,10 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 failures.append(
                     f"turn {turn_id} retried Claude attempt {attempt} has a non-error native "
                     "Goal verdict")
+            elif checkpoint.get("type") == "goal.claude.evaluator_missing":
+                failures.append(
+                    f"turn {turn_id} retried Claude attempt {attempt} also nominated its result "
+                    "for independent Grid evaluation")
 
     # A relay start proves which native harness crossed the execution fence; it does not prove that
     # harness reached its own Goal evaluator. Require the exact native checkpoint from the terminal
@@ -1089,20 +1107,53 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                 or not isinstance(provider, str) or not provider
                 or harness not in ("codex", "claude")):
             continue
-        native_type = "goal.slice.completed" if harness == "codex" else "goal.claude.evaluated"
-        native = [
-            item["event"] for item in attempt_events
+        native_types = ({"goal.slice.completed"} if harness == "codex" else {
+            "goal.claude.evaluated", "goal.claude.evaluator_missing",
+        })
+        native_items = [
+            item for item in attempt_events
             if (isinstance(item, dict) and item.get("turn_id") == turn_id
                 and isinstance(item.get("event"), dict)
-                and item["event"].get("type") == native_type
+                and isinstance(item["event"].get("type"), str)
+                and item["event"].get("type") in native_types
                 and item["event"].get("attempt") == attempt
                 and item["event"].get("provider_node_id") == provider)
         ]
+        native = [item["event"] for item in native_items]
         if len(native) != 1:
             failures.append(
                 f"turn {index} has {len(native)} terminal {harness} Goal checkpoints; expected "
                 "exactly one")
             continue
+        claude_fallback = (harness == "claude"
+                           and native[0].get("type") == "goal.claude.evaluator_missing")
+        if claude_fallback:
+            # A clean process exit is only a nomination when Claude's private evaluator shape is
+            # missing. Accept that provenance bridge solely when the relay independently scored
+            # the exact terminal commit after the worker's fallback marker. The accepted run rows
+            # are checked against the immutable manifest below; this local check binds their relay
+            # marker into the attempt sequence and prevents a bare worker event from substituting
+            # for native Goal evidence.
+            fallback_seq = native_items[0].get("seq")
+            relay_markers = [
+                item for item in attempt_events
+                if (isinstance(item, dict) and item.get("turn_id") == turn_id
+                    and isinstance(item.get("event"), dict)
+                    and item["event"].get("type") == "goal.eval.completed"
+                    and item["event"].get("passed") is True
+                    and item["event"].get("blocked") is False
+                    and item["event"].get("result_commit") == turn.get("result_commit")
+                    and item["event"].get("checks") == len(evals)
+                    and isinstance(item.get("seq"), int)
+                    and not isinstance(item.get("seq"), bool)
+                    and isinstance(fallback_seq, int)
+                    and not isinstance(fallback_seq, bool)
+                    and item["seq"] > fallback_seq)
+            ]
+            if not evals or len(relay_markers) != 1:
+                failures.append(
+                    f"turn {index} Claude evaluator fallback has no later passing relay "
+                    "evaluation marker for its exact result")
         if harness == "codex":
             checkpoint_turns = native[0].get("turns_completed")
             checkpoint_tokens = native[0].get("tokens_used")
@@ -1126,11 +1177,12 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
         if index == len(turns) and goal.get("status") == "complete":
             if harness == "codex" and native[0].get("status") != "complete":
                 failures.append("final Codex Goal checkpoint is not complete")
-            if harness == "claude" and (
+            if harness == "claude" and not claude_fallback and (
                     native[0].get("met") is not True
                     or native[0].get("impossible") is not False):
                 failures.append("final Claude Goal checkpoint does not prove the condition met")
-        if harness == "claude" and native[0].get("protocol_error") is not None:
+        if (harness == "claude" and not claude_fallback
+                and native[0].get("protocol_error") is not None):
             failures.append(
                 f"turn {index} terminal Claude Goal checkpoint contains a protocol error")
 
