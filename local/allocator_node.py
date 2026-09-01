@@ -75,6 +75,7 @@ class AllocatorNodeAgent:
         instance_id: str | None = None,
         startup_path: Path | None = None,
         allow_insecure_http: bool = False,
+        route_publisher: Any | None = None,
     ) -> None:
         if not control_token:
             raise ValueError("allocator node requires a node credential")
@@ -155,6 +156,7 @@ class AllocatorNodeAgent:
         self._shutdown_complete = False
         self._shutdown_requested = threading.Event()
         self.last_error = ""
+        self.route_publisher = route_publisher
 
     @property
     def resources(self) -> dict[str, Any]:
@@ -420,7 +422,16 @@ class AllocatorNodeAgent:
         try:
             # A rejected credential cannot fence or delete its old records. Stopping immediately
             # would leave those records routable to dead ports. Keep serving for one bounded TTL.
-            if wait_for_registry_expiry and not force:
+            if wait_for_registry_expiry and not force and self.route_publisher is not None:
+                deferred = self.route_publisher.fence(deadline=deadline + timeout)
+                if deferred:
+                    raise RuntimeError(
+                        "remote provider did not confirm the allocator shutdown route fence"
+                    )
+                self._registered_engines.clear()
+                registry_expired = True
+                routing_fenced = True
+            elif wait_for_registry_expiry and not force:
                 expiry_deadline = (
                     self._routable_registry_expiry_deadline()
                     if _registry_expiry_deadline is None
@@ -457,6 +468,13 @@ class AllocatorNodeAgent:
                         self._monotonic() + MAX_SHUTDOWN_REQUEST_TIMEOUT_SECONDS,
                     )
                 )
+                if self.route_publisher is not None:
+                    deferred = self.route_publisher.fence(deadline=deadline)
+                    if deferred:
+                        raise RuntimeError(
+                            "remote provider did not confirm the allocator shutdown route fence"
+                        )
+                    self._registered_engines.clear()
                 routing_fenced = True
 
             self.runtime.begin_shutdown()
@@ -556,7 +574,7 @@ class AllocatorNodeAgent:
 
     def _register_control(self, *, deadline: float | None = None) -> None:
         envelope = self._allocator_envelope()
-        envelope["max_concurrency"] = 0
+        envelope["max_concurrency"] = self._control_max_concurrency()
         self._note_routable_registry_attempt()
         try:
             response = self.client.put(
@@ -568,6 +586,7 @@ class AllocatorNodeAgent:
                     "name": socket.gethostname() or self.runtime.host_id,
                     "host_id": self.runtime.host_id,
                     "resources": self.resources,
+                    "load": self._control_load(),
                     "allocator": envelope,
                 },
                 **self._timeout_kwargs(deadline),
@@ -588,7 +607,7 @@ class AllocatorNodeAgent:
         request_started_at = self._monotonic()
         acknowledgements = self.runtime.acknowledgements()
         envelope = self._allocator_envelope()
-        envelope["max_concurrency"] = 0
+        envelope["max_concurrency"] = self._control_max_concurrency()
         self._note_routable_registry_attempt()
         try:
             response = self.client.post(
@@ -597,6 +616,7 @@ class AllocatorNodeAgent:
                 json={
                     "node_id": self.node_id,
                     "resources": self.resources,
+                    "load": self._control_load(),
                     "allocator": envelope,
                     "acknowledgements": acknowledgements,
                 },
@@ -615,6 +635,7 @@ class AllocatorNodeAgent:
                     json={
                         "node_id": self.node_id,
                         "resources": self.resources,
+                        "load": self._control_load(),
                         "allocator": envelope,
                         "acknowledgements": acknowledgements,
                     },
@@ -654,6 +675,20 @@ class AllocatorNodeAgent:
         return payload, acknowledgements
 
     def _sync_engine_nodes(self, *, deadline: float | None = None) -> tuple[str, ...]:
+        if self.route_publisher is not None:
+            residencies = self.runtime.residencies
+            desired = {
+                item.model_id: item.handle.port
+                for item in residencies
+                if item.handle is not None and item.state == ResidencyState.READY
+            }
+            if desired != self._registered_engines:
+                self._registry_cleanup_fenced = True
+            deferred = self.route_publisher.sync(residencies, deadline=deadline)
+            if not deferred:
+                self._registered_engines = desired
+                self._registry_cleanup_fenced = False
+            return tuple(deferred)
         active = {
             item.model_id: item
             for item in self.runtime.residencies
@@ -952,7 +987,29 @@ class AllocatorNodeAgent:
     def _allocator_envelope(self) -> dict[str, Any]:
         envelope = self.runtime.allocator_envelope()
         envelope["host_priority"] = self.resources.get("host_priority", 0)
+        if self.route_publisher is not None:
+            envelope["route_admitted_models"] = list(
+                self.route_publisher.routable_models
+            )
         return envelope
+
+    def _control_max_concurrency(self) -> int:
+        if self.route_publisher is None:
+            return 0
+        return 1 if self.route_publisher.routable_models else 0
+
+    def _control_load(self) -> dict[str, int]:
+        active = 0
+        for model_id in (
+            self.route_publisher.routable_models if self.route_publisher is not None else ()
+        ):
+            sample = self._runtime_active_tasks(model_id)
+            if sample is not None:
+                active += sample
+        return {
+            "active_tasks": active,
+            "max_concurrency": self._control_max_concurrency(),
+        }
 
     def _engine_envelope(self, residency: ManagedResidency) -> dict[str, Any]:
         envelope = self._allocator_envelope()
@@ -997,7 +1054,7 @@ class AllocatorNodeAgent:
         if self._registry_cleanup_fenced:
             envelope["state"] = NodeState.DRAINING.value
             envelope["decision"] = None
-        envelope["max_concurrency"] = 0
+        envelope["max_concurrency"] = self._control_max_concurrency()
         routable_attempt = not self._registry_cleanup_fenced
         if routable_attempt:
             self._note_routable_registry_attempt()
@@ -1008,6 +1065,7 @@ class AllocatorNodeAgent:
                 json={
                     "node_id": self.node_id,
                     "resources": self.resources,
+                    "load": self._control_load(),
                     "allocator": envelope,
                     # This lease response is discarded. Only _post_control may poll commands and
                     # mark them delivered at the controller.
@@ -1093,6 +1151,7 @@ class AllocatorNodeAgent:
             json={
                 "node_id": self.node_id,
                 "resources": self.resources,
+                "load": self._control_load(),
                 "allocator": envelope,
                 "request_commands": False,
             },
@@ -1111,6 +1170,11 @@ class AllocatorNodeAgent:
         *,
         deadline: float | None = None,
     ) -> dict[str, int | None]:
+        if self.route_publisher is not None:
+            return {
+                model_id: self._runtime_active_tasks(model_id)
+                for model_id in sorted(model_ids)
+            }
         residencies = {item.model_id: item for item in self.runtime.residencies}
         activity: dict[str, int | None] = {}
         for model_id in sorted(model_ids):
@@ -1171,6 +1235,14 @@ class AllocatorNodeAgent:
         """Publish and retain a host-wide fence outside the ordinary cycle budget."""
 
         self._registry_cleanup_fenced = True
+        if self.route_publisher is not None:
+            deferred = self.route_publisher.fence(
+                deadline=self._monotonic() + MAX_SHUTDOWN_REQUEST_TIMEOUT_SECONDS
+            )
+            if deferred:
+                raise RuntimeError(
+                    "remote provider did not confirm the allocator route fence"
+                )
         self._heartbeat_shutdown_control(
             deadline=self._monotonic() + MAX_SHUTDOWN_REQUEST_TIMEOUT_SECONDS
         )

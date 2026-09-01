@@ -329,6 +329,59 @@ def test_authenticated_evaluation_records_quality_without_creating_demand(tmp_pa
     assert app.state.allocator.intelligence.unbound_demand.to_dict()["models"] == {}
 
 
+def test_authenticated_remote_observation_feeds_real_lifecycle_demand(tmp_path):
+    app, client, _ = _app(tmp_path)
+    assert client.put(
+        "/allocator/models/qwen",
+        json=_profile(workload_scores=[["coding", 0.9]]),
+        headers=AUTH,
+    ).status_code == 200
+    body = {
+        "features": {
+            "endpoint": "chat/completions",
+            "requested_model": "qwen",
+            "workload": "coding",
+            "modalities": ["text"],
+            "input_units": 32,
+            "requested_output_units": 16,
+        },
+        "served_model": "qwen",
+        "service_seconds": 0.25,
+        "latency_ms": 250,
+        "output_units": 12,
+        "workflow_key": "hashed-workflow",
+    }
+
+    assert client.post("/allocator/observations", json=body).status_code == 403
+    before = app.state.allocator_dirty_revision
+    response = client.post("/allocator/observations", headers=AUTH, json=body)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"recorded": True}
+    assert app.state.allocator_dirty_revision == before + 1
+    assert "qwen" in app.state.allocator.demand.to_dict()["models"]
+
+
+def test_remote_observation_rejects_string_booleans(tmp_path):
+    _, client, _ = _app(tmp_path)
+
+    response = client.post(
+        "/allocator/observations",
+        headers=AUTH,
+        json={
+            "features": {
+                "endpoint": "chat/completions",
+                "requested_model": "auto",
+                "is_evaluation": "false",
+            },
+            "service_seconds": 0.1,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "is_evaluation must be a boolean"
+
+
 def test_evaluation_api_rejects_stale_artifact_revision(tmp_path):
     app, client, _ = _app(tmp_path)
     revision_a = "a" * 64

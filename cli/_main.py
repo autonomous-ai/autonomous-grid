@@ -71,6 +71,7 @@ def cmd_internal_allocator_node(
     engine_tls_cert: str | None,
     engine_tls_key: str | None,
     engine_tls_ca: str | None,
+    provider_grid_id: str | None = None,
 ) -> int:
     import signal
     from pathlib import Path
@@ -78,6 +79,7 @@ def cmd_internal_allocator_node(
     from local.allocator_node import AllocatorNodeAgent
     from shared.allocator.auth import decode_node_token, secure_control_transport
     from shared.allocator.runtime import LlamaCppBackend, ManagedModelRuntime
+    from remote.allocator_routes import RemoteProviderRoutePublisher
 
     cfg = config.select_grid(grid_selector)
     # Consume and remove the credential before constructing any model runtime. llama-server inherits
@@ -119,6 +121,11 @@ def cmd_internal_allocator_node(
         advertise_host=effective_advertise_host,
         heartbeat_interval=heartbeat_interval,
         allow_insecure_http=allow_insecure_http,
+        route_publisher=(
+            RemoteProviderRoutePublisher(provider_grid_id, credential.host_id)
+            if provider_grid_id
+            else None
+        ),
     )
 
     def _on_term(_signum, _frame):
@@ -285,6 +292,7 @@ def _maybe_internal(argv: list[str]) -> int | None:
         parser.add_argument("--engine-tls-cert", default=None)
         parser.add_argument("--engine-tls-key", default=None)
         parser.add_argument("--engine-tls-ca", default=None)
+        parser.add_argument("--provider-grid-id", default=None)
         parser.add_argument("--allow-insecure-http", action="store_true")
         args = parser.parse_args(argv[1:])
         return cmd_internal_allocator_node(
@@ -298,6 +306,7 @@ def _maybe_internal(argv: list[str]) -> int | None:
             engine_tls_cert=args.engine_tls_cert,
             engine_tls_key=args.engine_tls_key,
             engine_tls_ca=args.engine_tls_ca,
+            provider_grid_id=args.provider_grid_id,
         )
     if argv[0] == "__media-server":
         parser = argparse.ArgumentParser(prog="grid __media-server")

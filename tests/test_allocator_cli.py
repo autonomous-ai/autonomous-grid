@@ -1220,6 +1220,7 @@ def test_internal_node_dispatch_parses_private_arguments(monkeypatch):
         "engine_tls_cert": None,
         "engine_tls_key": None,
         "engine_tls_ca": None,
+        "provider_grid_id": None,
     }
 
 

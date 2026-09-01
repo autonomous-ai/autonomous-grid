@@ -787,6 +787,61 @@ def create_app(
         await _run_allocator_tick(app)
         return {"evaluation": asdict(outcome)}
 
+    @app.post("/allocator/observations")
+    async def allocator_record_observation(request: Request):
+        """Accept one bounded request/response lifecycle summary from a remote inference plane."""
+
+        _require_allocator_control(app, request)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400, detail="Request body is not valid JSON"
+            ) from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+        raw_features = body.get("features")
+        if not isinstance(raw_features, dict):
+            raise HTTPException(status_code=400, detail="features must be a JSON object")
+        for owner, key in ((raw_features, "is_evaluation"), (body, "error")):
+            if key in owner and not isinstance(owner[key], bool):
+                raise HTTPException(status_code=400, detail=f"{key} must be a boolean")
+        try:
+            features = RequestFeatures(
+                endpoint=str(raw_features["endpoint"]),
+                requested_model=str(raw_features.get("requested_model") or ""),
+                workload=str(raw_features.get("workload") or "general"),
+                modalities=tuple(raw_features.get("modalities") or ("text",)),
+                input_units=int(raw_features.get("input_units") or 0),
+                requested_output_units=int(
+                    raw_features.get("requested_output_units") or 0
+                ),
+                is_evaluation=bool(raw_features.get("is_evaluation", False)),
+            )
+            recorded = _allocator(app).observe_lifecycle(
+                features,
+                served_model=str(body.get("served_model") or ""),
+                served_artifact_sha256=str(
+                    body.get("served_artifact_sha256") or ""
+                ),
+                service_seconds=float(body.get("service_seconds") or 0.0),
+                latency_ms=float(body.get("latency_ms") or 0.0),
+                queue_depth=int(body.get("queue_depth") or 0),
+                error=bool(body.get("error", False)),
+                output_units=int(body.get("output_units") or 0),
+                workflow_key=str(body.get("workflow_key") or ""),
+                timestamp=(
+                    float(body["timestamp"])
+                    if body.get("timestamp") is not None
+                    else None
+                ),
+            )
+        except (KeyError, OverflowError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if recorded:
+            _mark_allocator_dirty(app, safety_changed=False)
+        return {"recorded": bool(recorded)}
+
     @app.put("/allocator/mode")
     async def allocator_set_mode(request: Request):
         _require_allocator_control(app, request)
@@ -2754,9 +2809,13 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                 role=node.role,
                 malformed=malformed,
                 admitted_models=(
-                    frozenset(node.models)
+                    frozenset(
+                        node.models
+                        if node.role in ("engine", "both")
+                        else _string_tuple(allocator.get("route_admitted_models"))
+                    )
                     if (
-                        node.role in ("engine", "both")
+                        node.role in ("engine", "both", "allocator")
                         and _node_lease_has_allocator_safety_headroom(
                             node,
                             now=now,

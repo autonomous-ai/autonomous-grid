@@ -631,6 +631,14 @@ def _add_allocator(sub) -> None:
     node_start = node_sub.add_parser("start", help="Join this machine as managed capacity")
     _add_allocator_grid(node_start, node_token=True)
     node_start.add_argument("--heartbeat-interval", type=float, default=15.0)
+    node_start.add_argument(
+        "--provider-grid",
+        default=None,
+        help=(
+            "Publish allocator-owned models through this already-joined remote Grid identity "
+            "using zero-drop hot reload."
+        ),
+    )
     node_start.add_argument("--advertise-host", default=None)
     node_start.add_argument(
         "--engine-tls-cert",

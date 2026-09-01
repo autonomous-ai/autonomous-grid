@@ -343,10 +343,17 @@ def _start_allocator_node_locked(
     state_path = _node_state_path(scope)
     token, host_id = _node_token(cfg, getattr(args, "token_file", None), state_path)
     control_url = runtime.allocator_control_url(cfg)
+    provider_network_id = _remote_provider_network_id(
+        getattr(args, "provider_grid", None)
+    )
     effective_advertise_host = (
-        args.advertise_host
-        or _literal_loopback_url_host(control_url)
-        or runtime.detect_local_ip_for_url(grid_url)
+        "127.0.0.1"
+        if provider_network_id
+        else (
+            args.advertise_host
+            or _literal_loopback_url_host(control_url)
+            or runtime.detect_local_ip_for_url(grid_url)
+        )
     )
     tls_cert, tls_key, tls_ca = _validated_engine_tls_files(
         getattr(args, "engine_tls_cert", None),
@@ -359,7 +366,11 @@ def _start_allocator_node_locked(
             "URL (literal loopback HTTP is also allowed). --allow-insecure-http cannot expose "
             "managed engine keys on a LAN."
         )
-    if not _literal_loopback_host(effective_advertise_host) and not tls_cert:
+    if (
+        not provider_network_id
+        and not _literal_loopback_host(effective_advertise_host)
+        and not tls_cert
+    ):
         raise SystemExit(
             "A non-loopback managed engine requires end-to-end TLS. Pass "
             "--engine-tls-cert, --engine-tls-key, and (for a private CA) --engine-tls-ca."
@@ -385,6 +396,8 @@ def _start_allocator_node_locked(
         str(args.heartbeat_interval),
     ]
     command.extend(["--advertise-host", effective_advertise_host])
+    if provider_network_id:
+        command.extend(["--provider-grid-id", provider_network_id])
     if tls_cert:
         command.extend(["--engine-tls-cert", tls_cert, "--engine-tls-key", tls_key])
     if tls_ca:
@@ -420,6 +433,7 @@ def _start_allocator_node_locked(
             "grid_selector": selector,
             "grid_url": grid_url,
             "host_id": host_id,
+            "provider_grid_id": provider_network_id,
             "state_path": str(state_path),
             "startup_path": str(startup_path),
             "graceful_shutdown": True,
@@ -459,6 +473,37 @@ def _start_allocator_node_locked(
     print(f"Allocator node started (pid={process.pid}, host={started.get('host_id', host_id)})")
     print(f"log={log_path}")
     return 0
+
+
+def _remote_provider_network_id(selector: str | None) -> str:
+    """Resolve a remote Grid name/id only when provider-route integration was requested."""
+
+    if not selector:
+        return ""
+    from remote import credentials
+
+    matches = [
+        item
+        for item in (credentials.load_credentials().get("networks") or [])
+        if isinstance(item, dict)
+        and (item.get("network_id") == selector or item.get("name") == selector)
+    ]
+    if not matches:
+        raise SystemExit(
+            f"Remote provider Grid not found: {selector!r}. Run `grid sync` and join it first."
+        )
+    network_id = str(matches[-1].get("network_id") or "")
+    record = run_records.read_record(network_id, run_records.REMOTE_IDENTITY)
+    if not record or not run_records.record_alive(record):
+        raise SystemExit(
+            f"This machine is not actively serving remote Grid {selector!r}; run `grid join` first."
+        )
+    if record.get("reload_signal") != "sighup":
+        raise SystemExit(
+            "The running remote provider predates allocator hot reload; rejoin it once with "
+            "`grid join --respawn`."
+        )
+    return network_id
 
 
 def cmd_allocator_node_stop(args: argparse.Namespace) -> int:
