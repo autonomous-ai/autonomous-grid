@@ -880,13 +880,10 @@ def test_claude_protocol_drift_quarantines_node_and_hands_same_turn_to_codex(
         objective="Recover a partial artifact when one native Goal protocol changes",
         done_when="PARTIAL.md and DONE.md prove a cross-harness same-turn recovery",
         model="fake-grid-model", token_budget=3_000, tools=[],
-        agents=["claude", "codex"],
-        evals=[
-            {"type": "file", "name": "accepted Claude checkpoint", "path": "PARTIAL.md",
-             "max_bytes": 2_000, "contains": ["Claude A"]},
-            {"type": "file", "name": "Codex recovery", "path": "DONE.md",
-             "max_bytes": 2_000, "contains": ["Codex B", "same Goal turn"]},
-        ])
+        # Deliberately no independent eval contract: a clean Claude exit without its native
+        # evaluator may be nominated only when Grid has measurable checks of its own. With none,
+        # the exact binary revision must still be quarantined and the same turn handed to Codex.
+        agents=["claude", "codex"])
 
     # A remains alive. Its child exited zero, but without the native evaluator attachment; the
     # supervisor must publish a coherent checkpoint and immediately requeue the same row. Its next
