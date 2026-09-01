@@ -2356,7 +2356,41 @@ def test_historical_error_rate_does_not_ratchet_one_replica_per_tick():
         for index in range(4)
     )
 
-    assert desired_replica_count(profile, forecast, nodes=machines, now=100) == 3
+    assert desired_replica_count(profile, forecast, nodes=machines, now=100) == 2
+
+
+def test_latency_pressure_is_not_counted_twice_on_single_request_engines():
+    """A measured SLO breach may raise capacity or add a safety replica, but never both.
+
+    Live Forge evidence: one 4.455s SmolLM request against a 3s SLO requested three replicas even
+    though its throughput required one. Latency pressure already raised that to two; the generic
+    safety increment was a duplicate response to the same signal.
+    """
+    profile = model(
+        min_replicas=1,
+        max_replicas=3,
+        target_utilization=0.6,
+        latency_slo_ms=3_000,
+        scale_down_cooldown_seconds=10,
+    )
+    forecast = DemandForecast(
+        "qwen",
+        requests_per_minute=1,
+        observed_requests_per_minute=1,
+        offered_concurrency=0.07425,
+        p95_latency_ms=4_277.345,
+        sample_count=1,
+        updated_at=100,
+    )
+    machines = tuple(
+        node(
+            f"n-{index}",
+            residencies=(ready("qwen", 8_000, loaded_at=90, last_used_at=90),),
+        )
+        for index in range(3)
+    )
+
+    assert desired_replica_count(profile, forecast, nodes=machines, now=100) == 2
 
 
 def test_historical_queue_pressure_adds_one_safety_replica_without_ratcheting():

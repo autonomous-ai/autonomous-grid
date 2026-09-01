@@ -3240,6 +3240,7 @@ def desired_replica_count(
             concurrency / model.target_utilization,
             MAX_COUNTER,
         )
+        baseline_required_capacity = required_capacity
         if forecast.queue_depth:
             required_capacity = max(
                 required_capacity,
@@ -3276,11 +3277,18 @@ def desired_replica_count(
             timestamp,
             policy,
         )
+        baseline_target, _ = _replicas_for_service_capacity(
+            model,
+            baseline_required_capacity,
+            node_list,
+            timestamp,
+            policy,
+        )
         # A queue or degraded service level is direct evidence that computed service capacity needs
         # one safety replica, even if one engine advertises a wide theoretical batch. Anchor that
         # increment to the freshly computed target—not the current ready count—so a historical
         # pressure sample cannot ratchet the fleet by one replica on every planning tick.
-        if ready_replicas and (
+        if ready_replicas and (baseline_target == 0 or target <= baseline_target) and (
             forecast.queue_depth
             or (model.latency_slo_ms and forecast.p95_latency_ms > model.latency_slo_ms)
             or forecast.error_rate
