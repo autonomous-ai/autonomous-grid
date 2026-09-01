@@ -274,12 +274,13 @@ class TestTheIsolationIsUnchanged:
             "SEKRIT", task_repo.GitIdentity("Alice", "alice@example.com"),
             claim_id="claim-generation-7")
 
-        assert env["GIT_CONFIG_COUNT"] == "3"
+        assert env["GIT_CONFIG_COUNT"] == "4"
         assert [(env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"])
-                for index in range(3)] == [
+                for index in range(4)] == [
             ("http.extraHeader", "Authorization: Bearer SEKRIT"),
             ("http.extraHeader", "X-Grid-Task-Claim: claim-generation-7"),
             ("http.followRedirects", "false"),
+            ("http.postBuffer", str(task_repo._GIT_HTTP_POST_BUFFER_BYTES)),
         ]
 
     def test_the_committer_is_never_the_member(self):

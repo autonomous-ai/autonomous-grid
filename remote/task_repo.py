@@ -113,6 +113,19 @@ _GIT_TIMEOUT_SECONDS = 120
 # Raised from 300s for ADR 0033 issue 16a: a real 581 MiB / 29,133-commit repository takes ~11s to
 # fetch on a fast local disk, and the relay is allowed ten minutes for the case that is not fast.
 _GIT_NETWORK_TIMEOUT_SECONDS = 900
+# Git changes an HTTP push from a Content-Length request to a chunked one once the request exceeds
+# ``http.postBuffer`` (1 MiB by default).  That is legal HTTP, and the relay accepts it directly,
+# but real reverse proxies in front of a remote Grid do not all preserve Git's chunked request body
+# faithfully.  A long native-agent transcript reproduced the failure through a Cloudflare tunnel:
+# Git's empty authentication probe succeeded, then the real receive-pack body reached the relay as
+# a malformed pkt-line stream and the completed Goal was retried from scratch.
+#
+# Buffer ordinary task-plane pushes through the relay's own default 64 MiB request ceiling.  This
+# does not raise what Grid accepts and it does not force a large project import into memory: an
+# import larger than this still uses Git's chunked path, which is why the relay supports that path.
+# It only makes the result/transcript pushes that already fit the ordinary ceiling travel as one
+# Content-Length request, the shape commodity proxies handle reliably.
+_GIT_HTTP_POST_BUFFER_BYTES = 64 * 1024 * 1024
 # Wall-clock ceiling for the workspace listing (ADR 0032 issue 08). Much SHORTER than the local one,
 # and that is the whole reason it exists rather than reusing it: this call runs on the lease
 # renewer's beat, and `_GIT_TIMEOUT_SECONDS` is 120s — the relay's entire lease TTL. A listing
@@ -373,6 +386,7 @@ def _env(token: str | None = None, author: GitIdentity | None = None, *,
         if claim_id:
             entries.append(("http.extraHeader", f"X-Grid-Task-Claim: {claim_id}"))
         entries.append(("http.followRedirects", "false"))
+        entries.append(("http.postBuffer", str(_GIT_HTTP_POST_BUFFER_BYTES)))
         env.update({
             "GIT_CONFIG_COUNT": str(len(entries)),
             **{f"GIT_CONFIG_KEY_{index}": key
