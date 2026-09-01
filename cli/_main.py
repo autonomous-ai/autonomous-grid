@@ -79,7 +79,11 @@ def cmd_internal_allocator_node(
 
     from local.allocator_node import AllocatorNodeAgent
     from shared.allocator.auth import decode_node_token, secure_control_transport
-    from shared.allocator.runtime import LlamaCppBackend, ManagedModelRuntime
+    from shared.allocator.runtime import (
+        LlamaCppBackend,
+        ManagedModelRuntime,
+        engine_api_key_path,
+    )
     from shared.allocator.local import HostPolicy, LocalHostProtectionLoop
     from remote.allocator_routes import RemoteProviderRoutePublisher
 
@@ -138,7 +142,11 @@ def cmd_internal_allocator_node(
         heartbeat_interval=heartbeat_interval,
         allow_insecure_http=allow_insecure_http,
         route_publisher=(
-            RemoteProviderRoutePublisher(provider_grid_id, credential.host_id)
+            RemoteProviderRoutePublisher(
+                provider_grid_id,
+                credential.host_id,
+                engine_api_key_file=engine_api_key_path(Path(state_path)),
+            )
             if provider_grid_id
             else None
         ),

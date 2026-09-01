@@ -59,6 +59,9 @@ def _seed(monkeypatch, tmp_path: Path, *, engines):
 
 
 def test_remote_publisher_preserves_user_engine_and_adds_managed_route(monkeypatch, tmp_path):
+    key_file = tmp_path / "engine.key"
+    key_file.write_text("allocator-engine-secret-123456\n")
+    key_file.chmod(0o600)
     user = {
         "endpoint_url": "http://127.0.0.1:8000/v1",
         "models": ["qwen"],
@@ -72,7 +75,7 @@ def test_remote_publisher_preserves_user_engine_and_adds_managed_route(monkeypat
         }
     )
     publisher = RemoteProviderRoutePublisher(
-        "grid-forge", "host-c", client=client
+        "grid-forge", "host-c", engine_api_key_file=key_file, client=client
     )
 
     assert publisher.sync([_ready("SmolLM2-135M-Instruct-Q3_K_M.gguf", 18081)]) == ()
@@ -81,6 +84,7 @@ def test_remote_publisher_preserves_user_engine_and_adds_managed_route(monkeypat
     assert stored["engines"][0] == user
     assert stored["engines"][1]["allocator_host_id"] == "host-c"
     assert stored["engines"][1]["endpoint_url"] == "http://127.0.0.1:18081/v1"
+    assert stored["engines"][1]["allocator_api_key_file"] == str(key_file.resolve())
     assert stored["models"] == ["qwen", "SmolLM2-135M-Instruct-Q3_K_M.gguf"]
     assert len(signals) == 1
 
@@ -108,3 +112,19 @@ def test_remote_publisher_fence_removes_only_its_managed_routes(monkeypatch, tmp
     stored = jsonio.load_json(path)
     assert stored["engines"] == [user, other]
     assert stored["models"] == ["qwen", "other"]
+
+
+def test_remote_publisher_refuses_managed_route_without_engine_credential(monkeypatch, tmp_path):
+    _seed(monkeypatch, tmp_path, engines=[])
+    publisher = RemoteProviderRoutePublisher(
+        "grid-forge",
+        "host-c",
+        client=_Client({"name": "forge-node", "models": []}),
+    )
+
+    try:
+        publisher.sync([_ready("smollm.gguf", 18081)])
+    except RuntimeError as exc:
+        assert "API key file" in str(exc)
+    else:
+        raise AssertionError("managed route was published without its engine credential")

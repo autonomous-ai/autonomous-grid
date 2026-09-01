@@ -16,13 +16,16 @@ from __future__ import annotations
 import json
 import os
 import signal
+import stat
 import sys
 import threading
 import time
 import traceback
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from remote import (
     api_keys, bringup, control_plane, credentials, engine_health, probe, relay, service_truth,
@@ -669,6 +672,10 @@ def _api_bearers(record: dict[str, Any]) -> dict[str, str]:
     """
     bearers: dict[str, str] = {}
     for spec in record.get("engines") or []:
+        if spec.get("allocator_host_id"):
+            endpoint = str(spec.get("endpoint_url") or "").rstrip("/")
+            bearers[endpoint] = _allocator_engine_bearer(spec)
+            continue
         kind = spec.get("api_kind")
         if not kind:
             continue
@@ -679,6 +686,43 @@ def _api_bearers(record: dict[str, Any]) -> dict[str, str]:
             continue
         bearers[(spec.get("endpoint_url") or "").rstrip("/")] = api_keys.require_bearer(str(kind))
     return bearers
+
+
+def _allocator_engine_bearer(spec: Mapping[str, Any]) -> str:
+    """Read a managed engine bearer from its owner-only file without persisting the secret.
+
+    Allocator routes are necessarily same-host routes. Refusing a non-loopback endpoint prevents a
+    hand-edited run record from forwarding this private bearer into another network trust domain.
+    """
+
+    endpoint = urlparse(str(spec.get("endpoint_url") or ""))
+    host = (endpoint.hostname or "").casefold()
+    if endpoint.scheme not in {"http", "https"} or host not in {
+        "127.0.0.1",
+        "::1",
+        "localhost",
+    }:
+        raise SystemExit("allocator-managed provider routes must target a loopback HTTP(S) endpoint")
+    raw_path = str(spec.get("allocator_api_key_file") or "")
+    key_path = Path(raw_path)
+    if not raw_path or not key_path.is_absolute():
+        raise SystemExit("allocator-managed provider route is missing its engine credential file")
+    try:
+        metadata = key_path.lstat()
+    except OSError as exc:
+        raise SystemExit("allocator-managed engine credential file is unavailable") from exc
+    if key_path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
+        raise SystemExit("allocator-managed engine credential file is not a protected regular file")
+    if os.name != "nt":
+        if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+            raise SystemExit("allocator-managed engine credential file must be owner-only")
+    try:
+        credential = key_path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError) as exc:
+        raise SystemExit("allocator-managed engine credential file could not be read") from exc
+    if len(credential) < 16 or len(credential) > 4096 or any(char.isspace() for char in credential):
+        raise SystemExit("allocator-managed engine credential file is invalid")
+    return credential
 
 
 def _prime_codex_seat(state: _ServeState, record: dict[str, Any]) -> None:

@@ -15,6 +15,7 @@ import signal
 import time
 import uuid
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -38,6 +39,7 @@ class RemoteProviderRoutePublisher:
         host_id: str,
         *,
         engine_id: str = REMOTE_IDENTITY,
+        engine_api_key_file: str | os.PathLike[str] | None = None,
         client: httpx.Client | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
@@ -47,6 +49,11 @@ class RemoteProviderRoutePublisher:
         self.network_id = network_id
         self.host_id = host_id
         self.engine_id = engine_id
+        self.engine_api_key_file = (
+            str(Path(engine_api_key_file).expanduser().resolve())
+            if engine_api_key_file is not None
+            else ""
+        )
         self.client = client or httpx.Client(timeout=5.0, trust_env=True)
         self._monotonic = monotonic
         self._sleep = sleeper
@@ -70,6 +77,10 @@ class RemoteProviderRoutePublisher:
             if item.handle is not None and item.state == ResidencyState.READY
         }
         requested = tuple(sorted(ready))
+        if requested and not self.engine_api_key_file:
+            raise RuntimeError("remote allocator routing requires an engine API key file")
+        if requested and not Path(self.engine_api_key_file).is_file():
+            raise RuntimeError("managed engine API key file is missing")
         if deadline is not None and self._monotonic() >= deadline:
             return requested
 
@@ -98,6 +109,7 @@ class RemoteProviderRoutePublisher:
                     "models": [model],
                     "engine_label": "allocator:llama.cpp",
                     "allocator_host_id": self.host_id,
+                    "allocator_api_key_file": self.engine_api_key_file,
                 }
                 for model in requested
             ]
