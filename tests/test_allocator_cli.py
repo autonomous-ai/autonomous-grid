@@ -52,6 +52,9 @@ def patch_http_client(monkeypatch, request):
 
 def test_parser_exposes_complete_allocator_surface():
     parser = cli.build_parser()
+    assert parser.parse_args(
+        ["allocator", "join", "forge"]
+    ).handler is cli.cmd_allocator_join
     assert parser.parse_args(["allocator", "status"]).handler is cli.cmd_allocator_status
     set_args = parser.parse_args(
         [
@@ -116,6 +119,72 @@ def test_allocator_is_remote_gated():
     args = cli.build_parser().parse_args(["allocator", "status"])
     with pytest.raises(SystemExit, match="isn't available in remote mode"):
         cli_dispatch.dispatch(args, "remote")
+
+
+def test_allocator_join_is_the_remote_provider_opt_in(monkeypatch):
+    args = cli.build_parser().parse_args(["allocator", "join", "forge"])
+    monkeypatch.setattr(args, "handler", lambda value: int(value.grid == "forge"))
+
+    assert cli_dispatch.dispatch(args, "remote") == 1
+
+
+def test_allocator_join_reuses_remote_membership_and_keeps_node_token_in_memory(
+    monkeypatch, tmp_path
+):
+    from remote import credentials
+    from cli import remote_grid
+
+    args = cli.build_parser().parse_args(
+        ["allocator", "join", "forge", "--dedicated"]
+    )
+    rec = {
+        "network_id": "grid-forge",
+        "name": "forge",
+        "access_token": "existing-membership",
+    }
+    monkeypatch.setattr(credentials, "require_session", lambda: "session")
+    monkeypatch.setattr(remote_grid, "_select", lambda _value: rec)
+    monkeypatch.setattr(remote_grid, "_network_id", lambda _rec: "grid-forge")
+    monkeypatch.setattr(
+        remote_grid,
+        "resolve_relay_base",
+        lambda *_args: ("https://forge.example", {}),
+    )
+    monkeypatch.setattr(
+        allocator, "_remote_provider_network_id", lambda value: value
+    )
+    monkeypatch.setattr(
+        allocator,
+        "_request",
+        lambda *_args, **_kwargs: {"grid_id": "allocator-control"},
+    )
+    node_token = "grid-node-v1.payload.signature"
+    monkeypatch.setattr(
+        allocator,
+        "_request_remote_enrollment",
+        lambda relay, token, label: node_token,
+    )
+    monkeypatch.setattr(
+        allocator,
+        "_node_record_path",
+        lambda _scope: tmp_path / "allocator-node.json",
+    )
+    captured = {}
+
+    def start(_args, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(allocator, "_start_allocator_node_locked", start)
+
+    assert allocator.cmd_allocator_join(args) == 0
+    assert captured["cfg"]["lan_signaling_url"] == (
+        "https://forge.example/allocator-control"
+    )
+    assert captured["supplied_node_token"] == node_token
+    assert args.provider_grid == "grid-forge"
+    assert args.dedicated is True
+    assert args.token_file is None
 
 
 def test_status_prints_summary_or_json_without_control_token(monkeypatch, capsys):

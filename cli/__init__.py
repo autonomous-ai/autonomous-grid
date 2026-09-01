@@ -23,6 +23,7 @@ from .agent import (
     cmd_agent_status,
 )
 from .allocator import (
+    cmd_allocator_join,
     cmd_allocator_mode,
     cmd_allocator_model_remove,
     cmd_allocator_model_set,
@@ -142,6 +143,7 @@ __all__ = [
     "cmd_agent_install",
     "cmd_agent_status",
     "cmd_allocator_mode",
+    "cmd_allocator_join",
     "cmd_allocator_model_remove",
     "cmd_allocator_model_set",
     "cmd_allocator_node_override",

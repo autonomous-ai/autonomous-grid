@@ -17,6 +17,7 @@ from ._constants import (
 )
 from .agent import cmd_agent_install, cmd_agent_status
 from .allocator import (
+    cmd_allocator_join,
     cmd_allocator_mode,
     cmd_allocator_model_remove,
     cmd_allocator_model_set,
@@ -472,6 +473,19 @@ def _add_allocator(sub) -> None:
         help="Place configured models dynamically across participating hosts",
     )
     allocator_sub = allocator.add_subparsers(dest="allocator_command", required=True)
+
+    allocator_join = allocator_sub.add_parser(
+        "join",
+        help="Enroll this already-joined remote provider as allocator-managed capacity",
+    )
+    allocator_join.add_argument("grid", nargs="?", default=None)
+    allocator_join.add_argument("--heartbeat-interval", type=float, default=15.0)
+    allocator_join.add_argument(
+        "--dedicated",
+        action="store_true",
+        help="Treat this host as dedicated Grid capacity while retaining hardware safety limits.",
+    )
+    allocator_join.set_defaults(handler=cmd_allocator_join)
 
     status = allocator_sub.add_parser("status", help="Show demand, placement, and mutations")
     _add_allocator_grid(status)

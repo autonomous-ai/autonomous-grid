@@ -15,7 +15,12 @@ from cli import _main as cli_main
 from local import config, runtime
 from local import server as server_module
 from local.server import create_app
-from shared.allocator.auth import control_node_id, engine_node_id, mint_node_token
+from shared.allocator.auth import (
+    control_node_id,
+    decode_node_token,
+    engine_node_id,
+    mint_node_token,
+)
 
 TOKEN = "allocator-test-token"
 AUTH = {"X-Grid-Allocator-Token": TOKEN}
@@ -180,6 +185,35 @@ def test_allocator_mutations_require_control_capability(tmp_path):
     )
     assert response.status_code == 200, response.text
     assert response.json()["model"]["model_id"] == "qwen"
+
+
+def test_allocator_enrollment_mints_only_a_host_scoped_node_credential(tmp_path):
+    _, client, _ = _app(tmp_path)
+
+    assert client.post("/allocator/enroll", json={"host_id": "host-b"}).status_code == 403
+    response = client.post(
+        "/allocator/enroll",
+        json={"host_id": "host-b"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["host_id"] == "host-b"
+    assert decode_node_token(payload["node_token"]).host_id == "host-b"
+    assert TOKEN not in response.text
+
+
+def test_allocator_enrollment_rejects_invalid_host_identity(tmp_path):
+    _, client, _ = _app(tmp_path)
+
+    response = client.post(
+        "/allocator/enroll",
+        json={"host_id": "not/a/host"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 400
 
 
 def test_managed_registration_rejects_unsupported_allocator_schema(tmp_path):

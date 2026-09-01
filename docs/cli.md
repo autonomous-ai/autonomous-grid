@@ -552,6 +552,8 @@ grid allocator mode observe|recommend|automatic
 grid allocator tick
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
 
+grid allocator join [grid] [--heartbeat-interval <s>] [--dedicated]
+
 grid allocator token write <path> [--host-id <id>] [--ttl-days <n>] [--force]
     [--grid <g>] [--token-file <path>] [--allow-insecure-http]
 
@@ -572,6 +574,12 @@ actions, `recommend` shows the actions it would take, and `automatic` delivers e
 load/warm/drain/unload commands within the allocator's safety limits. For the initial managed
 runtime, `<model>` must be the exact filename of a GGUF already cached with `grid pull` on each
 eligible computer; allocation never invents a download source.
+
+On a remote Grid, first serve the machine normally with `grid join`, then run
+`grid allocator join <grid>`. The relay reuses that provider's existing authenticated membership,
+derives a stable allocator host identity, and starts the managed node without asking the operator
+to copy a control token. Enrollment is available only to the same live provider identity; it does
+not admit a new member or grant policy-administration access.
 
 Repeat `--workload-score WORKLOAD=SCORE` to describe where a model fits the portfolio, for example
 `--workload-score coding=1 --workload-score research=.8`. Scores are capability hints in `(0, 1]`;

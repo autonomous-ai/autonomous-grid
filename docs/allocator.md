@@ -802,6 +802,18 @@ grid allocator node start
 grid allocator node status
 ```
 
+For an already-serving provider on a remote Grid, enrollment is one command and reuses its existing
+Grid membership:
+
+```bash
+grid allocator join forge
+```
+
+The relay verifies that the token-bound node is currently a provider, derives its stable allocator
+host identity, and obtains a host-scoped credential from the controller. The operator capability is
+never sent to the worker, and the returned node credential remains in memory rather than appearing
+in the terminal or process arguments.
+
 Create a placement profile from a machine that can control the grid. Memory is the resident runtime
 budget for one replica, not the file's compressed size:
 
@@ -1264,9 +1276,9 @@ The design follows several primary systems results while preserving Grid's alloc
 
 ## Current limits
 
-- The controller and status/control routes in this repository are the local Grid implementation.
-  The hosted relay/control-plane service is separate, so remote fleet allocation needs a matching
-  versioned persistence, authentication, lease, and command-delivery implementation there.
+- Remote allocator nodes require a relay with the authenticated allocator sidecar and enrollment
+  bridge enabled. Policy administration remains controller-only; remote providers may enroll only
+  their own already-live identity.
 - The first managed process boundary is Grid-owned llama.cpp model runtimes. ComfyUI, external
   Ollama/vLLM/LM Studio, API, and manually started engines are inventory and routing sources, not
   processes the allocator may stop. The mixed-framework logical fixture starts and stops its own

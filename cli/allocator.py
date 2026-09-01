@@ -313,6 +313,64 @@ def cmd_allocator_node_start(args: argparse.Namespace) -> int:
         )
 
 
+def cmd_allocator_join(args: argparse.Namespace) -> int:
+    """Enroll this already-serving remote provider as allocator-managed capacity."""
+
+    from remote import credentials
+
+    from . import remote_grid
+
+    session = credentials.require_session()
+    rec = remote_grid._select(getattr(args, "grid", None))
+    network_id = remote_grid._network_id(rec)
+    label = str(rec.get("name") or network_id)
+    access_token = remote_grid.require_access_token(rec, label)
+    relay_url, _status = remote_grid.resolve_relay_base(
+        session, rec, network_id, label
+    )
+    relay_url = relay_url.rstrip("/")
+    if not secure_control_transport(relay_url):
+        raise SystemExit(
+            "Allocator enrollment requires an HTTPS relay (literal loopback HTTP is also allowed)."
+        )
+
+    # Enrollment is capacity opt-in, not provider admission.  Refuse before minting anything unless
+    # this exact remote identity is already alive and supports allocator-owned route hot reload.
+    _remote_provider_network_id(network_id)
+    cfg = {
+        "grid_id": network_id,
+        "name": label,
+        "managed_server": False,
+        "lan_signaling_url": f"{relay_url}/allocator-control",
+    }
+    grid_info = _request(cfg, "GET", "/grid/info")
+    grid_id = _validated_grid_id(grid_info.get("grid_id"))
+    scope = _scope(grid_id)
+    record_path = _node_record_path(scope)
+    with file_lock(record_path):
+        record = jsonio.load_json(record_path)
+        if _node_process_state(record) == "owned":
+            print(f"Allocator node already running (pid={_record_pid(record)})")
+            return 0
+        node_token = _request_remote_enrollment(relay_url, access_token, label)
+        args.provider_grid = network_id
+        args.token_file = None
+        args.advertise_host = None
+        args.engine_tls_cert = None
+        args.engine_tls_key = None
+        args.engine_tls_ca = None
+        args.allow_insecure_http = False
+        return _start_allocator_node_locked(
+            args,
+            cfg=cfg,
+            grid_url=runtime.grid_url(cfg),
+            grid_id=grid_id,
+            scope=scope,
+            record_path=record_path,
+            supplied_node_token=node_token,
+        )
+
+
 def _start_allocator_node_locked(
     args: argparse.Namespace,
     *,
@@ -321,6 +379,7 @@ def _start_allocator_node_locked(
     grid_id: str,
     scope: str,
     record_path: Path,
+    supplied_node_token: str = "",
 ) -> int:
     record = jsonio.load_json(record_path)
     pid = _record_pid(record)
@@ -341,7 +400,12 @@ def _start_allocator_node_locked(
         record_path.unlink(missing_ok=True)
 
     state_path = _node_state_path(scope)
-    token, host_id = _node_token(cfg, getattr(args, "token_file", None), state_path)
+    token, host_id = _node_token(
+        cfg,
+        getattr(args, "token_file", None),
+        state_path,
+        supplied_token=supplied_node_token,
+    )
     control_url = runtime.allocator_control_url(cfg)
     provider_network_id = _remote_provider_network_id(
         getattr(args, "provider_grid", None)
@@ -737,6 +801,35 @@ def _request(
     return payload
 
 
+def _request_remote_enrollment(relay_url: str, access_token: str, label: str) -> str:
+    """Exchange existing provider membership for an in-memory host credential."""
+
+    try:
+        with httpx.Client(timeout=15.0, trust_env=True) as client:
+            response = client.post(
+                f"{relay_url}/allocator/enroll",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+    except httpx.RequestError as exc:
+        raise SystemExit(f"Could not enroll this machine with allocator on {label}: {exc}") from exc
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail")
+        except (ValueError, AttributeError):
+            detail = "relay rejected allocator enrollment"
+        raise SystemExit(f"Allocator enrollment failed ({response.status_code}): {detail}")
+    try:
+        payload = response.json()
+        token = str(payload["node_token"])
+        host_id = str(payload["host_id"])
+        credential = decode_node_token(token)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SystemExit("Allocator enrollment returned an invalid node credential") from exc
+    if credential.host_id != host_id:
+        raise SystemExit("Allocator enrollment returned a mismatched node identity")
+    return token
+
+
 def _control_token(cfg: dict[str, Any], token_file: str | None) -> str:
     token = ""
     if token_file:
@@ -758,10 +851,12 @@ def _node_token(
     cfg: dict[str, Any],
     token_file: str | None,
     state_path: Path,
+    *,
+    supplied_token: str = "",
 ) -> tuple[str, str]:
     """Resolve a host credential and bind it to this runtime's durable host id."""
 
-    token = ""
+    token = supplied_token.strip()
     if token_file:
         try:
             token = Path(token_file).expanduser().read_text(encoding="utf-8").strip()

@@ -21,7 +21,7 @@ from typing import NoReturn
 
 from shared import state
 
-from . import remote_grid, remote_overview, remote_provider, remote_request
+from . import remote_allocator, remote_grid, remote_overview, remote_provider, remote_request
 
 # Commands that behave identically in both modes: local engine/model setup, plus the
 # mode/selection commands and the bare overview (which branch on the mode internally).
@@ -116,6 +116,7 @@ REMOTE_HANDLERS = {
     "image": remote_request.cmd_remote_image,
     "edit": remote_request.cmd_remote_edit,
     "video": remote_request.cmd_remote_video,
+    "allocator": remote_allocator.cmd_remote_allocator,
 }
 
 

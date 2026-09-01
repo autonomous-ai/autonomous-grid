@@ -26,8 +26,11 @@ from pydantic import BaseModel, Field
 
 from local.runtime import GRID_TYPE
 from shared.allocator.auth import (
+    DEFAULT_NODE_TOKEN_TTL_SECONDS,
     control_node_id,
+    decode_node_token,
     engine_node_id,
+    mint_node_token,
     verify_node_token,
 )
 from shared.allocator.authority import ControllerAuthorityLease
@@ -109,6 +112,12 @@ class HeartbeatRequest(BaseModel):
     # command-delivery boundary. Default true preserves the public heartbeat contract for older
     # nodes, whose ordinary control heartbeat has always polled commands.
     request_commands: bool = True
+
+
+class AllocatorEnrollmentRequest(BaseModel):
+    """Trusted relay request for one host-scoped allocator credential."""
+
+    host_id: str
 
 
 def _request_fields_set(value: BaseModel) -> set[str]:
@@ -705,6 +714,31 @@ def create_app(
                 if app.state.allocator_authority is not None
                 else None
             ),
+        }
+
+    @app.post("/allocator/enroll")
+    async def allocator_enroll(req: AllocatorEnrollmentRequest, request: Request):
+        """Mint a worker credential for an authenticated enrollment broker.
+
+        This route is operator-authenticated just like policy mutations.  A public relay may call
+        it only after independently authenticating an already-joined provider and deriving the
+        host id itself; clients never receive or forward the operator capability.
+        """
+
+        _require_allocator_control(app, request)
+        try:
+            token = mint_node_token(
+                str(app.state.allocator_control_token or ""),
+                req.host_id,
+                ttl_seconds=DEFAULT_NODE_TOKEN_TTL_SECONDS,
+            )
+            credential = decode_node_token(token)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "host_id": credential.host_id,
+            "node_token": token,
+            "expires_at": credential.expires_at,
         }
 
     @app.put("/allocator/models/{model_id:path}")
