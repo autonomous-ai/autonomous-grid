@@ -355,7 +355,10 @@ def test_three_prestart_machine_losses_reuse_attempt_one_before_a_real_worker_ru
         "D", scenario="prestart_recovery", disk_label="prestart-winner", one_task=True)
     complete = H.wait_for(
         lambda: _completed_goal(relay, owner_token, goal["id"]), timeout=30)
-    assert complete, f"replacement did not finish; D output:\n{winner.output()}"
+    assert complete, (
+        f"replacement did not finish; tasks={_tasks(relay, owner_token, project_id, goal['id'])!r}; "
+        f"evidence={relay_client.get_goal_evidence(relay, owner_token, goal['id'])!r}; "
+        f"D output:\n{winner.output()}")
     rows = _tasks(relay, owner_token, project_id, goal["id"])
     assert len(rows) == 1 and rows[0]["attempt"] == 1
     assert rows[0]["provider_id"] == winner.node_id

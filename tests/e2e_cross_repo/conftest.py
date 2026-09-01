@@ -484,6 +484,12 @@ def spawn_goal_provider(relay, provider_nodes, fake_codex_bin, fake_agent_bin, g
             **os.environ,
             "PATH": (f"{fake_codex_bin}{os.pathsep}{fake_agent_bin}{os.pathsep}"
                      f"{os.environ.get('PATH', '')}"),
+            # Each provider represents a different physical machine. Never let the test inherit
+            # the developer's ~/.grid/bin/codex: production intentionally prefers an executable
+            # installed for GRID_HOME before PATH, so an unisolated fixture silently launches the
+            # real Codex and routes real model traffic instead of exercising this deterministic
+            # cross-repository protocol harness.
+            "GRID_HOME": str(task_root / ".grid"),
             "GRID_REPO": str(H.GRID_REPO),
             "GRID_SIGNALING_URL": relay,
             "GRID_NODE_ID": node_id,
