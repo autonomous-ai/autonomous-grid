@@ -310,6 +310,52 @@ def test_missing_claude_goal_attachment_quarantines_only_that_binary_revision(
     assert task_agent.distributed_goal_available() is True
 
 
+def test_missing_claude_evaluator_delegates_only_to_an_independent_grid_eval(
+        tmp_path, monkeypatch):
+    """A local model may miss Claude's private evaluator shape; the relay still owns the grade."""
+    binary = tmp_path / "claude"
+    binary.write_text("measured claude revision\n")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "tasks"))
+    monkeypatch.setattr(task_agent, "_DISTRIBUTED_GOAL_FAILURES", {})
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: str(binary))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "link_transcript", lambda *_args: tmp_path / "transcript")
+    monkeypatch.setattr(task_agent, "resumable_session", lambda *_args: task_agent.ResumeDecision())
+    monkeypatch.setattr(task_agent, "child_env", lambda **_kwargs: {"PATH": os.environ["PATH"]})
+    monkeypatch.setattr(task_agent, "agent_argv", lambda *_args, **_kwargs: [str(binary)])
+    monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(tasks.task_codex_proxy.InferenceProxy, "stop", lambda self: None)
+    published = []
+
+    def run_child(_argv, **kwargs):
+        translator = kwargs["translator"]
+        translator.session_id = "claude-session-1"
+        translator.result_text = "implemented the measurable artifact"
+        translator.observed_tokens = 23
+        return 0, ""
+
+    monkeypatch.setattr(tasks, "_run_child", run_child)
+    outcome = tasks.run_task({
+        "task_id": "turn-1", "conversation_id": "goal-1", "project_id": "project-1",
+        "member_key": "member-1", "agent_kind": "claude", "prompt": "continue",
+        "goal": {
+            "objective": "Build it", "done_when": "artifact check passes", "model": "grid-model",
+            "turns_completed": 2, "tokens_used": 100, "time_used_seconds": 20,
+            "evals": [{"type": "file", "path": "RESULT.md"}],
+        },
+    }, inference=task_codex.GridInference("https://grid.example/relay/v1", "secret"),
+        publish=lambda event, **fields: published.append((event, fields)))
+
+    assert outcome.state == "completed" and outcome.goal_status == "complete"
+    assert outcome.goal_turns_completed == 3 and outcome.goal_tokens_used == 123
+    assert outcome.output == "implemented the measurable artifact"
+    assert ("goal.claude.evaluator_missing", {
+        "reason": "Claude Goal exited without a native evaluator checkpoint",
+        "fallback": "independent_grid_eval",
+    }) in published
+    assert task_agent._DISTRIBUTED_GOAL_FAILURES == {}
+
+
 def test_native_claude_impossible_verdict_remains_terminal(tmp_path, monkeypatch):
     """The native Goal's explicit impossible verdict is semantic; another node must not loop it."""
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "tasks"))

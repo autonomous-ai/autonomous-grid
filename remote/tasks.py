@@ -1191,19 +1191,46 @@ def run_task(job: dict[str, Any],
             reason = translator.goal_protocol_error
             task_agent.remember_distributed_goal_failure(binary, reason)
             return failed(reason, retryable=True)
-        if not translator.goal_evaluated:
-            reason = "Claude Goal exited without a native evaluator checkpoint"
-            # Exit zero with no goal_status attachment is deterministic protocol drift: model/API
-            # failures take the nonzero/timeout paths above. Stop this exact revision advertising
-            # native_goal so another harness/machine receives the retry instead of burning the cap.
-            task_agent.remember_distributed_goal_failure(binary, reason)
-            return failed(reason, retryable=True)
 
         def goal_counter(name: str) -> int:
             value = goal.get(name)
             return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
         slice_tokens = max(translator.observed_tokens, translator.goal_tokens or 0)
+        if not translator.goal_evaluated:
+            reason = "Claude Goal exited without a native evaluator checkpoint"
+            evals = goal.get("evals")
+            if isinstance(evals, list) and evals:
+                # Third-party/local models can complete Claude's ordinary tool loop yet fail the
+                # undocumented small evaluator response shape that makes Claude Code persist a
+                # terminal goal_status attachment. The exact failure was measured with Claude Code
+                # 2.1.252 + Qwen3.6-27B: the transcript held the sentinel, two successful tools and
+                # the final answer, while the fourth Grid inference request completed and no
+                # evaluator attachment existed.
+                #
+                # This is safe only because an independent relay eval is present. A clean native
+                # exit nominates the exact result commit; it does not grade itself. The relay checks
+                # every configured eval against that commit and either accepts it or creates the
+                # ordinary eval-repair turn. With no eval definition we retain the fail-closed
+                # protocol-drift path below, because process exit is not a measurable Goal verdict.
+                _publish_safely(
+                    sink, "goal.claude.evaluator_missing", reason=reason,
+                    fallback="independent_grid_eval")
+                output = translator.last_output or translator.result_text
+                return TaskOutcome(
+                    "completed", output[:_TASK_OUTPUT_MAX_CHARS] if output else None, None,
+                    session_id=translator.session_id, session_reset_reason=reset_reason,
+                    goal_status="complete",
+                    goal_turns_completed=goal_counter("turns_completed") + 1,
+                    goal_tokens_used=goal_counter("tokens_used") + slice_tokens,
+                    goal_time_used_seconds=(goal_counter("time_used_seconds")
+                                            + max(1, int(time.monotonic() - started))),
+                )
+            # Exit zero with no goal_status attachment is deterministic protocol drift: model/API
+            # failures take the nonzero/timeout paths above. Stop this exact revision advertising
+            # native_goal so another harness/machine receives the retry instead of burning the cap.
+            task_agent.remember_distributed_goal_failure(binary, reason)
+            return failed(reason, retryable=True)
         status = ("failed" if translator.goal_impossible else
                   "complete" if translator.goal_met else "active")
         total_tokens = goal_counter("tokens_used") + slice_tokens
