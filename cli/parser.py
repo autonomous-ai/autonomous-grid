@@ -30,6 +30,7 @@ from .allocator import (
     cmd_allocator_tick,
     cmd_allocator_token_write,
 )
+from .allocator_qualification import cmd_allocator_qualify
 from shared.allocator.scenario import SCENARIO_STRATEGIES
 
 from .allocator_scenario import (
@@ -622,6 +623,33 @@ def _add_allocator(sub) -> None:
     _add_allocator_grid(tick, token=True)
     tick.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     tick.set_defaults(handler=cmd_allocator_tick)
+
+    qualify = allocator_sub.add_parser(
+        "qualify",
+        help="Prove a physical engine's full managed lifecycle with real inference",
+    )
+    qualify.add_argument("runtime", choices=("ollama", "comfyui", "vllm"))
+    qualify.add_argument("model")
+    qualify.add_argument(
+        "--endpoint",
+        default="",
+        help="Native engine base URL (defaults by runtime).",
+    )
+    qualify.add_argument("--artifact-source", default="")
+    qualify.add_argument("--artifact-sha256", default="")
+    qualify.add_argument("--artifact-size-mb", type=int, default=0)
+    qualify.add_argument("--port", type=int, default=28901)
+    qualify.add_argument("--tensor-parallel-size", type=int, default=1)
+    qualify.add_argument("--cache-dir", default=None)
+    qualify.add_argument("--prompt", default="Reply with exactly GRID.")
+    qualify.add_argument("--max-tokens", type=int, default=32)
+    qualify.add_argument("--image-size", type=int, default=256)
+    qualify.add_argument("--steps", type=int, default=1)
+    qualify.add_argument("--timeout", type=float, default=900.0)
+    qualify.add_argument("--cleanup-artifact", action="store_true")
+    qualify.add_argument("--report", default=None)
+    qualify.add_argument("--json", action="store_true")
+    qualify.set_defaults(handler=cmd_allocator_qualify)
 
     token = allocator_sub.add_parser("token", help="Provision the node control capability")
     token_sub = token.add_subparsers(dest="allocator_token_command", required=True)

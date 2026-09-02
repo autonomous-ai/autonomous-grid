@@ -622,6 +622,22 @@ grid --local allocator status --grid allocator-control
 grid --local allocator mode automatic --grid allocator-control
 ```
 
+Before granting a new physical runtime production lifecycle authority, qualify it on that machine
+with actual inference. The command writes an owner-only evidence report and always attempts to stop
+what it warmed; it never deletes a pre-existing artifact:
+
+```bash
+grid --local allocator qualify ollama <model> --artifact-sha256 <digest>
+grid --local allocator qualify comfyui comfyui:image_generation \
+  --endpoint http://127.0.0.1:8188
+grid --local allocator qualify vllm <served-model> \
+  --artifact-source hf://owner/repo@<commit> \
+  --artifact-sha256 <snapshot-identity> --artifact-size-mb <bound>
+```
+
+See [physical runtime qualification](docs/allocator-runtime-qualification.md) for canary cleanup,
+failure interpretation, and the evidence captured on Forge.
+
 Allocator enrollment verifies the managed llama.cpp runtime and installs Grid's version- and
 SHA-256-pinned build when it is absent. It also waits briefly for a just-started provider identity
 to become visible at the relay, so the two fresh-node commands above are safe to run back to back.

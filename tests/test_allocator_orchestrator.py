@@ -172,8 +172,29 @@ def test_ollama_start_failure_never_returns_a_routable_handle() -> None:
     backend.client.close()
     backend.client = httpx.Client(transport=httpx.MockTransport(handler))
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(RuntimeError, match="Ollama warm failed with HTTP 500"):
         backend.start("broken", 18_100)
+
+
+def test_ollama_fetch_never_replaces_a_preexisting_different_digest() -> None:
+    existing = "a" * 64
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "tiny", "digest": existing, "size": 4}]},
+            )
+        raise AssertionError(request.url)
+
+    backend = OllamaBackend()
+    backend.client.close()
+    backend.client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError, match="refusing to replace"):
+        backend.fetch_artifact("tiny", "ollama://tiny", "b" * 64, 10)
+    assert calls == ["/api/tags", "/api/tags"]
 
 
 def test_comfyui_advertises_only_configured_bundle_and_unloads_native_memory() -> None:
