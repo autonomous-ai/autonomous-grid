@@ -2004,6 +2004,23 @@ class ManagedModelRuntime:
                 artifact_fetched=artifact_fetched,
             )
 
+    def _action_runtime(
+        self,
+        action: MutationAction,
+        current: ManagedResidency | None = None,
+        handle: RuntimeHandle | None = None,
+    ) -> str:
+        """Resolve and persist the actuator's proven runtime during rolling upgrades."""
+
+        if action.runtime:
+            return action.runtime
+        if handle is not None and handle.runtime:
+            return handle.runtime
+        if current is not None and current.runtime:
+            return current.runtime
+        resolver = getattr(self.backend, "runtime_for", None)
+        return str(resolver(action.model_id) if callable(resolver) else "")
+
     def _load(self, action: MutationAction) -> bool:
         """Materialize the artifact and report whether the backend fetched missing bytes."""
 
@@ -2078,7 +2095,7 @@ class ManagedModelRuntime:
                     if current is not None
                     else False
                 ),
-                runtime=(action.runtime or (current.runtime if current else "")),
+                runtime=self._action_runtime(action, current),
             )
             self._save_locked()
         return artifact_fetched
@@ -2271,7 +2288,7 @@ class ManagedModelRuntime:
                     or (current.artifact_sha256 if current else "")
                 ),
                 predictive_cache=False,
-                runtime=(action.runtime or (current.runtime if current else "")),
+                runtime=self._action_runtime(action, current),
             )
             self._save_locked()
         with self._lock:
@@ -2294,7 +2311,7 @@ class ManagedModelRuntime:
                         or (current.artifact_sha256 if current else "")
                     ),
                     predictive_cache=False,
-                    runtime=(action.runtime or (current.runtime if current else handle.runtime)),
+                    runtime=self._action_runtime(action, current, handle),
                 )
                 self._save_locked()
 
@@ -2327,7 +2344,7 @@ class ManagedModelRuntime:
                     or (current.artifact_sha256 if current else "")
                 ),
                 predictive_cache=False,
-                runtime=(action.runtime or handle.runtime or (current.runtime if current else "")),
+                runtime=self._action_runtime(action, current, handle),
             )
             self._save_locked()
 
@@ -2470,7 +2487,7 @@ class ManagedModelRuntime:
                         else action.artifact_sha256
                     ),
                     predictive_cache=False,
-                    runtime=(action.runtime or (current.runtime if current else "")),
+                    runtime=self._action_runtime(action, current, handle),
                 )
             self._finish_locked(action, MutationStatus.FAILED, message)
 

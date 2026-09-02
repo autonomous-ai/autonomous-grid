@@ -8,7 +8,7 @@ import pytest
 
 from shared.allocator.models import ActionKind, MutationAction
 from shared.allocator.orchestrator import EngineOrchestratorBackend, OllamaBackend
-from shared.allocator.runtime import RuntimeHandle
+from shared.allocator.runtime import ManagedModelRuntime, RuntimeHandle
 
 
 class StubBackend:
@@ -49,10 +49,14 @@ class StubBackend:
         return 0
 
 
-def action(model_id: str, runtime: str) -> MutationAction:
+def action(
+    model_id: str,
+    runtime: str,
+    kind: ActionKind = ActionKind.LOAD,
+) -> MutationAction:
     return MutationAction(
-        action_id=f"load-{model_id}",
-        kind=ActionKind.LOAD,
+        action_id=f"{kind.value}-{model_id}",
+        kind=kind,
         node_id="host-a",
         model_id=model_id,
         memory_mb=100,
@@ -82,6 +86,27 @@ def test_orchestrator_dispatches_to_selected_runtime_and_restores_binding() -> N
     assert restored.runtime_for("coder") == "vllm"
     with pytest.raises(RuntimeError, match="already bound"):
         restored.bind("coder", "llama.cpp")
+
+
+def test_node_persists_inferred_runtime_from_an_older_controller(tmp_path) -> None:
+    llama = StubBackend("llama.cpp", ("tiny.gguf",))
+    vllm = StubBackend("vllm", ("coder",))
+    backend = EngineOrchestratorBackend({"llama.cpp": llama, "vllm": vllm})
+    managed = ManagedModelRuntime(
+        tmp_path / "runtime.json",
+        host_id="host-a",
+        backend=backend,
+        port_available=lambda _port: True,
+    )
+
+    managed.begin(action("coder", ""))
+    assert managed.wait_idle(2)
+    managed.begin(action("coder", "", ActionKind.WARM))
+    assert managed.wait_idle(2)
+
+    residency = next(item for item in managed.residencies if item.model_id == "coder")
+    assert residency.runtime == "vllm"
+    assert residency.handle is not None and residency.handle.runtime == "vllm"
 
 
 def test_ollama_lifecycle_requires_native_readiness() -> None:
