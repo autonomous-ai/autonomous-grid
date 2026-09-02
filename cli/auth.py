@@ -47,6 +47,7 @@ def cmd_login(args: argparse.Namespace) -> int:
     # drops every prior grid's bundle while its serve child keeps polling, and afterwards there is
     # nothing left to diff against (ADR 0023).
     previous_networks = list(credentials.load_credentials().get("networks") or [])
+    self_hosted = [n for n in previous_networks if isinstance(n, dict) and n.get("self_hosted")]
 
     started = control_plane.start_device_login(api_url)
     url = _device_login_url(started)
@@ -71,11 +72,13 @@ def cmd_login(args: argparse.Namespace) -> int:
         "session_token": session_token,
         "api_url": api_url,
         "user": user,
-        "networks": networks,
+        # A hosted account cannot authoritatively delete a Grid owned by somebody else's relay.
+        # Pairing records therefore survive login and are refreshed only by another pairing bundle.
+        "networks": [*networks, *self_hosted],
     })
-    signout.warn_stranded(previous_networks, networks)
+    signout.warn_stranded(previous_networks, [*networks, *self_hosted])
     # Deliberately no `state.set_active("remote", …)` here — login never auto-selects a grid.
-    return _report_login(user.get("email", ""), networks, as_json=as_json)
+    return _report_login(user.get("email", ""), [*networks, *self_hosted], as_json=as_json)
 
 
 def _await_approval(started: dict[str, Any], api_url: str) -> dict[str, Any]:
@@ -372,7 +375,19 @@ def cmd_sync(args: argparse.Namespace) -> int:
     session_token = data.get("session_token")
     if not session_token:
         raise SystemExit("You're not signed in. Run `grid login` to sign in.")
-    prev_count = len(data.get("networks") or [])
+    self_hosted = [
+        item for item in (data.get("networks") or [])
+        if isinstance(item, dict) and item.get("self_hosted")
+    ]
+    hosted_before = [
+        item for item in (data.get("networks") or [])
+        if isinstance(item, dict) and not item.get("self_hosted")
+    ]
+    if str(session_token).startswith("self-hosted:"):
+        # A standalone relay has no account-level control plane to sync against. Its credential is
+        # replaced by `grid relay connect`; reporting the preserved records is the complete sync.
+        return _report_sync(self_hosted, as_json=as_json)
+    prev_count = len(hosted_before)
     device_id = credentials.device_id()
     api_url = credentials.api_url()
     try:
@@ -391,11 +406,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
     networks = _validated(raw)
     # Authoritative overwrite of the stored grid list; session_token / api_url / user are preserved.
     # Immutable update — a fresh dict, never the loaded one mutated in place. state.json is untouched.
-    credentials.save_credentials({**data, "networks": networks})
+    combined = [*networks, *self_hosted]
+    credentials.save_credentials({**data, "networks": combined})
     # A grid that just dropped out takes its token with it while its serve child keeps polling — the
     # same unreachable state a logout produces, one grid at a time (ADR 0023). Sync does not tear it
     # down; it names it and the verb that still reaches it.
-    signout.warn_stranded(list(data.get("networks") or []), networks)
+    signout.warn_stranded(list(data.get("networks") or []), combined)
     if prev_count and not networks:
         # The overwrite just cleared every grid. Make the wipe visible so a transient backend hiccup
         # isn't mistaken for a silent loss of all credentials.
@@ -404,7 +420,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             "were cleared locally. Re-run `grid sync` if this may be transient.",
             file=sys.stderr,
         )
-    return _report_sync(networks, as_json=as_json)
+    return _report_sync(combined, as_json=as_json)
 
 
 def _report_sync(networks: list[dict[str, Any]], *, as_json: bool) -> int:

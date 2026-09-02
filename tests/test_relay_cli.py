@@ -135,6 +135,147 @@ def test_relay_info_requires_remote_mode(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         cli.main(["relay", "info"])
     assert str(exc.value) == (
-        "`grid relay` is a remote-mode command. "
-        "Run `grid mode remote` (or pass --remote) to sign in."
+        "`grid relay info` reads remote Grid records. Pass `--remote` or switch modes."
     )
+
+
+def _pairing_bundle(**updates):
+    import base64
+    import time
+
+    def enc(value):
+        return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+
+    claims = {
+        "relay_id": "relay-self", "relay_url": "https://relay.example",
+        "server_id": "server-self", "network_id": "grid-self", "network_name": "Self",
+        "network_type": "permissioned", "node_id": "node-self",
+        "exp": int(time.time()) + 3600,
+    }
+    token = ".".join((enc(b'{"alg":"RS256"}'), enc(json.dumps(claims).encode()), enc(b"sig")))
+    value = {
+        "version": 1, "relay_id": "relay-self", "server_id": "server-self",
+        "relay_url": "https://relay.example",
+        "network_id": "grid-self", "network_name": "Self", "network_type": "permissioned",
+        "access_token": token, "node_id": "node-self", "email": "a@example.com",
+        "roles": ["both"], "scopes": ["inference:create"], "expires_at": claims["exp"],
+    }
+    value.update(updates)
+    return enc(json.dumps(value).encode())
+
+
+def test_connect_saves_self_hosted_grid_and_switches_to_remote(monkeypatch, tmp_path, capsys):
+    from cli import remote_relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"server_id": "server-self"}
+
+    monkeypatch.setattr(remote_relay.httpx, "get", lambda *a, **k: Response())
+    assert cli.main(["relay", "connect", "--bundle", _pairing_bundle()]) == 0
+    data = credentials.load_credentials()
+    assert data["networks"][0]["self_hosted"] is True
+    assert data["networks"][0]["relay_id"] == "relay-self"
+    assert state.get_mode() == "remote"
+    assert state.get_active("remote") == "grid-self"
+    assert "Connected to self-hosted Grid Self" in capsys.readouterr().out
+
+
+def test_host_command_delegates_to_separate_runtime(monkeypatch, tmp_path):
+    from cli import remote_relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setenv("GRID_RELAY_BIN", "/opt/grid/bin/grid-relay")
+    seen = {}
+
+    class Result:
+        returncode = 7
+
+    def run(argv, check):
+        seen["argv"] = argv
+        seen["check"] = check
+        return Result()
+
+    monkeypatch.setattr(remote_relay.subprocess, "run", run)
+    assert cli.main(["relay", "status", "forge", "--json"]) == 7
+    assert seen == {
+        "argv": ["/opt/grid/bin/grid-relay", "status", "forge", "--json"],
+        "check": False,
+    }
+
+
+@pytest.mark.parametrize("argv", [
+    pytest.param(["relay", "list", "--json"], id="after-list"),
+    pytest.param(["--json", "relay", "list"], id="global"),
+    pytest.param(["relay", "status", "--json"], id="status-with-default-selector"),
+])
+def test_host_json_without_selector_reaches_separate_runtime(monkeypatch, tmp_path, argv):
+    from cli import remote_relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setenv("GRID_RELAY_BIN", "/opt/grid/bin/grid-relay")
+    seen = {}
+
+    class Result:
+        returncode = 0
+
+    def run(command, check):
+        seen["argv"] = command
+        seen["check"] = check
+        return Result()
+
+    monkeypatch.setattr(remote_relay.subprocess, "run", run)
+    assert cli.main(argv) == 0
+    command = "status" if "status" in argv else "list"
+    assert seen == {
+        "argv": ["/opt/grid/bin/grid-relay", command, "--json"],
+        "check": False,
+    }
+
+
+def test_disconnect_removes_only_selected_self_hosted_grid(monkeypatch, tmp_path):
+    _remote_home(monkeypatch, tmp_path, [
+        {"network_id": "hosted", "name": "Hosted", "signaling_url": "https://hosted.example"},
+        {"network_id": "self", "name": "Self", "relay_id": "relay-self",
+         "signaling_url": "https://self.example", "self_hosted": True},
+    ], active="self")
+    assert cli.main(["relay", "disconnect", "relay-self"]) == 0
+    assert [item["network_id"] for item in credentials.load_credentials()["networks"]] == ["hosted"]
+    assert state.get_active("remote") is None
+
+
+def test_sync_without_hosted_account_keeps_self_hosted_grid(monkeypatch, tmp_path, capsys):
+    _remote_home(monkeypatch, tmp_path, [
+        {"network_id": "self", "name": "Self", "relay_id": "relay-self",
+         "signaling_url": "https://self.example", "self_hosted": True},
+    ])
+    data = credentials.load_credentials()
+    credentials.save_credentials({**data, "session_token": "self-hosted:relay-self"})
+    assert cli.main(["sync"]) == 0
+    assert [item["network_id"] for item in credentials.load_credentials()["networks"]] == ["self"]
+    assert capsys.readouterr().out == "Synced 1 grid(s): Self.\n"
+
+
+def test_hosted_sync_merges_self_hosted_grid(monkeypatch, tmp_path, capsys):
+    from remote import control_plane
+
+    _remote_home(monkeypatch, tmp_path, [
+        {"network_id": "old", "name": "Old", "signaling_url": "https://hosted.example"},
+        {"network_id": "self", "name": "Self", "relay_id": "relay-self",
+         "signaling_url": "https://self.example", "self_hosted": True},
+    ])
+    monkeypatch.setattr(control_plane, "fetch_tokens", lambda *args: [
+        {"network_id": "new", "name": "New", "signaling_url": "https://new.example"},
+    ])
+    assert cli.main(["sync"]) == 0
+    assert {item["network_id"] for item in credentials.load_credentials()["networks"]} == {
+        "new", "self",
+    }
+    assert capsys.readouterr().out == "Synced 2 grid(s): New, Self.\n"

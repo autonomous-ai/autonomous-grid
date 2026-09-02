@@ -557,7 +557,7 @@ def _add_state(sub) -> None:
 def _add_relay(sub) -> None:
     relay = sub.add_parser(
         "relay",
-        help="Show a relay and the Grids that use it (remote)",
+        help="Connect to, inspect, or host a Grid relay",
     )
     actions = relay.add_subparsers(dest="subcommand", required=True)
     info = actions.add_parser(
@@ -573,6 +573,48 @@ def _add_relay(sub) -> None:
     )
     info.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     info.set_defaults(handler=cmd_remote_relay)
+
+    connect = actions.add_parser(
+        "connect",
+        help="Connect this machine to a self-hosted relay using a pairing bundle",
+    )
+    connect.add_argument("--bundle", default=None, help="Pairing bundle (visible in shell history).")
+    connect.add_argument("--bundle-file", default=None, help="Owner-only file containing the bundle.")
+    connect.set_defaults(handler=cmd_remote_relay)
+
+    disconnect = actions.add_parser(
+        "disconnect",
+        help="Forget one self-hosted relay/Grid on this machine without stopping it",
+    )
+    disconnect.add_argument("relay", help="Relay id, Grid id, or Grid name.")
+    disconnect.set_defaults(handler=cmd_remote_relay)
+
+    host_help = {
+        "list": "List relay instances hosted on this machine",
+        "up": "Create or start a relay on this machine",
+        "down": "Stop a relay on this machine",
+        "restart": "Restart a relay on this machine",
+        "status": "Inspect relay host health",
+        "invite": "Create a member pairing bundle",
+        "revoke": "Revoke one member's relay credentials",
+        "set-url": "Verify and publish a relay URL",
+        "backup": "Back up relay configuration and PostgreSQL",
+        "restore": "Restore an absent relay from a backup",
+        "destroy": "Permanently remove a relay and its database",
+        "supervise": "Run relay supervision in the foreground",
+        "service": "Manage relay auto-start with launchd or systemd",
+    }
+    for command, help_text in host_help.items():
+        host = actions.add_parser(command, help=help_text, add_help=False)
+        # A REMAINDER positional starts only after argparse has consumed a positional token.  Host
+        # commands whose selector is optional (notably `list`, and `status` with its default relay)
+        # therefore rejected `--json` when it was the first forwarded argument.  Recognize the one
+        # shared Grid flag here; `_host` puts it back on the separate runtime's argv.  Flags after a
+        # selector continue to travel verbatim in `host_args`.
+        host.add_argument("--json", dest="host_json", action="store_true",
+                          help="Emit machine-readable JSON.")
+        host.add_argument("host_args", nargs=argparse.REMAINDER)
+        host.set_defaults(handler=cmd_remote_relay)
 
 
 def _add_auth(sub) -> None:

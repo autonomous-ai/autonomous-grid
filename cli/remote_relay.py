@@ -11,11 +11,28 @@ identity.  Supporting both makes ``grid relay info`` useful during a rolling upg
 from __future__ import annotations
 
 import argparse
+import base64
+import getpass
 import json
+import os
+import shutil
+import subprocess
+import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+import httpx
+
 from shared import state
+
+
+PAIRING_VERSION = 1
+MAX_PAIRING_BYTES = 32 * 1024
+_HOST_COMMANDS = frozenset({
+    "list", "up", "down", "restart", "status", "invite", "revoke", "set-url", "backup",
+    "restore", "destroy", "supervise", "service",
+})
 
 
 def _networks() -> list[dict[str, Any]]:
@@ -131,9 +148,17 @@ def _target(networks: list[dict[str, Any]], selector: str | None) -> dict[str, A
 def cmd_remote_relay(args: argparse.Namespace) -> int:
     from remote import credentials
 
-    credentials.require_session()
+    if args.subcommand == "connect":
+        return _connect(args)
+    if args.subcommand == "disconnect":
+        return _disconnect(args)
+    if args.subcommand in _HOST_COMMANDS:
+        return _host(args)
     if args.subcommand != "info":
         raise SystemExit(f"Unknown relay subcommand: {args.subcommand!r}")
+    if getattr(args, "mode", None) != "remote":
+        raise SystemExit("`grid relay info` reads remote Grid records. Pass `--remote` or switch modes.")
+    credentials.require_session()
 
     networks = _networks()
     target = _target(networks, args.relay)
@@ -174,3 +199,153 @@ def cmd_remote_relay(args: argparse.Namespace) -> int:
     for grid in grids:
         print(f"  {grid['grid']}\t{grid['id']}")
     return 0
+
+
+def _decode_bundle(raw: str) -> dict[str, Any]:
+    compact = "".join(str(raw or "").split())
+    if not compact or len(compact) > MAX_PAIRING_BYTES:
+        raise SystemExit("Pairing bundle is missing or unexpectedly large.")
+    try:
+        decoded = base64.urlsafe_b64decode(compact + "=" * (-len(compact) % 4))
+        value = json.loads(decoded)
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("Pairing bundle is not valid base64url JSON.") from exc
+    if not isinstance(value, dict) or value.get("version") != PAIRING_VERSION:
+        raise SystemExit(f"Pairing bundle must use version {PAIRING_VERSION}.")
+    return value
+
+
+def _root_url(value: object) -> str:
+    raw = str(value or "").strip().rstrip("/")
+    parsed = urlsplit(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise SystemExit("Pairing bundle has no valid HTTP relay URL.")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
+        raise SystemExit("Pairing bundle relay URL must be a credential-free root URL.")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise SystemExit("Pairing bundle relay URL has an invalid port.") from exc
+    return raw
+
+
+def _bundle_value(args: argparse.Namespace) -> str:
+    if args.bundle and args.bundle_file:
+        raise SystemExit("Use either --bundle or --bundle-file, not both.")
+    if args.bundle_file:
+        path = Path(args.bundle_file).expanduser()
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise SystemExit(f"Cannot read pairing bundle {path}: {exc}") from None
+    if args.bundle:
+        return args.bundle
+    return getpass.getpass("Paste relay pairing bundle (input hidden): ")
+
+
+def _connect(args: argparse.Namespace) -> int:
+    from remote import credentials
+
+    value = _decode_bundle(_bundle_value(args))
+    relay_url = _root_url(value.get("relay_url"))
+    required = (
+        "relay_id", "server_id", "network_id", "network_name", "network_type", "access_token",
+        "node_id",
+    )
+    missing = [key for key in required if not str(value.get(key) or "").strip()]
+    if missing:
+        raise SystemExit(f"Pairing bundle is missing: {', '.join(missing)}.")
+    claims = credentials.claims_from_token(value["access_token"])
+    signed_identity = {
+        "relay_id", "relay_url", "server_id", "network_id", "network_name", "network_type",
+        "node_id",
+    }
+    if any(claims.get(key) != value.get(key) for key in signed_identity):
+        raise SystemExit("Pairing bundle identity does not match its signed credential.")
+    expires_at = value.get("expires_at")
+    if not isinstance(expires_at, int) or isinstance(expires_at, bool) or expires_at <= int(time.time()):
+        raise SystemExit("Pairing bundle credential is expired or has no valid expiry.")
+    try:
+        response = httpx.get(f"{relay_url}/server/info", timeout=10)
+        response.raise_for_status()
+        server = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise SystemExit(f"Relay is not reachable at {relay_url}: {exc}") from None
+    if not isinstance(server, dict) or not server.get("server_id"):
+        raise SystemExit(f"{relay_url} answered, but it is not a Grid relay.")
+    if str(server["server_id"]) != str(value["server_id"]):
+        raise SystemExit("Pairing bundle points at a different Grid relay; refusing to connect.")
+
+    current = credentials.load_credentials()
+    record = {
+        "network_id": str(value["network_id"]),
+        "name": str(value["network_name"]),
+        "network_type": str(value["network_type"]),
+        "relay_id": str(value["relay_id"]),
+        "signaling_url": relay_url,
+        "lan_signaling_url": relay_url,
+        "access_token": str(value["access_token"]),
+        "node_id": str(value["node_id"]),
+        "email": str(value.get("email") or ""),
+        "roles": list(value.get("roles") or []),
+        "scopes": list(value.get("scopes") or []),
+        "expires_at": expires_at,
+        "self_hosted": True,
+    }
+    networks = [
+        item for item in (current.get("networks") or [])
+        if isinstance(item, dict) and item.get("network_id") != record["network_id"]
+    ]
+    networks.append(record)
+    credentials.save_credentials({
+        **current,
+        "session_token": current.get("session_token") or f"self-hosted:{record['relay_id']}",
+        "user": current.get("user") or {"email": record["email"]},
+        "networks": networks,
+    })
+    state.set_mode("remote")
+    state.set_active("remote", record["network_id"])
+    print(f"Connected to self-hosted Grid {record['name']} through relay {record['relay_id']}.")
+    print(f"relay_url={relay_url}")
+    print(f"node={record['node_id']}")
+    return 0
+
+
+def _disconnect(args: argparse.Namespace) -> int:
+    from remote import credentials
+
+    data = credentials.load_credentials()
+    selector = args.relay
+    removed = [item for item in (data.get("networks") or []) if isinstance(item, dict) and (
+        item.get("self_hosted") and selector in {
+            item.get("network_id"), item.get("name"), item.get("relay_id"),
+        }
+    )]
+    if not removed:
+        raise SystemExit(f"Self-hosted relay/Grid not found locally: {selector!r}.")
+    remove_ids = {item.get("network_id") for item in removed}
+    networks = [
+        item for item in (data.get("networks") or [])
+        if not isinstance(item, dict) or item.get("network_id") not in remove_ids
+    ]
+    credentials.save_credentials({**data, "networks": networks})
+    active = state.get_active("remote")
+    if active in remove_ids:
+        state.set_active("remote", None)
+    print(f"Disconnected {len(removed)} self-hosted Grid(s). The relay was not stopped.")
+    return 0
+
+
+def _host(args: argparse.Namespace) -> int:
+    executable = os.getenv("GRID_RELAY_BIN") or shutil.which("grid-relay")
+    if not executable:
+        raise SystemExit(
+            "The relay host runtime is not installed. Install the `grid-relay` package on this "
+            "machine, then retry. Client-only machines need only `grid relay connect`."
+        )
+    host_args = list(args.host_args or [])
+    wants_json = getattr(args, "json", False) or getattr(args, "host_json", False)
+    if wants_json and "--json" not in host_args:
+        host_args.append("--json")
+    forwarded = [str(executable), args.subcommand, *host_args]
+    return subprocess.run(forwarded, check=False).returncode
