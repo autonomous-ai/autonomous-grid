@@ -615,12 +615,32 @@ grid --remote allocator join <grid> --dedicated
 # Controller/relay host: register exact artifacts, inspect, then enable actuation
 grid --local allocator model set <model.gguf> --grid allocator-control \
   --memory-mb <resident-mb> --artifact-sha256 <sha256> \
-  --artifact-source hf://owner/repo/model.gguf --artifact-size-mb <download-mb> \
+  --artifact-source hf://owner/repo@<commit>/model.gguf --artifact-size-mb <download-mb> \
   --min-replicas 0 --max-replicas 3
 grid --local allocator mode recommend --grid allocator-control
 grid --local allocator status --grid allocator-control
 grid --local allocator mode automatic --grid allocator-control
 ```
+
+The optional model scout watches trusted Hugging Face publishers for immutable GGUF and vLLM
+releases, rejects unknown licenses and mutable revisions, checks the current fleet's runtime,
+memory, and disk fit, and writes ranked proposals. Hub popularity is discovery priority—not model
+quality. Qualification always sends real requests through Grid to a bounded canary and records the
+result as allocator evaluation evidence:
+
+```bash
+grid --local allocator scout run --grid allocator-control --search coder
+grid --local allocator scout status --grid allocator-control
+grid --local allocator scout benchmark <proposal-id> --grid allocator-control \
+  --inference-grid <remote-grid> --deploy-canary
+
+# Or refresh proposals every six hours. This discovers only; it never silently replaces a model.
+grid --local allocator scout watch --grid allocator-control --interval 21600
+```
+
+Canary profiles are exact-revision and exact-digest pinned, have zero required replicas and at most
+one replica, and do not retire incumbents. A candidate enters the live portfolio only after it
+passes the real quality floor; replacement remains a separate, reviewable allocation decision.
 
 Allocator enrollment verifies the managed llama.cpp runtime and installs Grid's version- and
 SHA-256-pinned build when it is absent. It also waits briefly for a just-started provider identity

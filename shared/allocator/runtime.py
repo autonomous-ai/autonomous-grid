@@ -499,7 +499,7 @@ class LlamaCppBackend:
             raise RuntimeError(
                 "managed llama.cpp artifact ids must be plain .gguf filenames"
             )
-        repo, filename = _parse_hugging_face_artifact_source(source)
+        repo, revision, filename = _parse_hugging_face_artifact_source(source)
         from shared.models import download
 
         target = download.local_path(model_id)
@@ -532,6 +532,7 @@ class LlamaCppBackend:
                 filename,
                 out=staging,
                 max_bytes=maximum_bytes,
+                revision=revision,
             )
         except SystemExit as exc:
             raise RuntimeError(str(exc)) from None
@@ -2937,7 +2938,7 @@ def _cached_model_path(model_id: str) -> Path | None:
     )
 
 
-def _parse_hugging_face_artifact_source(source: str) -> tuple[str, str]:
+def _parse_hugging_face_artifact_source(source: str) -> tuple[str, str, str]:
     parsed = urlsplit(str(source or ""))
     if (
         parsed.scheme != "hf"
@@ -2948,19 +2949,32 @@ def _parse_hugging_face_artifact_source(source: str) -> tuple[str, str]:
         or parsed.fragment
     ):
         raise RuntimeError(
-            "managed llama.cpp artifact_source must be hf://owner/repo/path.gguf"
+            "managed llama.cpp artifact_source must be "
+            "hf://owner/repo[@commit]/path.gguf"
         )
     parts = [unquote(item) for item in parsed.path.split("/") if item]
     if len(parts) < 2:
         raise RuntimeError(
-            "managed llama.cpp artifact_source must be hf://owner/repo/path.gguf"
+            "managed llama.cpp artifact_source must be "
+            "hf://owner/repo[@commit]/path.gguf"
         )
     if any(item in (".", "..") or "\0" in item for item in parts):
         raise RuntimeError("artifact_source contains an unsafe path component")
+    repo_name, separator, revision = parts[0].partition("@")
+    if separator and (
+        len(revision) != 40
+        or any(character not in "0123456789abcdefABCDEF" for character in revision)
+    ):
+        raise RuntimeError("Hugging Face artifact revision must be a full 40-hex commit")
+    if not repo_name:
+        raise RuntimeError(
+            "managed llama.cpp artifact_source must be "
+            "hf://owner/repo[@commit]/path.gguf"
+        )
     filename = "/".join(parts[1:])
     if not filename.lower().endswith(".gguf"):
         raise RuntimeError("managed llama.cpp artifact_source must name an exact .gguf")
-    return f"{parsed.netloc}/{parts[0]}", filename
+    return f"{parsed.netloc}/{repo_name}", (revision.lower() if separator else "main"), filename
 
 
 def _sha256_file(path: Path) -> str:
