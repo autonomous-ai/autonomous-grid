@@ -1169,6 +1169,26 @@ def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
         else:
             label = "llama.cpp"
     meta = {"name": record.get("meta_name") or engine_id, "engine": label}
+    specs = record.get("engines") or (
+        [_flat_spec(record)] if (record.get("endpoint_url") or record.get("models")) else []
+    )
+    aliases = list(record.get("advertise_as") or [])
+    model_engines: dict[str, str] = {}
+    for spec in specs:
+        models = list(spec.get("models") or [])
+        advertised = models if spec.get("api_kind") else _advertised_models(models, aliases)
+        spec_label = spec.get("engine_label")
+        if not spec_label:
+            spec_label = "llama.cpp" if not spec.get("endpoint_url") else "external"
+        for model in advertised:
+            # First route wins in `_build_routing`; make the display ownership follow the same
+            # collision rule instead of letting a shadowed engine relabel the routed model.
+            model_engines.setdefault(str(model), str(spec_label))
+    if model_engines:
+        # A provider identity can mix operator-owned engines with allocator-owned loopback routes.
+        # The aggregate `engine` label cannot describe that union; publish the per-model provenance
+        # so the relay/CLI never call an external vLLM route allocator-owned (or vice versa).
+        meta["model_engines"] = model_engines
     # What the machine IS — chip on Apple Silicon, card elsewhere. Without it the grid page can only
     # say the hostname and the OS ("Grid-Relay · macOS"), which is the same sentence for a laptop
     # and for a 192 GB Mac Studio. Empty fields are dropped rather than sent blank: the relay merges

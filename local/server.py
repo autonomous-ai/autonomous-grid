@@ -344,6 +344,7 @@ def create_app(
     app.state.allocator_last_success_safety_revision = 0
     app.state.allocator_last_error_revision = 0
     app.state.allocator_last_tick_monotonic = 0.0
+    app.state.allocator_last_dirty_monotonic = 0.0
 
     app.add_middleware(
         CORSMiddleware,
@@ -2553,6 +2554,7 @@ def _node_allocator_safety_digest(node: Node) -> str:
 
 def _mark_allocator_dirty(app: FastAPI, *, safety_changed: bool = True) -> int:
     app.state.allocator_dirty_revision += 1
+    app.state.allocator_last_dirty_monotonic = time.monotonic()
     if safety_changed:
         app.state.allocator_safety_revision += 1
     app.state.allocator_dirty_event.set()
@@ -2682,11 +2684,20 @@ async def _allocator_loop(app: FastAPI) -> None:
         except TimeoutError:
             pass
 
-        if (
-            app.state.allocator_dirty_event.is_set()
-            and app.state.allocator_coalesce_seconds
-        ):
-            await asyncio.sleep(app.state.allocator_coalesce_seconds)
+        if app.state.allocator_dirty_event.is_set() and app.state.allocator_coalesce_seconds:
+            # Debounce from the LAST mutation, not the first one. A fixed sleep after the first
+            # heartbeat splits an otherwise continuous burst whenever processing the HTTP calls
+            # takes slightly longer than the window (seen under the full-suite scheduler load),
+            # producing two plans for one burst. The event-loop thread owns these scalar updates,
+            # so re-reading after each await safely extends the quiet window without another lock.
+            while app.state.allocator_dirty_event.is_set():
+                quiet_for = time.monotonic() - float(
+                    app.state.allocator_last_dirty_monotonic
+                )
+                remaining = float(app.state.allocator_coalesce_seconds) - quiet_for
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(remaining)
 
         since_last = time.monotonic() - float(app.state.allocator_last_tick_monotonic)
         minimum = float(app.state.allocator_min_tick_seconds)

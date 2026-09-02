@@ -172,6 +172,7 @@ def test_allocator_join_reuses_remote_membership_and_keeps_node_token_in_memory(
         "_node_record_path",
         lambda _scope: tmp_path / "allocator-node.json",
     )
+    monkeypatch.setattr("cli.engine.ensure_allocator_llama_cpp", lambda: False)
     captured = {}
 
     def start(_args, **kwargs):
@@ -188,6 +189,212 @@ def test_allocator_join_reuses_remote_membership_and_keeps_node_token_in_memory(
     assert args.provider_grid == "grid-forge"
     assert args.dedicated is True
     assert args.token_file is None
+
+
+def test_allocator_join_verifies_runtime_before_requesting_enrollment(
+    monkeypatch, tmp_path
+):
+    from cli import remote_grid
+    from remote import credentials
+
+    args = cli.build_parser().parse_args(["allocator", "join", "forge"])
+    rec = {
+        "network_id": "grid-forge",
+        "name": "forge",
+        "access_token": "existing-membership",
+    }
+    monkeypatch.setattr(credentials, "require_session", lambda: "session")
+    monkeypatch.setattr(remote_grid, "_select", lambda _value: rec)
+    monkeypatch.setattr(remote_grid, "_network_id", lambda _rec: "grid-forge")
+    monkeypatch.setattr(
+        remote_grid,
+        "resolve_relay_base",
+        lambda *_args: ("https://forge.example", {}),
+    )
+    monkeypatch.setattr(allocator, "_remote_provider_network_id", lambda value: value)
+    monkeypatch.setattr(
+        allocator,
+        "_request",
+        lambda *_args, **_kwargs: {"grid_id": "allocator-control"},
+    )
+    monkeypatch.setattr(
+        allocator,
+        "_node_record_path",
+        lambda _scope: tmp_path / "allocator-node.json",
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "cli.engine.ensure_allocator_llama_cpp",
+        lambda: calls.append("runtime") or True,
+    )
+    monkeypatch.setattr(
+        allocator,
+        "_request_remote_enrollment",
+        lambda *_args: calls.append("enroll") or "grid-node-v1.payload.signature",
+    )
+    monkeypatch.setattr(
+        allocator,
+        "_start_allocator_node_locked",
+        lambda *_args, **_kwargs: calls.append("start") or 0,
+    )
+
+    assert allocator.cmd_allocator_join(args) == 0
+    assert calls == ["runtime", "enroll", "start"]
+
+
+def test_remote_enrollment_retries_until_provider_registration_is_visible(monkeypatch):
+    node_token = allocator.mint_node_token(
+        "operator-secret", "host-d", now=1_000, token_id="token-d"
+    )
+    replies = [
+        response(409, {"detail": "This machine must join the Grid as a provider before allocator enrollment"}),
+        response(409, {"detail": "This machine must join the Grid as a provider before allocator enrollment"}),
+        response(200, {"node_token": node_token, "host_id": "host-d"}),
+    ]
+    now = [0.0]
+    sleeps: list[float] = []
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            return replies.pop(0)
+
+    monkeypatch.setattr(allocator.httpx, "Client", Client)
+    monkeypatch.setattr(allocator.time, "monotonic", lambda: now[0])
+
+    def advance(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(allocator.time, "sleep", advance)
+
+    assert allocator._request_remote_enrollment(
+        "https://forge.example", "access", "forge"
+    ) == node_token
+    assert sleeps == [0.25, 0.25]
+    assert replies == []
+
+
+def test_remote_enrollment_does_not_retry_an_unrelated_conflict(monkeypatch):
+    calls = []
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            calls.append("post")
+            return response(409, {"detail": "provider identity is already bound"})
+
+    monkeypatch.setattr(allocator.httpx, "Client", Client)
+    monkeypatch.setattr(
+        allocator.time,
+        "sleep",
+        lambda _seconds: pytest.fail("an unrelated 409 must fail immediately"),
+    )
+
+    with pytest.raises(SystemExit, match="already bound"):
+        allocator._request_remote_enrollment(
+            "https://forge.example", "access", "forge"
+        )
+    assert calls == ["post"]
+
+
+def test_remote_enrollment_provider_wait_is_bounded(monkeypatch):
+    attempts = []
+    now = [0.0]
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            attempts.append(now[0])
+            return response(
+                409,
+                {"detail": "This machine must join the Grid as a provider before allocator enrollment"},
+            )
+
+    monkeypatch.setattr(allocator.httpx, "Client", Client)
+    monkeypatch.setattr(allocator, "REMOTE_ENROLLMENT_READY_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(allocator.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        allocator.time,
+        "sleep",
+        lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+
+    with pytest.raises(SystemExit, match="must join the Grid as a provider"):
+        allocator._request_remote_enrollment(
+            "https://forge.example", "access", "forge"
+        )
+    assert attempts == [0.0, 0.25, 0.5]
+
+
+def test_allocator_runtime_bootstrap_installs_and_verifies_pinned_llama(monkeypatch):
+    from cli import engine
+    from shared.engine import launcher
+
+    resolutions = [SystemExit("llama-server not found. Run install."), "/grid/bin/llama-server"]
+    installs = []
+
+    def resolve():
+        value = resolutions.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    monkeypatch.setattr(launcher, "llama_server_path", resolve)
+    monkeypatch.setattr(
+        engine,
+        "_install_llama_cpp",
+        lambda args: installs.append((args.target_sm, args.from_source)) or 0,
+    )
+
+    assert engine.ensure_allocator_llama_cpp() is True
+    assert installs == [(None, False)]
+    assert resolutions == []
+
+
+def test_allocator_runtime_bootstrap_preserves_invalid_explicit_override(monkeypatch):
+    from cli import engine
+    from shared.engine import launcher
+
+    monkeypatch.setattr(
+        launcher,
+        "llama_server_path",
+        lambda: (_ for _ in ()).throw(
+            SystemExit("LLAMA_SERVER is set but not an executable file: /bad")
+        ),
+    )
+    monkeypatch.setattr(
+        engine,
+        "_install_llama_cpp",
+        lambda _args: pytest.fail("must not install around an explicit broken override"),
+    )
+
+    with pytest.raises(SystemExit, match="LLAMA_SERVER"):
+        engine.ensure_allocator_llama_cpp()
 
 
 def test_detached_allocator_child_uses_resolvable_remote_control_url():

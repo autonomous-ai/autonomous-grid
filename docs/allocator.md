@@ -838,6 +838,11 @@ grid --remote join <grid> --allocator-provider --name <node-name>
 grid --remote allocator join <grid> --dedicated
 ```
 
+Enrollment verifies the llama.cpp runtime before advertising the node's managed capabilities. On a
+fresh machine it installs Grid's version- and SHA-256-pinned build automatically. It also retries
+the narrow provider-registration race for up to 15 seconds, so these commands may be run back to
+back; authentication, policy, and unrelated conflict failures are never retried.
+
 After installing a newer Grid build on a provider, apply it without manually locating the detached
 daemon or its controller-sidecar scope:
 

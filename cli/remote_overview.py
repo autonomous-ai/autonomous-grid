@@ -157,6 +157,25 @@ def _node_responses_models(
     return {case_map.get(str(model).casefold(), str(model)) for model in models}
 
 
+def _node_model_engines(
+    node: dict[str, Any], overview: dict[str, Any] | None = None
+) -> dict[str, str]:
+    """Per-model runtime/ownership labels, with the aggregate node label as compatibility fallback."""
+
+    raw = node.get("model_engines")
+    if not isinstance(raw, dict):
+        return {}
+    case_map = _model_case_map(overview) if overview is not None else {}
+    resolved: dict[str, str] = {}
+    for model, engine in raw.items():
+        if not isinstance(model, str) or not isinstance(engine, str):
+            continue
+        if not engine or len(engine) > 128 or not engine.isprintable():
+            continue
+        resolved[case_map.get(model.casefold(), model)] = engine
+    return resolved
+
+
 def cmd_remote_engines(args: argparse.Namespace) -> int:
     """`grid engines` (remote): the live engines (nodes) joined to the active grid."""
     overview = _fetch_overview(args)
@@ -212,12 +231,14 @@ def cmd_remote_models(args: argparse.Namespace) -> int:
     nodes = _nodes_from(overview)
     rows: list[tuple[str, str, str, bool]] = []
     for node in nodes:
-        engine = str(node.get("engine") or "")
+        aggregate_engine = str(node.get("engine") or "")
         name = str(node.get("name") or "")
         capable = _node_responses_models(
             node, overview
         )  # resolved once per node, not per served model
+        model_engines = _node_model_engines(node, overview)
         for model in _node_models(node, overview):
+            engine = model_engines.get(model, aggregate_engine)
             rows.append((model, engine, name, model in capable))
     # When auto routing is enabled, advertise the reserved `auto` model FIRST — same as the relay's
     # /relay/v1/models endpoint (owner `grid-router`), so it shows even when zero engines are joined.

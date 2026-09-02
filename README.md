@@ -622,6 +622,10 @@ grid --local allocator status --grid allocator-control
 grid --local allocator mode automatic --grid allocator-control
 ```
 
+Allocator enrollment verifies the managed llama.cpp runtime and installs Grid's version- and
+SHA-256-pinned build when it is absent. It also waits briefly for a just-started provider identity
+to become visible at the relay, so the two fresh-node commands above are safe to run back to back.
+
 The relay also needs its allocator sidecar URL and owner-only enrollment-token file configured
 before providers can enroll; the complete relay setup, rollout sequence, framework ownership
 boundary, and verification commands are in the

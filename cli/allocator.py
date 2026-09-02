@@ -58,6 +58,8 @@ NODE_STOP_COOPERATIVE_GRACE_SECONDS = (
     + NODE_SHUTDOWN_SCHEDULING_MARGIN_SECONDS
 )
 NODE_STARTUP_CLEANUP_GRACE_SECONDS = NODE_STOP_COOPERATIVE_GRACE_SECONDS
+REMOTE_ENROLLMENT_READY_TIMEOUT_SECONDS = 15.0
+REMOTE_ENROLLMENT_RETRY_SECONDS = 0.25
 
 
 def cmd_allocator_status(args: argparse.Namespace) -> int:
@@ -360,6 +362,13 @@ def cmd_allocator_join(args: argparse.Namespace) -> int:
         if _node_process_state(record) == "owned":
             print(f"Allocator node already running (pid={_record_pid(record)})")
             return 0
+        # The orchestrator always advertises llama.cpp as a managed runtime. A fresh capacity node
+        # must therefore have the executable before it enrolls; otherwise the controller can make
+        # a valid placement that is guaranteed to fail at warm time. Enrollment is the explicit
+        # lifecycle opt-in, and the installer is a version- and SHA-256-pinned Grid artifact.
+        from .engine import ensure_allocator_llama_cpp
+
+        ensure_allocator_llama_cpp()
         node_token = _request_remote_enrollment(relay_url, access_token, label)
         args.provider_grid = network_id
         args.token_file = None
@@ -824,21 +833,39 @@ def _request(
 
 
 def _request_remote_enrollment(relay_url: str, access_token: str, label: str) -> str:
-    """Exchange existing provider membership for an in-memory host credential."""
+    """Exchange provider membership for a host credential after registration becomes visible.
 
-    try:
-        with httpx.Client(timeout=15.0, trust_env=True) as client:
-            response = client.post(
-                f"{relay_url}/allocator/enroll",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-    except httpx.RequestError as exc:
-        raise SystemExit(f"Could not enroll this machine with allocator on {label}: {exc}") from exc
-    if response.status_code >= 400:
+    ``grid join`` deliberately returns once its detached provider has started, while the provider
+    registers with the relay asynchronously. A directly following ``grid allocator join`` can
+    therefore observe a short, honest 409. Retry only that exact readiness race; authentication,
+    policy, malformed responses, and every other error remain immediate failures.
+    """
+
+    deadline = time.monotonic() + REMOTE_ENROLLMENT_READY_TIMEOUT_SECONDS
+    while True:
+        try:
+            with httpx.Client(timeout=15.0, trust_env=True) as client:
+                response = client.post(
+                    f"{relay_url}/allocator/enroll",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+        except httpx.RequestError as exc:
+            raise SystemExit(f"Could not enroll this machine with allocator on {label}: {exc}") from exc
         try:
             detail = response.json().get("detail")
         except (ValueError, AttributeError):
             detail = "relay rejected allocator enrollment"
+        provider_not_visible = (
+            response.status_code == 409
+            and isinstance(detail, str)
+            and "must join the grid as a provider" in detail.lower()
+        )
+        remaining = deadline - time.monotonic()
+        if provider_not_visible and remaining > 0:
+            time.sleep(min(REMOTE_ENROLLMENT_RETRY_SECONDS, remaining))
+            continue
+        break
+    if response.status_code >= 400:
         raise SystemExit(f"Allocator enrollment failed ({response.status_code}): {detail}")
     try:
         payload = response.json()

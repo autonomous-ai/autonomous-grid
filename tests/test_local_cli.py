@@ -19044,6 +19044,36 @@ def test_meta_labels_all_external_union_as_external(monkeypatch, tmp_path):
     assert serve._meta(builtin, "remote")["engine"] == "llama.cpp"  # built-in --serve still labels llama.cpp
 
 
+def test_meta_labels_each_model_in_a_mixed_allocator_union(monkeypatch, tmp_path):
+    """The aggregate node label cannot erase route ownership in a mixed managed/unmanaged union."""
+    from remote import serve
+
+    got = serve._meta(
+        {
+            "engines": [
+                {
+                    "endpoint_url": "http://127.0.0.1:8000/v1",
+                    "models": ["qwen-external"],
+                    "engine_label": "vllm",
+                },
+                {
+                    "endpoint_url": "http://127.0.0.1:18081/v1",
+                    "models": ["qwen-managed.gguf"],
+                    "engine_label": "allocator:llama.cpp",
+                    "allocator_host_id": "host-c",
+                },
+            ]
+        },
+        "remote",
+    )
+
+    assert got["engine"] == "vllm+allocator:llama.cpp"
+    assert got["model_engines"] == {
+        "qwen-external": "vllm",
+        "qwen-managed.gguf": "allocator:llama.cpp",
+    }
+
+
 def test_bring_up_engines_external_multi_probes_each(monkeypatch, tmp_path):
     from remote import probe, serve
 
@@ -21346,6 +21376,30 @@ def test_remote_models_json_maps_name_to_node_key(monkeypatch, tmp_path, capsys)
     assert {"model": "glm-5.2", "engine": "MLX", "node": "mac-studio", "responses": False} in payload
     assert {"model": "qwen-3", "engine": "MLX", "node": "mac-studio", "responses": False} in payload
     assert {"model": "glm-5.2", "engine": "ollama", "node": "ollama-box", "responses": False} in payload
+
+
+def test_remote_models_uses_per_model_engine_for_mixed_ownership(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(
+        monkeypatch,
+        {
+            "nodes": [
+                {
+                    "name": "gpu-box",
+                    "engine": "vllm+allocator:llama.cpp",
+                    "models": ["qwen-external", "qwen-managed"],
+                    "model_engines": {
+                        "qwen-external": "vllm",
+                        "qwen-managed": "allocator:llama.cpp",
+                    },
+                }
+            ]
+        },
+    )
+
+    assert cli.main(["models", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["engine"] for row in payload] == ["vllm", "allocator:llama.cpp"]
 
 
 def test_remote_models_preserves_case_for_extensionless_gguf_alias(monkeypatch, tmp_path, capsys):
