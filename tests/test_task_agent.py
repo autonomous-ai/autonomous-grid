@@ -5686,6 +5686,7 @@ def test_codex_only_preflight_does_not_require_claude(monkeypatch, tmp_path):
         task_agent, "resolve_binary",
         lambda: pytest.fail("Codex-only node tried to resolve Claude"))
     monkeypatch.setattr(task_codex, "resolve_binary", lambda: "/opt/grid/bin/codex")
+    _sandbox_packages_present(monkeypatch)
 
     task_agent.preflight_before_serving()
 
