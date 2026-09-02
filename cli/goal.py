@@ -1095,6 +1095,40 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
     own_tokens = goal.get("own_tokens_used")
     valid_own_tokens = (isinstance(own_tokens, int) and not isinstance(own_tokens, bool)
                         and own_tokens >= 0)
+    terminal_attempts = set()
+    for turn in turns:
+        if not isinstance(turn, dict):
+            continue
+        identity = (
+            turn.get("id"), turn.get("attempt"), turn.get("provider_node_id"),
+            turn.get("agent_kind"),
+        )
+        if (isinstance(identity[0], str)
+                and isinstance(identity[1], int) and not isinstance(identity[1], bool)
+                and isinstance(identity[2], str) and isinstance(identity[3], str)):
+            terminal_attempts.add(identity)
+    abandoned_inference_tokens = 0
+    abandoned_inference_tokens_complete = True
+    for inference_index, item in enumerate(inference, 1):
+        if inference_index not in valid_inference_identity or not isinstance(item, dict):
+            continue
+        identity = (
+            item.get("turn_id"), item.get("goal_attempt"),
+            item.get("goal_executor_node_id"), item.get("goal_agent_kind"),
+        )
+        # A native Codex counter advances only when Codex receives a completed model response on
+        # the attempt that ultimately completed that turn. Grid intentionally charges every routed
+        # request, including work done by a worker that later disappears and a response that times
+        # out before Codex can consume it. Those tokens belong in relay `own_tokens_used`, but can
+        # never appear in the resumed native thread's counter.
+        if identity in terminal_attempts and item.get("state") == "completed":
+            continue
+        token_fields = (item.get("tokens_in"), item.get("tokens_out"))
+        if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
+               for value in token_fields):
+            abandoned_inference_tokens += sum(token_fields)
+        else:
+            abandoned_inference_tokens_complete = False
     for index, turn in enumerate(turns, 1):
         if not isinstance(turn, dict):
             continue
@@ -1171,9 +1205,12 @@ def _verify_evidence(record: dict, *, min_execution_nodes: int = 1,
                     failures.append(
                         f"turn {index} Codex Goal token counter exceeds relay own-token usage")
                 if (index == len(turns) and goal.get("status") == "complete"
-                        and valid_own_tokens and checkpoint_tokens != own_tokens):
+                        and valid_own_tokens and checkpoint_tokens != own_tokens
+                        and (not abandoned_inference_tokens_complete
+                             or checkpoint_tokens + abandoned_inference_tokens != own_tokens)):
                     failures.append(
-                        "final Codex Goal token counter does not equal relay own-token usage")
+                        "final Codex Goal token counter plus abandoned inference usage does not "
+                        "equal relay own-token usage")
         if index == len(turns) and goal.get("status") == "complete":
             if harness == "codex" and native[0].get("status") != "complete":
                 failures.append("final Codex Goal checkpoint is not complete")

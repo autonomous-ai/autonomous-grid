@@ -1719,6 +1719,66 @@ def test_goal_evidence_verify_checks_hierarchical_token_accounting():
                for failure in _verify_evidence(record))
 
 
+def test_goal_evidence_reconciles_native_tokens_after_failover_and_timeout():
+    """Grid charges abandoned calls that the resumed native Codex thread cannot count."""
+    from copy import deepcopy
+
+    from cli.goal import _verify_evidence
+
+    record = {
+        "schema_version": 1,
+        "goal": {
+            "status": "complete", "model": "grid-model", "tokens_used": 150,
+            "own_tokens_used": 150, "descendant_tokens_used": 0,
+            "child_tokens_reserved": 0, "turns_completed": 1, "evals": [],
+        },
+        "relationships": {"parent_goal_id": None, "children": []},
+        "trajectory": {"transcript_pruned": False, "pruned_turn_branches": [],
+                       "worktree_chain": []},
+        "turns": [{
+            "id": "turn-1", "attempt": 2, "state": "completed", "agent_kind": "codex",
+            "provider_node_id": "node-B", "input_commit": "1" * 40,
+            "result_commit": "2" * 40, "transcript_commit": None,
+            "transcript_result_commit": "a" * 40,
+        }],
+        "attempt_events": [
+            attempt_started_event("turn-1", 0, 1, "node-A", "codex"),
+            {"turn_id": "turn-1", "seq": 1, "event": {
+                "type": "task.retry", "attempt": 1, "reason": "lease_expired",
+                "previous_provider_id": "node-A", "previous_agent_kind": "codex",
+            }},
+            attempt_started_event("turn-1", 2, 2, "node-B", "codex"),
+            native_goal_event("turn-1", 3, 2, "node-B", "codex"),
+            terminal_event("turn-1", 4),
+        ],
+        "inference": [{
+            "turn_id": "turn-1", "model": "grid-model", "provider_node_id": "gpu-C",
+            "state": "completed", "requests": 2, "tokens_in": 35, "tokens_out": 5,
+            "goal_attempt": 1, "goal_executor_node_id": "node-A",
+            "goal_agent_kind": "codex",
+        }, {
+            "turn_id": "turn-1", "model": "grid-model", "provider_node_id": "gpu-C",
+            "state": "completed", "requests": 3, "tokens_in": 80, "tokens_out": 20,
+            "goal_attempt": 2, "goal_executor_node_id": "node-B",
+            "goal_agent_kind": "codex",
+        }, {
+            "turn_id": "turn-1", "model": "grid-model", "provider_node_id": "gpu-C",
+            "state": "timed_out", "requests": 1, "tokens_in": 10, "tokens_out": 0,
+            "goal_attempt": 2, "goal_executor_node_id": "node-B",
+            "goal_agent_kind": "codex",
+        }],
+        "eval_runs": [],
+    }
+
+    assert _verify_evidence(record, min_execution_nodes=2, require_inference=True) == []
+
+    damaged = deepcopy(record)
+    damaged["inference"][0]["tokens_out"] += 1
+    assert any("plus abandoned inference usage" in failure
+               for failure in _verify_evidence(
+                   damaged, min_execution_nodes=2, require_inference=True))
+
+
 def test_goal_evidence_verifier_is_total_over_json_shaped_corruption():
     """A saved/exported artifact may be damaged; verification must reject, never traceback."""
     from copy import deepcopy
