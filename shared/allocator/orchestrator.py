@@ -262,6 +262,7 @@ class OllamaBackend:
         response.raise_for_status()
         digest = self.artifact_sha256(model_id)
         if digest != canonical_sha256(expected_sha256):
+            self.evict_artifact(model_id, digest)
             raise RuntimeError("pulled Ollama model digest does not match the pinned artifact")
         for item in self._json("GET", "/api/tags").get("models", []):
             if isinstance(item, Mapping) and item.get("name") == model_id:
@@ -357,10 +358,14 @@ class ComfyUIBackend:
         self,
         base_url: str = "http://127.0.0.1:8188",
         *,
-        bundles: tuple[str, ...] = ("image_generation", "image_editing", "i2v", "z_image"),
+        bundles: tuple[str, ...] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.port = urlsplit(self.base_url).port or 8188
+        if bundles is None:
+            from shared.models.media_bundles import present_bundles
+
+            bundles = tuple(present_bundles())
         self.bundles = tuple(sorted({f"comfyui:{item}" for item in bundles}))
         self.client = httpx.Client(timeout=10.0, trust_env=False)
 
@@ -673,8 +678,10 @@ def _parse_hf_snapshot_source(source: str) -> tuple[str, str]:
     repo_id, separator, revision = value.rpartition("@")
     if not separator or repo_id.count("/") != 1 or not revision:
         raise RuntimeError("vLLM artifacts require hf://owner/repo@revision sources")
-    if any(character not in "0123456789abcdefABCDEF" for character in revision):
-        raise RuntimeError("vLLM revision must be an immutable hexadecimal commit")
+    if len(revision) != 40 or any(
+        character not in "0123456789abcdefABCDEF" for character in revision
+    ):
+        raise RuntimeError("vLLM revision must be a full immutable 40-hex commit")
     return repo_id, revision.lower()
 
 

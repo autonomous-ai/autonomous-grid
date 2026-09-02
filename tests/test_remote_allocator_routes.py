@@ -27,12 +27,13 @@ class _Client:
         return _Response({"nodes": [self.node]})
 
 
-def _ready(model: str, port: int) -> ManagedResidency:
+def _ready(model: str, port: int, runtime: str = "llama.cpp") -> ManagedResidency:
     return ManagedResidency(
         model_id=model,
         memory_mb=256,
         state=ResidencyState.READY,
-        handle=RuntimeHandle(pid=999, port=port),
+        handle=RuntimeHandle(pid=999, port=port, runtime=runtime),
+        runtime=runtime,
     )
 
 
@@ -128,3 +129,41 @@ def test_remote_publisher_refuses_managed_route_without_engine_credential(monkey
         assert "API key file" in str(exc)
     else:
         raise AssertionError("managed route was published without its engine credential")
+
+
+def test_remote_publisher_adds_and_removes_managed_media_without_clobbering_user_media(
+    monkeypatch, tmp_path
+):
+    key_file = tmp_path / "engine.key"
+    key_file.write_text("allocator-engine-secret-123456\n")
+    user = {"endpoint_url": "http://127.0.0.1:8000/v1", "models": ["qwen"]}
+    path, _ = _seed(monkeypatch, tmp_path, engines=[user])
+    record = jsonio.load_json(path)
+    record["media"] = True
+    record["media_bundles"] = ["z_image"]
+    jsonio.atomic_write_json(path, record)
+    client = _Client(
+        {
+            "name": "forge-node",
+            "models": ["qwen", "comfyui:z_image", "comfyui:image_generation"],
+        }
+    )
+    publisher = RemoteProviderRoutePublisher(
+        "grid-forge", "host-c", engine_api_key_file=key_file, client=client
+    )
+
+    assert publisher.sync(
+        [_ready("comfyui:image_generation", 8188, "comfyui")]
+    ) == ()
+    stored = jsonio.load_json(path)
+    assert stored["engines"] == [user]
+    assert stored["media"] is True
+    assert stored["media_bundles"] == ["z_image", "image_generation"]
+    assert stored["allocator_media_models"] == ["comfyui:image_generation"]
+
+    client.node["models"] = ["qwen", "comfyui:z_image"]
+    assert publisher.fence() == ()
+    restored = jsonio.load_json(path)
+    assert restored["media"] is True
+    assert restored["media_bundles"] == ["z_image"]
+    assert "allocator_media_host_id" not in restored

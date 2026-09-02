@@ -7,7 +7,12 @@ import httpx
 import pytest
 
 from shared.allocator.models import ActionKind, MutationAction
-from shared.allocator.orchestrator import EngineOrchestratorBackend, OllamaBackend
+from shared.allocator.orchestrator import (
+    ComfyUIBackend,
+    EngineOrchestratorBackend,
+    OllamaBackend,
+    _parse_hf_snapshot_source,
+)
 from shared.allocator.runtime import ManagedModelRuntime, RuntimeHandle
 
 
@@ -169,3 +174,41 @@ def test_ollama_start_failure_never_returns_a_routable_handle() -> None:
 
     with pytest.raises(httpx.HTTPStatusError):
         backend.start("broken", 18_100)
+
+
+def test_comfyui_advertises_only_configured_bundle_and_unloads_native_memory() -> None:
+    freed = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal freed
+        if request.url.path == "/system_stats":
+            return httpx.Response(200, json={"system": {}})
+        if request.url.path == "/queue":
+            return httpx.Response(200, json={"queue_running": ["job"]})
+        if request.url.path == "/free":
+            freed = True
+            return httpx.Response(200, json={})
+        raise AssertionError(request.url)
+
+    backend = ComfyUIBackend(bundles=("image_generation",))
+    backend.client.close()
+    backend.client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    assert backend.cached_models() == ("comfyui:image_generation",)
+    handle = backend.start("comfyui:image_generation", 99)
+    assert handle.runtime == "comfyui" and handle.port == 8188
+    assert backend.active_requests(handle, "comfyui:image_generation") == 1
+    backend.stop(handle, "comfyui:image_generation")
+    assert freed
+
+
+def test_vllm_snapshot_sources_require_full_commit_identity() -> None:
+    revision = "a" * 40
+    assert _parse_hf_snapshot_source(f"hf://Qwen/Qwen3.8@{revision}") == (
+        "Qwen/Qwen3.8",
+        revision,
+    )
+    with pytest.raises(RuntimeError, match="full immutable"):
+        _parse_hf_snapshot_source("hf://Qwen/Qwen3.8@main")
+    with pytest.raises(RuntimeError, match="full immutable"):
+        _parse_hf_snapshot_source("hf://Qwen/Qwen3.8@abc123")

@@ -1,11 +1,11 @@
-"""Publish allocator-owned llama.cpp routes through an existing remote Grid identity.
+"""Publish allocator-owned engine routes through an existing remote Grid identity.
 
 The remote provider already owns the relay credential, poll workers, and one stable node identity.
 Allocator nodes therefore do not register a second provider.  They add loopback engines to the
 existing remote run record and ask its serve process to atomically hot-reload the model union.
 
-Only specs carrying ``allocator_host_id`` are owned here.  User-managed vLLM, ComfyUI, API, and
-other external engines are preserved byte-for-byte.
+Only specs and media fields carrying ``allocator_host_id`` are owned here. User-managed engines
+and media configuration are preserved byte-for-byte.
 """
 
 from __future__ import annotations
@@ -77,6 +77,12 @@ class RemoteProviderRoutePublisher:
             if item.handle is not None and item.state == ResidencyState.READY
         }
         requested = tuple(sorted(ready))
+        requested_media = tuple(
+            model
+            for model in requested
+            if (ready[model].runtime or ready[model].handle.runtime) == "comfyui"
+        )
+        requested_text = tuple(model for model in requested if model not in requested_media)
         if requested and not self.engine_api_key_file:
             raise RuntimeError("remote allocator routing requires an engine API key file")
         if requested and not Path(self.engine_api_key_file).is_file():
@@ -90,6 +96,12 @@ class RemoteProviderRoutePublisher:
             record = jsonio.load_json(path)
             self._validate_live_record(record)
             existing = list(record.get("engines") or [])
+            previous_media_state = (
+                bool(record.get("media", False)),
+                tuple(record.get("media_bundles") or []),
+                str(record.get("allocator_media_host_id") or ""),
+                tuple(record.get("allocator_media_models") or []),
+            )
             previously_managed = {
                 str(model)
                 for spec in existing
@@ -97,6 +109,10 @@ class RemoteProviderRoutePublisher:
                 and spec.get("allocator_host_id") == self.host_id
                 for model in (spec.get("models") or [])
             }
+            if record.get("allocator_media_host_id") == self.host_id:
+                previously_managed.update(
+                    str(model) for model in (record.get("allocator_media_models") or [])
+                )
             unmanaged = [
                 dict(spec)
                 for spec in existing
@@ -123,10 +139,37 @@ class RemoteProviderRoutePublisher:
                         else {}
                     ),
                 }
-                for model in requested
+                for model in requested_text
             ]
             desired = unmanaged + managed
-            changed = desired != existing
+            if requested_media:
+                media_owner = str(record.get("allocator_media_host_id") or "")
+                if media_owner and media_owner != self.host_id:
+                    raise RuntimeError("remote provider media lifecycle is owned by another host")
+                if not media_owner:
+                    record["allocator_media_base_enabled"] = bool(record.get("media", False))
+                    record["allocator_media_base_bundles"] = list(
+                        record.get("media_bundles") or []
+                    )
+                base_bundles = list(record.get("allocator_media_base_bundles") or [])
+                managed_bundles = [model.removeprefix("comfyui:") for model in requested_media]
+                record["media"] = True
+                record["media_bundles"] = list(dict.fromkeys([*base_bundles, *managed_bundles]))
+                record["allocator_media_host_id"] = self.host_id
+                record["allocator_media_models"] = list(requested_media)
+            elif record.get("allocator_media_host_id") == self.host_id:
+                record["media"] = bool(record.pop("allocator_media_base_enabled", False))
+                record["media_bundles"] = list(
+                    record.pop("allocator_media_base_bundles", []) or []
+                )
+                record.pop("allocator_media_host_id", None)
+                record.pop("allocator_media_models", None)
+            changed = desired != existing or previous_media_state != (
+                bool(record.get("media", False)),
+                tuple(record.get("media_bundles") or []),
+                str(record.get("allocator_media_host_id") or ""),
+                tuple(record.get("allocator_media_models") or []),
+            )
             if changed:
                 record["engines"] = desired
                 record["models"] = list(
