@@ -169,6 +169,7 @@ class AllocatorNodeAgent:
         self._resources = _allocator_resources(
             self.resource_collector(),
             self.runtime.residencies,
+            runtimes=self.runtime.supported_runtimes,
         )
 
     def heartbeat_once(self) -> None:
@@ -880,7 +881,7 @@ class AllocatorNodeAgent:
             },
             "allocator": self._engine_envelope(residency),
         }
-        engine_api_key = getattr(self.runtime, "engine_api_key", "")
+        engine_api_key = self.runtime.engine_api_key_for(residency.model_id)
         if isinstance(engine_api_key, str) and engine_api_key:
             body["engine_api_key"] = engine_api_key
         if active_tasks is not None:
@@ -1432,6 +1433,8 @@ def _validated_grid_url(value: str, *, allow_insecure_http: bool) -> str:
 def _allocator_resources(
     info: Mapping[str, Any],
     residencies: tuple[ManagedResidency, ...] = (),
+    *,
+    runtimes: tuple[str, ...] = ("llama.cpp",),
 ) -> dict[str, Any]:
     usable_bytes = _nonnegative_int(info.get("usable_bytes"))
     backend = str(info.get("backend") or "cpu")
@@ -1528,7 +1531,7 @@ def _allocator_resources(
             if disk.get("free_gb") is not None
             else None
         ),
-        "runtimes": ["llama.cpp"],
+        "runtimes": list(runtimes),
         "backends": [backend],
         "gpu_count": gpu_count,
         "gpu_memory_mb": list(gpu_memory_mb),

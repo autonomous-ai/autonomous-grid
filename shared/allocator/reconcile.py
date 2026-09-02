@@ -520,7 +520,23 @@ class Reconciler:
         # obsolete one is considered for removal.
         for assignment in plan.assignments:
             pair = (assignment.node_id, assignment.model_id)
+            ready_residency = residency_by_pair.get(pair)
             if pair in ready_pairs:
+                if (
+                    ready_residency is not None
+                    and ready_residency.runtime
+                    and assignment.runtime
+                    and ready_residency.runtime != assignment.runtime
+                ):
+                    deferred.append(
+                        DeferredMutation(
+                            ActionKind.WARM,
+                            assignment.node_id,
+                            assignment.model_id,
+                            "runtime_migration_requires_replacement",
+                            "A live model cannot change serving engines in place; stage a versioned canary first",
+                        )
+                    )
                 continue
             if (
                 service_capacity_unsatisfied
@@ -597,6 +613,7 @@ class Reconciler:
                     blocked_causes=mutation_block_causes,
                     history_cooldowns=history_cooldowns,
                     memory_mb=assignment.memory_mb,
+                    runtime=assignment.runtime,
                 )
                 if load_action is None:
                     deferred.extend(
@@ -640,6 +657,7 @@ class Reconciler:
                 history_cooldowns=history_cooldowns,
                 bypass_success_observation=authoritative_rewarm_state,
                 memory_mb=assignment.memory_mb,
+                runtime=assignment.runtime,
             )
             if warm_action is None:
                 deferred.extend(
@@ -839,6 +857,7 @@ class Reconciler:
                 blocked_causes=mutation_block_causes,
                 history_cooldowns=history_cooldowns,
                 residency=residency,
+                runtime=residency.runtime,
             )
             if action is None:
                 deferred.extend(
@@ -961,6 +980,7 @@ class Reconciler:
                         history_cooldowns=history_cooldowns,
                         bypass_success_observation=True,
                         residency=residency,
+                        runtime=residency.runtime,
                     )
                 else:
                     action = self._proposal(
@@ -977,6 +997,7 @@ class Reconciler:
                         history_cooldowns=history_cooldowns,
                         bypass_success_observation=True,
                         residency=residency,
+                        runtime=residency.runtime,
                     )
                 if action is None:
                     deferred.extend(
@@ -1242,6 +1263,7 @@ class Reconciler:
         memory_mb: int | None = None,
         residency: ModelResidency | None = None,
         predictive_prefetch: bool = False,
+        runtime: str = "",
     ) -> MutationAction | None:
         if kind.value not in node.actuator_capabilities or node.manually_managed:
             return None
@@ -1337,6 +1359,7 @@ class Reconciler:
             artifact_source=(profile.artifact_source if kind == ActionKind.LOAD else ""),
             artifact_size_mb=(profile.artifact_size_mb if kind == ActionKind.LOAD else 0),
             predictive_prefetch=predictive_prefetch,
+            runtime=(runtime or profile.runtime_for(node.runtimes)),
         )
 
     def _history_blocked_until(

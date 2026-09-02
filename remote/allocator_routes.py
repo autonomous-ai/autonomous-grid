@@ -107,9 +107,21 @@ class RemoteProviderRoutePublisher:
                 {
                     "endpoint_url": f"http://127.0.0.1:{ready[model].handle.port}/v1",
                     "models": [model],
-                    "engine_label": "allocator:llama.cpp",
+                    "engine_label": (
+                        "allocator:"
+                        f"{ready[model].runtime or ready[model].handle.runtime or 'llama.cpp'}"
+                    ),
                     "allocator_host_id": self.host_id,
-                    "allocator_api_key_file": self.engine_api_key_file,
+                    **(
+                        {"allocator_api_key_file": self.engine_api_key_file}
+                        if (
+                            ready[model].runtime
+                            or ready[model].handle.runtime
+                            or "llama.cpp"
+                        )
+                        == "llama.cpp"
+                        else {}
+                    ),
                 }
                 for model in requested
             ]

@@ -84,6 +84,8 @@ def cmd_internal_allocator_node(
         ManagedModelRuntime,
         engine_api_key_path,
     )
+    from shared.allocator.orchestrator import build_engine_orchestrator
+    from shared.system.device_info import collect_device_info
     from shared.allocator.local import HostPolicy, LocalHostProtectionLoop
     from remote.allocator_routes import RemoteProviderRoutePublisher
 
@@ -107,20 +109,31 @@ def cmd_internal_allocator_node(
             "Allocator nodes carrying private engine credentials require HTTPS Grid control "
             "transport (literal loopback HTTP is also allowed)."
         )
+    state_file = Path(state_path)
+    llama_backend = LlamaCppBackend(
+        bind_host=_allocator_bind_host(effective_advertise_host),
+        endpoint_host=effective_advertise_host,
+        tls_cert_file=engine_tls_cert,
+        tls_key_file=engine_tls_key,
+        tls_ca_file=engine_tls_ca,
+    )
+    device = collect_device_info()
+    gpu_count = len(device.get("gpus") or []) if isinstance(device, dict) else 1
     managed = ManagedModelRuntime(
-        Path(state_path),
+        state_file,
         host_id=credential.host_id,
-        backend=LlamaCppBackend(
-            bind_host=_allocator_bind_host(effective_advertise_host),
-            endpoint_host=effective_advertise_host,
-            tls_cert_file=engine_tls_cert,
-            tls_key_file=engine_tls_key,
-            tls_ca_file=engine_tls_ca,
+        backend=build_engine_orchestrator(
+            state_path=state_file,
+            llama_backend=llama_backend,
+            dedicated=dedicated,
+            gpu_count=max(1, gpu_count),
+            local_proxy=bool(provider_grid_id),
         ),
         protection_loop=(
             LocalHostProtectionLoop(
                 HostPolicy(
                     pause_for_user_activity=False,
+                    accelerator_memory_is_managed=True,
                     cpu_throttle_percent=100.0,
                     load_per_cpu_throttle=4.0,
                     activity_debounce_seconds=0.0,

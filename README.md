@@ -20,6 +20,11 @@ If you want a desktop app instead of a terminal, get it at [autonomous.ai/grid](
 If your computers are in different places, start here then switch to [remote mode](#working-from-anywhere).
 If you already run Ollama, vLLM or LM Studio, keep them — Grid networks them, it does not replace them.
 
+For fleets that should adapt model residency to changing coding, research, image, video, and other
+workloads, Grid also includes a safety-fenced [dynamic resource allocator](docs/allocator.md). Its
+router handles each request; the allocator separately learns demand and manages compatible
+llama.cpp, Ollama, ComfyUI, and vLLM capacity on explicitly enrolled hosts.
+
 ## Install
 
 On every computer, macOS or Linux:

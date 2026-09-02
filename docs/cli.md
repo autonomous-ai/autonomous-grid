@@ -571,9 +571,10 @@ grid allocator node resume [--grid <g>]
 The allocator dynamically places configured model replicas across participating computers. It is
 experimental and starts in **`recommend`** mode: `observe` records drift without proposing
 actions, `recommend` shows the actions it would take, and `automatic` delivers executable
-load/warm/drain/unload commands within the allocator's safety limits. For the initial managed
-runtime, `<model>` must be the exact filename of a GGUF already cached with `grid pull` on each
-eligible computer; allocation never invents a download source.
+load/warm/drain/unload commands within the allocator's safety limits. For `llama.cpp`, `<model>` is
+the exact GGUF filename. Dedicated remote providers also expose installed Ollama, ComfyUI, and vLLM
+lifecycle adapters through the same allocator contract; profiles must declare the matching runtime
+and an immutable runtime-specific source when an artifact is not already cached.
 
 On a remote Grid, first serve the machine normally with `grid join`, then run
 `grid allocator join <grid>`. The relay reuses that provider's existing authenticated membership,
@@ -608,7 +609,8 @@ before provisioning another computer.
 If `--runtime` is omitted, model profiles default to `llama.cpp`. Supplying one or more
 `--runtime` flags replaces that default; it does not add to it. One or more
 `--runtime-memory-mb RUNTIME=MB` values override the fallback `--memory-mb` estimate on matching
-hosts; a host advertising several matching runtimes is charged the largest matching value. A
+hosts. A new placement selects the compatible runtime with the smallest declared footprint (then a
+stable name tie-break), while an already-live compatible runtime remains sticky. A
 profile can also require a physical topology with `--min-gpu-count` and
 `--min-gpu-memory-mb`; nodes without enough reported per-device VRAM fail that constraint closed. A
 managed node on the same machine as its Grid advertises the Grid's literal loopback control address
@@ -683,6 +685,9 @@ grid join --at http://gpu-host:8000/v1 -m Qwen3.8-Flash-Next --kind vllm \
 
 Repeat `--gpu-memory-mb` once per device for heterogeneous GPUs. This metadata is placement and
 routing evidence only; Grid still never starts, drains, or stops an externally owned vLLM process.
+To make vLLM allocator-managed, enroll its existing Grid provider with
+`grid --remote allocator join <grid> --dedicated` and configure an immutable `vllm` model profile;
+the allocator still refuses any process it cannot prove it owns.
 
 ## Use
 

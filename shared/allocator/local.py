@@ -89,6 +89,10 @@ class HostPolicy:
     memory_critical_percent: float = 95.0
     gpu_memory_throttle_percent: float = 92.0
     gpu_memory_critical_percent: float = 98.0
+    # Dedicated allocator nodes intentionally fill accelerator memory with managed models. Treat
+    # that occupancy as workload rather than competing-user pressure while retaining thermal,
+    # system-memory, battery, and network safety fences.
+    accelerator_memory_is_managed: bool = False
     cpu_throttle_percent: float = 90.0
     load_per_cpu_throttle: float = 1.25
 
@@ -762,7 +766,11 @@ def evaluate_host(
     if memory is not None and memory >= policy.memory_critical_percent:
         safety_target = _more_restrictive(safety_target, NodeState.UNHEALTHY)
         reasons.append("memory_critical")
-    if gpu_memory is not None and gpu_memory >= policy.gpu_memory_critical_percent:
+    if (
+        not policy.accelerator_memory_is_managed
+        and gpu_memory is not None
+        and gpu_memory >= policy.gpu_memory_critical_percent
+    ):
         safety_target = _more_restrictive(safety_target, NodeState.UNHEALTHY)
         reasons.append("gpu_memory_critical")
     if policy.require_network and network is False:
@@ -788,7 +796,11 @@ def evaluate_host(
         throttle_reasons.append("thermal_hot")
     if memory is not None and memory >= policy.memory_throttle_percent:
         throttle_reasons.append("memory_pressure")
-    if gpu_memory is not None and gpu_memory >= policy.gpu_memory_throttle_percent:
+    if (
+        not policy.accelerator_memory_is_managed
+        and gpu_memory is not None
+        and gpu_memory >= policy.gpu_memory_throttle_percent
+    ):
         throttle_reasons.append("gpu_memory_pressure")
     if cpu_utilization is not None and cpu_utilization >= policy.cpu_throttle_percent:
         throttle_reasons.append("cpu_busy")

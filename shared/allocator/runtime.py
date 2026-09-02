@@ -124,6 +124,7 @@ class RuntimeHandle:
     process_birth_marker: str = ""
     executable_path: str = ""
     model_path: str = ""
+    runtime: str = ""
 
     def __post_init__(self) -> None:
         if self.pid <= 0 or not 0 < self.port < 65_536:
@@ -137,6 +138,7 @@ class RuntimeHandle:
             process_birth_marker=str(value.get("process_birth_marker") or ""),
             executable_path=str(value.get("executable_path") or ""),
             model_path=str(value.get("model_path") or ""),
+            runtime=str(value.get("runtime") or ""),
         )
 
 
@@ -160,6 +162,7 @@ class ManagedResidency:
     handle: RuntimeHandle | None = None
     artifact_sha256: str = ""
     predictive_cache: bool = False
+    runtime: str = ""
 
     def __post_init__(self) -> None:
         if not self.model_id or self.memory_mb <= 0:
@@ -174,6 +177,10 @@ class ManagedResidency:
             )
         if not isinstance(self.predictive_cache, bool):
             raise ValueError("predictive_cache must be boolean")
+        if len(self.runtime) > MAX_ID_LENGTH or any(
+            character in self.runtime for character in "\r\n\0"
+        ):
+            raise ValueError("managed residency runtime is invalid")
         object.__setattr__(
             self, "artifact_sha256", canonical_sha256(self.artifact_sha256)
         )
@@ -190,6 +197,7 @@ class ManagedResidency:
             managed=True,
             artifact_sha256=self.artifact_sha256,
             predictive_cache=self.predictive_cache,
+            runtime=(self.runtime or (self.handle.runtime if self.handle is not None else "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -215,6 +223,7 @@ class ManagedResidency:
             ),
             artifact_sha256=value.get("artifact_sha256") or "",
             predictive_cache=bool(value.get("predictive_cache", False)),
+            runtime=str(value.get("runtime") or ""),
         )
 
 
@@ -674,6 +683,7 @@ class LlamaCppBackend:
             # Match launcher.start_llm's canonicalization exactly. Persisting this argv operand is
             # what lets a restarted allocator prove ownership even after the GGUF is deleted.
             model_path=str(paths.models_dir() / Path(model_id).name),
+            runtime="llama.cpp",
         )
         with self._lock:
             self._spawned[launched.proc.pid] = (launched, model_id, handle)
@@ -1000,6 +1010,14 @@ class ManagedModelRuntime:
         configure_api_key_file = getattr(self.backend, "configure_api_key_file", None)
         if callable(configure_api_key_file):
             configure_api_key_file(key_file)
+        bind = getattr(self.backend, "bind", None)
+        if callable(bind):
+            for residency in self._residencies.values():
+                bind(
+                    residency.model_id,
+                    residency.runtime
+                    or (residency.handle.runtime if residency.handle is not None else ""),
+                )
         self._recover()
         self._save()
 
@@ -1028,6 +1046,21 @@ class ManagedModelRuntime:
         """Stable bearer credential for Grid's private path to managed model engines."""
 
         return self._engine_api_key
+
+    @property
+    def supported_runtimes(self) -> tuple[str, ...]:
+        configured = getattr(self.backend, "supported_runtimes", None)
+        if configured is not None:
+            return tuple(str(item) for item in configured)
+        return ("llama.cpp",)
+
+    def engine_api_key_for(self, model_id: str) -> str:
+        runtime_for = getattr(self.backend, "runtime_for", None)
+        runtime = str(runtime_for(model_id) if callable(runtime_for) else "llama.cpp")
+        if runtime == "llama.cpp":
+            return self._engine_api_key
+        resolver = getattr(self.backend, "engine_api_key_for", None)
+        return str(resolver(model_id) if callable(resolver) else "")
 
     def evaluate_host(self) -> AdmissionDecision:
         signals = self.signal_collector.collect()
@@ -1398,8 +1431,21 @@ class ManagedModelRuntime:
                 not in (ResidencyState.READY, ResidencyState.DRAINING)
             ):
                 return None
-            scheme = str(getattr(self.backend, "endpoint_scheme", "http"))
-            return f"{scheme}://{_url_host(host)}:{residency.handle.port}/v1"
+            scheme_for = getattr(self.backend, "endpoint_scheme_for", None)
+            scheme = str(
+                scheme_for(model_id)
+                if callable(scheme_for)
+                else getattr(self.backend, "endpoint_scheme", "http")
+            )
+            path_for = getattr(self.backend, "endpoint_path_for", None)
+            path = str(path_for(model_id) if callable(path_for) else "/v1")
+            if path and not path.startswith("/"):
+                raise RuntimeError("runtime endpoint path must be absolute")
+            host_for = getattr(self.backend, "endpoint_host_for", None)
+            endpoint_host = str(
+                host_for(model_id, host) if callable(host_for) else host
+            )
+            return f"{scheme}://{_url_host(endpoint_host)}:{residency.handle.port}{path}"
 
     def _validate_backend_configuration(self) -> None:
         if not self._persisted_backend_config:
@@ -1442,6 +1488,7 @@ class ManagedModelRuntime:
                 handle=current.handle,
                 artifact_sha256=current.artifact_sha256,
                 predictive_cache=False,
+                runtime=current.runtime,
             )
             self._save_locked()
             return True
@@ -1604,6 +1651,7 @@ class ManagedModelRuntime:
                 handle,
                 residency.artifact_sha256,
                 False,
+                residency.runtime,
             )
         if (
             not recovering
@@ -1635,6 +1683,7 @@ class ManagedModelRuntime:
             handle if alive is not False else None,
             residency.artifact_sha256,
             residency.predictive_cache,
+            residency.runtime,
         )
 
     def begin_shutdown(self) -> None:
@@ -1665,6 +1714,7 @@ class ManagedModelRuntime:
                     handle=residency.handle,
                     artifact_sha256=residency.artifact_sha256,
                     predictive_cache=False,
+                    runtime=residency.runtime,
                 )
                 changed = True
             if changed:
@@ -1786,6 +1836,7 @@ class ManagedModelRuntime:
                         pinned=current.pinned,
                         artifact_sha256=current.artifact_sha256,
                         predictive_cache=False,
+                        runtime=current.runtime,
                     )
                     changed = True
             if changed:
@@ -1912,6 +1963,9 @@ class ManagedModelRuntime:
     def _execute(self, action: MutationAction) -> None:
         artifact_fetched = False
         try:
+            prepare = getattr(self.backend, "prepare", None)
+            if callable(prepare):
+                prepare(action)
             if action.kind == ActionKind.LOAD:
                 artifact_fetched = self._load(action)
             elif action.kind == ActionKind.WARM:
@@ -2010,6 +2064,7 @@ class ManagedModelRuntime:
                     if current is not None
                     else False
                 ),
+                runtime=(action.runtime or (current.runtime if current else "")),
             )
             self._save_locked()
         return artifact_fetched
@@ -2048,6 +2103,7 @@ class ManagedModelRuntime:
                             handle=current.handle,
                             artifact_sha256=current.artifact_sha256,
                             predictive_cache=False,
+                            runtime=current.runtime,
                         )
                         self._save_locked()
                     return
@@ -2073,6 +2129,7 @@ class ManagedModelRuntime:
                         current.handle,
                         current.artifact_sha256,
                         False,
+                        current.runtime,
                     )
                     self._residencies[action.model_id] = current
                     self._save_locked()
@@ -2089,6 +2146,7 @@ class ManagedModelRuntime:
                         None,
                         current.artifact_sha256,
                         False,
+                        current.runtime,
                     )
                     self._residencies[action.model_id] = current
                     self._save_locked()
@@ -2149,6 +2207,7 @@ class ManagedModelRuntime:
                             handle=recovery_handle,
                             artifact_sha256=current.artifact_sha256,
                             predictive_cache=False,
+                            runtime=current.runtime,
                         )
                         self._save_locked()
                         return
@@ -2168,6 +2227,7 @@ class ManagedModelRuntime:
                         None,
                         current.artifact_sha256,
                         False,
+                        current.runtime,
                     )
                     self._residencies[action.model_id] = current
                     self._save_locked()
@@ -2197,6 +2257,7 @@ class ManagedModelRuntime:
                     or (current.artifact_sha256 if current else "")
                 ),
                 predictive_cache=False,
+                runtime=(action.runtime or (current.runtime if current else "")),
             )
             self._save_locked()
         with self._lock:
@@ -2219,6 +2280,7 @@ class ManagedModelRuntime:
                         or (current.artifact_sha256 if current else "")
                     ),
                     predictive_cache=False,
+                    runtime=(action.runtime or (current.runtime if current else handle.runtime)),
                 )
                 self._save_locked()
 
@@ -2251,6 +2313,7 @@ class ManagedModelRuntime:
                     or (current.artifact_sha256 if current else "")
                 ),
                 predictive_cache=False,
+                runtime=(action.runtime or handle.runtime or (current.runtime if current else "")),
             )
             self._save_locked()
 
@@ -2276,6 +2339,7 @@ class ManagedModelRuntime:
                 handle=current.handle,
                 artifact_sha256=current.artifact_sha256,
                 predictive_cache=False,
+                runtime=current.runtime,
             )
             self._save_locked()
 
@@ -2312,6 +2376,7 @@ class ManagedModelRuntime:
                 pinned=current.pinned,
                 artifact_sha256=current.artifact_sha256,
                 predictive_cache=False,
+                runtime=current.runtime,
             )
             self._save_locked()
 
@@ -2391,6 +2456,7 @@ class ManagedModelRuntime:
                         else action.artifact_sha256
                     ),
                     predictive_cache=False,
+                    runtime=(action.runtime or (current.runtime if current else "")),
                 )
             self._finish_locked(action, MutationStatus.FAILED, message)
 
@@ -2511,6 +2577,7 @@ class ManagedModelRuntime:
                         None,
                         residency.artifact_sha256,
                         residency.predictive_cache,
+                        residency.runtime,
                     )
                     continue
                 if residency.handle is not None:
@@ -2537,6 +2604,7 @@ class ManagedModelRuntime:
                     None,
                     residency.artifact_sha256,
                     False,
+                    residency.runtime,
                 )
             snapshot = tuple(
                 (model_id, residency)
@@ -2812,6 +2880,8 @@ def _model_residency_dict(
         "managed": residency.managed,
         "artifact_sha256": residency.artifact_sha256,
     }
+    if residency.runtime:
+        payload["runtime"] = residency.runtime
     if residency.predictive_cache:
         # Keep ordinary heartbeats readable by the previous server during rolling upgrades.
         payload["predictive_cache"] = True

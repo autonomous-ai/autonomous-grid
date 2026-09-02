@@ -867,11 +867,20 @@ grid --remote models <grid>
 grid --remote chat -m <model.gguf> "hello"
 ```
 
-Automatic lifecycle actuation currently owns GGUF replicas launched through `llama.cpp`. Existing
-ComfyUI, vLLM, and other OpenAI-compatible engines remain routable inventory and inform observed
-demand, but Grid does not claim permission to start, stop, or replace those externally managed
-processes. Runtime-specific managed adapters are required before enabling autonomous lifecycle
-actions for them.
+On a remote provider enrolled with `--dedicated`, the node uses Grid's multi-engine lifecycle
+orchestrator. It manages installed `llama.cpp`, Ollama, ComfyUI, and vLLM runtimes through one
+`LOAD → WARM → READY → DRAIN → UNLOAD` contract while the existing provider remains the only relay
+ingress. Ollama and ComfyUI stay bound to loopback and are advertised only after their native
+readiness APIs prove the requested model or workflow is usable. Ollama downloads require an exact
+`ollama://<model>` source plus the registry digest; vLLM downloads require an immutable
+`hf://<owner>/<repo>@<revision>` snapshot identity. ComfyUI workflow assets must already be
+installed because a workflow manifest—not a mutable model name—is the safe unit of deployment.
+
+Enrollment grants lifecycle authority only to processes started or process-identity-proven by the
+allocator. A pre-existing external route remains visible demand and capacity evidence; Grid never
+kills an unrelated daemon merely because its API resembles vLLM or Ollama. To migrate such a route,
+first configure a versioned allocator model profile and prove its canary, then retire the old
+external route after the managed replacement is READY.
 
 ### CLI workflow
 
@@ -915,7 +924,7 @@ grid allocator model set <model.gguf> \
   --min-failure-domains 2
 ```
 
-The profile command also accepts repeated `--runtime`, `--backend`, `--required-tag`,
+The profile command also accepts repeated `--runtime`, `--runtime-memory-mb RUNTIME=MB`, `--backend`, `--required-tag`,
 `--forbidden-tag`, `--pin`, and `--workload-score WORKLOAD=SCORE` values. Workload scores are
 capability hints in `(0, 1]` for portfolio planning; they do not route an individual request. Data
 tier, target utilization, expected service time, latency SLO, priority, load/warm estimates,
@@ -931,9 +940,12 @@ reciprocal: Grid will neither place that model beside another live/planned model
 different configured model beside it. Cached-only weights do not consume a serving slot. When a
 managed host already violates a tightened ceiling, Grid deterministically elects the higher-priority
 (then more constrained) survivor and stages safe drain/unload of removable peers before it admits
-new work. Existing manually managed vLLM inventory that violates a profile remains visible but is
-reported unsatisfied; the constraint never grants Grid authority to resize or stop the external
-engine.
+new work. Existing manually managed inventory that violates a profile remains visible but is
+reported unsatisfied; the constraint never grants Grid authority to resize or stop an external
+engine. When several compatible runtimes are installed, a new placement chooses the runtime with
+the smallest declared resident footprint (then a stable name tie-break). A live compatible
+residency is sticky: changing engines is a versioned canary/replacement operation, never an in-place
+restart.
 For a narrower policy, repeat `--colocation-exclude <model>` to name only measured bad pairings.
 Exclusions are reciprocal even if declared by one profile: neither placement order can put the pair
 together. Compatible peers may still share the host, and the same managed-only staged convergence

@@ -100,6 +100,7 @@ class ModelResidency:
     active_requests: int = 0
     artifact_sha256: str = ""
     predictive_cache: bool = False
+    runtime: str = ""
 
     def __post_init__(self) -> None:
         if not self.model_id or len(self.model_id) > MAX_ID_LENGTH:
@@ -116,6 +117,10 @@ class ModelResidency:
             object.__setattr__(self, "state", ResidencyState(self.state))
         if not isinstance(self.predictive_cache, bool):
             raise ValueError("predictive_cache must be boolean")
+        if len(self.runtime) > MAX_ID_LENGTH or any(
+            character in self.runtime for character in "\r\n\0"
+        ):
+            raise ValueError("residency runtime is invalid")
         object.__setattr__(
             self,
             "artifact_sha256",
@@ -136,6 +141,7 @@ class ModelResidency:
             active_requests=int(value.get("active_requests") or 0),
             artifact_sha256=value.get("artifact_sha256") or "",
             predictive_cache=bool(value.get("predictive_cache", False)),
+            runtime=str(value.get("runtime") or ""),
         )
 
 
@@ -579,11 +585,33 @@ class ModelProfile:
         return {**asdict(self), "schema_version": SCHEMA_VERSION}
 
     def memory_for(self, runtimes: Iterable[str]) -> int:
-        """Return the conservative footprint for one host's advertised runtimes."""
+        """Return the footprint for the runtime this profile would use on a host.
 
+        Older plans used the largest override when a node exposed several engines because the
+        selected runtime was not represented in the plan. Runtime-aware actions now make that
+        pessimism unnecessary: choose the least-memory compatible engine deterministically.
+        """
+
+        runtime = self.runtime_for(runtimes)
+        return self.memory_for_runtime(runtime)
+
+    def runtime_for(self, runtimes: Iterable[str]) -> str:
+        """Choose one compatible runtime deterministically for a placement target."""
+
+        available = {str(runtime) for runtime in runtimes if str(runtime)}
+        compatible = available.intersection(self.runtimes) if self.runtimes else available
+        if not compatible:
+            return ""
         overrides = dict(self.runtime_memory_mb)
-        matched = [overrides[runtime] for runtime in set(runtimes) if runtime in overrides]
-        return max(matched, default=self.memory_mb)
+        return min(
+            compatible,
+            key=lambda runtime: (overrides.get(runtime, self.memory_mb), runtime),
+        )
+
+    def memory_for_runtime(self, runtime: str) -> int:
+        """Return the configured footprint for one already-selected runtime."""
+
+        return dict(self.runtime_memory_mb).get(runtime, self.memory_mb)
 
     def workload_score(self, workload: str) -> float:
         """Return this model's configured portfolio suitability for one workload."""
@@ -723,6 +751,7 @@ class PlacementAssignment:
     score: float
     existing: bool = False
     reasons: tuple[str, ...] = ()
+    runtime: str = ""
 
     def __post_init__(self) -> None:
         if not self.model_id or not self.node_id:
@@ -734,6 +763,10 @@ class PlacementAssignment:
         ):
             raise ValueError("invalid assignment memory, index, or score")
         object.__setattr__(self, "reasons", _unique(self.reasons))
+        if len(self.runtime) > MAX_ID_LENGTH or any(
+            character in self.runtime for character in "\r\n\0"
+        ):
+            raise ValueError("assignment runtime is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -949,6 +982,7 @@ class MutationAction:
     controller_id: str = ""
     controller_lease_expires_at: float = 0.0
     predictive_prefetch: bool = False
+    runtime: str = ""
 
     def __post_init__(self) -> None:
         if (
@@ -986,6 +1020,10 @@ class MutationAction:
             object.__setattr__(self, "kind", ActionKind(self.kind))
         if not isinstance(self.predictive_prefetch, bool):
             raise ValueError("predictive_prefetch must be boolean")
+        if len(self.runtime) > MAX_ID_LENGTH or any(
+            character in self.runtime for character in "\r\n\0"
+        ):
+            raise ValueError("action runtime is invalid")
         if self.predictive_prefetch and self.kind != ActionKind.LOAD:
             raise ValueError("predictive_prefetch is valid only for load actions")
         object.__setattr__(self, "dependencies", _unique(self.dependencies))

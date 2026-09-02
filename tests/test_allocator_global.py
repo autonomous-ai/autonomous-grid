@@ -343,7 +343,8 @@ def test_runtime_specific_memory_is_canonical_and_round_trips():
     assert profile.memory_for(("llama.cpp",)) == 10_000
     assert profile.memory_for(("vllm",)) == 24_000
     assert profile.memory_for(("unknown",)) == 8_000
-    assert profile.memory_for(("llama.cpp", "vllm")) == 24_000
+    assert profile.runtime_for(("llama.cpp", "vllm")) == "llama.cpp"
+    assert profile.memory_for(("llama.cpp", "vllm")) == 10_000
     assert profile.maximum_memory_mb == 24_000
     assert ModelProfile.from_dict(profile.to_dict()) == profile
     assert replace(profile, memory_mb=30_000).maximum_memory_mb == 30_000

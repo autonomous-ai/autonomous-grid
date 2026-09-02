@@ -4396,10 +4396,21 @@ def _assignment(
     reasons: tuple[str, ...],
 ) -> PlacementAssignment:
     residency = node.residency(model.model_id)
+    selected_runtime = model.runtime_for(node.runtimes)
+    # Residency is sticky across otherwise equivalent compatible runtimes. Avoid replacing a live
+    # Ollama/vLLM/llama.cpp instance merely because another installed engine has a smaller modeled
+    # footprint; migrations require an explicit replacement plan and canary, not lexical ordering.
+    if (
+        residency is not None
+        and residency.runtime
+        and residency.runtime in node.runtimes
+        and residency.runtime in model.compatible_runtimes
+    ):
+        selected_runtime = residency.runtime
     return PlacementAssignment(
         model_id=model.model_id,
         node_id=node.node_id,
-        memory_mb=model.memory_for(node.runtimes),
+        memory_mb=model.memory_for_runtime(selected_runtime),
         replica_index=index,
         score=score,
         existing=bool(
@@ -4408,6 +4419,7 @@ def _assignment(
             and model.matches_artifact(residency)
         ),
         reasons=reasons,
+        runtime=selected_runtime,
     )
 
 
