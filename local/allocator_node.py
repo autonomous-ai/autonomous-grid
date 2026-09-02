@@ -44,6 +44,7 @@ MAX_REGISTRY_TTL_SECONDS = 300.0
 MAX_SHUTDOWN_REQUEST_TIMEOUT_SECONDS = 1.0
 DEFAULT_HEARTBEAT_CYCLE_TIMEOUT_SECONDS = 30.0
 MAX_CHILD_ACTIVITY_WORKERS = 32
+MAX_READY_CHILD_SYNC_WORKERS = 16
 _ACTIVITY_UNSET = object()
 
 
@@ -759,14 +760,12 @@ class AllocatorNodeAgent:
         if unsampled:
             return tuple(model_id for model_id, _ in ordered)
 
-        ready_processed = 0
-        for index, (model_id, residency) in enumerate(ordered):
+        for index, (model_id, residency) in enumerate(draining):
             if deadline is not None and self._monotonic() >= deadline:
-                if ready:
-                    self._engine_sync_cursor = (
-                        ready_offset + ready_processed
-                    ) % len(ready)
-                return tuple(model for model, _ in ordered[index:])
+                return tuple(
+                    [model for model, _ in draining[index:]]
+                    + [model for model, _ in rotated_ready]
+                )
             assert residency.handle is not None
             prior_port = self._registered_engines.get(model_id)
             if prior_port != residency.handle.port:
@@ -776,24 +775,85 @@ class AllocatorNodeAgent:
                     active_tasks=activity[model_id],
                 )
                 self._registered_engines[model_id] = residency.handle.port
-                if residency.state != ResidencyState.DRAINING:
-                    ready_processed += 1
                 continue
             self._heartbeat_engine(
                 residency,
                 deadline=deadline,
                 active_tasks=activity[model_id],
             )
-            if residency.state != ResidencyState.DRAINING:
-                ready_processed += 1
+        ready_processed, deferred_ready = self._parallel_ready_child_sync(
+            rotated_ready,
+            activity=activity,
+            deadline=deadline,
+        )
         if ready:
             self._engine_sync_cursor = (
                 ready_offset + ready_processed
             ) % len(ready)
+        if deferred_ready:
+            return deferred_ready
         # A host-wide fallback fence can reopen only after every surviving child has published its
         # own current state. The caller's final control heartbeat performs that ordered reopen.
         self._registry_cleanup_fenced = False
         return ()
+
+    def _parallel_ready_child_sync(
+        self,
+        ready: list[tuple[str, ManagedResidency]],
+        *,
+        activity: Mapping[str, int | None],
+        deadline: float | None,
+    ) -> tuple[int, tuple[str, ...]]:
+        """Publish independent READY child leases concurrently after every drain fence."""
+
+        if not ready:
+            return 0, ()
+
+        def publish(model_id: str, residency: ManagedResidency) -> bool:
+            if deadline is not None and self._monotonic() >= deadline:
+                return False
+            assert residency.handle is not None
+            if self._registered_engines.get(model_id) != residency.handle.port:
+                self._register_engine(
+                    residency,
+                    deadline=deadline,
+                    active_tasks=activity[model_id],
+                )
+            else:
+                self._heartbeat_engine(
+                    residency,
+                    deadline=deadline,
+                    active_tasks=activity[model_id],
+                )
+            return True
+
+        executor = ThreadPoolExecutor(
+            max_workers=min(MAX_READY_CHILD_SYNC_WORKERS, len(ready)),
+            thread_name_prefix="grid-allocator-child-sync",
+        )
+        futures = {
+            executor.submit(publish, model_id, residency): model_id
+            for model_id, residency in ready
+        }
+        timeout = None if deadline is None else max(0.0, deadline - self._monotonic())
+        completed, pending = wait(futures, timeout=timeout)
+        errors: list[tuple[str, BaseException]] = []
+        processed: set[str] = set()
+        for future in completed:
+            model_id = futures[future]
+            try:
+                if future.result():
+                    processed.add(model_id)
+            except BaseException as exc:  # noqa: BLE001 - preserve the registry safety failure
+                errors.append((model_id, exc))
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=not pending, cancel_futures=True)
+        if errors:
+            errors.sort(key=lambda item: item[0])
+            raise errors[0][1]
+        deferred = tuple(model_id for model_id, _ in ready if model_id not in processed)
+        return len(processed), deferred
 
     def _sync_engine_nodes_or_fence(
         self,
