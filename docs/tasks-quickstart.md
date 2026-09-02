@@ -443,8 +443,9 @@ grid join <grid> --api claude       # a provider must join an engine; the task l
 | `GRID_TASK_ENV_PASSTHROUGH` | — | variables to pass to the agent |
 | `GRID_TASK_CLAUDE_CONFIG_DIR` | — | a dedicated Claude config directory |
 
-**On Linux**, install `bubblewrap` **and** `socat`, and Claude Code ≥ 2.1.221. Without them the
-provider refuses to run tasks rather than running them unconfined.
+**On Linux**, Codex workers need `bubblewrap`. Claude Code workers need `bubblewrap` **and** `socat`
+plus Claude Code ≥ 2.1.221. Without the applicable packages, the provider refuses to advertise
+task capacity rather than claiming work that cannot execute safely.
 
 **On macOS**, leave `GRID_TASK_CLAUDE_CONFIG_DIR` unset. The credential lives in the Keychain, and
 setting the variable — even to the default path — makes Claude Code look for a credentials file that

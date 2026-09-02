@@ -888,6 +888,7 @@ def preflight_before_serving() -> None:
             from . import task_codex
 
             task_codex.resolve_binary()
+            _require_codex_sandbox_package()
             usable = True
         except (Exception, SystemExit) as exc:
             failures.append(f"codex: {str(exc) or exc.__class__.__name__}")
@@ -917,6 +918,25 @@ def preflight_before_serving() -> None:
 # socat not installed` — so an operator who meets both messages is reading about one thing.
 _SANDBOX_PACKAGES = (("bwrap", "bubblewrap (bwrap)"), ("socat", "socat"))
 _SANDBOX_PACKAGE_INSTALL = "apt install bubblewrap socat"
+
+
+def _require_codex_sandbox_package() -> None:
+    """Refuse a Linux Codex worker that cannot execute sandboxed commands.
+
+    The standalone Codex binary uses bubblewrap directly.  Unlike Claude Code it does not need the
+    socat bridge, so requiring both packages would reject otherwise healthy Codex-only workers.
+    The check belongs at join time: accepting tasks first produces a healthy-looking node that can
+    infer and converse but fails every file action inside the native harness.
+    """
+    if sys.platform != "linux" or not task_sandbox.enabled():
+        return
+    if shutil.which("bwrap") is not None:
+        return
+    raise OSError(
+        "the Codex task sandbox needs bubblewrap (bwrap) on this box, and it is not installed — "
+        "every task would fail inside Codex with `bubblewrap is unavailable`. Install it with: "
+        "apt install bubblewrap, or set "
+        f"{task_sandbox.SANDBOX_ENV}=0 to run agents unconfined deliberately.")
 
 
 def _require_the_sandbox_packages() -> None:

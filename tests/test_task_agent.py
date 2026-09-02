@@ -5998,6 +5998,38 @@ def test_a_linux_provider_with_both_packages_is_allowed(monkeypatch, tmp_path):
     task_agent.preflight_before_serving()
 
 
+def test_a_linux_codex_provider_missing_bubblewrap_is_told_at_join(monkeypatch, tmp_path):
+    """Codex uses bwrap directly and must not advertise task capacity without it."""
+    from remote import task_agent, task_codex
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("GRID_TASK_SANDBOX", raising=False)
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    _packages(monkeypatch, ())
+    monkeypatch.setattr(task_codex, "resolve_binary", lambda: "codex")
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.preflight_before_serving()
+
+    assert "bubblewrap is unavailable" in str(excinfo.value)
+    assert "apt install bubblewrap" in str(excinfo.value)
+
+
+def test_a_linux_codex_provider_does_not_require_claudes_socat(monkeypatch, tmp_path):
+    """Codex needs bwrap, but rejecting it for Claude's socat bridge would remove valid capacity."""
+    from remote import task_agent, task_codex
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("GRID_TASK_SANDBOX", raising=False)
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    _packages(monkeypatch, ("bwrap",))
+    monkeypatch.setattr(task_codex, "resolve_binary", lambda: "codex")
+
+    task_agent.preflight_before_serving()
+
+
 def test_the_sandbox_package_probe_does_not_run_off_linux(monkeypatch, tmp_path):
     """macOS needs neither package. A probe that fired there is a refusal handed to a provider that
     would have worked — the opposite of what this issue is for."""
