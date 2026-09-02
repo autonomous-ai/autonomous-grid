@@ -975,6 +975,11 @@ def test_node_stop_uses_cooperative_shutdown_request_before_signals(
 
     monkeypatch.setattr(run_records, "pid_alive", alive)
     monkeypatch.setattr(
+        allocator,
+        "_node_process_state",
+        lambda _record: "dead" if request_path.exists() else "owned",
+    )
+    monkeypatch.setattr(
         run_records,
         "terminate_pid",
         lambda _pid: pytest.fail("cooperative stop should avoid signal fallback"),
@@ -1015,6 +1020,11 @@ def test_node_stop_does_not_signal_before_registry_expiry_fallback_can_finish(
     monkeypatch.setattr(allocator.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(allocator.time, "sleep", advance)
     monkeypatch.setattr(run_records, "pid_alive", alive)
+    monkeypatch.setattr(
+        allocator,
+        "_node_process_state",
+        lambda _record: "dead" if now[0] >= safe_fallback_seconds else "owned",
+    )
     monkeypatch.setattr(
         run_records,
         "terminate_pid",
