@@ -90,6 +90,36 @@ def test_remote_publisher_preserves_user_engine_and_adds_managed_route(monkeypat
     assert len(signals) == 1
 
 
+def test_remote_publisher_claims_exact_recovery_route_but_not_operator_route(monkeypatch, tmp_path):
+    key_file = tmp_path / "engine.key"
+    key_file.write_text("allocator-engine-secret-123456\n")
+    recovery = {
+        "endpoint_url": "http://127.0.0.1:18081/v1",
+        "models": ["smollm.gguf"],
+        "engine_label": "llama.cpp",
+    }
+    operator = {
+        "endpoint_url": "http://127.0.0.1:18082/v1",
+        "models": ["smollm.gguf"],
+        "engine_label": "llama.cpp",
+    }
+    path, _ = _seed(monkeypatch, tmp_path, engines=[operator, recovery])
+    publisher = RemoteProviderRoutePublisher(
+        "grid-forge",
+        "host-c",
+        engine_api_key_file=key_file,
+        client=_Client({"name": "forge-node", "models": ["smollm"]}),
+    )
+
+    assert publisher.sync([_ready("smollm.gguf", 18081)]) == ()
+
+    stored = jsonio.load_json(path)
+    assert stored["engines"][0] == operator
+    assert len(stored["engines"]) == 2
+    assert stored["engines"][1]["allocator_host_id"] == "host-c"
+    assert stored["engines"][1]["endpoint_url"] == recovery["endpoint_url"]
+
+
 def test_remote_publisher_fence_removes_only_its_managed_routes(monkeypatch, tmp_path):
     user = {"endpoint_url": "http://127.0.0.1:8000/v1", "models": ["qwen"]}
     owned = {

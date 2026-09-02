@@ -109,6 +109,32 @@ class RemoteProviderRoutePublisher:
                 and spec.get("allocator_host_id") == self.host_id
                 for model in (spec.get("models") or [])
             }
+            # Recovery may have to bootstrap the provider with an explicit --at route after the
+            # provider daemon dies. Claim that temporary route only when it points at the exact
+            # loopback port and single model of a READY process whose ownership the allocator has
+            # already proved. This avoids a duplicate unmanaged route that would survive a later
+            # allocator fence, while never adopting an operator route merely because its model name
+            # happens to match.
+            claimable = {
+                (f"http://127.0.0.1:{ready[model].handle.port}/v1", model)
+                for model in requested_text
+            }
+
+            def owned_or_claimable(spec: object) -> bool:
+                if not isinstance(spec, dict):
+                    return False
+                owner = str(spec.get("allocator_host_id") or "")
+                if owner:
+                    return owner == self.host_id
+                models = tuple(str(model) for model in (spec.get("models") or []))
+                return len(models) == 1 and (str(spec.get("endpoint_url") or ""), models[0]) in claimable
+
+            previously_managed.update(
+                str(model)
+                for spec in existing
+                if owned_or_claimable(spec)
+                for model in (spec.get("models") or [])
+            )
             if record.get("allocator_media_host_id") == self.host_id:
                 previously_managed.update(
                     str(model) for model in (record.get("allocator_media_models") or [])
@@ -116,8 +142,7 @@ class RemoteProviderRoutePublisher:
             unmanaged = [
                 dict(spec)
                 for spec in existing
-                if not isinstance(spec, dict)
-                or spec.get("allocator_host_id") != self.host_id
+                if not owned_or_claimable(spec)
             ]
             managed = [
                 {
