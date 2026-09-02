@@ -134,6 +134,7 @@ def cmd_internal_allocator_node(
                 HostPolicy(
                     pause_for_user_activity=False,
                     accelerator_memory_is_managed=True,
+                    compute_load_is_managed=True,
                     cpu_throttle_percent=100.0,
                     load_per_cpu_throttle=4.0,
                     activity_debounce_seconds=0.0,

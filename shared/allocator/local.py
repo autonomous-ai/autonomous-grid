@@ -93,6 +93,9 @@ class HostPolicy:
     # that occupancy as workload rather than competing-user pressure while retaining thermal,
     # system-memory, battery, and network safety fences.
     accelerator_memory_is_managed: bool = False
+    # The same distinction applies to CPU utilization and load average on dedicated inference
+    # hosts: serving work creates those signals. Workstations keep the default protection.
+    compute_load_is_managed: bool = False
     cpu_throttle_percent: float = 90.0
     load_per_cpu_throttle: float = 1.25
 
@@ -802,9 +805,17 @@ def evaluate_host(
         and gpu_memory >= policy.gpu_memory_throttle_percent
     ):
         throttle_reasons.append("gpu_memory_pressure")
-    if cpu_utilization is not None and cpu_utilization >= policy.cpu_throttle_percent:
+    if (
+        not policy.compute_load_is_managed
+        and cpu_utilization is not None
+        and cpu_utilization >= policy.cpu_throttle_percent
+    ):
         throttle_reasons.append("cpu_busy")
-    if load_per_cpu is not None and load_per_cpu >= policy.load_per_cpu_throttle:
+    if (
+        not policy.compute_load_is_managed
+        and load_per_cpu is not None
+        and load_per_cpu >= policy.load_per_cpu_throttle
+    ):
         throttle_reasons.append("load_high")
     if on_battery is True and battery is not None and battery <= policy.battery_throttle_percent:
         throttle_reasons.append("battery_low")

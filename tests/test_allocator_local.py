@@ -178,6 +178,25 @@ def test_gpu_memory_thresholds_are_inclusive(gpu_memory: float, expected: NodeSt
     assert decision.state == expected
 
 
+def test_dedicated_host_does_not_mistake_managed_compute_for_competing_load() -> None:
+    decision = evaluate_host(
+        signals(
+            gpu_memory_percent=99.0,
+            cpu_utilization_percent=100.0,
+            load_per_cpu=20.0,
+        ),
+        short_policy(
+            accelerator_memory_is_managed=True,
+            compute_load_is_managed=True,
+        ),
+    )
+
+    assert decision.state == NodeState.ACCEPTING
+    assert "gpu_memory_pressure" not in decision.reasons
+    assert "cpu_busy" not in decision.reasons
+    assert "load_high" not in decision.reasons
+
+
 @pytest.mark.parametrize(
     "snapshot",
     [
