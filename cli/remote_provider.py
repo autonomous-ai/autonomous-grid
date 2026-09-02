@@ -449,11 +449,18 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # leave-then-rejoin instruction instead. (`meta_name` is not inherited by either path — it comes
         # from `--name` or the hostname.) Same shape as `_leave_one_engine`'s
         # `survivors or list(records.values())` (ADR 0010).
-        if deferred_target_error is not None and not live:
+        persisted = list(run_records.read_records(network_id).values())
+        if (
+            deferred_target_error is not None
+            and not live
+            and not _allocator_identity_can_respawn(persisted)
+        ):
             # Nothing running to restart, so there is no union to inherit and `--respawn` has nothing
-            # to act on: the operator gets the guidance auto-detect would have given them anyway.
+            # to act on. An allocator-integrated identity is the exception: its persisted record is
+            # the recovery contract and its allocator will republish READY routes after this empty
+            # provider comes back. Every ordinary stale record still gets the original guidance.
             raise deferred_target_error
-        base = live or list(run_records.read_records(network_id).values())
+        base = live or persisted
         inherited_transport = _identity_field(base, "relay_transport_url")
         requested_transport = getattr(args, "relay_at", None)
         relay_transport_url = _relay_transport_url(
@@ -1137,6 +1144,17 @@ def _identity_record(live: list[dict[str, object]]) -> dict[str, object] | None:
         if record.get("engine_id") == _REMOTE_IDENTITY:
             return record
     return live[0] if live else None
+
+
+def _allocator_identity_can_respawn(records: list[dict[str, object]]) -> bool:
+    """Whether a dead singleton has a durable allocator route-recovery contract."""
+
+    return any(
+        record.get("engine_id") == _REMOTE_IDENTITY
+        and bool(record.get("allocator_routing_revision"))
+        and record.get("reload_signal") == "sighup"
+        for record in records
+    )
 
 
 def _identity_field(live: list[dict[str, object]], key: str) -> object:

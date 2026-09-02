@@ -10010,6 +10010,30 @@ def test_remote_join_bare_with_nothing_live_and_nothing_detected_still_errors(mo
         cli.main(["join", "--respawn"])
 
 
+def test_remote_join_bare_respawn_recovers_dead_allocator_identity(monkeypatch, tmp_path):
+    """A provider crash must not strand an otherwise healthy allocator-owned engine."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(
+        pid=4242,
+        engines=[],
+        allocator_routing_revision="allocator-revision-a",
+    )
+    monkeypatch.setattr(cli.remote_provider.run_records, "record_alive", lambda _record: False)
+    monkeypatch.setattr(
+        cli.provider,
+        "_detect",
+        lambda _host: pytest.fail("allocator recovery must not adopt an unrelated local engine"),
+    )
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--respawn", "--name", "forge-machine-a"]) == 0
+
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["engines"] == []
+    assert record["models"] == []
+
+
 def test_remote_join_bare_respawn_restarts_rather_than_asking_which_engine_to_join(
     monkeypatch, tmp_path
 ):
