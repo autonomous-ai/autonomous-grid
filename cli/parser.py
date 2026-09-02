@@ -606,6 +606,13 @@ def _add_relay(sub) -> None:
     }
     for command, help_text in host_help.items():
         host = actions.add_parser(command, help=help_text, add_help=False)
+        # A REMAINDER positional starts only after argparse has consumed a positional token.  Host
+        # commands whose selector is optional (notably `list`, and `status` with its default relay)
+        # therefore rejected `--json` when it was the first forwarded argument.  Recognize the one
+        # shared Grid flag here; `_host` puts it back on the separate runtime's argv.  Flags after a
+        # selector continue to travel verbatim in `host_args`.
+        host.add_argument("--json", dest="host_json", action="store_true",
+                          help="Emit machine-readable JSON.")
         host.add_argument("host_args", nargs=argparse.REMAINDER)
         host.set_defaults(handler=cmd_remote_relay)
 

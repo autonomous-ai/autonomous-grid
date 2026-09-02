@@ -211,6 +211,35 @@ def test_host_command_delegates_to_separate_runtime(monkeypatch, tmp_path):
     }
 
 
+@pytest.mark.parametrize("argv", [
+    pytest.param(["relay", "list", "--json"], id="after-list"),
+    pytest.param(["--json", "relay", "list"], id="global"),
+    pytest.param(["relay", "status", "--json"], id="status-with-default-selector"),
+])
+def test_host_json_without_selector_reaches_separate_runtime(monkeypatch, tmp_path, argv):
+    from cli import remote_relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setenv("GRID_RELAY_BIN", "/opt/grid/bin/grid-relay")
+    seen = {}
+
+    class Result:
+        returncode = 0
+
+    def run(command, check):
+        seen["argv"] = command
+        seen["check"] = check
+        return Result()
+
+    monkeypatch.setattr(remote_relay.subprocess, "run", run)
+    assert cli.main(argv) == 0
+    command = "status" if "status" in argv else "list"
+    assert seen == {
+        "argv": ["/opt/grid/bin/grid-relay", command, "--json"],
+        "check": False,
+    }
+
+
 def test_disconnect_removes_only_selected_self_hosted_grid(monkeypatch, tmp_path):
     _remote_home(monkeypatch, tmp_path, [
         {"network_id": "hosted", "name": "Hosted", "signaling_url": "https://hosted.example"},

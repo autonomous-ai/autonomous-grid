@@ -343,5 +343,9 @@ def _host(args: argparse.Namespace) -> int:
             "The relay host runtime is not installed. Install the `grid-relay` package on this "
             "machine, then retry. Client-only machines need only `grid relay connect`."
         )
-    forwarded = [str(executable), args.subcommand, *list(args.host_args or [])]
+    host_args = list(args.host_args or [])
+    wants_json = getattr(args, "json", False) or getattr(args, "host_json", False)
+    if wants_json and "--json" not in host_args:
+        host_args.append("--json")
+    forwarded = [str(executable), args.subcommand, *host_args]
     return subprocess.run(forwarded, check=False).returncode
