@@ -16,6 +16,33 @@ from ._constants import (
     VALID_MEDIA_BUNDLES,
 )
 from .agent import cmd_agent_install, cmd_agent_status
+from .allocator import (
+    cmd_allocator_join,
+    cmd_allocator_mode,
+    cmd_allocator_model_remove,
+    cmd_allocator_model_set,
+    cmd_allocator_node_override,
+    cmd_allocator_node_resume,
+    cmd_allocator_node_start,
+    cmd_allocator_node_status,
+    cmd_allocator_node_stop,
+    cmd_allocator_status,
+    cmd_allocator_tick,
+    cmd_allocator_token_write,
+)
+from shared.allocator.scenario import SCENARIO_STRATEGIES
+
+from .allocator_scenario import (
+    bounded_scenario_machines,
+    bounded_scenario_models,
+    bounded_scenario_users,
+    cmd_test_graduate,
+    cmd_test_scenario,
+    graduation_machine_counts,
+    graduation_seeds,
+    simulated_minutes,
+    workload_trace_binding,
+)
 from .auth import cmd_login, cmd_logout, cmd_sync
 from .device import cmd_device_info
 from .engine import (
@@ -37,6 +64,21 @@ from .grid import (
 )
 from .credential import cmd_credential
 from .launch import cmd_launch
+from .logical_test import (
+    cmd_test_compete,
+    cmd_test_start,
+    cmd_test_demo,
+    cmd_test_status,
+    cmd_test_stop,
+    cmd_test_watch,
+    logical_machine_count,
+    positive_seconds,
+    positive_tokens,
+    positive_gib_csv,
+    workload_model_binding,
+    real_request_count,
+    real_user_count,
+)
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from . import project_arg
@@ -71,6 +113,30 @@ def _positive_task_count(raw: str) -> int:
     if count < 1:
         raise argparse.ArgumentTypeError(f"{raw!r} must be at least 1 task")
     return count
+
+
+def _positive_concurrency(raw: str) -> int:
+    """Bound one explicitly advertised engine width before it reaches either control plane."""
+
+    try:
+        count = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a whole concurrency value") from None
+    if not 1 <= count <= 256:
+        raise argparse.ArgumentTypeError(f"{raw!r} must be between 1 and 256")
+    return count
+
+
+def _positive_gpu_memory_mb(raw: str) -> int:
+    try:
+        memory_mb = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a whole MB value") from None
+    if not 1 <= memory_mb <= 1_000_000_000:
+        raise argparse.ArgumentTypeError(
+            f"{raw!r} must be between 1 and 1000000000 MB"
+        )
+    return memory_mb
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -112,11 +178,577 @@ def build_parser() -> argparse.ArgumentParser:
     _add_router(sub)
     _add_engine_setup(sub)
     _add_launch(sub)
+    _add_allocator(sub)
+    _add_logical_test(sub)
     _add_train(sub)
     _add_credential(sub)
     _add_stt(sub)
 
     return parser
+
+
+def _add_logical_test(sub) -> None:
+    test = sub.add_parser(
+        "test",
+        help="Run an isolated logical-machine Grid on this computer",
+    )
+    test_sub = test.add_subparsers(dest="test_command", required=True)
+
+    start = test_sub.add_parser("start", help="Start a persistent logical test Grid")
+    start.add_argument(
+        "--machines",
+        type=logical_machine_count,
+        default=4,
+        metavar="N",
+        help=f"Number of logical machines (default 4; maximum {32}).",
+    )
+    start.add_argument(
+        "--model",
+        default="SmolLM2-135M-Instruct-Q3_K_M.gguf",
+        help="Cached baseline GGUF filename to load on every logical machine.",
+    )
+    start.add_argument(
+        "--portfolio-model",
+        default="SmolLM2-135M-Instruct-Q3_K_S.gguf",
+        help="Cached GGUF the autonomous workload demo may proactively load.",
+    )
+    start.add_argument(
+        "--candidate-model",
+        dest="candidate_models",
+        action="append",
+        default=[],
+        metavar="GGUF",
+        help="Additional cached GGUF candidate for real portfolio competition; repeatable.",
+    )
+    start.add_argument(
+        "--workload-model",
+        dest="workload_models",
+        action="append",
+        type=workload_model_binding,
+        default=[],
+        metavar="WORKLOAD=GGUF",
+        help=(
+            "Bind a real workload capability to a cached GGUF for autonomous portfolio "
+            "selection; repeatable (for example coding=qwen-coder.gguf)."
+        ),
+    )
+    start.add_argument("--port", type=int, default=22_100, help="Grid control/API port.")
+    start.add_argument(
+        "--engine-port-base",
+        type=int,
+        default=22_110,
+        help="Beginning of the non-overlapping logical llama.cpp port ranges.",
+    )
+    start.add_argument(
+        "--timeout",
+        type=positive_seconds,
+        default=600.0,
+        help="Seconds to wait for every real text/media engine to become ready.",
+    )
+    start.add_argument(
+        "--include-comfyui",
+        action="store_true",
+        help=(
+            "Use one of the N logical machines for a real ComfyUI/PyTorch media engine; "
+            "the remaining machines run llama.cpp."
+        ),
+    )
+    start.add_argument(
+        "--media-bundle",
+        choices=("image_generation", "z_image"),
+        default="z_image",
+        help="Installed ComfyUI bundle used by the real media node (default z_image).",
+    )
+    start.add_argument(
+        "--comfyui-port",
+        type=int,
+        default=22_200,
+        help="Loopback ComfyUI port for the mixed-framework test Grid.",
+    )
+    start.add_argument(
+        "--media-port",
+        type=int,
+        default=22_201,
+        help="Loopback Grid media-adapter port for the mixed-framework test Grid.",
+    )
+    start.add_argument(
+        "--text-capacities-gib",
+        type=positive_gib_csv,
+        default=(),
+        metavar="GIB,...",
+        help=(
+            "Logical usable-memory totals for text nodes; count must equal the number of text "
+            "nodes and the physical total remains enforced."
+        ),
+    )
+    start.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    start.set_defaults(handler=cmd_test_start)
+
+    status = test_sub.add_parser("status", help="Show logical hosts and ready replicas")
+    status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    status.set_defaults(handler=cmd_test_status)
+
+    demo = test_sub.add_parser(
+        "demo",
+        help="Explain and exercise demand-driven scale-up and scale-down",
+    )
+    demo.add_argument(
+        "--requests",
+        type=real_request_count,
+        default=12,
+        metavar="N",
+        help="Total real concurrent chat requests in the multi-user phase (default 12).",
+    )
+    demo.add_argument(
+        "--users",
+        type=real_user_count,
+        default=6,
+        metavar="N",
+        help="Distinct real client personas issuing inference requests (default 6).",
+    )
+    demo.add_argument(
+        "--max-tokens",
+        type=positive_tokens,
+        default=32,
+        metavar="N",
+        help="Maximum generated tokens for each real chat request (default 32).",
+    )
+    demo.add_argument(
+        "--timeout",
+        type=positive_seconds,
+        default=600.0,
+        help="Seconds allowed for each real placement or ComfyUI generation transition.",
+    )
+    demo.set_defaults(handler=cmd_test_demo)
+
+    compete = test_sub.add_parser(
+        "compete",
+        help="Benchmark real candidate models and prove quality/cost-aware selection",
+    )
+    compete.add_argument(
+        "--max-tokens",
+        type=positive_tokens,
+        default=16,
+        metavar="N",
+        help="Maximum generated tokens per deterministic benchmark task (default 16).",
+    )
+    compete.add_argument(
+        "--timeout",
+        type=positive_seconds,
+        default=600.0,
+        help="Seconds allowed for each real model lifecycle transition.",
+    )
+    compete.set_defaults(handler=cmd_test_compete)
+
+    scenario = test_sub.add_parser(
+        "scenario",
+        help="Simulate heterogeneous machines, models, users, demand shifts, and failures",
+    )
+    scenario.add_argument(
+        "--machines",
+        type=bounded_scenario_machines,
+        default=8,
+        metavar="N",
+        help="Modeled heterogeneous logical machines (default 8; maximum 64).",
+    )
+    scenario.add_argument(
+        "--models",
+        type=bounded_scenario_models,
+        default=8,
+        metavar="N",
+        help="Configured model profiles (default 8; maximum 32).",
+    )
+    scenario.add_argument(
+        "--users",
+        type=bounded_scenario_users,
+        default=50,
+        metavar="N",
+        help="Concurrent user personas (default 50; maximum 10000).",
+    )
+    scenario.add_argument(
+        "--duration",
+        type=simulated_minutes,
+        default=30,
+        metavar="TIME",
+        help="Simulated time as minutes or hours, e.g. 30m or 2h (default 30m).",
+    )
+    scenario.add_argument("--seed", type=int, default=42, help="Deterministic random seed.")
+    scenario.add_argument(
+        "--strategy",
+        choices=SCENARIO_STRATEGIES,
+        default="smart",
+        help=(
+            "Allocation policy to evaluate: smart, reactive, greedy, or static "
+            "(default smart)."
+        ),
+    )
+    scenario.add_argument(
+        "--workload-trace",
+        action="append",
+        default=[],
+        type=workload_trace_binding,
+        metavar="WORKLOAD=CSV",
+        help=(
+            "Replay a headerless timestamp,request-rate CSV for one workload; repeat for "
+            "multiple workloads."
+        ),
+    )
+    scenario.add_argument(
+        "--timeline",
+        action="store_true",
+        help="Print every placement-changing tick instead of notable events only.",
+    )
+    scenario.add_argument(
+        "--oracle",
+        action="store_true",
+        help=(
+            "Exhaustively benchmark the observed trace on up to 4 machines and 9 models."
+        ),
+    )
+    scenario.add_argument("--json", action="store_true", help="Emit the complete JSON report.")
+    scenario.set_defaults(handler=cmd_test_scenario)
+
+    graduate = test_sub.add_parser(
+        "graduate",
+        help="Compare the smart allocator with fixed and reactive baselines",
+    )
+    graduate.add_argument(
+        "--machines",
+        type=graduation_machine_counts,
+        default=(2, 4, 8),
+        metavar="N,N,...",
+        help="Comma-separated logical fleet sizes (default 2,4,8).",
+    )
+    graduate.add_argument(
+        "--seeds",
+        type=graduation_seeds,
+        default=(42, 144),
+        metavar="N,N,...",
+        help="Comma-separated deterministic trace seeds (default 42,144).",
+    )
+    graduate.add_argument(
+        "--models",
+        type=bounded_scenario_models,
+        default=8,
+        metavar="N",
+        help="Configured model profiles (default 8; maximum 32).",
+    )
+    graduate.add_argument(
+        "--users",
+        type=bounded_scenario_users,
+        default=50,
+        metavar="N",
+        help="Concurrent user personas (default 50; maximum 10000).",
+    )
+    graduate.add_argument(
+        "--duration",
+        type=simulated_minutes,
+        default=120,
+        metavar="TIME",
+        help="Simulated duration per run (default 120m).",
+    )
+    graduate.add_argument("--json", action="store_true", help="Emit the complete JSON report.")
+    graduate.set_defaults(handler=cmd_test_graduate)
+
+    watch = test_sub.add_parser(
+        "watch",
+        help="Follow model placement and allocator action transitions",
+    )
+    watch.add_argument(
+        "--interval",
+        type=positive_seconds,
+        default=0.5,
+        help="Seconds between status polls (default 0.5).",
+    )
+    watch.set_defaults(handler=cmd_test_watch)
+
+    stop = test_sub.add_parser("stop", help="Drain and stop the logical test Grid")
+    stop.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    stop.set_defaults(handler=cmd_test_stop)
+
+
+def _add_allocator(sub) -> None:
+    allocator = sub.add_parser(
+        "allocator",
+        help="Place configured models dynamically across participating hosts",
+    )
+    allocator_sub = allocator.add_subparsers(dest="allocator_command", required=True)
+
+    allocator_join = allocator_sub.add_parser(
+        "join",
+        help="Enroll this already-joined remote provider as allocator-managed capacity",
+    )
+    allocator_join.add_argument("grid", nargs="?", default=None)
+    allocator_join.add_argument("--heartbeat-interval", type=float, default=15.0)
+    allocator_join.add_argument(
+        "--dedicated",
+        action="store_true",
+        help="Treat this host as dedicated Grid capacity while retaining hardware safety limits.",
+    )
+    allocator_join.add_argument(
+        "--restart",
+        action="store_true",
+        help="Gracefully replace this provider's running allocator node with the current build.",
+    )
+    allocator_join.set_defaults(handler=cmd_allocator_join)
+
+    status = allocator_sub.add_parser("status", help="Show demand, placement, and mutations")
+    _add_allocator_grid(status)
+    status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    status.set_defaults(handler=cmd_allocator_status)
+
+    model = allocator_sub.add_parser("model", help="Create or remove a model placement profile")
+    model_sub = model.add_subparsers(dest="allocator_model_command", required=True)
+    set_model = model_sub.add_parser("set", help="Create or replace a model placement profile")
+    set_model.add_argument("model", help="Advertised model id; managed llama.cpp uses a cached GGUF filename.")
+    set_model.add_argument("--memory-mb", type=int, required=True)
+    set_model.add_argument(
+        "--artifact-sha256",
+        default="",
+        metavar="HEX",
+        help="Require this immutable GGUF SHA-256 on managed replicas.",
+    )
+    set_model.add_argument(
+        "--artifact-source",
+        default="",
+        metavar="URI",
+        help=(
+            "Authenticated immutable source for autonomous loading; managed llama.cpp accepts "
+            "an exact hf://owner/repo/path.gguf URI."
+        ),
+    )
+    set_model.add_argument(
+        "--artifact-size-mb",
+        type=int,
+        default=0,
+        metavar="MB",
+        help="Maximum transfer size and required free disk for autonomous loading.",
+    )
+    set_model.add_argument(
+        "--runtime-memory-mb",
+        action="append",
+        default=[],
+        metavar="RUNTIME=MB",
+        help="Runtime-specific memory estimate; repeat for multiple runtimes.",
+    )
+    set_model.add_argument(
+        "--workload-score",
+        action="append",
+        default=[],
+        metavar="WORKLOAD=SCORE",
+        help=(
+            "Capability score in (0, 1] for an allocator workload such as coding, research, "
+            "design, image, or video; repeat for multiple workloads."
+        ),
+    )
+    set_model.add_argument(
+        "--runtime",
+        action="append",
+        dest="runtimes",
+        default=None,
+        metavar="NAME",
+        help="Compatible runtime; repeat for multiple values (default: llama.cpp when omitted).",
+    )
+    set_model.add_argument("--backend", action="append", dest="backends", default=[])
+    set_model.add_argument("--data-tier", default="internal")
+    set_model.add_argument("--required-tag", action="append", dest="required_tags", default=[])
+    set_model.add_argument("--forbidden-tag", action="append", dest="forbidden_tags", default=[])
+    set_model.add_argument("--pin", action="append", dest="pinned_nodes", default=[])
+    set_model.add_argument("--min-replicas", type=int, default=1)
+    set_model.add_argument("--max-replicas", type=int, default=None)
+    set_model.add_argument("--target-utilization", type=float, default=0.70)
+    set_model.add_argument(
+        "--replica-concurrency",
+        type=int,
+        default=1,
+        help="Conservative request slots per newly placed replica (default: 1).",
+    )
+    set_model.add_argument("--service-seconds", type=float, default=5.0)
+    set_model.add_argument("--latency-slo-ms", type=float, default=5_000.0)
+    set_model.add_argument("--priority", type=int, default=100)
+    set_model.add_argument("--load-seconds", type=float, default=30.0)
+    set_model.add_argument("--warm-seconds", type=float, default=5.0)
+    set_model.add_argument("--min-residency-seconds", type=float, default=300.0)
+    set_model.add_argument("--scale-down-cooldown-seconds", type=float, default=900.0)
+    set_model.add_argument("--min-failure-domains", type=int, default=1)
+    set_model.add_argument(
+        "--min-gpu-count",
+        type=int,
+        default=0,
+        help="Require at least this many GPUs on a placement target.",
+    )
+    set_model.add_argument(
+        "--min-gpu-memory-mb",
+        type=int,
+        default=0,
+        help="Require each needed GPU to have at least this much physical VRAM.",
+    )
+    set_model.add_argument(
+        "--max-colocated-models",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Limit distinct live models per host; 1 requests exclusive serving (default: unlimited).",
+    )
+    set_model.add_argument(
+        "--colocation-exclude",
+        action="append",
+        dest="colocation_excludes",
+        default=[],
+        metavar="MODEL",
+        help="Forbid sharing a host with this model; repeat for multiple pairwise exclusions.",
+    )
+    _add_allocator_grid(set_model, token=True)
+    set_model.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    set_model.set_defaults(handler=cmd_allocator_model_set)
+
+    for verb in ("remove", "rm"):
+        remove = model_sub.add_parser(
+            verb,
+            help="Retire a model and safely drain its managed replicas",
+        )
+        remove.add_argument("model")
+        _add_allocator_grid(remove, token=True)
+        remove.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+        remove.set_defaults(handler=cmd_allocator_model_remove)
+
+    mode = allocator_sub.add_parser("mode", help="Select observe, recommend, or automatic")
+    mode.add_argument("allocator_mode", choices=("observe", "recommend", "automatic"))
+    _add_allocator_grid(mode, token=True)
+    mode.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    mode.set_defaults(handler=cmd_allocator_mode)
+
+    tick = allocator_sub.add_parser("tick", help="Run an immediate allocation pass")
+    _add_allocator_grid(tick, token=True)
+    tick.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    tick.set_defaults(handler=cmd_allocator_tick)
+
+    token = allocator_sub.add_parser("token", help="Provision the node control capability")
+    token_sub = token.add_subparsers(dest="allocator_token_command", required=True)
+    token_write = token_sub.add_parser(
+        "write",
+        help="Write the control token to an owner-only file for secure node provisioning",
+    )
+    token_write.add_argument("path")
+    token_write.add_argument("--force", action="store_true")
+    token_write.add_argument(
+        "--host-id",
+        default=None,
+        help="Stable host identity to authorize (a new identity is generated if omitted).",
+    )
+    token_write.add_argument(
+        "--ttl-days",
+        type=int,
+        default=365,
+        help="Credential lifetime in days (default: 365).",
+    )
+    _add_allocator_grid(token_write, token=True)
+    token_write.set_defaults(handler=cmd_allocator_token_write)
+
+    node = allocator_sub.add_parser("node", help="Manage this machine's allocator node loop")
+    node_sub = node.add_subparsers(dest="allocator_node_command", required=True)
+    node_start = node_sub.add_parser("start", help="Join this machine as managed capacity")
+    _add_allocator_grid(node_start, node_token=True)
+    node_start.add_argument("--heartbeat-interval", type=float, default=15.0)
+    node_start.add_argument(
+        "--provider-grid",
+        default=None,
+        help=(
+            "Publish allocator-owned models through this already-joined remote Grid identity "
+            "using zero-drop hot reload."
+        ),
+    )
+    node_start.add_argument(
+        "--dedicated",
+        action="store_true",
+        help=(
+            "Treat this host as dedicated Grid capacity: ignore desktop activity and ordinary "
+            "CPU-load throttling while retaining thermal, memory, battery, disk, and network safety."
+        ),
+    )
+    node_start.add_argument("--advertise-host", default=None)
+    node_start.add_argument(
+        "--engine-tls-cert",
+        default=None,
+        help="PEM certificate served by managed llama.cpp endpoints.",
+    )
+    node_start.add_argument(
+        "--engine-tls-key",
+        default=None,
+        help="Owner-only PEM private key paired with --engine-tls-cert.",
+    )
+    node_start.add_argument(
+        "--engine-tls-ca",
+        default=None,
+        help="PEM CA bundle Grid should trust for the managed endpoint.",
+    )
+    node_start.add_argument(
+        "--allow-insecure-http",
+        action="store_true",
+        help=(
+            "Accepted for compatibility only; managed node and engine credentials still require "
+            "loopback HTTP or HTTPS."
+        ),
+    )
+    node_start.set_defaults(handler=cmd_allocator_node_start)
+
+    node_stop = node_sub.add_parser("stop", help="Stop this machine's managed node loop")
+    _add_allocator_grid(node_stop)
+    node_stop.set_defaults(handler=cmd_allocator_node_stop)
+
+    node_status = node_sub.add_parser("status", help="Show this machine's managed node loop")
+    _add_allocator_grid(node_status)
+    node_status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    node_status.set_defaults(handler=cmd_allocator_node_status)
+
+    for verb in ("drain", "pause", "quarantine"):
+        override = node_sub.add_parser(
+            verb,
+            help=f"Apply a durable local {verb} override",
+        )
+        _add_allocator_grid(override)
+        override.add_argument("--reason", default=f"local {verb}")
+        override.add_argument(
+            "--for-seconds",
+            type=float,
+            default=None,
+            help="Expire the override automatically after this duration.",
+        )
+        override.set_defaults(
+            handler=cmd_allocator_node_override,
+            override_state=verb,
+        )
+
+    resume = node_sub.add_parser("resume", help="Clear the local override and resume normal policy")
+    _add_allocator_grid(resume)
+    resume.set_defaults(handler=cmd_allocator_node_resume)
+
+
+def _add_allocator_grid(
+    parser,
+    *,
+    token: bool = False,
+    node_token: bool = False,
+) -> None:
+    parser.add_argument("--grid", default=None, help="Grid name, id, or local signaling URL.")
+    if token or node_token:
+        parser.add_argument(
+            "--token-file",
+            default=None,
+            help=(
+                "Read a host-scoped node credential from this file "
+                "(or set GRID_ALLOCATOR_NODE_TOKEN)."
+                if node_token
+                else "Read the allocator operator token from this file "
+                "(or set GRID_ALLOCATOR_CONTROL_TOKEN)."
+            ),
+        )
+    if token:
+        parser.add_argument(
+            "--allow-insecure-http",
+            action="store_true",
+            help="Permit operator credentials over non-loopback HTTP (trusted LANs only).",
+        )
 
 
 def _add_credential(sub) -> None:
@@ -238,7 +870,33 @@ def _add_engines(sub) -> None:
     )
     choose.add_argument("--all", action="store_true", help="Join every detected engine.")
     choose.add_argument("--kind", "--engine", dest="kind", default=None,
-                        help="Join only the detected engine of this kind (e.g. ollama, vllm).")
+                        help="Join only the detected engine of this kind (e.g. ollama, vllm); "
+                             "with --at, record that runtime kind for placement.")
+    choose.add_argument(
+        "--max-concurrency",
+        type=_positive_concurrency,
+        default=None,
+        metavar="N",
+        help="Maximum simultaneous requests admitted to this engine (default: 1).",
+    )
+    choose.add_argument(
+        "--gpu-count",
+        type=_positive_concurrency,
+        default=None,
+        metavar="N",
+        help="Physical GPU count reported as allocator topology evidence (local mode).",
+    )
+    choose.add_argument(
+        "--gpu-memory-mb",
+        action="append",
+        type=_positive_gpu_memory_mb,
+        default=[],
+        metavar="MB",
+        help=(
+            "Physical VRAM per GPU; repeat for heterogeneous devices, or combine one value "
+            "with --gpu-count for homogeneous GPUs (local mode)."
+        ),
+    )
     choose.add_argument(
         "--api",
         metavar="KIND",
@@ -331,16 +989,33 @@ def _add_engines(sub) -> None:
                              help="Deprecated — use `grid price set`. (No longer advertises a price.)")
     remote_only.add_argument("--pricing-output", type=float, default=None,
                              help="Deprecated — use `grid price set`. (No longer advertises a price.)")
-    remote_only.add_argument("--max-concurrency", type=int, default=None,
-                             help="How many requests this engine serves at once (remote only).")
     # `default=None`, not the `store_true` default of False: `provider._reject_remote_only_flags`
     # decides "was this flag used" with `is not None`, so a False default would reject every LOCAL
     # `grid join`. Every flag in this group defaults to None for that reason.
     remote_only.add_argument("--respawn", action="store_true", default=None,
                              help="Stop the engine already serving this grid and start a fresh one, "
                                   "instead of no-opping an identical re-join (remote only).")
-    # Task serving (ADR 0032). Remote-only for the same structural reason as `--max-concurrency`:
-    # a task is claimed from the relay, and local mode has no relay. `default=None` throughout, per
+    remote_only.add_argument(
+        "--allocator-provider",
+        action="store_true",
+        default=None,
+        help=(
+            "Create an empty provider identity for allocator-managed engines. The allocator can "
+            "then load and unload models without a manually started bootstrap model (remote only)."
+        ),
+    )
+    remote_only.add_argument(
+        "--relay-at",
+        default=None,
+        metavar="URL",
+        help=(
+            "Use this URL for provider-to-relay traffic while keeping the grid's public URL "
+            "canonical. Useful on the relay host (for example http://127.0.0.1:8090); "
+            "non-loopback transports must use HTTPS. Changing it respawns only this provider."
+        ),
+    )
+    # Task serving (ADR 0032). A task is claimed from the relay, and local mode has no relay.
+    # `default=None` throughout, per
     # the group's comment above — `--tasks` in particular, because a `store_true` defaulting to
     # False would make `_reject_remote_only_flags` refuse every LOCAL join.
     remote_only.add_argument("--tasks", action="store_true", default=None,
@@ -1487,6 +2162,7 @@ def _add_engine_setup(sub) -> None:
     start.set_defaults(handler=cmd_engine_start)
 
     stop = engine_sub.add_parser("stop", help="Stop the built-in media engine (ComfyUI)")
+    stop.add_argument("--port", type=int, default=8188)
     stop.set_defaults(handler=cmd_engine_stop)
 
     # `grid engine ls`/`list`: live engines joined to the grid (mode-aware, like `grid engines`).

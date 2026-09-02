@@ -5,11 +5,13 @@ import base64
 import contextlib
 import datetime
 import errno
+import io
 import json
 import os
 import shlex
 import shutil
 import socket
+import ssl
 import stat
 import struct
 import subprocess
@@ -63,6 +65,10 @@ def _engine_args(**overrides) -> SimpleNamespace:
         flash_attn=None,
         temp=None,
         reasoning_budget=None,
+        runtime_kind=None,
+        max_concurrency=None,
+        gpu_count=None,
+        gpu_memory_mb=[],
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -458,17 +464,54 @@ def test_cli_accepts_engine_runtime_commands():
     assert start.port == 8200
     assert start.detach is True
 
-    assert parser.parse_args(["engine", "stop"]).handler is cli.cmd_engine_stop
+    stop = parser.parse_args(["engine", "stop", "--port", "8200"])
+    assert stop.handler is cli.cmd_engine_stop
+    assert stop.port == 8200
 
 
 def test_engine_stop_delegates_to_comfyui(monkeypatch):
     calls = []
-    monkeypatch.setattr(comfyui, "stop_running", lambda: calls.append("stop") or 0)
+    monkeypatch.setattr(comfyui, "stop_running", lambda port: calls.append(port) or 0)
 
-    rc = cli.cmd_engine_stop(argparse.Namespace())
+    rc = cli.cmd_engine_stop(argparse.Namespace(port=8200))
 
     assert rc == 0
-    assert calls == ["stop"]
+    assert calls == [8200]
+
+
+def test_comfyui_start_detaches_engine_process_group(monkeypatch, tmp_path):
+    python = tmp_path / "python"
+    python.touch()
+    checkout = tmp_path / "ComfyUI"
+    checkout.mkdir()
+    output = tmp_path / "output"
+    spawned = {}
+    # `start()` stores the child handle globally. Make the test own that mutation so pytest restores
+    # it at teardown instead of leaking the fake process into later lifecycle tests.
+    monkeypatch.setattr(comfyui, "_active", None)
+
+    class FakeProc:
+        pid = 4321
+
+    def fake_popen(cmd, **kwargs):
+        spawned["cmd"] = cmd
+        spawned["kwargs"] = kwargs
+        return FakeProc()
+
+    monkeypatch.setattr(comfyui, "comfyui_python", lambda: python)
+    monkeypatch.setattr(comfyui, "comfyui_dir", lambda: checkout)
+    monkeypatch.setattr(comfyui, "output_dir", lambda: output)
+    monkeypatch.setattr(comfyui, "_is_port_in_use", lambda port: False)
+    monkeypatch.setattr(comfyui, "_vram_flags", lambda: [])
+    monkeypatch.setattr(comfyui, "_write_pid_file", lambda pid, port: None)
+    monkeypatch.setattr(comfyui.logging_setup, "cap_and_open_append", lambda *a, **k: io.StringIO())
+    monkeypatch.setattr(comfyui.subprocess, "Popen", fake_popen)
+
+    process = comfyui.start(8200)
+
+    assert process.proc.pid == 4321
+    assert spawned["kwargs"]["start_new_session"] is True
+    assert spawned["kwargs"]["cwd"] == str(checkout)
 
 
 def test_wait_for_media_server_fails_fast_when_child_exits():
@@ -3657,6 +3700,7 @@ def test_run_engine_launches_local_llama_server_by_default(monkeypatch, tmp_path
     assert calls["waited"] == 8081
     assert calls["stopped"] == 8081
     assert calls["payload"]["endpoint_url"] == "http://192.168.1.50:8081/v1"
+    assert calls["payload"]["resources"] == {"runtimes": ["llama.cpp"]}
 
 
 def test_run_engine_advertise_as_routes_alias_and_sets_llama_alias(monkeypatch, tmp_path):
@@ -3704,10 +3748,85 @@ def test_run_engine_endpoint_url_skips_local_llama_server(monkeypatch, tmp_path)
     monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
-    args = _engine_args(models=["custom-model"], endpoint_url="http://192.168.1.50:8081/v1")
+    args = _engine_args(
+        models=["custom-model"],
+        endpoint_url="http://192.168.1.50:8081/v1",
+        runtime_kind="vllm",
+        max_concurrency=16,
+    )
 
     assert cli.provider._run_engine(args) == 0
     assert calls["payload"]["endpoint_url"] == "http://192.168.1.50:8081/v1"
+    assert calls["payload"]["resources"] == {"runtimes": ["vllm"]}
+    assert calls["payload"]["load"]["max_concurrency"] == 16
+
+
+def test_run_engine_external_preserves_declared_gpu_topology(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = {}
+    monkeypatch.setattr(
+        launcher,
+        "start_llm",
+        lambda *args, **kwargs: pytest.fail("external engine must not launch llama.cpp"),
+    )
+    monkeypatch.setattr(
+        cli.provider,
+        "_register_engine",
+        lambda _url, _node_id, payload: calls.setdefault("payload", payload),
+    )
+    monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    args = _engine_args(
+        models=["qwen"],
+        endpoint_url="http://192.168.1.50:8000/v1",
+        runtime_kind="vllm",
+        gpu_count=2,
+        gpu_memory_mb=[96_000, 96_000],
+    )
+
+    assert cli.provider._run_engine(args) == 0
+    assert calls["payload"]["resources"] == {
+        "runtimes": ["vllm"],
+        "gpu_count": 2,
+        "gpu_memory_mb": [96_000, 96_000],
+    }
+
+
+def test_join_normalizes_homogeneous_gpu_topology_before_spawn(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_grid_config(name="home", port=8090)
+    captured = {}
+    monkeypatch.setattr(
+        cli.provider,
+        "_spawn_engine",
+        lambda _cfg, args, **kwargs: captured.update(args=vars(args), kwargs=kwargs) or 0,
+    )
+
+    args = cli.build_parser().parse_args(
+        [
+            "join",
+            "home",
+            "--at",
+            "http://192.168.1.50:8000/v1",
+            "-m",
+            "qwen",
+            "--kind",
+            "vllm",
+            "--gpu-count",
+            "2",
+            "--gpu-memory-mb",
+            "96000",
+        ]
+    )
+
+    assert cli.cmd_join(args) == 0
+    assert captured["args"]["gpu_count"] == 2
+    assert captured["args"]["gpu_memory_mb"] == [96_000, 96_000]
 
 
 def test_run_engine_external_advertise_as_maps_upstream(monkeypatch, tmp_path):
@@ -3856,6 +3975,8 @@ def test_join_at_writes_record_and_spawns_detached(monkeypatch, tmp_path):
         "llama3",
         "--name",
         "mac",
+        "--kind",
+        "vllm",
     ])
     assert cli.cmd_join(args) == 0
 
@@ -3863,6 +3984,7 @@ def test_join_at_writes_record_and_spawns_detached(monkeypatch, tmp_path):
     assert "mac" in records
     assert records["mac"]["endpoint_url"] == "http://192.168.1.10:11434/v1"
     assert records["mac"]["models"] == ["llama3"]
+    assert records["mac"]["runtime_kind"] == "vllm"
     assert records["mac"]["pid"] == 4321
     assert spawned["cmd"][-3:] == ["__engine", cfg["grid_id"], "mac"]
     assert spawned["kwargs"]["start_new_session"] is True
@@ -3939,6 +4061,7 @@ def test_join_kind_filters_to_one_engine(monkeypatch, tmp_path):
 
     assert cli.cmd_join(cli.build_parser().parse_args(["join", "home", "--kind", "vllm"])) == 0
     assert set(cli.provider._read_records(grid_id)) == {"vllm"}  # only the vllm engine joined
+    assert cli.provider._read_records(grid_id)["vllm"]["runtime_kind"] == "vllm"
     # the --engine alias drives the same filter (and errors on no match)
     assert cli.cmd_join(cli.build_parser().parse_args(["join", "home", "--engine", "ollama"])) == 0
     assert set(cli.provider._read_records(grid_id)) == {"vllm", "ollama"}
@@ -3973,13 +4096,30 @@ def test_join_parser_accepts_unified_remote_flags(monkeypatch, tmp_path):
     assert args.endpoint_port == 9001  # --llama-port is an alias for --endpoint-port
 
 
-def test_join_local_rejects_remote_only_flags(monkeypatch, tmp_path):
+def test_join_local_persists_max_concurrency_for_engine_admission(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    runtime.init_grid_config(name="home", port=8090)
-    args = cli.build_parser().parse_args(["join", "home", "--serve", "m", "--max-concurrency", "4"])
-    with pytest.raises(SystemExit) as exc:
-        cli.cmd_join(args)  # local handler rejects a remote-only flag before doing any work
-    assert "--max-concurrency" in str(exc.value) and "remote" in str(exc.value).lower()
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    monkeypatch.setattr(
+        cli.provider.subprocess,
+        "Popen",
+        lambda _cmd, **_kwargs: type("P", (), {"pid": 4321})(),
+    )
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *_args: "registered")
+
+    args = cli.build_parser().parse_args(
+        ["join", "home", "--serve", "m", "--max-concurrency", "4"]
+    )
+    assert cli.cmd_join(args) == 0
+    record = next(iter(cli.provider._read_records(grid_id).values()))
+    assert record["max_concurrency"] == 4
+
+
+@pytest.mark.parametrize("value", ("0", "257", "not-a-number"))
+def test_join_rejects_invalid_max_concurrency(value):
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["join", "--serve", "m", "--max-concurrency", value]
+        )
 
 
 def test_join_parser_accepts_api_kind(monkeypatch, tmp_path):
@@ -5091,7 +5231,7 @@ def test_engines_json_lists_joined_engines(monkeypatch, tmp_path, capsys):
 
 
 def test_engines_shows_max_concurrency(monkeypatch, tmp_path, capsys):
-    """`grid engines` surfaces the advertised max_concurrency (remote-only): in --json always (null
+    """`grid engines` surfaces advertised max_concurrency: in --json always (null
     when the engine didn't advertise it), and in the table only for engines that report it."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     runtime.init_grid_config(name="home", port=8090)
@@ -9870,6 +10010,69 @@ def test_remote_join_bare_with_nothing_live_and_nothing_detected_still_errors(mo
         cli.main(["join", "--respawn"])
 
 
+def test_remote_join_allocator_provider_bootstraps_empty_identity_without_detection(
+    monkeypatch, tmp_path, capsys
+):
+    """A fresh managed node must not need a fake manually served model before it can enroll."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        cli.provider,
+        "_detect",
+        lambda _host: pytest.fail("an allocator-provider bootstrap must not probe local engines"),
+    )
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--allocator-provider", "--name", "forge-machine-d"]) == 0
+
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["engines"] == []
+    assert record["models"] == []
+    assert record["allocator_provider"] is True
+    assert "allocator-provider=ready" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--serve", "model.gguf"],
+        ["--at", "http://127.0.0.1:11434/v1", "-m", "model"],
+        ["--media"],
+        ["--all"],
+        ["--kind", "vllm"],
+    ],
+)
+def test_remote_join_allocator_provider_rejects_engine_selectors(monkeypatch, tmp_path, extra):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit, match="creates an empty provider"):
+        cli.main(["join", "--allocator-provider", *extra])
+
+
+def test_remote_join_bare_respawn_recovers_dead_allocator_identity(monkeypatch, tmp_path):
+    """A provider crash must not strand an otherwise healthy allocator-owned engine."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(
+        pid=4242,
+        engines=[],
+        allocator_provider=True,
+    )
+    monkeypatch.setattr(cli.remote_provider.run_records, "record_alive", lambda _record: False)
+    monkeypatch.setattr(
+        cli.provider,
+        "_detect",
+        lambda _host: pytest.fail("allocator recovery must not adopt an unrelated local engine"),
+    )
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--respawn", "--name", "forge-machine-a"]) == 0
+
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["engines"] == []
+    assert record["models"] == []
+
+
 def test_remote_join_bare_respawn_restarts_rather_than_asking_which_engine_to_join(
     monkeypatch, tmp_path
 ):
@@ -9908,6 +10111,44 @@ def test_remote_join_bare_respawn_restarts_rather_than_asking_which_engine_to_jo
         "a restart quietly adopted an engine the operator never joined — --respawn restarts what is "
         "serving, it does not re-run detection"
     )
+
+
+def test_remote_join_bare_respawn_never_appends_one_unrelated_detected_engine(
+    monkeypatch, tmp_path
+):
+    """One detected engine is just as unrelated as several; detection must not run for a restart.
+
+    This is the live regression: restarting an allocator provider that served SmolLM found a local
+    Ollama process and silently added gpt-oss to the public grid.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:18081/v1", "models": ["smollm"], "engine_label": "allocator"},
+    ], started_at="2020-01-01T00:00:00+00:00", registered_at="2020-01-01T00:00:01+00:00")
+    _seed_heartbeat_sidecar(age_seconds=5)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    detected = []
+
+    def should_not_detect(_host):
+        detected.append(True)
+        return [
+            SimpleNamespace(
+                label="ollama",
+                endpoint_url="http://127.0.0.1:11434/v1",
+                models=["gpt-oss:20b"],
+                media=False,
+            )
+        ]
+
+    monkeypatch.setattr(cli.provider, "_detect", should_not_detect)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda _pid: True)
+    _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--respawn"]) == 0
+
+    assert detected == []
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == ["smollm"]
 
 
 def test_remote_join_hot_reload_keeps_the_identitys_registration(monkeypatch, tmp_path, capsys):
@@ -11809,6 +12050,24 @@ def _mock_relay(monkeypatch, handler, _real=httpx.Client):
         "Client",
         lambda *a, **k: _real(*a, **{**k, "transport": httpx.MockTransport(handler)}),
     )
+
+
+def test_relay_clients_reuse_startup_tls_trust_store(monkeypatch):
+    """A live provider must survive its virtual environment being replaced in place."""
+    from remote import relay
+
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(relay.httpx, "Client", FakeClient)
+    relay._client("https://relay.example", "AT", timeout=5.0)
+
+    assert seen["verify"] is relay._TLS_VERIFY_CONTEXT
+    assert seen["verify"].verify_mode == ssl.CERT_REQUIRED
+    assert seen["verify"].check_hostname is True
 
 
 def _default_project_listing(project_id="P1"):
@@ -18785,6 +19044,36 @@ def test_meta_labels_all_external_union_as_external(monkeypatch, tmp_path):
     assert serve._meta(builtin, "remote")["engine"] == "llama.cpp"  # built-in --serve still labels llama.cpp
 
 
+def test_meta_labels_each_model_in_a_mixed_allocator_union(monkeypatch, tmp_path):
+    """The aggregate node label cannot erase route ownership in a mixed managed/unmanaged union."""
+    from remote import serve
+
+    got = serve._meta(
+        {
+            "engines": [
+                {
+                    "endpoint_url": "http://127.0.0.1:8000/v1",
+                    "models": ["qwen-external"],
+                    "engine_label": "vllm",
+                },
+                {
+                    "endpoint_url": "http://127.0.0.1:18081/v1",
+                    "models": ["qwen-managed.gguf"],
+                    "engine_label": "allocator:llama.cpp",
+                    "allocator_host_id": "host-c",
+                },
+            ]
+        },
+        "remote",
+    )
+
+    assert got["engine"] == "vllm+allocator:llama.cpp"
+    assert got["model_engines"] == {
+        "qwen-external": "vllm",
+        "qwen-managed.gguf": "allocator:llama.cpp",
+    }
+
+
 def test_bring_up_engines_external_multi_probes_each(monkeypatch, tmp_path):
     from remote import probe, serve
 
@@ -21087,6 +21376,58 @@ def test_remote_models_json_maps_name_to_node_key(monkeypatch, tmp_path, capsys)
     assert {"model": "glm-5.2", "engine": "MLX", "node": "mac-studio", "responses": False} in payload
     assert {"model": "qwen-3", "engine": "MLX", "node": "mac-studio", "responses": False} in payload
     assert {"model": "glm-5.2", "engine": "ollama", "node": "ollama-box", "responses": False} in payload
+
+
+def test_remote_models_uses_per_model_engine_for_mixed_ownership(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(
+        monkeypatch,
+        {
+            "nodes": [
+                {
+                    "name": "gpu-box",
+                    "engine": "vllm+allocator:llama.cpp",
+                    "models": ["qwen-external", "qwen-managed"],
+                    "model_engines": {
+                        "qwen-external": "vllm",
+                        "qwen-managed": "allocator:llama.cpp",
+                    },
+                }
+            ]
+        },
+    )
+
+    assert cli.main(["models", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["engine"] for row in payload] == ["vllm", "allocator:llama.cpp"]
+
+
+def test_remote_models_preserves_case_for_extensionless_gguf_alias(monkeypatch, tmp_path, capsys):
+    """The overview node strips ``.gguf`` and lowercases for display, while the catalog retains
+    the request alias's true case. The rendered name must be copy-paste routable."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    overview = {
+        "models": [{"id": "SmolLM2-135M-Instruct-Q3_K_M.gguf"}],
+        "nodes": [{
+            "name": "intel-imac",
+            "engine": "llama.cpp",
+            "models": ["smollm2-135m-instruct-q3_k_m"],
+            "responses_models": ["smollm2-135m-instruct-q3_k_m"],
+            "online": True,
+        }],
+    }
+    _mock_overview(monkeypatch, overview)
+
+    assert cli.main(["models", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == [{
+        "model": "SmolLM2-135M-Instruct-Q3_K_M",
+        "engine": "llama.cpp",
+        "node": "intel-imac",
+        "responses": True,
+    }]
+    assert cli.remote_overview.live_model_names(overview) == (
+        "SmolLM2-135M-Instruct-Q3_K_M",
+    )
 
 
 def test_remote_models_empty_when_no_nodes(monkeypatch, tmp_path, capsys):

@@ -40,11 +40,12 @@ _REMOTE_ONLY_JOIN_FLAGS = (
     ("engine_label", "--engine-label"),
     ("pricing_input", "--pricing-input"),
     ("pricing_output", "--pricing-output"),
-    ("max_concurrency", "--max-concurrency"),
     ("respawn", "--respawn"),
+    ("allocator_provider", "--allocator-provider"),
+    ("relay_at", "--relay-at"),
     # Task serving (ADR 0032, issue 61). A task is claimed from the relay, and local mode has no
-    # relay — the same structural reason `--max-concurrency` is here. ⚠️ All three default to
-    # `None`, `--tasks` included: the predicate below is `is not None`, so a `store_true` flag
+    # relay. ⚠️ All three default to `None`, `--tasks` included: the predicate below is `is not
+    # None`, so a `store_true` flag
     # defaulting to False would refuse every LOCAL join.
     ("tasks", "--tasks"),
     ("max_tasks", "--max-tasks"),
@@ -108,6 +109,19 @@ def _apply_inline_aliases(args: argparse.Namespace) -> None:
 
 def cmd_join(args: argparse.Namespace) -> int:
     _reject_remote_only_flags(args)
+    gpu_memory_mb = list(getattr(args, "gpu_memory_mb", []) or [])
+    gpu_count = getattr(args, "gpu_count", None)
+    if gpu_count is None and gpu_memory_mb:
+        gpu_count = len(gpu_memory_mb)
+    if gpu_count and len(gpu_memory_mb) == 1:
+        gpu_memory_mb *= gpu_count
+    if gpu_memory_mb and len(gpu_memory_mb) != gpu_count:
+        raise SystemExit(
+            "Repeat --gpu-memory-mb once per heterogeneous GPU, or provide one value "
+            "for a homogeneous --gpu-count."
+        )
+    args.gpu_count = gpu_count
+    args.gpu_memory_mb = gpu_memory_mb
     if args.serve and args.models:
         raise SystemExit("--serve serves one built-in model; drop -m/--model (alias a built-in with --advertise-as).")
     _apply_inline_aliases(args)
@@ -130,13 +144,34 @@ def cmd_join(args: argparse.Namespace) -> int:
     if args.at:
         if not args.models:
             raise SystemExit("--at requires at least one -m/--model naming what that engine serves.")
-        return _spawn_engine(cfg, args, endpoint_url=args.at, models=list(args.models), media=args.media)
+        return _spawn_engine(
+            cfg,
+            args,
+            endpoint_url=args.at,
+            models=list(args.models),
+            media=args.media,
+            runtime_kind=args.kind,
+        )
 
     if args.serve:
-        return _spawn_engine(cfg, args, endpoint_url=None, models=[args.serve], media=args.media)
+        return _spawn_engine(
+            cfg,
+            args,
+            endpoint_url=None,
+            models=[args.serve],
+            media=args.media,
+            runtime_kind="llama.cpp",
+        )
 
     if args.media and not args.models:
-        return _spawn_engine(cfg, args, endpoint_url=None, models=[], media=True)
+        return _spawn_engine(
+            cfg,
+            args,
+            endpoint_url=None,
+            models=[],
+            media=True,
+            runtime_kind="comfyui",
+        )
 
     if args.models:
         raise SystemExit(
@@ -183,6 +218,7 @@ def cmd_join(args: argparse.Namespace) -> int:
                 models=engine.models,
                 engine_id=engine_id,
                 media=engine.media,
+                runtime_kind=engine.label,
             )
         except SystemExit as exc:
             print(f"Skipped {engine.label}: {exc}", file=sys.stderr)
@@ -270,7 +306,10 @@ def _run_cli_seat_engine(args: SimpleNamespace, cfg: dict[str, Any], grid_url: s
         "name": args.name,
         "pricing": {},
         "capabilities": {},
-        "load": {"active_tasks": 0},
+        "load": {
+            "active_tasks": 0,
+            "max_concurrency": max(1, int(getattr(args, "max_concurrency", None) or 1)),
+        },
         "upstream": {model: model for model in models},
     }
     return _advertise_until_terminated(
@@ -301,7 +340,12 @@ def _advertise_until_terminated(
         while True:
             time.sleep(max(1.0, float(args.heartbeat_interval)))
             try:
-                _heartbeat(grid_url, node_id, {"active_tasks": 0}, payload)
+                _heartbeat(
+                    grid_url,
+                    node_id,
+                    dict(payload.get("load") or {"active_tasks": 0}),
+                    payload,
+                )
             except httpx.RequestError as exc:
                 print(f"Heartbeat failed: {exc}", file=sys.stderr)
     except KeyboardInterrupt:
@@ -410,6 +454,7 @@ def _spawn_engine(
     api_kind: str | None = None,
     api_base_url: str | None = None,
     api_key: str | None = None,
+    runtime_kind: str | None = None,
 ) -> int:
     grid_id = cfg["grid_id"]
     engine_id = engine_id or getattr(args, "name", None) or f"engine-{uuid.uuid4().hex[:8]}"
@@ -423,6 +468,12 @@ def _spawn_engine(
         "pid": 0,
         "endpoint_url": endpoint_url,
         "models": models,
+        # Serving implementation is independent from ownership. In particular, an external vLLM
+        # process remains manually managed even though its runtime is now available to placement.
+        "runtime_kind": runtime_kind,
+        "max_concurrency": getattr(args, "max_concurrency", None),
+        "gpu_count": getattr(args, "gpu_count", None),
+        "gpu_memory_mb": list(getattr(args, "gpu_memory_mb", []) or []),
         "advertise_as": list(getattr(args, "advertise_as", []) or []),
         "media": bool(media),
         "media_bundles": list(getattr(args, "bundles", []) or []),
@@ -808,6 +859,10 @@ def run_engine_from_record(grid_id: str, engine_id: str) -> int:
         mmproj=record.get("mmproj"),
         temp=record.get("temp"),
         reasoning_budget=record.get("reasoning_budget"),
+        runtime_kind=record.get("runtime_kind"),
+        max_concurrency=record.get("max_concurrency"),
+        gpu_count=record.get("gpu_count"),
+        gpu_memory_mb=list(record.get("gpu_memory_mb") or []),
         api_kind=record.get("api_kind"),
         api_base_url=record.get("api_base_url"),
         api_media_port=record.get("api_media_port", 8190),
@@ -948,6 +1003,11 @@ def _run_engine(args: SimpleNamespace) -> int:
                 # shared with another media engine or already running when we joined.
                 run_records.update_record(args.grid, args.name, comfyui_started=True)
 
+        max_concurrency = max(1, int(getattr(args, "max_concurrency", None) or 1))
+        reported_load = {
+            "active_tasks": 0,
+            "max_concurrency": max_concurrency,
+        }
         payload = {
             "role": "engine",
             "models": advertised_models,
@@ -964,9 +1024,33 @@ def _run_engine(args: SimpleNamespace) -> int:
                 ) if text_advertised_models else {},
                 _media_capabilities(advertised_models) if args.enable_media else {},
             ),
-            "load": {"active_tasks": 0},
+            "load": reported_load,
             "upstream": upstream,
         }
+        # Old built-in records predate ``runtime_kind``; their missing endpoint is still definitive
+        # evidence that this loop launched llama.cpp. External records stay unknown unless the
+        # operator supplied --kind or auto-discovery recorded the detected label.
+        runtime_kind = getattr(args, "runtime_kind", None)
+        if not runtime_kind and not args.endpoint_url and args.models:
+            runtime_kind = "llama.cpp"
+        runtimes = list(
+            dict.fromkeys(
+                runtime
+                for runtime in (
+                    runtime_kind,
+                    "comfyui" if args.enable_media else None,
+                )
+                if runtime
+            )
+        )
+        gpu_memory_mb = list(getattr(args, "gpu_memory_mb", []) or [])
+        gpu_count = int(getattr(args, "gpu_count", None) or len(gpu_memory_mb))
+        if runtimes or gpu_count or gpu_memory_mb:
+            payload["resources"] = {
+                **({"runtimes": runtimes} if runtimes else {}),
+                **({"gpu_count": gpu_count} if gpu_count else {}),
+                **({"gpu_memory_mb": gpu_memory_mb} if gpu_memory_mb else {}),
+            }
         _register_engine(grid_url, node_id, payload)
         registered = True
         print(f"Engine {node_id} advertised on {grid_url}")
@@ -979,7 +1063,7 @@ def _run_engine(args: SimpleNamespace) -> int:
         while True:
             time.sleep(max(1.0, float(args.heartbeat_interval)))
             try:
-                _heartbeat(grid_url, node_id, {"active_tasks": 0}, payload)
+                _heartbeat(grid_url, node_id, reported_load, payload)
             except httpx.RequestError as exc:
                 print(f"Heartbeat failed: {exc}", file=sys.stderr)
     except KeyboardInterrupt:
@@ -1103,7 +1187,10 @@ def _run_api_media_engine(args: SimpleNamespace, cfg: dict[str, Any], grid_url: 
         "name": args.name,
         "pricing": {},
         "capabilities": _api_media_capabilities(models),
-        "load": {"active_tasks": 0},
+        "load": {
+            "active_tasks": 0,
+            "max_concurrency": max(1, int(getattr(args, "max_concurrency", None) or 1)),
+        },
         "upstream": {},
     }
     print(f"media_url={payload['media_url']} ({args.api_kind} -> {args.api_base_url})")
@@ -1236,5 +1323,3 @@ def _record_alive(grid_id: str, engine_id: str) -> bool:
     reaper — made this refuse a re-join of an engine that had already died."""
     record = run_records.read_records(grid_id).get(engine_id)
     return bool(record and run_records.record_alive(record))
-
-

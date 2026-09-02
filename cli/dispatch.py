@@ -21,7 +21,7 @@ from typing import NoReturn
 
 from shared import state
 
-from . import remote_grid, remote_overview, remote_provider, remote_request
+from . import remote_allocator, remote_grid, remote_overview, remote_provider, remote_request
 
 # Commands that behave identically in both modes: local engine/model setup, plus the
 # mode/selection commands and the bare overview (which branch on the mode internally).
@@ -51,6 +51,9 @@ AGNOSTIC = frozenset({
     # `stt` hits the account-level control plane — there's no "this grid" for it to route
     # through, so it is mode-blind too.
     "stt",
+    # A single-machine development fixture is deliberately independent of the selected local or
+    # remote production mode. It owns its isolated endpoint and never mutates either grid catalog.
+    "test",
 })
 
 # Mode-gated commands: real local behaviour today; a clear stub in remote mode until later slices
@@ -80,6 +83,7 @@ GATED = (
     "image",
     "edit",
     "video",
+    "allocator",
 )
 
 
@@ -112,6 +116,7 @@ REMOTE_HANDLERS = {
     "image": remote_request.cmd_remote_image,
     "edit": remote_request.cmd_remote_edit,
     "video": remote_request.cmd_remote_video,
+    "allocator": remote_allocator.cmd_remote_allocator,
 }
 
 

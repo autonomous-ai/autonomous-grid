@@ -422,7 +422,17 @@ def start(port: int = COMFYUI_PORT_DEFAULT) -> ComfyProcess:
         env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     else:
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    proc = subprocess.Popen(cmd, cwd=str(comfyui_dir()), stdout=log_fh, stderr=log_fh, env=env)
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(comfyui_dir()),
+        stdout=log_fh,
+        stderr=log_fh,
+        env=env,
+        # `grid engine start --detach` returns after readiness.  Without a new session, shells and
+        # process supervisors can send their departing foreground process group a hangup and kill
+        # the engine that the command just promised was detached.
+        start_new_session=True,
+    )
     cp = ComfyProcess(proc=proc, port=port, log=log)
     _active = cp
     _write_pid_file(proc.pid, port)

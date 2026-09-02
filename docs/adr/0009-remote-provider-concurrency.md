@@ -77,3 +77,14 @@ on the surface; `node_id` internal.
 - `grid engines <grid>` (and `--json`) surfaces each engine's advertised `max_concurrency`, so an
   operator can confirm what a join is serving at (remote-only; the field is `null` when unadvertised).
   The authoritative local value is also readable in the run record `~/.grid/run/engines/<grid_id>/<engine_id>.json`.
+
+## Amendment (2026-08-28): local admission and allocator capacity
+
+The original hard invariant kept `--max-concurrency` remote-only because local Grid had no pull
+worker pool to size. Dynamic allocation changes the relevant contract: the local proxy already owns
+exact in-flight admission, and the allocator needs a conservative service-capacity signal for
+heterogeneous llama.cpp and vLLM inventory. The flag therefore applies in both modes, remains bounded
+to `[1, 256]`, is persisted in the local engine record, and is repeated in registration heartbeats.
+Local routing admits no more than the declared number of simultaneous requests. A ready single-model
+engine may contribute this width to demand planning; a multi-model engine does not, because the
+node-wide limit is shared. This metadata does not grant lifecycle ownership of an external process.

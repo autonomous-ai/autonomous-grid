@@ -8,9 +8,10 @@ and relationships, not exact numbers.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from shared.system import apple, bandwidth, device, device_info, gpu
 from shared.system.device import Budget
-
 
 # field -> accepted python type(s); `None` in a tuple means the field is nullable.
 _TOP = {
@@ -38,7 +39,11 @@ _CPU = {
     "physical_cores": (int,),
     "logical_threads": (int,),
 }
-_MEMORY = {"total_gb": (int, float), "available_gb": (int, float), "used_percent": (int, float)}
+_MEMORY = {
+    "total_gb": (int, float),
+    "available_gb": (int, float, None),
+    "used_percent": (int, float, None),
+}
 _DISK = {"total_gb": (int, float), "free_gb": (int, float)}
 _GPU = {
     "index": (int,),
@@ -115,6 +120,30 @@ def test_collect_never_raises_when_probes_fail(monkeypatch):
     _assert_shape(info)
 
 
+def test_device_info_preserves_unknown_memory_availability_and_pressure(monkeypatch):
+    monkeypatch.setattr(
+        device_info,
+        "_safe_budget",
+        lambda: Budget(4 * 1024**3, "ram", "test", backend="cpu"),
+    )
+    monkeypatch.setattr(
+        device_info.host,
+        "gather",
+        lambda: SimpleNamespace(
+            memory_total_gb=8.0,
+            memory_available_gb=None,
+            memory_percent=None,
+            cpu_count=4,
+            disk_total_gb=100.0,
+            disk_free_gb=50.0,
+        ),
+    )
+
+    memory = device_info.collect_device_info()["memory"]
+
+    assert memory == {"total_gb": 8, "available_gb": None, "used_percent": None}
+
+
 def test_gpu_core_count_never_raises(monkeypatch):
     # Patch the real subprocess boundary: _run must swallow this and return "",
     # so gpu_core_count degrades to None instead of raising.
@@ -132,7 +161,7 @@ def _force_apple(monkeypatch, *, chip="Apple M3 Max", model="MacBook Pro (Mac15,
                  cores=40, total_mb=65536.0):
     monkeypatch.setattr(
         device, "resolve_budget",
-        lambda: Budget(int(60 * 1024 ** 3), "vram",
+        lambda: Budget((60 * 1024 ** 3), "vram",
                        "Apple Silicon, 60 GB usable of 64 GB unified memory", backend="metal"),
     )
     monkeypatch.setattr(apple, "describe_chip", lambda: (model, chip))
@@ -191,7 +220,7 @@ def test_nvidia_gpu_has_compute_cap_and_null_core_count(monkeypatch):
                        memory_used_mb=2048.0, utilization_pct=12.0)
     monkeypatch.setattr(
         device, "resolve_budget",
-        lambda: Budget(int(22 * 1024 ** 3), "vram", "NVIDIA RTX 4090, 22 GB VRAM", backend="cuda"),
+        lambda: Budget((22 * 1024 ** 3), "vram", "NVIDIA RTX 4090, 22 GB VRAM", backend="cuda"),
     )
     monkeypatch.setattr(gpu, "enumerate_gpus", lambda **k: [fake])
     info = device_info.collect_device_info()

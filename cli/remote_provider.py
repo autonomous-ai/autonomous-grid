@@ -26,6 +26,7 @@ import time
 from typing import NamedTuple
 import uuid
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from shared import logging_setup, orphan_sweep, paths, run_records
 from shared.filelock import file_lock
@@ -44,6 +45,36 @@ _REMOTE_IDENTITY = run_records.REMOTE_IDENTITY
 
 # One-shot vendor model-listing call at `join --api` (key validation + whitelist intersection).
 _VENDOR_LIST_TIMEOUT = 15.0
+
+
+def _relay_transport_url(value: str | None, canonical_url: str) -> str | None:
+    """Validate and normalize an optional provider-only relay transport.
+
+    The grid's canonical URL remains the public discovery address.  This override only changes the
+    outbound path used by the provider process, primarily so a provider co-located with its relay
+    does not hairpin every poll and response through a public tunnel.
+    """
+
+    if value is None:
+        return None
+    normalized = value.strip().rstrip("/")
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
+        raise SystemExit("--relay-at must be an HTTP(S) base URL without embedded credentials.")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise SystemExit("--relay-at must be an origin URL without a path, query, or fragment.")
+    loopback = parsed.hostname.casefold() == "localhost" or parsed.hostname in {
+        "127.0.0.1",
+        "::1",
+    }
+    if parsed.scheme != "https" and not loopback:
+        raise SystemExit("--relay-at permits plain HTTP only for a loopback address; use HTTPS.")
+    canonical = canonical_url.rstrip("/")
+    return None if normalized == canonical else normalized
+
+
+def _effective_relay_transport(record: dict[str, object]) -> str:
+    return str(record.get("relay_transport_url") or record.get("signaling_url") or "").rstrip("/")
 
 # Appended to a full-leave success line when the argv sweep could not read the process table: the
 # backstop still dropped the model, but we couldn't verify no stray child remains, so the success is
@@ -320,6 +351,24 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     from . import provider, remote_grid
 
     _reject_local_only_flags(args)
+    allocator_provider = bool(getattr(args, "allocator_provider", False))
+    if allocator_provider:
+        conflicts = (
+            ("api", "--api"),
+            ("at", "--at"),
+            ("serve", "--serve"),
+            ("models", "-m/--model"),
+            ("media", "--media"),
+            ("bundles", "--bundle"),
+            ("all", "--all"),
+            ("kind", "--kind"),
+        )
+        used = [flag for attr, flag in conflicts if getattr(args, attr, None)]
+        if used:
+            raise SystemExit(
+                "--allocator-provider creates an empty provider and can't combine with "
+                f"{', '.join(used)}. Let the allocator load models after it joins."
+            )
     if getattr(args, "api", None) is not None:  # `--api ""` must error, not fall through to hardware
         _reject_api_conflicts(args)
     if args.serve and args.models:
@@ -365,13 +414,15 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     respawn = bool(getattr(args, "respawn", False))  # never no-op, never SIGHUP — always stop-and-start
     key_rotated = False  # a `join --api` that stored a NEW key must reach a live identity via respawn
     deferred_target_error: SystemExit | None = None
-    if getattr(args, "api", None) is not None:
+    if allocator_provider:
+        specs, media_detected = [], False
+    elif getattr(args, "api", None) is not None:
         specs, key_rotated = _resolve_api_targets(args, network_id)
         media_detected = False
     else:
         specs, media_detected, deferred_target_error = _resolve_or_defer(args, respawn=respawn)
     media = bool(getattr(args, "media", False)) or media_detected
-    if not specs and not media and deferred_target_error is None:
+    if not specs and not media and deferred_target_error is None and not allocator_provider:
         # engines detected and the operator declined, or nothing to serve
         print("Nothing joined.")
         return 0
@@ -418,11 +469,27 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # leave-then-rejoin instruction instead. (`meta_name` is not inherited by either path — it comes
         # from `--name` or the hostname.) Same shape as `_leave_one_engine`'s
         # `survivors or list(records.values())` (ADR 0010).
-        if deferred_target_error is not None and not live:
+        persisted = list(run_records.read_records(network_id).values())
+        if (
+            deferred_target_error is not None
+            and not live
+            and not _allocator_identity_can_respawn(persisted)
+        ):
             # Nothing running to restart, so there is no union to inherit and `--respawn` has nothing
-            # to act on: the operator gets the guidance auto-detect would have given them anyway.
+            # to act on. An allocator-integrated identity is the exception: its persisted record is
+            # the recovery contract and its allocator will republish READY routes after this empty
+            # provider comes back. Every ordinary stale record still gets the original guidance.
             raise deferred_target_error
-        base = live or list(run_records.read_records(network_id).values())
+        base = live or persisted
+        inherited_transport = _identity_field(base, "relay_transport_url")
+        requested_transport = getattr(args, "relay_at", None)
+        relay_transport_url = _relay_transport_url(
+            requested_transport if requested_transport is not None else inherited_transport,
+            signaling_url,
+        )
+        previous_transport = _effective_relay_transport(_identity_record(live) or {})
+        next_transport = relay_transport_url or signaling_url.rstrip("/")
+        transport_changed = bool(live) and next_transport != previous_transport
         merged_specs, changed = _merge_engines(_engine_union(base), specs)
         # A rotated key only matters when this kind's API spec is already LIVE. A reload WOULD re-read the
         # key store and swap the bearer in place (issue 05), but rotation deliberately RESPAWNS so the
@@ -441,7 +508,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         if (
             live and not changed and media == base_media and bundles == base_bundles
             and meta_name == _identity_field(live, "meta_name") and not rotated_live
-            and not respawn
+            and not respawn and not transport_changed
         ):
             # Lazy, per this module's import rule: `cli.dispatch` imports it while `cli` is still
             # initialising, and `remote.relay` pulls httpx in eagerly.
@@ -483,7 +550,13 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         record = _build_record(
             args, network_id, engine_id, signaling_url, merged_specs,
             media=media, meta_name=meta_name, bundles=bundles,
+            relay_transport_url=relay_transport_url,
         )
+        if allocator_provider or any(bool(item.get("allocator_provider")) for item in base):
+            # This is a durable provider role, not a claim that a model is already routed. It lets
+            # a dead empty provider recover with `grid join --respawn`, while the allocator remains
+            # solely responsible for publishing real READY routes and routing revisions.
+            record["allocator_provider"] = True
         # Preserve the live identity's --max-concurrency across an additive join, like media/bundles/meta
         # above. It sizes the running N-worker poll pool (remote/serve._serve_loop), so a re-join that
         # doesn't re-pass --max-concurrency must NOT reset it to the default 1 — that would silently
@@ -528,10 +601,14 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         print(f"endpoint_url={record['endpoint_url']}")
     if record["models"]:
         print(f"models={','.join(record['models'])}")
+    if record.get("allocator_provider"):
+        print("allocator-provider=ready (models are loaded and unloaded by the allocator)")
     if media:  # the comfyui:* models are resolved from bundle gating at serve time, not here
         print("media=on (serving comfyui:* workflows via the relay)")
     if task_serving.allowed:  # said only when it is true — the refusal has already gone to stderr
         print("tasks=on (claiming tasks for this grid)")
+    if relay_transport_url:
+        print(f"relay_transport={relay_transport_url} (canonical grid URL unchanged)")
     print(f"log={paths.engines_dir(network_id) / f'{engine_id}.log'}")
     # Quoted: a grid's display name is freeform and can carry a space ("Hydrate Grid"), and a hint
     # printed bare isn't actually copy-pasteable — argparse splits it into two positionals and
@@ -1096,6 +1173,17 @@ def _identity_record(live: list[dict[str, object]]) -> dict[str, object] | None:
     return live[0] if live else None
 
 
+def _allocator_identity_can_respawn(records: list[dict[str, object]]) -> bool:
+    """Whether a dead singleton has a durable allocator route-recovery contract."""
+
+    return any(
+        record.get("engine_id") == _REMOTE_IDENTITY
+        and bool(record.get("allocator_provider") or record.get("allocator_routing_revision"))
+        and record.get("reload_signal") == "sighup"
+        for record in records
+    )
+
+
 def _identity_field(live: list[dict[str, object]], key: str) -> object:
     """One field of the live identity — the singleton's if present, else the first live record's."""
     record = _identity_record(live)
@@ -1164,6 +1252,10 @@ def _hot_reloadable(
     # the EFFECTIVE concurrency — the api-only default 8 vs the hardware default 1, with no
     # explicit --max-concurrency pinning both sides — only a respawn applies the new size.
     if run_records.effective_max_concurrency(record) != run_records.effective_max_concurrency(singleton):
+        return False
+    # The provider's relay base is captured by every poll/heartbeat worker at process start. A
+    # SIGHUP can replace model routing but cannot atomically retarget those live workers.
+    if _effective_relay_transport(record) != _effective_relay_transport(singleton):
         return False
     # A NEW API engine is hot-reloadable now that the reload re-reads the key store and swaps the vendor
     # bearer atomically with routing (issue 05 — remote/serve._assemble_snapshot → _api_bearers), so it
@@ -1307,8 +1399,10 @@ def _resolve_or_defer(
     `--respawn` is also a **restart** — the one-command form of the `grid leave` + `grid join` folklore
     it replaces, which an operator runs with no arguments. But auto-detect probes loopback only, so an
     identity serving `--at <otherhost>` or an API engine has nothing to find, and the refusal would
-    land before the CLI ever looked at what is running. Deferring it lets the caller answer from the
-    live identity's own union instead, and re-raise untouched when there is no live identity.
+    land before the CLI ever looked at what is running. More importantly, detection may find a
+    DIFFERENT local engine that was never part of the identity: a restart must not silently append
+    it. Skip detection entirely and let the caller answer from the live identity's own union; when
+    there is no live identity, surface the ordinary no-engine guidance.
 
     Only a join that names **nothing** defers, which is what makes this safe to express as "catch
     ``SystemExit``". `_resolve_serve_targets` has five refusals; three of them (`--at` without `-m`,
@@ -1324,6 +1418,12 @@ def _resolve_or_defer(
         args.at, args.serve, getattr(args, "models", None), getattr(args, "media", False),
         getattr(args, "kind", None),
     ))
+    if respawn and named_nothing:
+        return [], False, SystemExit(
+            "No running engine detected on this box. Point at one with "
+            "`grid join --at <url> -m <model>`, or start the built-in engine with "
+            "`grid join --serve <model>`."
+        )
     try:
         specs, media_detected = _resolve_serve_targets(args)
     except SystemExit as exc:
@@ -1414,6 +1514,7 @@ def _build_record(
     media: bool = False,
     meta_name: str | None = None,
     bundles: list[str] | None = None,
+    relay_transport_url: str | None = None,
 ) -> dict[str, object]:
     """The remote engine's run record — non-secret routing only; the token stays in credentials.toml.
 
@@ -1438,6 +1539,7 @@ def _build_record(
         "meta_name": meta_name,  # grid-page display name (--name, or hostname); NOT the record key
         "pid": 0,
         "signaling_url": signaling_url,
+        "relay_transport_url": relay_transport_url,
         "endpoint_url": single_endpoint,
         "models": union,
         "engines": specs,

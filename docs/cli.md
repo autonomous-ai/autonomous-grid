@@ -18,6 +18,7 @@ launch    start an app already pointed at your grid; the app it starts is a laun
 pack      a bundled starting point for training on business data (`grid train packs`)
 adapter   the small add-on layer a training run produces (LoRA) — what moves between machines
 gate      the check that refuses to serve a trained model unless it beat the one you serve
+allocator the local controller that places configured models across participating hosts
 ```
 
 Do not use `provider`, `consumer`, or `signaling` in CLI output or first-run docs — with one
@@ -93,10 +94,12 @@ with `grid join`, and use them with `grid chat -m <model> "…"`.
 
 ## Modes
 
-Grid runs in one of two modes. **`local`** (the default) is everything documented here: an
-unauthenticated in-memory grid on your local network. **`remote`** is a signed-in thin client to
-autonomous's hosted relay: sign in with `grid login`, then bring up and manage hosted **remote
-grids** with the same `up`/`down`/`ls`/`info` verbs, serve them (`join`/`leave`), consume them
+Grid runs in one of two modes. **`local`** (the default) is everything documented here: a local-
+network grid whose inference, discovery, and ordinary registry are unauthenticated and whose live
+membership is in memory. Allocator mutations and managed-node control are the narrow authenticated
+exception (see [Allocator](#allocator)). **`remote`** is a signed-in thin client to autonomous's
+hosted relay: sign in with `grid login`, then bring up and manage hosted **remote grids** with the
+same `up`/`down`/`ls`/`info` verbs, serve them (`join`/`leave`), consume them
 (`chat`/`image`/`edit`/`video`), price your served models (`grid price`), and manage who may join or
 use them (`grid members`).
 
@@ -124,6 +127,10 @@ dialect the launched app speaks for `launch` — see [Launch](#launch)). The sha
 local commands (`catalog`, `pull`, `rm`/`remove`, `ctx`, `device-info`, `engine …`, `agent …`,
 `train …`) work in either mode. A machine with no state
 file behaves exactly as a `local`-only install.
+
+`grid allocator …` is mode-gated in the other direction: it runs only in `local` mode in this
+release. In `remote` mode it exits with guidance to run `grid mode local` or use `--local` for that
+one command; it never silently operates on the hosted relay.
 
 Notes:
 - `--json` goes after the subcommand (`grid info --json`); bare `grid --json` prints the
@@ -217,7 +224,7 @@ See [ADR 0003](./adr/0003-remote-grid-lifecycle.md).
 ```
 grid join [grid]                                      # auto-detect local engines
 grid join [grid] --all                                # join every detected engine
-grid join [grid] --at <url> -m <model>... [--name <id>]
+grid join [grid] --at <url> -m <model>... [--kind <runtime>] [--max-concurrency <n>] [--name <id>]
 grid join [grid] --serve <model> [--name <id>]
 grid join [grid] --media [--bundle <bundle>]... [--name <id>]
 grid join [grid] --api <kind> [-m <model>...]         # join a third-party API engine (openai, codex, doggi)
@@ -237,6 +244,11 @@ grid engine ls [grid] [--json]                        # live engines joined to a
 When detection finds more than one engine, print the plan and ask for confirmation in
 interactive terminals. In non-interactive mode, require `--all`, `--kind <kind>`, or
 explicit `--at`.
+
+Auto-detected engines publish their detected runtime to the allocator. When `--at` points at an
+engine whose implementation Grid cannot infer from the OpenAI-compatible wire protocol, add
+`--kind vllm`, `--kind ollama`, or the corresponding runtime. This is compatibility metadata only;
+the externally started process remains manually managed and Grid receives no lifecycle authority.
 
 Example detection output:
 
@@ -408,6 +420,7 @@ The `grid join` flag set is the union of both modes, gated by mode:
 
 - **Both modes:** `--at` / `--serve` / `-m,--model` / `--kind <kind>` (alias `--engine`) / `--name`
   / `--all`, `--advertise-as` (or inline `-m real=pub`), `--endpoint-port` (alias `--llama-port`),
+  `--max-concurrency` (the engine's real simultaneous-request/batch admission limit),
   the llama tuning flags (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`),
   `--heartbeat-interval` (seconds between heartbeats, default 15), `--api-key <key>` (overrides the
   env var and the key store, and warns that it is visible in shell history), and the media flags
@@ -419,9 +432,9 @@ The `grid join` flag set is the union of both modes, gated by mode:
   (`doggi`) also joins in `local` mode, where it bridges to the vendor gateway exactly where ComfyUI
   would sit. `-m` optionally narrows the whitelist (omitted = every whitelisted model the key can
   see), `--no-browser` (the codex OAuth
-  sign-in's paste flow for headless boxes; inert elsewhere, with a note), and `--max-concurrency`
-  (how many requests this engine serves at once; the provider runs one poll worker per slot —
-  default 1, or 8 when the identity serves only API engines, pinned back to **1** when any of
+  sign-in's paste flow for headless boxes; inert elsewhere, with a note). In remote mode the
+  provider runs one poll worker per concurrency slot — default 1, or 4 when the identity serves
+  only API engines, pinned back to **1** when any of
   them is a `codex` seat: a flat-rate subscription is never hammered four-wide by default).
   Match it to the engine's own batch width — llama.cpp `--parallel`, vLLM `max_num_seqs` — or the
   extra slots queue behind a batch that was never widened to take them. Finally, `--respawn` (stop
@@ -514,6 +527,167 @@ flat `models` list.
 
 See [ADR 0012](./adr/0012-api-engines.md) for the decisions behind the CLI-shipped whitelist,
 the `openai:*` namespacing, and the key-store lifecycle.
+
+## Allocator
+
+```
+grid allocator status [--grid <g>] [--json]
+
+grid allocator model set <model> --memory-mb <n>
+    [--artifact-sha256 <64-hex-digest>]
+    [--workload-score <workload=score>]...
+    [--runtime <name>]... [--backend <name>]... [--data-tier <tier>]
+    [--required-tag <tag>]... [--forbidden-tag <tag>]... [--pin <host>]...
+    [--min-replicas <n>] [--max-replicas <n>] [--target-utilization <f>]
+    [--service-seconds <s>] [--latency-slo-ms <ms>] [--priority <n>]
+    [--load-seconds <s>] [--warm-seconds <s>] [--min-residency-seconds <s>]
+    [--scale-down-cooldown-seconds <s>] [--min-failure-domains <n>]
+    [--max-colocated-models <n>]
+    [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
+grid allocator model remove|rm <model>
+    [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
+
+grid allocator mode observe|recommend|automatic
+    [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
+grid allocator tick
+    [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
+
+grid allocator join [grid] [--heartbeat-interval <s>] [--dedicated] [--restart]
+
+grid allocator token write <path> [--host-id <id>] [--ttl-days <n>] [--force]
+    [--grid <g>] [--token-file <path>] [--allow-insecure-http]
+
+grid allocator node start [--grid <g>] [--token-file <path>]
+    [--heartbeat-interval <s>] [--advertise-host <h>]
+    [--engine-tls-cert <pem>] [--engine-tls-key <pem>] [--engine-tls-ca <pem>]
+    [--allow-insecure-http]
+grid allocator node stop [--grid <g>]
+grid allocator node status [--grid <g>] [--json]
+grid allocator node drain|pause|quarantine [--grid <g>]
+    [--reason <text>] [--for-seconds <s>]
+grid allocator node resume [--grid <g>]
+```
+
+The allocator dynamically places configured model replicas across participating computers. It is
+experimental and starts in **`recommend`** mode: `observe` records drift without proposing
+actions, `recommend` shows the actions it would take, and `automatic` delivers executable
+load/warm/drain/unload commands within the allocator's safety limits. For `llama.cpp`, `<model>` is
+the exact GGUF filename. Dedicated remote providers also expose installed Ollama, ComfyUI, and vLLM
+lifecycle adapters through the same allocator contract; profiles must declare the matching runtime
+and an immutable runtime-specific source when an artifact is not already cached.
+
+On a remote Grid, first serve the machine normally with `grid join`, then run
+`grid allocator join <grid>`. The relay reuses that provider's existing authenticated membership,
+derives a stable allocator host identity, and starts the managed node without asking the operator
+to copy a control token. Enrollment is available only to the same live provider identity; it does
+not admit a new member or grant policy-administration access.
+
+Repeat `--workload-score WORKLOAD=SCORE` to describe where a model fits the portfolio, for example
+`--workload-score coding=1 --workload-score research=.8`. Scores are capability hints in `(0, 1]`;
+the allocator combines them with observed workload demand, compatibility, resource footprint, cold-start
+time, and measured outcomes. They do not route an individual request. With several active workload
+classes, allocator status also shows the jointly optimized workload-to-model map, how many distinct
+models it selected, and the one uncertainty-driven model—if any—using the fleet exploration slot.
+Clients may reuse an opaque `X-Grid-Affinity-Key` across an iterative workflow. After repeated
+same-session workload transitions, status explains proactive prewarming as `learned workflow A →
+B` with confidence; adjacent traffic from different users is not treated as a workflow.
+
+`grid allocator node start` joins this computer as managed capacity and starts a detached local
+protection loop. `drain`, `pause`, and `quarantine` are durable local overrides that outrank global
+placement; `resume` clears the override. `node stop` fences routing and drains active work before
+stopping processes that Grid can prove it owns. If activity remains busy or unknowable at the
+graceful deadline, cleanup fails safe and leaves the process alive; the explicit force fallback is
+reserved for bounded, identity-checked daemon cleanup and never signals an unproven model child.
+Retry after work drains. Managed llama ports use a private engine key that Grid persists owner-only
+and gives to llama.cpp through an owner-only key file, never process argv or environment. It is
+never returned from status or discovery. A non-loopback managed engine requires the TLS certificate
+and key flags above; add the CA flag for a private intranet CA. The certificate SAN must cover the
+exact `--advertise-host`, and the private key must be owned by the current user with no group/other
+permissions. Use `token write` to mint an expiring, host-scoped credential into an owner-only file
+before provisioning another computer.
+
+If `--runtime` is omitted, model profiles default to `llama.cpp`. Supplying one or more
+`--runtime` flags replaces that default; it does not add to it. One or more
+`--runtime-memory-mb RUNTIME=MB` values override the fallback `--memory-mb` estimate on matching
+hosts. A new placement selects the compatible runtime with the smallest declared footprint (then a
+stable name tie-break), while an already-live compatible runtime remains sticky. A
+profile can also require a physical topology with `--min-gpu-count` and
+`--min-gpu-memory-mb`; nodes without enough reported per-device VRAM fail that constraint closed. A
+managed node on the same machine as its Grid advertises the Grid's literal loopback control address
+by default. Remote workers need
+an explicit reachable address and end-to-end TLS.
+
+`status` is a read-only LAN status view and needs no allocator credential. Model profile changes,
+allocator mode changes, immediate ticks, and node-token minting use the operator capability from
+the managed local grid config, `GRID_ALLOCATOR_CONTROL_TOKEN`, or `--token-file`. A managed node
+uses the separate host-scoped `GRID_ALLOCATOR_NODE_TOKEN` or its own `--token-file`; never copy the
+operator capability to a worker. Operator calls retain the explicit legacy
+`--allow-insecure-http` escape hatch, but managed node and engine credentials always refuse
+non-loopback plaintext. The node-start spelling is accepted for compatibility only and does not
+relax that rule. Use HTTPS between computers. See
+[Dynamic resource allocator](allocator.md) for placement rules, safety invariants, and the wire
+contract.
+
+For allocator development on one machine, the `test` group separates modeled scale from real
+process actuation:
+
+```
+grid test scenario [--machines N] [--models N] [--users N]
+    [--duration 30m|2h] [--seed N] [--strategy smart|reactive|greedy|static]
+    [--workload-trace WORKLOAD=CSV]... [--oracle] [--timeline] [--json]
+grid test graduate [--machines N,N,...] [--seeds N,N,...]
+    [--models N] [--users N] [--duration 30m|2h] [--json]
+grid test start [--machines N] [--candidate-model GGUF]...
+    [--workload-model WORKLOAD=GGUF]...
+    [--include-comfyui --media-bundle z_image]
+    [--comfyui-port N] [--media-port N]
+    [--text-capacities-gib GIB,...]
+grid test demo [--users N] [--requests N] [--max-tokens N] [--timeout SECONDS]
+grid test compete [--max-tokens N] [--timeout SECONDS]
+grid test status [--json]
+grid test watch
+grid test stop
+```
+
+`test scenario` runs deterministic heterogeneous planning with changing user demand and failures;
+it starts no engine processes and is not an inference test. Repeat `--workload-trace` to replace a
+workload's synthetic demand timing with a headerless CSV whose first columns are timestamp seconds
+and request rate. Extra columns are ignored. The lab normalizes the imported curve to that
+workload's original mean demand, so it compares burst shapes without silently changing scale.
+`--oracle` exhaustively benchmarks the exact trace on at most four logical machines, nine models,
+and 240 minutes. It reports the clairvoyant service ceiling, potential placement gain,
+minimum-churn winning schedule, and artifact/startup feasibility; it remains a planning benchmark
+and starts no engines.
+`test graduate` replays identical traces through smart, reactive-only, current-demand greedy, and
+fixed static strategies. It prints per-case score, service, and churn comparisons plus explicit
+pass/fail gates; a failing gate exits nonzero and identifies the next allocator weakness to fix.
+`--workload-model` gives the real test
+Grid explicit model capabilities such as `coding=qwen-coder.gguf` or
+`research=qwen-instruct.gguf`; several workloads may share one model. With those bindings,
+`test demo` runs a five-phase adaptive workday: idle, mixed specialist demand, a general-demand
+replica surge, a changed workload mix, and cooldown. It requires real responses and real lifecycle
+actions at every placement. Without bindings, the original single-specialist demo remains
+available. `test compete` benchmarks repeatable, distinct `--candidate-model` GGUFs with real
+inference, records authenticated quality/latency evidence without creating demand, then proves the
+allocator selects the measured winner and places it on the planner-preferred capable logical node.
+`--text-capacities-gib` defines one heterogeneous capacity per text node; its count must match.
+Starting with `--include-comfyui` uses
+one of the N logical machines for a real ComfyUI/PyTorch-MPS node; the demo then requires an actual
+PNG from the installed image-generation bundle. Install it first with `grid engine install comfyui`
+and `grid engine pull z_image`. See the allocator guide for the ownership limits and full workflow.
+
+An external vLLM endpoint can declare homogeneous topology without changing lifecycle ownership:
+
+```bash
+grid join --at http://gpu-host:8000/v1 -m Qwen3.8-Flash-Next --kind vllm \
+  --gpu-count 2 --gpu-memory-mb 98304
+```
+
+Repeat `--gpu-memory-mb` once per device for heterogeneous GPUs. This metadata is placement and
+routing evidence only; Grid still never starts, drains, or stops an externally owned vLLM process.
+To make vLLM allocator-managed, enroll its existing Grid provider with
+`grid --remote allocator join <grid> --dedicated` and configure an immutable `vllm` model profile;
+the allocator still refuses any process it cannot prove it owns.
 
 ## Use
 
@@ -2325,7 +2499,7 @@ grid engine install comfyui                    # default media engine
 grid engine pull <bundle>                      # ComfyUI media bundle: image_generation, image_editing, i2v
 grid engine status [--port 8188]               # ComfyUI: installed, its venv, output dir, bundles, running?
 grid engine start [--port 8188] [--detach]     # start ComfyUI (blocks unless --detach)
-grid engine stop                               # stop it
+grid engine stop [--port 8188]                 # stop the tracked ComfyUI on that port
 grid engine ls [grid] [--json]                 # live engines joined to a grid (same view as grid engines)
 ```
 

@@ -20,6 +20,11 @@ If you want a desktop app instead of a terminal, get it at [autonomous.ai/grid](
 If your computers are in different places, start here then switch to [remote mode](#working-from-anywhere).
 If you already run Ollama, vLLM or LM Studio, keep them — Grid networks them, it does not replace them.
 
+For fleets that should adapt model residency to changing coding, research, image, video, and other
+workloads, Grid also includes a safety-fenced [dynamic resource allocator](docs/allocator.md). Its
+router handles each request; the allocator separately learns demand and manages compatible
+llama.cpp, Ollama, ComfyUI, and vLLM capacity on explicitly enrolled hosts.
+
 ## Install
 
 On every computer, macOS or Linux:
@@ -582,6 +587,49 @@ grid chat -m auto "summarize this file in one line"
 - The `model` field and the `X-Grid-Routed-Model` header name whichever model actually answered.
 
 Details in [docs/cli.md](docs/cli.md#router).
+
+### Dynamic allocation (experimental)
+
+Grid can plan which configured models belong on which computers as demand and host availability
+change. It protects employee machines locally, preserves required replicas, drains before unload,
+and defaults to recommendation-only operation. Runtime discovery and lifecycle ownership are
+separate: existing llama.cpp, ComfyUI, and vLLM/OpenAI-compatible engines remain usable inventory
+without granting Grid permission to restart them. An engine reported as `external` can still have a
+known framework such as vLLM; `external` describes ownership, not its implementation.
+
+A remote deployment has one loopback allocator controller beside the relay. Each computer first
+joins the remote Grid as a normal provider, then opts into allocator-managed capacity:
+
+```bash
+# Controller/relay host (Grid runtime CLI)
+grid --local start allocator-control --host 127.0.0.1 --port 22101 \
+  --advertise-host 127.0.0.1
+
+# Every already-serving remote provider
+grid --remote allocator join <grid> --dedicated
+
+# A fresh capacity node with no manually started engine
+grid --remote join <grid> --allocator-provider --name <node-name>
+grid --remote allocator join <grid> --dedicated
+
+# Controller/relay host: register exact artifacts, inspect, then enable actuation
+grid --local allocator model set <model.gguf> --grid allocator-control \
+  --memory-mb <resident-mb> --artifact-sha256 <sha256> \
+  --artifact-source hf://owner/repo/model.gguf --artifact-size-mb <download-mb> \
+  --min-replicas 0 --max-replicas 3
+grid --local allocator mode recommend --grid allocator-control
+grid --local allocator status --grid allocator-control
+grid --local allocator mode automatic --grid allocator-control
+```
+
+Allocator enrollment verifies the managed llama.cpp runtime and installs Grid's version- and
+SHA-256-pinned build when it is absent. It also waits briefly for a just-started provider identity
+to become visible at the relay, so the two fresh-node commands above are safe to run back to back.
+
+The relay also needs its allocator sidecar URL and owner-only enrollment-token file configured
+before providers can enroll; the complete relay setup, rollout sequence, framework ownership
+boundary, and verification commands are in the
+[allocator deployment guide](docs/allocator.md#remote-grid-deployment).
 
 ---
 
