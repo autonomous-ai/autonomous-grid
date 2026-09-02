@@ -642,6 +642,12 @@ Canary profiles are exact-revision and exact-digest pinned, have zero required r
 one replica, and do not retire incumbents. A candidate enters the live portfolio only after it
 passes the real quality floor; replacement remains a separate, reviewable allocation decision.
 
+Large sharded profiles may also require a proven GPU fabric with
+`--min-gpu-count`, `--min-gpu-memory-mb`, `--min-gpu-interconnect-gbps`,
+`--single-numa-node`, and `--disallow-mig`. Advanced constraints fail closed when a node cannot
+report the required NVLink/PCIe, NUMA, or MIG topology; cold artifact placement also accounts for
+reported transfer bandwidth and active transfer contention.
+
 Allocator enrollment verifies the managed llama.cpp runtime and installs Grid's version- and
 SHA-256-pinned build when it is absent. It also waits briefly for a just-started provider identity
 to become visible at the relay, so the two fresh-node commands above are safe to run back to back.

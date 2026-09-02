@@ -1025,6 +1025,26 @@ explicit because it consumes real fleet capacity. A production replacement shoul
 candidate's recorded benchmark evidence plus a warm-before-drain allocator plan; mutable `main`
 revisions are never emitted by the scout.
 
+### Advanced GPU topology and transfer contention
+
+For a tensor-parallel model, `--min-gpu-count` and `--min-gpu-memory-mb` establish the basic
+device set. `--min-gpu-interconnect-gbps` additionally requires every pair in the selected set to
+meet the stated NVLink/PCIe bandwidth floor; `--single-numa-node` prevents cross-socket placement;
+and `--disallow-mig` excludes MIG compute instances. These are joint constraints: Grid searches for
+one feasible subset rather than independently counting favorable devices and links. A node that
+cannot report the topology needed to prove an advanced constraint is ineligible.
+
+On NVIDIA hosts, the node reads UUID, PCI bus, MIG, NUMA, PCIe link, and NVLink status from the
+installed driver tools and Linux sysfs. MIG-enabled physical devices are not advertised as usable
+whole GPUs; their configured compute instances are advertised individually. On Apple Silicon the
+unified GPU is one integrated device. Unknown link speed remains zero and can never satisfy a
+positive bandwidth floor.
+
+The node also reports its live NIC line rate and whether an artifact transfer is in progress. For
+an uncached artifact, the planner takes the slower of its learned/configured load duration and the
+size-over-available-bandwidth estimate, multiplied by current transfer contention. This keeps a
+nominally fast GPU from winning a cold placement when its model transfer path is the bottleneck.
+
 Use the three modes as a rollout sequence:
 
 ```bash
@@ -1457,11 +1477,10 @@ The design follows several primary systems results while preserving Grid's alloc
   ComfyUI bundles and externally owned vLLM artifacts still require their runtime-specific install
   paths; the generic action fields are present, but those lifecycle adapters are not yet claimed.
 - Capacity is refreshed by the node as stable physical capacity plus dynamic non-Grid reserve.
-  Device count and per-device VRAM are preserved, and profiles may fail closed with
-  `min_gpu_count` and `min_gpu_memory_mb` constraints. This covers basic tensor-parallel
-  feasibility, artifact disk admission, and safe predictive-cache eviction but does not yet model
-  GPU interconnect bandwidth, heterogeneous sharding, NUMA boundaries, or simultaneous transfer-
-  bandwidth bottlenecks.
+  Device count, per-device VRAM, schedulable MIG instances, NVLink/PCIe paths, NUMA locality, NIC
+  line rate, and active artifact transfers are preserved. Profiles may fail closed on a joint GPU
+  shard constraint, and cold-load ranking includes transfer contention. Cross-host switches are
+  not yet observable, so shared top-of-rack oversubscription remains outside the model.
 - Model profiles accept a portable `memory_mb` fallback plus runtime-specific
   `runtime_memory_mb` estimates, so llama.cpp/Metal and vLLM/CUDA placements account for their
   distinct footprints. If a node advertises several matching runtimes, the planner conservatively

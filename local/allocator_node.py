@@ -1595,6 +1595,14 @@ def _allocator_resources(
         "backends": [backend],
         "gpu_count": gpu_count,
         "gpu_memory_mb": list(gpu_memory_mb),
+        "gpu_devices": list(info.get("gpu_devices") or []),
+        "gpu_links": list(info.get("gpu_links") or []),
+        "transfer_bandwidth_mbps": _nonnegative_number(
+            info.get("transfer_bandwidth_mbps")
+        ),
+        "active_transfers": sum(
+            residency.state == ResidencyState.LOADING for residency in residencies
+        ),
         "failure_domain": failure_domain,
         "tags": [platform, backend],
         "memory_bandwidth_gbps": _nonnegative_number(
