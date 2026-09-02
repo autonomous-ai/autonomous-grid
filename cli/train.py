@@ -299,6 +299,42 @@ def cmd_train_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_train_dataset(args: argparse.Namespace) -> int:
+    """Build a versioned local dataset from independently evaluated Grid Goals."""
+    import time
+
+    from remote import relay
+    from train.goal_dataset import build_dataset
+
+    from .remote_task import _resolve
+
+    base, token, label = _resolve(args)
+    destination = Path(args.out or f"grid-goals-{time.strftime('%Y%m%d-%H%M%S')}")
+    goals = relay.list_goals(base, token, all=True)
+    if args.goal_id:
+        wanted = set(args.goal_id)
+        goals = [goal for goal in goals if goal.get("id") in wanted]
+        missing = sorted(wanted - {goal.get("id") for goal in goals})
+        if missing:
+            raise SystemExit("grid train: Goal not found: " + ", ".join(missing))
+    try:
+        result = build_dataset(
+            goals, lambda goal_id: relay.get_goal_evidence(base, token, goal_id), destination,
+            grid=label, holdout_fraction=args.holdout, seed=args.seed,
+            output_format=args.format, force=args.force)
+    except (FileExistsError, RuntimeError, ValueError) as exc:
+        raise SystemExit(f"grid train: {exc}") from None
+    print(f"Dataset: {result.destination}")
+    print(f"  accepted   {result.accepted} verified Goal trajectories")
+    print(f"  split      {result.train} train · {result.held_out} held out")
+    print(f"  excluded   {result.rejected} ({result.duplicates} duplicates)")
+    if result.accepted:
+        print("Next: point [data] at train/sft.jsonl and run `grid train sft`.")
+    else:
+        print("Nothing is trainable yet. See rejected.jsonl for the exact reason per Goal.")
+    return 0 if result.accepted else 1
+
+
 def cmd_train_autopilot(args: argparse.Namespace) -> int:
     """One unattended cycle over captured work: build tonight's data, train, prove, ship or bin."""
     from train.autopilot import history, run_cycle
