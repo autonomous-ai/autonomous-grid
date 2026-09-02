@@ -405,6 +405,7 @@ def _start_allocator_node_locked(
         getattr(args, "token_file", None),
         state_path,
         supplied_token=supplied_node_token,
+        allow_stopped_host_rebind=bool(getattr(args, "provider_grid", None)),
     )
     control_url = runtime.allocator_control_url(cfg)
     provider_network_id = _remote_provider_network_id(
@@ -866,6 +867,7 @@ def _node_token(
     state_path: Path,
     *,
     supplied_token: str = "",
+    allow_stopped_host_rebind: bool = False,
 ) -> tuple[str, str]:
     """Resolve a host credential and bind it to this runtime's durable host id."""
 
@@ -897,7 +899,25 @@ def _node_token(
             "Invalid allocator node credential; mint a host-scoped credential with "
             "`grid allocator token write`."
         ) from exc
-    if persisted_host and persisted_host != credential.host_id:
+    raw_residencies = persisted.get("residencies") or []
+    raw_receipts = persisted.get("receipts") or []
+    rebind_state_inert = (
+        isinstance(raw_residencies, list)
+        and all(
+            isinstance(row, dict) and row.get("handle") is None
+            for row in raw_residencies
+        )
+        and isinstance(raw_receipts, list)
+        and all(
+            not isinstance(row, dict) or row.get("status") != "running"
+            for row in raw_receipts
+        )
+    )
+    if (
+        persisted_host
+        and persisted_host != credential.host_id
+        and not (allow_stopped_host_rebind and rebind_state_inert)
+    ):
         raise SystemExit(
             f"Allocator credential is for {credential.host_id}, but this node is {persisted_host}."
         )
