@@ -889,6 +889,20 @@ grid --remote models <grid>
 grid --remote chat -m <model.gguf> "hello"
 ```
 
+Before enabling a newly installed engine adapter on a physical provider, run its real lifecycle
+qualification locally on that host. It validates inventory, immutable identity, warm, ownership,
+native readiness, real inference, activity, and drain/stop, then writes durable evidence:
+
+```bash
+grid --local allocator qualify ollama <model> --artifact-sha256 <digest>
+grid --local allocator qualify comfyui comfyui:image_generation
+grid --local allocator qualify vllm <model> \
+  --artifact-source hf://owner/repo@<commit> \
+  --artifact-sha256 <snapshot-identity> --artifact-size-mb <bound>
+```
+
+See [physical runtime qualification](allocator-runtime-qualification.md) for exact behavior.
+
 On a remote provider enrolled with `--dedicated`, the node uses Grid's multi-engine lifecycle
 orchestrator. It manages installed `llama.cpp`, Ollama, ComfyUI, and vLLM runtimes through one
 `LOAD → WARM → READY → DRAIN → UNLOAD` contract while the existing provider remains the only relay
@@ -1462,20 +1476,20 @@ The design follows several primary systems results while preserving Grid's alloc
 - Remote allocator nodes require a relay with the authenticated allocator sidecar and enrollment
   bridge enabled. Policy administration remains controller-only; remote providers may enroll only
   their own already-live identity.
-- The first managed process boundary is Grid-owned llama.cpp model runtimes. ComfyUI, external
-  Ollama/vLLM/LM Studio, API, and manually started engines are inventory and routing sources, not
-  processes the allocator may stop. The mixed-framework logical fixture starts and stops its own
-  ComfyUI process as test-fixture setup/cleanup; allocator actions do not masquerade as ComfyUI
-  model lifecycle mutations.
+- Dedicated allocator providers have lifecycle adapters for Grid-owned llama.cpp and vLLM children,
+  plus model-memory control for loopback Ollama and ComfyUI services. External/manual processes
+  remain inventory and routing sources until explicitly enrolled; lifecycle authority never follows
+  from protocol detection alone. LM Studio and generic API engines remain routing-only.
 - The current autonomous.ai NVIDIA engines are vLLM/CUDA even though live discovery labels their
   ownership class `external`. Framework identity and lifecycle ownership are independent: those
   engines participate in routing and placement evidence, but discovery alone does not grant Grid
   permission to start, drain, or stop them. Local auto-discovery publishes the detected runtime;
   when pointing at an engine explicitly, use `grid join --at <url> -m <model> --kind vllm` (or the
   corresponding kind) so runtime-constrained profiles can use the inventory.
-- Managed llama.cpp can autonomously fetch an exact, size-bounded, SHA-256-pinned Hugging Face GGUF.
-  ComfyUI bundles and externally owned vLLM artifacts still require their runtime-specific install
-  paths; the generic action fields are present, but those lifecycle adapters are not yet claimed.
+- Managed llama.cpp and vLLM can autonomously fetch exact, size-bounded immutable artifacts. Ollama
+  verifies the native registry digest and refuses to overwrite a pre-existing tag with another
+  digest. ComfyUI workflow assets still require their runtime-specific installation path and are
+  unloaded from accelerator memory rather than deleted.
 - Capacity is refreshed by the node as stable physical capacity plus dynamic non-Grid reserve.
   Device count, per-device VRAM, schedulable MIG instances, NVLink/PCIe paths, NUMA locality, NIC
   line rate, and active artifact transfers are preserved. Profiles may fail closed on a joint GPU

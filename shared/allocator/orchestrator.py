@@ -255,13 +255,19 @@ class OllamaBackend:
         source_model = unquote(f"{parsed.netloc}{parsed.path}").lstrip("/")
         if source_model != model_id:
             raise RuntimeError("Ollama source model does not match the placement model")
+        expected = canonical_sha256(expected_sha256)
+        if model_id in self.cached_models():
+            existing = self.artifact_sha256(model_id)
+            if existing != expected:
+                raise RuntimeError("refusing to replace an existing Ollama tag with another digest")
+            return existing
         response = self.client.post(
             f"{self.base_url}/api/pull",
             json={"model": model_id, "stream": False},
         )
-        response.raise_for_status()
+        _raise_engine_error(response, "Ollama pull")
         digest = self.artifact_sha256(model_id)
-        if digest != canonical_sha256(expected_sha256):
+        if digest != expected:
             self.evict_artifact(model_id, digest)
             raise RuntimeError("pulled Ollama model digest does not match the pinned artifact")
         for item in self._json("GET", "/api/tags").get("models", []):
@@ -278,7 +284,7 @@ class OllamaBackend:
         response = self.client.request(
             "DELETE", f"{self.base_url}/api/delete", json={"model": model_id}
         )
-        response.raise_for_status()
+        _raise_engine_error(response, "Ollama delete")
 
     def start(self, model_id: str, port: int) -> RuntimeHandle:
         del port
@@ -286,7 +292,7 @@ class OllamaBackend:
             f"{self.base_url}/api/generate",
             json={"model": model_id, "prompt": "", "stream": False, "keep_alive": -1},
         )
-        response.raise_for_status()
+        _raise_engine_error(response, "Ollama warm")
         handle = RuntimeHandle(
             pid=os.getpid(),
             port=self.port,
@@ -329,7 +335,15 @@ class OllamaBackend:
             f"{self.base_url}/api/generate",
             json={"model": model_id, "prompt": "", "stream": False, "keep_alive": 0},
         )
-        response.raise_for_status()
+        _raise_engine_error(response, "Ollama unload")
+        deadline = time.monotonic() + 30.0
+        while self.ready(handle, model_id) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if self.ready(handle, model_id):
+            raise RuntimeError(f"Ollama did not unload {model_id!r} within 30 seconds")
+
+    def close(self) -> None:
+        self.client.close()
 
     def active_requests(self, handle: RuntimeHandle, model_id: str) -> int | None:
         del handle, model_id
@@ -422,6 +436,9 @@ class ComfyUIBackend:
             return len(running) if isinstance(running, list) else None
         except (httpx.HTTPError, ValueError):
             return None
+
+    def close(self) -> None:
+        self.client.close()
 
     def _healthy(self) -> bool:
         try:
@@ -558,6 +575,10 @@ class VllmBackend:
         raise RuntimeError(f"vLLM readiness timed out; see {log_path}")
 
     def alive(self, handle: RuntimeHandle) -> bool:
+        with self._lock:
+            process = self._spawned.get(handle.pid)
+        if process is not None:
+            return process.poll() is None
         try:
             os.kill(handle.pid, 0)
             return True
@@ -598,6 +619,10 @@ class VllmBackend:
             time.sleep(0.1)
         if self.alive(handle):
             raise RuntimeError("vLLM did not drain and stop within 30 seconds")
+        with self._lock:
+            process = self._spawned.pop(handle.pid, None)
+        if process is not None:
+            process.wait(timeout=1.0)
 
     def active_requests(self, handle: RuntimeHandle, model_id: str) -> int | None:
         del model_id
@@ -655,6 +680,21 @@ def _ollama_digest(value: Any) -> str:
     if digest.startswith("sha256:"):
         digest = digest.removeprefix("sha256:")
     return canonical_sha256(digest, "Ollama model digest")
+
+
+def _raise_engine_error(response: httpx.Response, operation: str) -> None:
+    """Preserve a native engine's bounded error text instead of hiding it behind status only."""
+
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        try:
+            payload = response.json()
+            detail = str(payload.get("error") or payload.get("detail") or "")
+        except (ValueError, AttributeError):
+            detail = response.text[:500]
+        suffix = f": {detail[:500]}" if detail else ""
+        raise RuntimeError(f"{operation} failed with HTTP {response.status_code}{suffix}") from exc
 
 
 def _handle_with_runtime(handle: RuntimeHandle, runtime: str) -> RuntimeHandle:
