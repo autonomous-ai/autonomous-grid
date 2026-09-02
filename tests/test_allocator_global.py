@@ -350,6 +350,39 @@ def test_runtime_specific_memory_is_canonical_and_round_trips():
     assert replace(profile, memory_mb=30_000).maximum_memory_mb == 30_000
 
 
+def test_live_compatible_runtime_is_sticky_until_an_explicit_replacement():
+    profile = ModelProfile(
+        model_id="qwen",
+        memory_mb=8_000,
+        runtime_memory_mb=(("llama.cpp", 10_000), ("vllm", 24_000)),
+        runtimes=("llama.cpp", "vllm"),
+        min_replicas=1,
+        max_replicas=1,
+    )
+    machine = replace(
+        node("gpu", capacity_mb=32_000),
+        runtimes=("llama.cpp", "vllm"),
+        residencies=(
+            ModelResidency(
+                "qwen",
+                24_000,
+                state=ResidencyState.READY,
+                runtime="vllm",
+            ),
+        ),
+    )
+
+    plan = PlacementPlanner(PlannerPolicy(memory_headroom_fraction=0)).plan(
+        (machine,),
+        (profile,),
+        now=10,
+    )
+
+    assert plan.assignments[0].runtime == "vllm"
+    assert plan.assignments[0].memory_mb == 24_000
+    assert plan.assignments[0].existing
+
+
 def test_artifact_sha256_is_canonical_validated_and_round_trips():
     profile = model(artifact_sha256="A" * 64)
     residency = ModelResidency("qwen", 8_000, artifact_sha256="A" * 64)

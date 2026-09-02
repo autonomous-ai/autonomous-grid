@@ -4404,7 +4404,7 @@ def _assignment(
         residency is not None
         and residency.runtime
         and residency.runtime in node.runtimes
-        and residency.runtime in model.compatible_runtimes
+        and residency.runtime in model.runtimes
     ):
         selected_runtime = residency.runtime
     return PlacementAssignment(
