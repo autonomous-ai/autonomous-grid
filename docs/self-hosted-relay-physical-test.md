@@ -1,40 +1,41 @@
 # Self-hosted relay physical acceptance
 
-Status: **in progress**. The relay PR remains draft until Machine B and the forced three-machine
-Goal handoff pass.
-
-Test date: 2026-09-01
+Status: **passed** on 2026-09-02.
 
 ## Revisions and topology
 
-- Public member CLI/Goal worker: `grid-relay` at `c0dee9c`
-- Separate relay/server runtime: `grid-relay` at `4bcfefd`
-- Fresh isolated Grid: `relay-physical-3`
-- Machine A: macOS arm64, Codex task worker
-- Machine C: Linux, two NVIDIA RTX 4090 D GPUs, Codex task worker and local
-  `qwen3.6-27b` inference provider
-- Machine B: pending its physical join
+- Public member CLI/workers: `grid-relay` at `4feb975`
+- Goal verifier: `grid-goal-distributed` at `bdf3e52`
+- Separate relay/server package: `autonomous-grid-cli` `grid-relay` at `4f33900`
+- Isolated Grid `relay-physical-4` (`grid-relay-physical-4-bfc35758`)
+- Relay `relay-01d1ed2cc8fd4a0f8298342bc7789838`
+- Machine A: Apple M2 Max, relay host and Codex task worker
+- Machine C: Linux, two NVIDIA RTX 4090 D GPUs, `qwen3.6-27b` inference and Codex tasks
+- Machine D: Linux, one NVIDIA RTX 4090 D GPU, Codex tasks
 
 ## Passed checks
 
-- A -> self-hosted relay -> C inference returned `RELAY_C_OK`.
-- `grid relay info`, `grid relay status` delegation, `grid engines`, `grid goal list`, pairing by
-  file, disconnect, revocation, and credential reissue behaved as specified.
-- Goal `fd4a7477-c53c-4fb4-bcb6-0e7743dede61` completed in two durable Codex turns using 80,607
-  local-model tokens. Relay evaluation scored the exact final commit `1.0` and accepted it.
-- Evidence verification passed with required inference and exact clean worker revision `c0dee9c`.
-- The completed artifact was readable from the relay-owned project repository and the Goal cleared
-  from the active list.
-- A live relay restart preserved Goal/eval history; A and C re-registered automatically and
-  post-restart inference returned `RESTART_RECOVERY_OK`.
-- Public exact-head suite: `3399 passed, 57 skipped, 7 deselected`.
-- Public relay/process focused suite: `37 passed`.
-- The public sdist and wheel built, installed into a fresh disposable environment, and exposed the
-  expected `grid relay` command surface.
-
-## Remaining gates
-
-- Join physical Machine B and prove all three hardware identities.
-- Force and verify a B -> A -> C Goal continuation with worker loss.
-- Run a full relay down/up recovery cycle.
-- Update this record with the final evidence before marking the PR ready.
+- Pairing, node join/rejoin, relay info/status/list JSON, inference, member revocation/reissue, and
+  automatic worker recovery passed without copying Grid homes or task roots.
+- Individual Goals ran successfully on A, C, and D with independent eval score `1.0` and strict
+  evidence verification.
+- Forced handoff Goal `a475278a-58d1-4342-ab4f-347fb47005d1` continued A -> D -> C after two
+  deliberate worker losses. It recorded four ordered Codex attempts across three execution nodes,
+  used 2,261,947 local-model tokens through Grid inference, repaired an initial failed eval, passed
+  all seven final evals, and produced commit `8ac063f72ea2ff43e3364fb32a31f7aff07197a3`.
+- Strict evidence required three execution nodes, Grid inference, the exact clean worker revision,
+  and ordered agent sequence. The completed Goal cleared from the active queue.
+- A full relay/PostgreSQL down/up cycle preserved identity and history. A post-restart Goal ran on D
+  with inference on C, used 41,496 tokens, scored `1.0`, and passed strict revision evidence.
+- A real disaster restore deleted the test relay's dedicated PostgreSQL container and volume, then
+  restored solely from a mode-`0600` backup. Relay/Grid/server ids, all five members, node
+  credentials, Goal/eval history, usage, and all seven Git project repositories survived. C and D
+  reconnected automatically, inference returned `RESTORE_OK`, strict historical evidence passed,
+  and the restored game cloned at the exact evaluated commit and passed all seven behavior tests.
+- The recovery drill found and fixed the old backup's missing Git plane. Backup v2 uses checksummed
+  Git bundles, restores all refs, runs `git fsck`, streams large members, rejects malformed
+  archives, and isolates project storage per relay on every OS.
+- Public exact-head suite: `3405 passed, 57 skipped, 7 deselected`; lint, Python
+  3.11/3.12/3.13, and Windows CI passed.
+- Public and private sdists/wheels built and installed in fresh environments. `grid relay`,
+  `grid goal`, and `grid-relay` entry points passed their package smoke tests.
