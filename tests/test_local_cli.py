@@ -11,6 +11,7 @@ import os
 import shlex
 import shutil
 import socket
+import ssl
 import stat
 import struct
 import subprocess
@@ -11986,6 +11987,24 @@ def _mock_relay(monkeypatch, handler, _real=httpx.Client):
         "Client",
         lambda *a, **k: _real(*a, **{**k, "transport": httpx.MockTransport(handler)}),
     )
+
+
+def test_relay_clients_reuse_startup_tls_trust_store(monkeypatch):
+    """A live provider must survive its virtual environment being replaced in place."""
+    from remote import relay
+
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(relay.httpx, "Client", FakeClient)
+    relay._client("https://relay.example", "AT", timeout=5.0)
+
+    assert seen["verify"] is relay._TLS_VERIFY_CONTEXT
+    assert seen["verify"].verify_mode == ssl.CERT_REQUIRED
+    assert seen["verify"].check_hostname is True
 
 
 def _default_project_listing(project_id="P1"):
