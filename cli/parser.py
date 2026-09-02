@@ -584,6 +584,22 @@ def _add_allocator(sub) -> None:
         help="Require each needed GPU to have at least this much physical VRAM.",
     )
     set_model.add_argument(
+        "--min-gpu-interconnect-gbps",
+        type=float,
+        default=0.0,
+        help="Require this all-peer GPU fabric bandwidth for a sharded placement.",
+    )
+    set_model.add_argument(
+        "--single-numa-node",
+        action="store_true",
+        help="Require every GPU shard to share one known NUMA node.",
+    )
+    set_model.add_argument(
+        "--disallow-mig",
+        action="store_true",
+        help="Reject MIG compute instances for this model.",
+    )
+    set_model.add_argument(
         "--max-colocated-models",
         type=int,
         default=0,

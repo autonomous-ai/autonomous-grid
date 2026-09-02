@@ -612,7 +612,12 @@ If `--runtime` is omitted, model profiles default to `llama.cpp`. Supplying one 
 hosts. A new placement selects the compatible runtime with the smallest declared footprint (then a
 stable name tie-break), while an already-live compatible runtime remains sticky. A
 profile can also require a physical topology with `--min-gpu-count` and
-`--min-gpu-memory-mb`; nodes without enough reported per-device VRAM fail that constraint closed. A
+`--min-gpu-memory-mb`. Sharded models can additionally set
+`--min-gpu-interconnect-gbps`, `--single-numa-node`, or `--disallow-mig`; the planner must find one
+GPU subset that satisfies every constraint, and nodes with missing topology fail advanced
+constraints closed. Nodes report schedulable MIG instances separately from their physical parent,
+plus NVLink/PCIe paths and NIC line rate. Cold artifact ranking includes predicted transfer time and
+current transfer contention. A
 managed node on the same machine as its Grid advertises the Grid's literal loopback control address
 by default. Remote workers need
 an explicit reachable address and end-to-end TLS.

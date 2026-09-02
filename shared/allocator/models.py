@@ -203,6 +203,73 @@ class ModelPerformance:
 
 
 @dataclass(frozen=True, slots=True)
+class GpuDevice:
+    """One schedulable physical GPU or MIG compute instance."""
+
+    device_id: str
+    memory_mb: int
+    index: int = 0
+    numa_node: int = -1
+    pci_bus_id: str = ""
+    mig_parent_id: str = ""
+    mig_profile: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.device_id or len(self.device_id) > MAX_ID_LENGTH:
+            raise ValueError("GPU device_id is required")
+        if (
+            isinstance(self.memory_mb, bool)
+            or not isinstance(self.memory_mb, int)
+            or not 1 <= self.memory_mb <= MAX_MEMORY_MB
+        ):
+            raise ValueError(f"GPU memory_mb must be in [1, {MAX_MEMORY_MB}]")
+        if isinstance(self.index, bool) or not isinstance(self.index, int) or self.index < 0:
+            raise ValueError("GPU index must be a non-negative integer")
+        if isinstance(self.numa_node, bool) or not isinstance(self.numa_node, int):
+            raise ValueError("GPU numa_node must be an integer")
+        for name in ("pci_bus_id", "mig_parent_id", "mig_profile"):
+            value = str(getattr(self, name) or "")
+            if len(value) > MAX_ID_LENGTH or any(character in value for character in "\r\n\0"):
+                raise ValueError(f"GPU {name} is invalid")
+            object.__setattr__(self, name, value)
+
+    @property
+    def is_mig(self) -> bool:
+        return bool(self.mig_parent_id)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> GpuDevice:
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True, slots=True)
+class GpuLink:
+    """Undirected peer path between schedulable GPU devices."""
+
+    device_a: str
+    device_b: str
+    kind: str
+    bandwidth_gbps: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.device_a or not self.device_b or self.device_a == self.device_b:
+            raise ValueError("GPU link endpoints must be two different devices")
+        if self.device_b < self.device_a:
+            first, second = self.device_b, self.device_a
+            object.__setattr__(self, "device_a", first)
+            object.__setattr__(self, "device_b", second)
+        kind = str(self.kind or "").lower()
+        if kind not in ("nvlink", "pcie", "integrated"):
+            raise ValueError("GPU link kind must be nvlink, pcie, or integrated")
+        object.__setattr__(self, "kind", kind)
+        _finite_nonnegative(float(self.bandwidth_gbps), "GPU link bandwidth_gbps")
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> GpuLink:
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True, slots=True)
 class NodeSnapshot:
     node_id: str
     capacity_mb: int
@@ -229,6 +296,10 @@ class NodeSnapshot:
     compute_gflops: float = 0.0
     gpu_count: int = 0
     gpu_memory_mb: tuple[int, ...] = ()
+    gpu_devices: tuple[GpuDevice, ...] = ()
+    gpu_links: tuple[GpuLink, ...] = ()
+    transfer_bandwidth_mbps: float = 0.0
+    active_transfers: int = 0
     disk_capacity_mb: int | None = None
     disk_available_mb: int | None = None
     host_priority: int = 0
@@ -276,6 +347,7 @@ class NodeSnapshot:
         _finite_nonnegative(self.latency_ms, "latency_ms")
         _finite_nonnegative(self.memory_bandwidth_gbps, "memory_bandwidth_gbps")
         _finite_nonnegative(self.compute_gflops, "compute_gflops")
+        _finite_nonnegative(self.transfer_bandwidth_mbps, "transfer_bandwidth_mbps")
         _finite_nonnegative(self.last_heartbeat, "last_heartbeat")
         _finite_nonnegative(self.mutation_cooldown_until, "mutation_cooldown_until")
         if (
@@ -284,6 +356,12 @@ class NodeSnapshot:
             or not 0 <= self.gpu_count <= MAX_COUNTER
         ):
             raise ValueError(f"gpu_count must be in [0, {MAX_COUNTER}]")
+        if (
+            isinstance(self.active_transfers, bool)
+            or not isinstance(self.active_transfers, int)
+            or not 0 <= self.active_transfers <= MAX_COUNTER
+        ):
+            raise ValueError(f"active_transfers must be in [0, {MAX_COUNTER}]")
         try:
             gpu_memory = tuple(
                 sorted((int(value) for value in self.gpu_memory_mb), reverse=True)
@@ -295,6 +373,37 @@ class NodeSnapshot:
         object.__setattr__(self, "gpu_memory_mb", gpu_memory)
         if len(gpu_memory) > self.gpu_count:
             object.__setattr__(self, "gpu_count", len(gpu_memory))
+        devices = tuple(
+            sorted(
+                (
+                    item if isinstance(item, GpuDevice) else GpuDevice.from_dict(item)
+                    for item in self.gpu_devices
+                ),
+                key=lambda item: (item.index, item.device_id),
+            )
+        )
+        device_ids = [item.device_id for item in devices]
+        if len(device_ids) != len(set(device_ids)):
+            raise ValueError("gpu_devices contains duplicate device IDs")
+        object.__setattr__(self, "gpu_devices", devices)
+        links = tuple(
+            sorted(
+                (item if isinstance(item, GpuLink) else GpuLink.from_dict(item) for item in self.gpu_links),
+                key=lambda item: (item.device_a, item.device_b),
+            )
+        )
+        pairs = [(item.device_a, item.device_b) for item in links]
+        if len(pairs) != len(set(pairs)):
+            raise ValueError("gpu_links contains duplicate device pairs")
+        unknown_endpoints = {
+            endpoint
+            for item in links
+            for endpoint in (item.device_a, item.device_b)
+            if endpoint not in set(device_ids)
+        }
+        if unknown_endpoints:
+            raise ValueError("gpu_links references an unknown GPU device")
+        object.__setattr__(self, "gpu_links", links)
         if not isinstance(self.state, NodeState):
             object.__setattr__(self, "state", NodeState(self.state))
         for field_name in (
@@ -403,6 +512,12 @@ class NodeSnapshot:
             ModelPerformance.from_dict(item)
             for item in fields.get("model_performance") or ()
         )
+        fields["gpu_devices"] = tuple(
+            GpuDevice.from_dict(item) for item in fields.get("gpu_devices") or ()
+        )
+        fields["gpu_links"] = tuple(
+            GpuLink.from_dict(item) for item in fields.get("gpu_links") or ()
+        )
         return cls(**fields)
 
 
@@ -436,6 +551,9 @@ class ModelProfile:
     min_failure_domains: int = 1
     min_gpu_count: int = 0
     min_gpu_memory_mb: int = 0
+    min_gpu_interconnect_gbps: float = 0.0
+    require_single_numa_node: bool = False
+    allow_mig: bool = True
     artifact_sha256: str = ""
     # An authenticated operator may provide an immutable, runtime-specific artifact source. The
     # first managed adapter accepts exact ``hf://owner/repo/path.gguf`` URIs. Other runtimes can
@@ -517,6 +635,13 @@ class ModelProfile:
             or not 0 <= self.min_gpu_memory_mb <= MAX_MEMORY_MB
         ):
             raise ValueError(f"min_gpu_memory_mb must be in [0, {MAX_MEMORY_MB}]")
+        _finite_nonnegative(
+            float(self.min_gpu_interconnect_gbps), "min_gpu_interconnect_gbps"
+        )
+        if not isinstance(self.require_single_numa_node, bool):
+            raise ValueError("require_single_numa_node must be boolean")
+        if not isinstance(self.allow_mig, bool):
+            raise ValueError("allow_mig must be boolean")
         if (
             isinstance(self.artifact_size_mb, bool)
             or not isinstance(self.artifact_size_mb, int)

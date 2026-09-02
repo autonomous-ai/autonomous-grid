@@ -593,6 +593,10 @@ def test_model_set_accepts_runtime_specific_memory(monkeypatch):
             "2",
             "--min-gpu-memory-mb",
             "48000",
+            "--min-gpu-interconnect-gbps",
+            "50",
+            "--single-numa-node",
+            "--disallow-mig",
         ]
     )
 
@@ -603,6 +607,9 @@ def test_model_set_accepts_runtime_specific_memory(monkeypatch):
     assert body["workload_scores"] == (("coding", 1.0), ("research", 0.8))
     assert body["min_gpu_count"] == 2
     assert body["min_gpu_memory_mb"] == 48_000
+    assert body["min_gpu_interconnect_gbps"] == 50
+    assert body["require_single_numa_node"] is True
+    assert body["allow_mig"] is False
 
 
 def test_model_set_rejects_malformed_runtime_specific_memory(monkeypatch):

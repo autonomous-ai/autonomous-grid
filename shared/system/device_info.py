@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import platform
 
-from shared.system import apple, arch, bandwidth, device, gpu, host
+from shared.system import apple, arch, bandwidth, device, gpu, host, topology
 from shared.system.device import Budget
 
 # backend is authoritative; device_class and gpu backend both derive from it.
@@ -128,6 +128,7 @@ def collect_device_info() -> dict:
         gpus = []
 
     logical = hinfo.cpu_count if hinfo else (os.cpu_count() or 1)
+    accelerator_topology = topology.collect(gpus, backend)
 
     return {
         # ── Decision inputs ──
@@ -162,6 +163,7 @@ def collect_device_info() -> dict:
             "free_gb": _int_gb(hinfo.disk_free_gb) if hinfo else 0,
         },
         "gpus": gpus,
+        **accelerator_topology,
     }
 
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from shared.system import apple, bandwidth, device, device_info, gpu
+from shared.system import apple, bandwidth, device, device_info, gpu, topology
 from shared.system.device import Budget
 
 # field -> accepted python type(s); `None` in a tuple means the field is nullable.
@@ -26,6 +26,9 @@ _TOP = {
     "memory": (dict,),
     "disk": (dict,),
     "gpus": (list,),
+    "gpu_devices": (list,),
+    "gpu_links": (list,),
+    "transfer_bandwidth_mbps": (int, float),
 }
 _MACHINE = {
     "model": (str, None),
@@ -115,6 +118,9 @@ def test_collect_never_raises_when_probes_fail(monkeypatch):
     monkeypatch.setattr(apple, "_run", boom)
     monkeypatch.setattr(apple, "describe_chip", lambda: ("", ""))
     monkeypatch.setattr(apple, "gpu_core_count", lambda: None)
+    monkeypatch.setattr(topology, "collect", lambda *_args: {
+        "gpu_devices": [], "gpu_links": [], "transfer_bandwidth_mbps": 0.0
+    })
     # Even the budget resolver failing must not crash collection.
     info = device_info.collect_device_info()
     _assert_shape(info)
