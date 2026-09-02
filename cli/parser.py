@@ -30,6 +30,12 @@ from .allocator import (
     cmd_allocator_tick,
     cmd_allocator_token_write,
 )
+from .allocator_scout import (
+    cmd_allocator_scout_benchmark,
+    cmd_allocator_scout_run,
+    cmd_allocator_scout_status,
+    cmd_allocator_scout_watch,
+)
 from shared.allocator.scenario import SCENARIO_STRATEGIES
 
 from .allocator_scenario import (
@@ -514,7 +520,7 @@ def _add_allocator(sub) -> None:
         metavar="URI",
         help=(
             "Authenticated immutable source for autonomous loading; managed llama.cpp accepts "
-            "an exact hf://owner/repo/path.gguf URI."
+            "an exact hf://owner/repo[@commit]/path.gguf URI."
         ),
     )
     set_model.add_argument(
@@ -622,6 +628,66 @@ def _add_allocator(sub) -> None:
     _add_allocator_grid(tick, token=True)
     tick.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     tick.set_defaults(handler=cmd_allocator_tick)
+
+    scout = allocator_sub.add_parser(
+        "scout",
+        help="Discover immutable open-weight releases and qualify real canaries",
+    )
+    scout_sub = scout.add_subparsers(dest="allocator_scout_command", required=True)
+
+    def add_scout_discovery_options(command) -> None:
+        command.add_argument("--search", default="", help="Optional Hub model search text.")
+        command.add_argument("--workload", action="append", dest="workloads", default=[])
+        command.add_argument(
+            "--runtime", action="append", dest="runtimes", choices=("llama.cpp", "vllm"), default=[]
+        )
+        command.add_argument("--author", action="append", dest="authors", default=[])
+        command.add_argument("--license", action="append", dest="licenses", default=[])
+        command.add_argument("--quantization", action="append", dest="quantizations", default=[])
+        command.add_argument("--limit", type=int, default=30)
+        command.add_argument("--inspect", type=int, default=12)
+        command.add_argument("--max-artifact-size-mb", type=int, default=100_000)
+        command.add_argument("--min-downloads", type=int, default=0)
+        command.add_argument("--hub-url", default="https://huggingface.co")
+        command.add_argument("--state-file", default=None)
+        _add_allocator_grid(command)
+        command.add_argument("--json", action="store_true")
+
+    scout_run = scout_sub.add_parser(
+        "run", help="Run one discovery and fleet-fit proposal cycle"
+    )
+    add_scout_discovery_options(scout_run)
+    scout_run.set_defaults(handler=cmd_allocator_scout_run)
+
+    scout_watch = scout_sub.add_parser(
+        "watch", help="Continuously refresh discovery and proposals"
+    )
+    add_scout_discovery_options(scout_watch)
+    scout_watch.add_argument("--interval", type=float, default=21_600.0)
+    scout_watch.add_argument(
+        "--max-cycles", type=int, default=0, help="Stop after N cycles; 0 runs until interrupted."
+    )
+    scout_watch.set_defaults(handler=cmd_allocator_scout_watch)
+
+    scout_status = scout_sub.add_parser("status", help="Show persisted scout proposals")
+    scout_status.add_argument("--state-file", default=None)
+    _add_allocator_grid(scout_status)
+    scout_status.add_argument("--json", action="store_true")
+    scout_status.set_defaults(handler=cmd_allocator_scout_status)
+
+    scout_benchmark = scout_sub.add_parser(
+        "benchmark", help="Deploy one bounded canary and record real evaluation evidence"
+    )
+    scout_benchmark.add_argument("proposal")
+    scout_benchmark.add_argument("--inference-grid", required=True)
+    scout_benchmark.add_argument("--workload", action="append", dest="workloads", default=[])
+    scout_benchmark.add_argument("--deploy-canary", action="store_true")
+    scout_benchmark.add_argument("--startup-timeout", type=float, default=900.0)
+    scout_benchmark.add_argument("--request-timeout", type=float, default=120.0)
+    scout_benchmark.add_argument("--state-file", default=None)
+    _add_allocator_grid(scout_benchmark, token=True)
+    scout_benchmark.add_argument("--json", action="store_true")
+    scout_benchmark.set_defaults(handler=cmd_allocator_scout_benchmark)
 
     token = allocator_sub.add_parser("token", help="Provision the node control capability")
     token_sub = token.add_subparsers(dest="allocator_token_command", required=True)
