@@ -657,6 +657,9 @@ grid train packs
 # Turn successful, independently evaluated agent work into training data
 grid train dataset --grid <grid-name> --out ./goal-data
 
+# Measure the model where it matters: independently completed held-out Goals
+grid train benchmark --suite suite.json --model <model> --run-dir ./benchmark
+
 # Turn support tickets into a reply-drafting model
 grid train init --pack support-replies
 

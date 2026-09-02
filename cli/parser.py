@@ -1777,6 +1777,7 @@ def _add_launch(sub) -> None:
 def _add_train(sub) -> None:
     from .train import (
         cmd_train_autopilot,
+        cmd_train_benchmark,
         cmd_train_collect,
         cmd_train_convert,
         cmd_train_dataset,
@@ -1896,6 +1897,33 @@ def _add_train(sub) -> None:
     dataset.add_argument("--force", action="store_true",
                          help="Replace an existing output directory.")
     dataset.set_defaults(handler=cmd_train_dataset)
+
+    benchmark = train_sub.add_parser(
+        "benchmark", help="Run a held-out Goal suite and report independent pass rate"
+    )
+    benchmark.add_argument("--suite", required=True, help="Version-1 Goal suite JSON file.")
+    benchmark.add_argument("--model", required=True, help="Candidate model served by the Grid.")
+    benchmark.add_argument("--grid", default=None,
+                           help="Remote grid to use (default: active remote grid).")
+    benchmark.add_argument("--run-dir", required=True,
+                           help="Durable local ledger; reuse it to resume safely.")
+    benchmark.add_argument("--repeat", type=int, default=1,
+                           help="Submit each case N times for a soak run (default: 1).")
+    benchmark.add_argument("--min-pass-rate", type=float, default=1.0,
+                           help="Required independent Goal pass rate (default: 1.0).")
+    benchmark.add_argument("--timeout", type=float, default=86_400,
+                           help="Maximum seconds to wait this invocation (default: 86400).")
+    benchmark.add_argument("--poll", type=float, default=5,
+                           help="Status polling interval in seconds (default: 5).")
+    benchmark.add_argument("--no-wait", action="store_true",
+                           help="Submit missing cases, save the ledger and return.")
+    benchmark.add_argument("--min-execution-nodes", type=_positive_node_count, default=1,
+                           metavar="N", help="Require N distinct execution nodes per Goal.")
+    benchmark.add_argument("--require-worker-revision", type=_worker_revision, default=None,
+                           metavar="REV", help="Require a clean worker revision prefix.")
+    benchmark.add_argument("--require-agent-sequence", type=_agent_sequence, default=None,
+                           metavar="AGENT,...", help="Require an ordered harness handoff.")
+    benchmark.set_defaults(handler=cmd_train_benchmark)
 
     auto = train_sub.add_parser(
         "autopilot", help="Improve a model from captured work, unattended (see `schedule`)"
