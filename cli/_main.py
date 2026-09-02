@@ -144,6 +144,7 @@ def cmd_internal_allocator_node(
             if dedicated
             else None
         ),
+        allow_stopped_host_rebind=bool(provider_grid_id),
     )
     agent = AllocatorNodeAgent(
         grid_url=runtime.allocator_control_url(cfg),

@@ -956,6 +956,7 @@ class ManagedModelRuntime:
         port_start: int = DEFAULT_PORT_START,
         port_end: int = DEFAULT_PORT_END,
         port_available: Callable[[int], bool] | None = None,
+        allow_stopped_host_rebind: bool = False,
     ) -> None:
         if not 0 < port_start <= port_end < 65_536:
             raise ValueError("allocator runtime port range is invalid")
@@ -994,9 +995,22 @@ class ManagedModelRuntime:
         self.host_id = host_id or f"host-{uuid.uuid4().hex[:16]}"
         self._restore()
         if host_id and self.host_id != host_id:
-            raise ValueError(
-                "persisted allocator host id does not match the requested host id"
-            )
+            if not allow_stopped_host_rebind or any(
+                residency.handle is not None for residency in self._residencies.values()
+            ):
+                raise ValueError(
+                    "persisted allocator host id does not match the requested host id"
+                )
+            # A provider can receive a new authenticated identity after it rejoins a remote Grid.
+            # Reuse only inert cache state; commands, controller fences, and receipts belong to the
+            # old identity and must never be replayed under the new host capability.
+            self.host_id = host_id
+            self._receipts.clear()
+            self._next_receipt_sequence = 1
+            self._latest_plan_generation = ""
+            self._superseded_plan_epochs.clear()
+            self._highest_controller_term = 0
+            self._controller_id_for_term = ""
         self._validate_backend_configuration()
         key_file = engine_api_key_path(self.state_path)
         jsonio.atomic_write_bytes(

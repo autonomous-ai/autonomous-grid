@@ -181,14 +181,29 @@ def action(
 
 
 def runtime(tmp_path, backend=None, clock=None, **kwargs) -> ManagedModelRuntime:
+    host_id = kwargs.pop("host_id", "host-a")
     return ManagedModelRuntime(
         tmp_path / "runtime.json",
-        host_id="host-a",
+        host_id=host_id,
         backend=backend or FakeBackend(),
         clock=clock or Clock(),
         port_available=lambda _port: True,
         **kwargs,
     )
+
+
+def test_remote_enrollment_can_rebind_only_an_inert_runtime_state(tmp_path):
+    runtime(tmp_path, host_id="old-provider")
+
+    rebound = runtime(
+        tmp_path,
+        host_id="new-provider",
+        allow_stopped_host_rebind=True,
+    )
+    assert rebound.host_id == "new-provider"
+
+    with pytest.raises(ValueError, match="does not match"):
+        runtime(tmp_path, host_id="third-provider")
 
 
 def wait(runtime: ManagedModelRuntime) -> None:
