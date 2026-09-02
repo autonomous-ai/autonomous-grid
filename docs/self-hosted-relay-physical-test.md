@@ -32,6 +32,9 @@ Status: **passed** on 2026-09-02.
   credentials, Goal/eval history, usage, and all seven Git project repositories survived. C and D
   reconnected automatically, inference returned `RESTORE_OK`, strict historical evidence passed,
   and the restored game cloned at the exact evaluated commit and passed all seven behavior tests.
+- A fresh post-restore Goal then wrote a new project on Machine D using Machine C inference. It used
+  41,842 tokens, scored `1.0`, passed strict worker/inference evidence, cloned its exact evaluated
+  commit through the recovered Git plane, and cleared from the active queue.
 - The recovery drill found and fixed the old backup's missing Git plane. Backup v2 uses checksummed
   Git bundles, restores all refs, runs `git fsck`, streams large members, rejects malformed
   archives, and isolates project storage per relay on every OS.
