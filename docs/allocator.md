@@ -790,6 +790,89 @@ receipt time so node clock skew cannot bypass minimum-residency or scale-down co
 
 ## Operations
 
+### Remote Grid deployment
+
+A remote allocator deployment has one controller and any number of managed provider nodes. Run the
+controller on the same machine as the relay and bind it only to loopback; the relay is the sole
+authenticated bridge between remote nodes and the controller. Requests continue to enter the normal
+relay/router path. The relay sends bounded lifecycle features to the allocator, and the allocator
+sends placement commands to enrolled nodes. Neither prompts nor responses are forwarded to or
+retained by the allocator.
+
+On the controller/relay machine, start a dedicated local Grid runtime for allocator state and API:
+
+```bash
+grid --local start allocator-control \
+  --host 127.0.0.1 \
+  --advertise-host 127.0.0.1 \
+  --port 22101
+```
+
+Find its generated config under `~/.grid/grids/<allocator-grid-id>/config.json`. Keep that file
+owner-only. On a self-hosted relay using `autonomous-grid-cli`, configure the relay master with the
+supported environment command; use the literal absolute config path rather than `~`:
+
+```bash
+grid network set-env <remote-grid-id> \
+  GRID_ALLOCATOR_SIDECAR_URL=http://127.0.0.1:22101 \
+  GRID_ALLOCATOR_ENROLLMENT_TOKEN_FILE=/absolute/path/.grid/grids/<allocator-grid-id>/config.json
+grid network restart-server <remote-grid-id>
+```
+
+For a relay managed by another service runner, set those same two environment variables on that
+relay process. `GRID_ALLOCATOR_SIDECAR_URL` accepts only literal loopback HTTP. The enrollment file
+is read locally by the relay and its operator capability is never returned to a provider.
+
+Each capacity machine must first join the remote Grid as a normal, live provider. Then enroll the
+same authenticated provider identity as allocator-managed capacity:
+
+```bash
+grid --remote sync
+grid --remote use <grid>
+grid --remote allocator join <grid> --dedicated
+```
+
+Use `--dedicated` only for an always-on server. Omit it on a workstation or laptop so local activity,
+battery, thermal, memory, disk, and network protection can throttle or fence allocator work. The
+enrollment response contains only a host-scoped credential, retained by the detached node process;
+operators never copy the controller capability to workers.
+
+Policy administration remains local to the controller in this release. Register model profiles and
+move through the rollout modes from the controller machine:
+
+```bash
+grid --local allocator model set <model.gguf> \
+  --grid allocator-control \
+  --memory-mb <resident-mb> \
+  --artifact-sha256 <64-hex-digest> \
+  --artifact-source hf://owner/repo/path/to/model.gguf \
+  --artifact-size-mb <download-mb> \
+  --runtime llama.cpp \
+  --min-replicas 0 \
+  --max-replicas 3
+
+grid --local allocator mode observe --grid allocator-control
+grid --local allocator tick --grid allocator-control
+grid --local allocator status --grid allocator-control
+grid --local allocator mode recommend --grid allocator-control
+grid --local allocator status --grid allocator-control --json
+grid --local allocator mode automatic --grid allocator-control
+```
+
+Verify both control-plane convergence and real serving:
+
+```bash
+grid --local allocator status --grid allocator-control
+grid --remote models <grid>
+grid --remote chat -m <model.gguf> "hello"
+```
+
+Automatic lifecycle actuation currently owns GGUF replicas launched through `llama.cpp`. Existing
+ComfyUI, vLLM, and other OpenAI-compatible engines remain routable inventory and inform observed
+demand, but Grid does not claim permission to start, stop, or replace those externally managed
+processes. Runtime-specific managed adapters are required before enabling autonomous lifecycle
+actions for them.
+
 ### CLI workflow
 
 Start the local grid and join each computer that should offer managed capacity. Pre-pulling remains

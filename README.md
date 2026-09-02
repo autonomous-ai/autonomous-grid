@@ -590,8 +590,33 @@ change. It protects employee machines locally, preserves required replicas, drai
 and defaults to recommendation-only operation. Runtime discovery and lifecycle ownership are
 separate: existing llama.cpp, ComfyUI, and vLLM/OpenAI-compatible engines remain usable inventory
 without granting Grid permission to restart them. An engine reported as `external` can still have a
-known framework such as vLLM; `external` describes ownership, not its implementation. See the
-[allocator architecture, safety contract, and local API](docs/allocator.md).
+known framework such as vLLM; `external` describes ownership, not its implementation.
+
+A remote deployment has one loopback allocator controller beside the relay. Each computer first
+joins the remote Grid as a normal provider, then opts into allocator-managed capacity:
+
+```bash
+# Controller/relay host (Grid runtime CLI)
+grid --local start allocator-control --host 127.0.0.1 --port 22101 \
+  --advertise-host 127.0.0.1
+
+# Every already-serving remote provider
+grid --remote allocator join <grid> --dedicated
+
+# Controller/relay host: register exact artifacts, inspect, then enable actuation
+grid --local allocator model set <model.gguf> --grid allocator-control \
+  --memory-mb <resident-mb> --artifact-sha256 <sha256> \
+  --artifact-source hf://owner/repo/model.gguf --artifact-size-mb <download-mb> \
+  --min-replicas 0 --max-replicas 3
+grid --local allocator mode recommend --grid allocator-control
+grid --local allocator status --grid allocator-control
+grid --local allocator mode automatic --grid allocator-control
+```
+
+The relay also needs its allocator sidecar URL and owner-only enrollment-token file configured
+before providers can enroll; the complete relay setup, rollout sequence, framework ownership
+boundary, and verification commands are in the
+[allocator deployment guide](docs/allocator.md#remote-grid-deployment).
 
 ---
 
