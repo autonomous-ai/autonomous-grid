@@ -996,6 +996,15 @@ def _add_engines(sub) -> None:
                              help="Stop the engine already serving this grid and start a fresh one, "
                                   "instead of no-opping an identical re-join (remote only).")
     remote_only.add_argument(
+        "--allocator-provider",
+        action="store_true",
+        default=None,
+        help=(
+            "Create an empty provider identity for allocator-managed engines. The allocator can "
+            "then load and unload models without a manually started bootstrap model (remote only)."
+        ),
+    )
+    remote_only.add_argument(
         "--relay-at",
         default=None,
         metavar="URL",

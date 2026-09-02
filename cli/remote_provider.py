@@ -351,6 +351,24 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     from . import provider, remote_grid
 
     _reject_local_only_flags(args)
+    allocator_provider = bool(getattr(args, "allocator_provider", False))
+    if allocator_provider:
+        conflicts = (
+            ("api", "--api"),
+            ("at", "--at"),
+            ("serve", "--serve"),
+            ("models", "-m/--model"),
+            ("media", "--media"),
+            ("bundles", "--bundle"),
+            ("all", "--all"),
+            ("kind", "--kind"),
+        )
+        used = [flag for attr, flag in conflicts if getattr(args, attr, None)]
+        if used:
+            raise SystemExit(
+                "--allocator-provider creates an empty provider and can't combine with "
+                f"{', '.join(used)}. Let the allocator load models after it joins."
+            )
     if getattr(args, "api", None) is not None:  # `--api ""` must error, not fall through to hardware
         _reject_api_conflicts(args)
     if args.serve and args.models:
@@ -396,13 +414,15 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     respawn = bool(getattr(args, "respawn", False))  # never no-op, never SIGHUP — always stop-and-start
     key_rotated = False  # a `join --api` that stored a NEW key must reach a live identity via respawn
     deferred_target_error: SystemExit | None = None
-    if getattr(args, "api", None) is not None:
+    if allocator_provider:
+        specs, media_detected = [], False
+    elif getattr(args, "api", None) is not None:
         specs, key_rotated = _resolve_api_targets(args, network_id)
         media_detected = False
     else:
         specs, media_detected, deferred_target_error = _resolve_or_defer(args, respawn=respawn)
     media = bool(getattr(args, "media", False)) or media_detected
-    if not specs and not media and deferred_target_error is None:
+    if not specs and not media and deferred_target_error is None and not allocator_provider:
         # engines detected and the operator declined, or nothing to serve
         print("Nothing joined.")
         return 0
@@ -532,6 +552,11 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
             media=media, meta_name=meta_name, bundles=bundles,
             relay_transport_url=relay_transport_url,
         )
+        if allocator_provider or any(bool(item.get("allocator_provider")) for item in base):
+            # This is a durable provider role, not a claim that a model is already routed. It lets
+            # a dead empty provider recover with `grid join --respawn`, while the allocator remains
+            # solely responsible for publishing real READY routes and routing revisions.
+            record["allocator_provider"] = True
         # Preserve the live identity's --max-concurrency across an additive join, like media/bundles/meta
         # above. It sizes the running N-worker poll pool (remote/serve._serve_loop), so a re-join that
         # doesn't re-pass --max-concurrency must NOT reset it to the default 1 — that would silently
@@ -576,6 +601,8 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         print(f"endpoint_url={record['endpoint_url']}")
     if record["models"]:
         print(f"models={','.join(record['models'])}")
+    if record.get("allocator_provider"):
+        print("allocator-provider=ready (models are loaded and unloaded by the allocator)")
     if media:  # the comfyui:* models are resolved from bundle gating at serve time, not here
         print("media=on (serving comfyui:* workflows via the relay)")
     if task_serving.allowed:  # said only when it is true — the refusal has already gone to stderr
@@ -1151,7 +1178,7 @@ def _allocator_identity_can_respawn(records: list[dict[str, object]]) -> bool:
 
     return any(
         record.get("engine_id") == _REMOTE_IDENTITY
-        and bool(record.get("allocator_routing_revision"))
+        and bool(record.get("allocator_provider") or record.get("allocator_routing_revision"))
         and record.get("reload_signal") == "sighup"
         for record in records
     )

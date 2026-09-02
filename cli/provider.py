@@ -41,6 +41,7 @@ _REMOTE_ONLY_JOIN_FLAGS = (
     ("pricing_input", "--pricing-input"),
     ("pricing_output", "--pricing-output"),
     ("respawn", "--respawn"),
+    ("allocator_provider", "--allocator-provider"),
     ("relay_at", "--relay-at"),
     # Task serving (ADR 0032, issue 61). A task is claimed from the relay, and local mode has no
     # relay. ⚠️ All three default to `None`, `--tasks` included: the predicate below is `is not

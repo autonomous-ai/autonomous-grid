@@ -823,12 +823,18 @@ For a relay managed by another service runner, set those same two environment va
 relay process. `GRID_ALLOCATOR_SIDECAR_URL` accepts only literal loopback HTTP. The enrollment file
 is read locally by the relay and its operator capability is never returned to a provider.
 
-Each capacity machine must first join the remote Grid as a normal, live provider. Then enroll the
-same authenticated provider identity as allocator-managed capacity:
+Each capacity machine needs a live remote provider identity, then enrolls that same authenticated
+identity as allocator-managed capacity. An already-serving node only needs the allocator command.
+A fresh capacity node can create an empty provider explicitly; it does not need a fake bootstrap
+model, and it advertises no inference route until the allocator has loaded one:
 
 ```bash
 grid --remote sync
 grid --remote use <grid>
+
+# Fresh node with no engine yet:
+grid --remote join <grid> --allocator-provider --name <node-name>
+
 grid --remote allocator join <grid> --dedicated
 ```
 

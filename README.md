@@ -608,6 +608,10 @@ grid --local start allocator-control --host 127.0.0.1 --port 22101 \
 # Every already-serving remote provider
 grid --remote allocator join <grid> --dedicated
 
+# A fresh capacity node with no manually started engine
+grid --remote join <grid> --allocator-provider --name <node-name>
+grid --remote allocator join <grid> --dedicated
+
 # Controller/relay host: register exact artifacts, inspect, then enable actuation
 grid --local allocator model set <model.gguf> --grid allocator-control \
   --memory-mb <resident-mb> --artifact-sha256 <sha256> \

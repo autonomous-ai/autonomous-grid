@@ -10010,13 +10010,52 @@ def test_remote_join_bare_with_nothing_live_and_nothing_detected_still_errors(mo
         cli.main(["join", "--respawn"])
 
 
+def test_remote_join_allocator_provider_bootstraps_empty_identity_without_detection(
+    monkeypatch, tmp_path, capsys
+):
+    """A fresh managed node must not need a fake manually served model before it can enroll."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        cli.provider,
+        "_detect",
+        lambda _host: pytest.fail("an allocator-provider bootstrap must not probe local engines"),
+    )
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--allocator-provider", "--name", "forge-machine-d"]) == 0
+
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["engines"] == []
+    assert record["models"] == []
+    assert record["allocator_provider"] is True
+    assert "allocator-provider=ready" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--serve", "model.gguf"],
+        ["--at", "http://127.0.0.1:11434/v1", "-m", "model"],
+        ["--media"],
+        ["--all"],
+        ["--kind", "vllm"],
+    ],
+)
+def test_remote_join_allocator_provider_rejects_engine_selectors(monkeypatch, tmp_path, extra):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit, match="creates an empty provider"):
+        cli.main(["join", "--allocator-provider", *extra])
+
+
 def test_remote_join_bare_respawn_recovers_dead_allocator_identity(monkeypatch, tmp_path):
     """A provider crash must not strand an otherwise healthy allocator-owned engine."""
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _seed_live_identity_record(
         pid=4242,
         engines=[],
-        allocator_routing_revision="allocator-revision-a",
+        allocator_provider=True,
     )
     monkeypatch.setattr(cli.remote_provider.run_records, "record_alive", lambda _record: False)
     monkeypatch.setattr(
