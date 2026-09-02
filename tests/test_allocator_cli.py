@@ -55,6 +55,9 @@ def test_parser_exposes_complete_allocator_surface():
     assert parser.parse_args(
         ["allocator", "join", "forge"]
     ).handler is cli.cmd_allocator_join
+    assert parser.parse_args(
+        ["allocator", "join", "forge", "--dedicated", "--restart"]
+    ).restart is True
     assert parser.parse_args(["allocator", "status"]).handler is cli.cmd_allocator_status
     set_args = parser.parse_args(
         [

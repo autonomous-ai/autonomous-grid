@@ -347,6 +347,14 @@ def cmd_allocator_join(args: argparse.Namespace) -> int:
     grid_id = _validated_grid_id(grid_info.get("grid_id"))
     scope = _scope(grid_id)
     record_path = _node_record_path(scope)
+    if getattr(args, "restart", False):
+        existing = jsonio.load_json(record_path)
+        if _node_process_state(existing) == "owned":
+            print(f"Gracefully restarting allocator node (pid={_record_pid(existing)}) ...")
+            # Do not retain the run-record lock while the child fences remote routes: its publisher
+            # takes the same lock to perform the ordered drain, and holding it here would deadlock.
+            if not stop_allocator_node_for_grid(cfg):
+                raise SystemExit("Allocator node could not be stopped for restart.")
     with file_lock(record_path):
         record = jsonio.load_json(record_path)
         if _node_process_state(record) == "owned":

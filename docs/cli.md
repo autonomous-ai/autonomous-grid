@@ -552,7 +552,7 @@ grid allocator mode observe|recommend|automatic
 grid allocator tick
     [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
 
-grid allocator join [grid] [--heartbeat-interval <s>] [--dedicated]
+grid allocator join [grid] [--heartbeat-interval <s>] [--dedicated] [--restart]
 
 grid allocator token write <path> [--host-id <id>] [--ttl-days <n>] [--force]
     [--grid <g>] [--token-file <path>] [--allow-insecure-http]

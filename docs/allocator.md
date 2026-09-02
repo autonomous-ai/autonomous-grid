@@ -832,6 +832,17 @@ grid --remote use <grid>
 grid --remote allocator join <grid> --dedicated
 ```
 
+After installing a newer Grid build on a provider, apply it without manually locating the detached
+daemon or its controller-sidecar scope:
+
+```bash
+grid --remote allocator join <grid> --dedicated --restart
+```
+
+Restart uses the normal route fence and request drain, stops only identity-proven allocator-owned
+children, obtains a fresh host-scoped credential, then adopts cached state under the same provider
+identity. Other provider routes and the relay stay online.
+
 Use `--dedicated` only for an always-on server. Omit it on a workstation or laptop so local activity,
 battery, thermal, memory, disk, and network protection can throttle or fence allocator work. The
 enrollment response contains only a host-scoped credential, retained by the detached node process;

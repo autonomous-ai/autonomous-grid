@@ -485,6 +485,11 @@ def _add_allocator(sub) -> None:
         action="store_true",
         help="Treat this host as dedicated Grid capacity while retaining hardware safety limits.",
     )
+    allocator_join.add_argument(
+        "--restart",
+        action="store_true",
+        help="Gracefully replace this provider's running allocator node with the current build.",
+    )
     allocator_join.set_defaults(handler=cmd_allocator_join)
 
     status = allocator_sub.add_parser("status", help="Show demand, placement, and mutations")
