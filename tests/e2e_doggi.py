@@ -3,7 +3,7 @@
 
 Requires:
   - DOGGI_API_KEY in environment (or pass --api-key to grid join)
-  - A running relay (grid up)
+  - A running relay (grid start)
   - A joined Doggi engine (grid join --api doggi --at <url>)
 
 Run (env var):

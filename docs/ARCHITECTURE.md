@@ -25,7 +25,7 @@ both modes — only the wire between **grid** and **engine** changes:
 
 | Role | Brought up by | What it is |
 | --- | --- | --- |
-| **grid** | `grid up` | The endpoint apps point at. In `local`, the grid server: an OpenAI-compatible proxy + in-memory registry running on your box. In `remote`, an **remote grid** hosted on autonomous's relay. |
+| **grid** | `grid start` | The endpoint apps point at. In `local`, the grid server: an OpenAI-compatible proxy + in-memory registry running on your box. In `remote`, an **remote grid** hosted on autonomous's relay. |
 | **engine** | `grid join` | Something that runs models (Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI). In `local` it registers into the grid and is forwarded requests; in `remote` it polls the relay for work. |
 | **app** | any OpenAI SDK | Points at the grid's `/v1` base URL (`grid info --env`). In `remote` the base is the relay and the key is a per-grid access token. |
 
@@ -50,7 +50,7 @@ command surface), `shared/` (used by both modes), `local/` (local mode), and `re
 │   ├── _main.py             Entry point; `_maybe_internal` dispatches the hidden `__*` children.
 │   ├── dispatch.py          Mode resolution + routing (AGNOSTIC / GATED / REMOTE_HANDLERS / REMOTE_ONLY).
 │   ├── mode.py              `grid mode` / `grid use` (mode + active-grid selection).
-│   ├── grid.py              `grid up` / `down` / `ls` / `info` / `version` / overview (local).
+│   ├── grid.py              `grid start` / `stop` / `ls` / `info` / `version` / overview (local).
 │   ├── provider.py          `grid join` / `leave` / `engines` / `models` — local engine lifecycle
 │   │                        (file name predates the rename).
 │   ├── local_leave.py       The local `grid leave` teardown: record kills, argv sweep, and what the
@@ -60,7 +60,7 @@ command surface), `shared/` (used by both modes), `local/` (local mode), and `re
 │   ├── models.py            `grid catalog` / `pull` / `rm`.
 │   ├── auth.py              `grid login` / `logout` (remote sign-in).
 │   ├── codex_signin.py      The `--api codex` OAuth sign-in UX (browser + `--no-browser` paste flow).
-│   ├── remote_grid.py     Remote `up` / `down` / `ls` / `info` + `members`.
+│   ├── remote_grid.py     Remote `start` / `stop` / `ls` / `info` + `members`.
 │   ├── remote_provider.py Remote `join` / `leave` (serve a remote grid).
 │   ├── remote_request.py  Remote `chat` / `image` / `edit` / `video` (consume via relay).
 │   ├── remote_router.py   Remote `grid router` — owner config for auto-routing (model `auto`).
@@ -282,7 +282,7 @@ of `__engine`. That subprocess (`remote/serve.py:run_remote_engine_from_record`)
 
 ## Internal subcommands
 
-`grid up` and `grid join` spawn detached children via hidden CLI subcommands (dispatched in
+`grid start` and `grid join` spawn detached children via hidden CLI subcommands (dispatched in
 `cli/_main.py:_maybe_internal`) — process plumbing, not part of the user-facing surface:
 
 - `__server <grid_id>` — the local grid server (`local/server.py`).
