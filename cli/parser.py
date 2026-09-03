@@ -31,6 +31,7 @@ from .allocator import (
     cmd_allocator_token_write,
 )
 from .allocator_qualification import cmd_allocator_qualify
+from .allocator_ownership import cmd_allocator_audit
 from shared.allocator.scenario import SCENARIO_STRATEGIES
 
 from .allocator_scenario import (
@@ -474,6 +475,28 @@ def _add_allocator(sub) -> None:
         help="Place configured models dynamically across participating hosts",
     )
     allocator_sub = allocator.add_subparsers(dest="allocator_command", required=True)
+
+    audit = allocator_sub.add_parser(
+        "audit",
+        help="Show per-model lifecycle ownership and enforce migration cutover gates",
+    )
+    _add_allocator_grid(audit)
+    audit.add_argument(
+        "--require-managed",
+        action="append",
+        default=[],
+        metavar="MODEL",
+        help="Fail unless MODEL has managed ready routes and no external ready routes; repeatable.",
+    )
+    audit.add_argument(
+        "--forbid-external",
+        action="append",
+        default=[],
+        metavar="MODEL",
+        help="Fail while any ready external route for this model remains; repeatable.",
+    )
+    audit.add_argument("--json", action="store_true")
+    audit.set_defaults(handler=cmd_allocator_audit)
 
     allocator_join = allocator_sub.add_parser(
         "join",
