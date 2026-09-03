@@ -668,9 +668,11 @@ def _vllm_process_env(binary: Path) -> dict[str, str]:
     """Activate a wheel-packaged CUDA compiler when the host has drivers only."""
 
     env = os.environ.copy()
+    binary_dir = binary.resolve().parent
+    env["PATH"] = f"{binary_dir}{os.pathsep}{env.get('PATH', '')}"
     if env.get("CUDA_HOME") or shutil.which("nvcc", path=env.get("PATH")):
         return env
-    venv_root = binary.resolve().parent.parent
+    venv_root = binary_dir.parent
     candidates = sorted(
         venv_root.glob("lib/python*/site-packages/nvidia/cu*/bin/nvcc"), reverse=True
     )
@@ -678,7 +680,7 @@ def _vllm_process_env(binary: Path) -> dict[str, str]:
         return env
     cuda_bin = candidates[0].parent
     env["CUDA_HOME"] = str(cuda_bin.parent)
-    env["PATH"] = f"{cuda_bin}{os.pathsep}{env.get('PATH', '')}"
+    env["PATH"] = f"{cuda_bin}{os.pathsep}{env['PATH']}"
     return env
 
 
