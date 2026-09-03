@@ -632,6 +632,70 @@ def test_the_fetch_and_the_renewal_agree_with_each_other(monkeypatch, tmp_path):
         f"a machine would be admitted to an OS grid and then silently unable to renew on it")
 
 
+# --- the TOKEN SET itself: what this CLI can claim vs what the control plane will serve ------------
+# Every pin above is about a value's SPELLING. This one is about its MEMBERSHIP, and it arrived with
+# `omarchy` (issue 04) because that is the first token added since the two lists were written.
+#
+# `shared/system/os_grid.OS_TOKENS` is everything a machine running this CLI can claim.
+# `os_networks.DEFAULT_SERVED_OS_TOKENS` is everything the control plane provisions a grid for when
+# `GRID_OS_GRID_TOKENS` is unset — and it is unset on the dev VM and on prod, so that default is not
+# a fallback in practice, it is the served list.
+#
+# ⚠️ **A token this CLI claims and the control plane does not serve is a machine with NO OS grid, not
+# a machine that falls back to another one.** That is the whole point of the claim being single-valued
+# (ADR 0039 D-c): an Omarchy machine claims `omarchy`, so it is no longer claiming `linux`, so an
+# unserved `omarchy` costs it the Linux grid it used to be on. The degrade is at least LOUD — D-k's
+# absence line fires on `os_served: false` — which is why this is an ordering rather than a fail-open.
+#
+# ⚠️ **Roll the CONTROL PLANE out BEFORE the CLI for this value, the REVERSE of the `os-community`
+# literal at the top of this file.** That one goes grid-src first because the control plane shells out
+# to grid-src's argparse; this one goes control plane first because the CLI is what starts making the
+# new claim. Same feature, opposite answers, and inferring either from the other gets it backwards.
+#
+# ⚠️ Deliberately NOT compared against `_OS_LABELS`. The label map is the GRID'S NAME per token
+# (`omarchy` → `Omagrid`) and lives only in grid-apis; nothing in this repository reads a grid's name
+# for anything but printing it, so it has no half here and no lockstep to keep.
+
+_APIS_OS_NETWORKS = "grid_networks/os_networks.py"
+_SERVED_TOKENS = "DEFAULT_SERVED_OS_TOKENS"
+
+#: The token that predates this slice on both sides — the positive control, so a helper that has
+#: quietly stopped reading the tuple fails as a HARNESS fault rather than as "the seam is fine".
+_TOKEN_CONTROL_VALUE = "macos"
+
+
+def test_every_token_this_cli_can_claim_is_one_the_control_plane_serves():
+    """Membership, compared list against list — neither repository can see this alone.
+
+    This repository's suite is right that `os_token()` resolves `omarchy` on an Omarchy machine.
+    grid-apis' suite is right that `served_os_tokens()` answers exactly what its default tuple holds.
+    Both stay green while an Omarchy machine signs in, claims a token nobody serves, and is handed
+    nothing — which is a REGRESSION for that machine, because it was on the Linux grid the day before.
+
+    Asserted as a subset rather than as equality: the control plane may legitimately serve a token no
+    shipped CLI claims yet (that is how a token gets deployed FIRST, per the ordering above), and
+    calling that a failure would make the safe rollout order the one that fails the test.
+    """
+    from shared.system import os_grid
+
+    served = _collection(
+        _apis_module(_APIS_OS_NETWORKS), _SERVED_TOKENS, _APIS_OS_NETWORKS)
+
+    assert _TOKEN_CONTROL_VALUE in served, (
+        f"positive control: even {_TOKEN_CONTROL_VALUE!r} is missing from grid-apis' "
+        f"{_SERVED_TOKENS}, so this check is reading the wrong thing — fix the harness")
+    assert _TOKEN_CONTROL_VALUE in os_grid.OS_TOKENS, (
+        f"positive control: even {_TOKEN_CONTROL_VALUE!r} is missing from this repository's "
+        f"OS_TOKENS, so this check is reading the wrong thing — fix the harness")
+
+    unserved = sorted(set(os_grid.OS_TOKENS) - served)
+    assert not unserved, (
+        f"this CLI can claim {unserved} and grid-apis' {_SERVED_TOKENS} serves {sorted(served)}, so a "
+        f"machine of that system claims a token nobody provisions a grid for — and because the claim "
+        f"is single-valued it has stopped claiming the one it used to get (ADR 0039 D-c). Add the "
+        f"token to BOTH, and roll the control plane out FIRST")
+
+
 # --- the ANSWER's key, this slice's FOURTH cross-repo value ----------------------------------------
 # Everything above pins what the CLI SAYS. `os_served` is the one value on this seam that travels the
 # other way: `GET /v1/grid/tokens` reports whether this call was handed an OS grid, so the three
