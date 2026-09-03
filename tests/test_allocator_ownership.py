@@ -4,6 +4,8 @@ import json
 
 from cli.allocator_ownership import cmd_allocator_audit
 from cli.parser import build_parser
+from shared.allocator.controller import AllocatorController
+from shared.allocator.models import ModelProfile, ModelResidency, NodeSnapshot
 from shared.allocator.ownership import audit_ownership
 
 
@@ -93,6 +95,43 @@ def test_cutover_can_require_replacement_and_forbid_different_legacy_model():
         forbid_external=("old-qwen",),
     )
     assert passed.passed
+
+
+def test_cutover_gate_consumes_production_controller_status_schema():
+    controller = AllocatorController()
+    controller.put_profile(ModelProfile("replacement", 1_000))
+    replacement = ModelResidency("replacement", 1_000, managed=True, runtime="vllm")
+    legacy = ModelResidency("legacy", 2_000, managed=False, runtime="vllm")
+    node = NodeSnapshot(
+        "gpu-d",
+        24_000,
+        runtimes=("vllm",),
+        backends=("cuda",),
+        residencies=(replacement, legacy),
+        last_heartbeat=100,
+    )
+
+    warming_cutover = audit_ownership(
+        controller.status((node,), now=100),
+        require_managed=("replacement",),
+        forbid_external=("legacy",),
+    )
+    assert not warming_cutover.passed
+
+    completed_node = NodeSnapshot(
+        "gpu-d",
+        24_000,
+        runtimes=("vllm",),
+        backends=("cuda",),
+        residencies=(replacement,),
+        last_heartbeat=101,
+    )
+    completed_cutover = audit_ownership(
+        controller.status((completed_node,), now=101),
+        require_managed=("replacement",),
+        forbid_external=("legacy",),
+    )
+    assert completed_cutover.passed
 
 
 def test_same_model_mixed_ownership_warns_and_fails_cutover():
