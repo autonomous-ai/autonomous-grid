@@ -541,8 +541,91 @@ premise was tested against the paths its own scan cannot see — `apply_sync_sna
 `ProjectRow`, no raw or bulk insert exists, no migration seeds one — rather than trusted. ⚠️ It also
 found one **residue this decision did not consider**: the node's `name` on the same public payload
 is the provider's hostname, and consumer systems commonly derive a default machine name from the
-owner's. Weaker than an address and **not yet measured**; issue 15 carries the measurement to take
-and the candidate answers. D-m is not amended on the strength of an unmeasured claim.
+owner's. Weaker than an address, and at the time unmeasured — so D-m was left unamended rather than
+widened on a claim nobody had checked. **The measurement was taken 2026-09-03 and the residue is
+real; it is answered by D-n below, not by amending this decision.**
+
+## D-n — The machine's name is withheld too, unless its operator chose it
+
+D-m nulled the address and deliberately left the machine described. The enumeration it asked for
+(issue 15) found the machine's **name** sitting on the same unauthenticated payload — and consumer
+operating systems commonly derive a default machine name from the owner's, so on a grid of strangers
+that field may carry a person's given name with nobody having chosen to publish anything.
+
+**MEASURED 2026-09-03, macOS 26.6, on a machine that has never been renamed:**
+
+| | value |
+|---|---|
+| account `RealName` | `MacBook Pro` |
+| `scutil --get ComputerName` | `MacBook's MacBook Pro` |
+| `scutil --get LocalHostName` | `MacBooks-MacBook-Pro-7` |
+| `scutil --get HostName` | *not set* |
+| `platform.node()` | `MacBooks-MacBook-Pro-7.local` |
+
+Setup Assistant writes `<first word of the account's full name>'s <model>`. Three things say this was
+auto-derived and never typed: the possessive survives, `HostName` is unset, and the `-7` tail is
+Bonjour's collision counter. An account named "Kelvin Nguyen" on the same path yields
+`Kelvins-MacBook-Pro.local`. ⚠️ **n=1, and this account's own name is not a person's** — it
+establishes the derivation RULE with the account's full name on both sides of it, not a leaked human
+name observed in the wild.
+
+**And it is already on a live payload.** All 39 `__private-server` processes on the prod VM were
+asked for their own `GET /grid/overview`: 11 nodes answered, and one is named
+`MacBooks-MacBook-Pro-7.local` verbatim. ⚠️ **Not a prevalence estimate** — no `os-community` grid
+exists in prod yet, so none of those 11 is the population at issue, and 10 of them are hand-named.
+
+⚠️ **The Linux half is NOT measured, and this decision does not rest on it.** Every Linux node in the
+fleet is a datacenter box named by a provisioner, never by a desktop installer. The desktop that
+matters here is **Omarchy** (issue 04, still `needs-info`), not Ubuntu. Measuring it can only widen
+this decision's reach; it cannot overturn a residue already observed on a live row.
+
+**DECIDED 2026-09-03 (issue 15): on `os-community` the overview publishes a node's name only when the
+provider states its operator chose it. Otherwise it falls back to the anonymous label the route
+already computes.** Keyed by equality against the type literal — the same shape as D-i, D-l and D-m —
+and answered inside `member_identity_access` beside them, because that module exists precisely so a
+fourth surface finds one predicate rather than two conventions.
+
+- **Why not withhold every name on this type.** The relay cannot tell a name a person chose from a
+  hostname nobody chose: both arrive on the one `meta["name"]` key. And on a real fleet operators
+  **do** name their machines, frequently after their people — the prod sweep found `3d-artist-<given
+  name>`, `video-editor-<given name>`, `ml-engineer-<given name>`, all deliberate. Withholding
+  unconditionally takes the dashboard away from the operator who chose to publish, and protects
+  nobody who had not already decided. The thing the payload is missing is *who wrote this string*, so
+  that is what gets added rather than a blanket refusal.
+- **The provider says so explicitly — `name_chosen` on the register meta — and the relay never
+  guesses.** A heuristic ("does this look like a hostname") is wrong in both directions on the
+  measured fleet: `Grid`, `mac-studio-turtle` and `8x50902-67-qwen38-27b` are all chosen and all look
+  machine-generated, while `MacBooks-MacBook-Pro-7.local` looks like a model number.
+- **Absent means NOT chosen, so every degrade is fail-closed.** An old provider that never learns the
+  key has its name withheld on this type — the private answer, not the leaky one. An old relay
+  ignores the key and behaves as it does today. So the protection strengthens monotonically as the
+  relay lands, and there is **no hazardous ordering in either direction**.
+- ⚠️ **There are TWO provider halves, not one, and issue 15's scan named only the first.** grid-src
+  `provider_runtime/provider/lifecycle.py:365` is `opts.node_name or platform.node() or "node"`; the
+  **public CLI** `cli/remote_provider.py:379` is `getattr(args, "name", None) or socket.gethostname()`.
+  An `os-community` member runs the *second* — so this decision gains a half in **autonomous-grid**, a
+  repo the enumeration explicitly said it said nothing about, and a fix applied to one sibling leaves
+  the other publishing hostnames while every suite stays green.
+- **Why `node-<node_id[:6]>` is admissible here when D-m rejected "a stable non-identifying handle".**
+  D-m's objection was to a durable pseudonym standing in for a **person's address** — a second
+  spelling of who a provider is. This label stands in for the **machine**, `node_id` itself is not on
+  the payload, and the relay has emitted exactly this string for every nameless node since long
+  before this type existed. It introduces no identifier the payload did not already carry.
+- **No app half, measured rather than assumed.** `OverviewNode.name` is a non-null `final String`
+  parsed as `'${j['name'] ?? ''}'`, and the anonymous label is a case the UI has always rendered. So
+  the app needs no change and has no ordering in either direction.
+
+Two alternatives were rejected, each for a stated reason:
+
+- **Fall back to the anonymous label unconditionally on this type.** Three lines, no new wire key, and
+  it was the first candidate written. Rejected on the measurement above: it erases the deliberate
+  namer along with the accidental one, and the deliberate namer is the majority of every real fleet
+  observed.
+- **Accept it and say so in D-m.** Defensible while the claim was unmeasured — a hostname is the
+  machine's name and an operator can change it. Rejected now that it is measured: a given name
+  reaches the public payload with *nobody having chosen anything*, and "the operator can rename the
+  machine" asks a person to first know that a leak exists. That is the same reasoning D-m used to
+  refuse "somebody serving on a public pool publishes themselves by serving".
 
 ## Considered options
 
