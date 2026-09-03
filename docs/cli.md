@@ -711,7 +711,9 @@ grid train benchmark --suite <file> --model <model> --run-dir <dir> [--grid <nam
 
 grid train sft [--backend auto|mlx|torch] [--iters <n>] [--run-dir <dir>] [--config <path>]
 grid train submit-sft --data <sft.jsonl|dataset-dir> --backend mlx|torch
-                      [--grid <name>] [--project <id>] [--config <path>] [--iters <n>] [--json]
+                      [--grid <name>] [--project <id>] [--config <path>] [--iters <n>]
+                      [--timeout-hours <1..168>] [--queue-timeout-hours <1..720>] [--json]
+grid train verify-result <fetched-result-dir> [--json]
 grid train run [--config <path>]                  # the feedback loop (GRPO via TRL)
 grid train eval --run <dir> --candidate <name> [--adapter <dir>] [--base <name>] [--config <path>]
 grid train deploy --adapter <dir> [--gate] [--run <dir>] [--node <url>]... [--name <n>] [--config <path>]
@@ -797,19 +799,25 @@ GRID_TASK_AGENT_KINDS=codex,train-mlx grid join forge --tasks-only --respawn
 grid train submit-sft --grid forge --project <project-id> \
   --config grid-train.toml --data ./forge-goals --backend mlx
 grid task follow <task-id> --grid forge
-grid task fetch <task-id> --grid forge --out ./trained-result
+grid task fetch <task-id> --grid forge --into ./trained-result
+grid train verify-result ./trained-result/grid-train-result
 ```
 
 Use `train-torch`/`--backend torch` on CUDA or other torch training machines. Install `grid[train]`
 on a training worker; it advertises no training capacity unless every dependency for its backend
 is present. The backend is explicit, so the relay never guesses from a machine name.
 
-For runs longer than the one-hour task default, raise both sides deliberately: set
-`TASK_DEADLINE_SECONDS` on the self-hosted relay (and keep `TASK_QUEUE_DEADLINE_SECONDS` larger),
-then set the matching `GRID_TASK_TIMEOUT_SECONDS` on training workers. For example, a 24-hour run
-uses `86400`, with a relay queue deadline greater than `86400`. If the base model is not already
-cached, pass its registry credential explicitly with `GRID_TASK_ENV_PASSTHROUGH=HF_TOKEN`; normal
-worker environments do not leak ambient credentials into tasks.
+Training jobs do not inherit the ordinary one-hour agent-task clock. The defaults are 24 hours to
+run after a trainer claims the job and seven days to wait for compatible capacity. Override them
+per job with `--timeout-hours` and `--queue-timeout-hours`; the relay and worker validate the same
+bounded values, and the queue clock must be larger. If the base model is not already cached, pass
+its registry credential explicitly with `GRID_TASK_ENV_PASSTHROUGH=HF_TOKEN`; normal worker
+environments do not leak ambient credentials into tasks.
+
+A trainer exit is not success by itself. The worker requires a non-empty adapter plus a valid
+`run.json`, rewrites worker-local paths to portable relative paths, and writes `manifest.json` with
+the size and SHA-256 of every adapter file. `grid train verify-result` rechecks that manifest after
+fetch and refuses missing, added, symlinked or changed files.
 
 This is node scheduling and failover, not cross-machine DDP: one node owns the trainer for one job.
 If that node disappears, the task lease is reclaimed and another compatible node starts from the

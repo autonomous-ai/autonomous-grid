@@ -373,7 +373,10 @@ existing task/Git plane: an explicit `train-mlx` or `train-torch` capability sel
 node, leases recover a job when a node disappears, and the adapter returns in the result commit.
 It is not distributed-data-parallel training; one job has one trainer, which is the architecture
 above. The first release restarts from the immutable input after node loss rather than resuming an
-optimizer checkpoint.
+optimizer checkpoint. Training gets a separate 24-hour run clock and seven-day queue clock by
+default, both bounded and recorded in the relay-authored job. A result is accepted only when the
+adapter exists and its portable manifest covers every file; after fetching, run
+`grid train verify-result <result-dir>` before loading it.
 
 ## Not built yet
 

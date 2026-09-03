@@ -1792,6 +1792,7 @@ def _add_train(sub) -> None:
         cmd_train_run,
         cmd_train_schedule,
         cmd_train_submit_sft,
+        cmd_train_verify_result,
         cmd_train_serve,
         cmd_train_sft,
         cmd_train_ui,
@@ -1969,8 +1970,21 @@ def _add_train(sub) -> None:
                             help="Required worker type; explicit so scheduling is deterministic")
     submit_sft.add_argument("--iters", type=int, default=None,
                             help="Training iterations (MLX only)")
+    submit_sft.add_argument(
+        "--timeout-hours", type=int, default=24,
+        help="Maximum runtime after a trainer claims the job (default: 24; max: 168)")
+    submit_sft.add_argument(
+        "--queue-timeout-hours", type=int, default=168,
+        help="Maximum time to wait for a compatible trainer (default: 168; max: 720)")
     submit_sft.add_argument("--json", action="store_true")
     submit_sft.set_defaults(handler=cmd_train_submit_sft)
+
+    verify_result = train_sub.add_parser(
+        "verify-result", help="Verify a fetched distributed SFT adapter and its checksums"
+    )
+    verify_result.add_argument("path", help="Fetched grid-train-result directory")
+    verify_result.add_argument("--json", action="store_true")
+    verify_result.set_defaults(handler=cmd_train_verify_result)
 
     nightly = train_sub.add_parser(
         "nightly", help="One unattended cycle: train, prove it, ship it only if it won"

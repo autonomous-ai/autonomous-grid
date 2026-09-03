@@ -620,9 +620,20 @@ def cmd_train_submit_sft(args: argparse.Namespace) -> int:
 
     base, token, label = remote_task._resolve(args)
     project_id = remote_task._resolve_project(base, token, args.project)
+    timeout_hours = getattr(args, "timeout_hours", 24)
+    queue_timeout_hours = getattr(args, "queue_timeout_hours", 168)
+    if not 1 <= timeout_hours <= 168:
+        raise SystemExit("grid train: --timeout-hours must be 1-168")
+    if not 1 <= queue_timeout_hours <= 720:
+        raise SystemExit("grid train: --queue-timeout-hours must be 1-720")
+    if queue_timeout_hours <= timeout_hours:
+        raise SystemExit(
+            "grid train: --queue-timeout-hours must be greater than --timeout-hours")
     spec = {
         "version": 1, "backend": args.backend,
         "config": "grid-train-input/grid-train.toml", "run_dir": "grid-train-result",
+        "run_timeout_seconds": timeout_hours * 3600,
+        "queue_timeout_seconds": queue_timeout_hours * 3600,
     }
     if args.iters is not None:
         if args.backend != "mlx":
@@ -640,7 +651,26 @@ def cmd_train_submit_sft(args: argparse.Namespace) -> int:
     task_id = job.get("id")
     print(f"SFT job queued on {label}: {task_id}")
     print(f"  grid task follow {task_id} --grid {label}")
-    print(f"  grid task fetch {task_id} --grid {label} --out grid-train-result")
+    print(f"  grid task fetch {task_id} --grid {label} --into grid-train-result")
+    print("  grid train verify-result grid-train-result/grid-train-result")
+    return 0
+
+
+def cmd_train_verify_result(args: argparse.Namespace) -> int:
+    """Verify the checksums and structure of a fetched distributed SFT result."""
+    from remote.train_worker import verify_result
+
+    try:
+        result = verify_result(Path(args.path))
+    except ValueError as exc:
+        raise SystemExit(f"grid train: {exc}") from None
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"Verified {args.path}")
+        print(f"  {result['backend']} adapter · {len(result['files'])} file(s) · "
+              f"{result['total_bytes']} bytes")
+        print(f"  base model: {result.get('model') or 'not recorded'}")
     return 0
 
 

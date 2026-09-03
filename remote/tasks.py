@@ -1035,6 +1035,7 @@ def run_task(job: dict[str, Any],
 
     if agent_kind.startswith("train-"):
         try:
+            timeout = train_worker.timeout(job, workspace)
             argv = train_worker.command(job, workspace)
             _returncode, raw = _run_child(
                 argv, timeout=timeout, publish=sink, cwd=str(workspace),
@@ -1049,7 +1050,13 @@ def run_task(job: dict[str, Any],
             return failed(f"training exited {exc.returncode}: {exc.stderr[-500:].strip()}")
         except (Exception, SystemExit) as exc:
             return failed(f"could not run training: {exc}")
+        try:
+            manifest = train_worker.finalize_result(job, workspace)
+        except (Exception, SystemExit) as exc:
+            return failed(f"training produced no usable adapter: {exc}")
         output = raw.strip() or f"{agent_kind.removeprefix('train-')} SFT complete"
+        output += (f"\nVerified adapter: {manifest['total_bytes']} bytes across "
+                   f"{len(manifest['files'])} file(s); manifest.json written")
         return TaskOutcome("completed", output[-_TASK_OUTPUT_MAX_CHARS:], None)
 
     if agent_kind == "codex":
