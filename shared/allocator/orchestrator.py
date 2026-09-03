@@ -13,6 +13,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -538,6 +539,10 @@ class VllmBackend:
             raise RuntimeError(f"vLLM snapshot is not cached: {model_id!r}")
         binary = shutil.which("vllm")
         if not binary:
+            sibling = Path(sys.executable).with_name("vllm")
+            if sibling.is_file():
+                binary = str(sibling)
+        if not binary:
             raise RuntimeError("vLLM is not installed on this node")
         model_path = str(Path(str(item["path"])).resolve())
         command = [
@@ -563,10 +568,11 @@ class VllmBackend:
         log = log_path.open("ab")
         try:
             process = subprocess.Popen(
-                command,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
+            command,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=_vllm_process_env(Path(binary)),
+            start_new_session=True,
             )
         finally:
             log.close()
@@ -656,6 +662,24 @@ class VllmBackend:
                 except ValueError:
                     return None
         return int(total) if found and total.is_integer() else None
+
+
+def _vllm_process_env(binary: Path) -> dict[str, str]:
+    """Activate a wheel-packaged CUDA compiler when the host has drivers only."""
+
+    env = os.environ.copy()
+    if env.get("CUDA_HOME") or shutil.which("nvcc", path=env.get("PATH")):
+        return env
+    venv_root = binary.resolve().parent.parent
+    candidates = sorted(
+        venv_root.glob("lib/python*/site-packages/nvidia/cu*/bin/nvcc"), reverse=True
+    )
+    if not candidates:
+        return env
+    cuda_bin = candidates[0].parent
+    env["CUDA_HOME"] = str(cuda_bin.parent)
+    env["PATH"] = f"{cuda_bin}{os.pathsep}{env.get('PATH', '')}"
+    return env
 
 
 def build_engine_orchestrator(
