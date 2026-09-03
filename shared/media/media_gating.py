@@ -13,6 +13,8 @@ in `engine/comfyui.py` (`--lowvram --reserve-vram 1` when max card < 32 GB):
                         threshold. Heavier than the Z-Image Turbo it replaced
                         (~12 GB UNet); if generation starts OOMing on 24 GB
                         hosts, raise this gate rather than shrinking the model.
+    z_image           - Z-Image Turbo, the lighter alternative on the same
+                        route (~12 GB UNet). A host can serve either, or both.
     image_editing     - Qwen-Image-Edit at Q4_1 + Lightning lora fits a
                         24 GB card under --lowvram (UNet partitioned to RAM).
     i2v               - Wan2.2 14B high+low noise sequential, also fits a
@@ -38,8 +40,15 @@ class MediaGate:
     min_vram_gb: float
 
 
+# `image_generation` is advertised twice on purpose. `comfyui:image_generation` names the *task* and
+# is what `ENDPOINT_MODELS` resolves a request to when it names no model — every client written
+# before there was a choice keeps working. `comfyui:krea2` names the *model*, which is what a caller
+# picking between models actually wants, and reads correctly beside `comfyui:z_image`. Same bundle,
+# same files, same workflow: two names for one thing, not two things.
 GATES: tuple[MediaGate, ...] = (
     MediaGate(bundle="image_generation", advertise_as="comfyui:image_generation", min_vram_gb=22.0),
+    MediaGate(bundle="image_generation", advertise_as="comfyui:krea2",            min_vram_gb=22.0),
+    MediaGate(bundle="z_image",          advertise_as="comfyui:z_image",          min_vram_gb=22.0),
     MediaGate(bundle="image_editing",    advertise_as="comfyui:image_editing",    min_vram_gb=22.0),
     MediaGate(bundle="i2v",              advertise_as="comfyui:i2v",              min_vram_gb=22.0),
 )

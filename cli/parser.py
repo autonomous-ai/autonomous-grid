@@ -443,7 +443,9 @@ def _add_use(sub) -> None:
     )
     image.add_argument("--width", type=int, default=720)
     image.add_argument("--height", type=int, default=720)
-    image.add_argument("--steps", type=int, default=4)
+    # No default: the workflow the provider runs carries the step count its model was
+    # distilled for. Sending one from here would override it on every call.
+    image.add_argument("--steps", type=int, default=None)
     _add_remote_use_flags(image)
     image.set_defaults(handler=cmd_image)
 
@@ -463,7 +465,7 @@ def _add_use(sub) -> None:
         required=True,
         help="Input image path. Repeat up to three times.",
     )
-    edit.add_argument("--steps", type=int, default=4)
+    edit.add_argument("--steps", type=int, default=None)
     _add_remote_use_flags(edit)
     edit.set_defaults(handler=cmd_edit)
 

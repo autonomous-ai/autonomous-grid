@@ -467,18 +467,37 @@ Grid ships a second engine, ComfyUI, for media:
 # Install the media engine
 grid engine install comfyui
 
-# Download the model files for making images
-grid engine pull image_generation
+# Download the model files for what you want to make
+grid engine pull image_generation      # also: z_image, image_editing, i2v
 
-# Join this computer as a media engine
-grid join http://192.168.1.25:8090 --media --bundle image_generation
+# Join this computer as a media engine; repeat --bundle for more than one
+grid join <grid-url> --media --bundle image_generation
 
 # Make an image
-grid image "a compact walnut desk beside a sunlit window" --grid http://192.168.1.25:8090
+grid image "a compact walnut desk beside a sunlit window" \
+  -m comfyui:image_generation --grid <grid-url>
 ```
 
-- `grid engine pull` also takes `image_editing` and `i2v`.
-- `grid image` needs `--grid` on local — its positional argument is the prompt, so the grid is a flag.
+Editing and video take a source image with `-i`:
+
+```bash
+grid edit "put a vase of tulips on the desk" \
+  -m comfyui:image_editing -i desk.png --grid <grid-url>
+
+grid video "morning light moves across the desk" \
+  -m comfyui:i2v -i desk.png --duration 5s --aspect-ratio 1:1 --grid <grid-url>
+```
+
+- Each command needs `-m`: `comfyui:image_generation`, `comfyui:image_editing` or `comfyui:i2v`.
+  A computer serves only the bundles it joined with.
+- Two models make images. `comfyui:image_generation` is Krea 2 Turbo, also reachable as
+  `comfyui:krea2`; `comfyui:z_image` is the lighter Z-Image Turbo. Pull and join `z_image` to serve
+  both, then pick per request — the command is the same, only `-m` changes.
+- `--steps` is optional, and better left off: each model ships with the step count it was distilled
+  for. Both of these want 4, and asking for more is slower without being better.
+- `grid edit` takes up to three `-i` images. `grid video` takes one, and `--duration` is `5s` or `8s`.
+- `--grid` is only needed on local, because the positional argument is the prompt.
+- Results are written to `~/.grid/outputs` — `-o` puts them somewhere else.
 
 ### No GPU? Join with an API key
 
