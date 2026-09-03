@@ -376,7 +376,15 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         print("Nothing joined.")
         return 0
     engine_id = _REMOTE_IDENTITY
-    meta_name = getattr(args, "name", None) or socket.gethostname()
+    # Two facts, not one string. `--name mybox` and a box whose hostname IS `mybox` produce the same
+    # display name and mean opposite things about who wrote it — and on an `os-community` grid the
+    # public overview publishes the name only when a person chose it (ADR 0039 D-n, issue 16). The
+    # relay never guesses from the string: measured on the live fleet a heuristic is wrong in both
+    # directions (`Grid` and `8x50902-67-qwen38-27b` are chosen; `MacBooks-MacBook-Pro-7.local` is
+    # not). So the distinction is kept here, carried through the run record, and stated on the wire.
+    chosen_name = getattr(args, "name", None)
+    meta_name = chosen_name or socket.gethostname()
+    name_chosen = bool(chosen_name)
 
     # ⚠️ **Before the lock, and before anything is stopped.** A provider that was serving inference
     # a second ago must still be serving it after a task check that failed — so this may not run
@@ -415,9 +423,9 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # Union, media, bundles and concurrency inherit TOGETHER, and the alias guard reads `base` too:
         # aliases are positionally keyed to a record's models and are NOT carried by the spec merge, so
         # inheriting an aliased union would drop its aliases. It is refused with the existing
-        # leave-then-rejoin instruction instead. (`meta_name` is not inherited by either path — it comes
-        # from `--name` or the hostname.) Same shape as `_leave_one_engine`'s
-        # `survivors or list(records.values())` (ADR 0010).
+        # leave-then-rejoin instruction instead. (`meta_name` and `meta_name_chosen` are not inherited
+        # by either path — they come from `--name` or the hostname, freshly, on every join.) Same shape
+        # as `_leave_one_engine`'s `survivors or list(records.values())` (ADR 0010).
         if deferred_target_error is not None and not live:
             # Nothing running to restart, so there is no union to inherit and `--respawn` has nothing
             # to act on: the operator gets the guidance auto-detect would have given them anyway.
@@ -438,9 +446,16 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # An idempotent re-join (no new engine/model, and no display-name/media/bundle change) is a no-op,
         # so it doesn't needlessly restart a live identity. A change in ANY of those does respawn to apply
         # it — there is no other way to rename or add a bundle in Slice 1.
+        # ⚠️ **Whether the name was CHOSEN is part of the display name for this purpose**, and the case
+        # it is here for is the one the string comparison cannot see: `--name mybox` on a box already
+        # called `mybox`. Same string, opposite fact — and without this half the operator is told
+        # "already serving", the relay never hears the claim, and the name stays withheld on an
+        # `os-community` grid with nothing anywhere to say why (ADR 0039 D-n).
         if (
             live and not changed and media == base_media and bundles == base_bundles
-            and meta_name == _identity_field(live, "meta_name") and not rotated_live
+            and meta_name == _identity_field(live, "meta_name")
+            and _states_the_same_name_choice(live, name_chosen)
+            and not rotated_live
             and not respawn
         ):
             # Lazy, per this module's import rule: `cli.dispatch` imports it while `cli` is still
@@ -477,12 +492,15 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
             return 0
+        dropped_claim = _dropped_name_claim_note(live, meta_name, name_chosen)
+        if dropped_claim:
+            print(dropped_claim, file=sys.stderr)
         _reject_unserveable_union(merged_specs, args, base)
         _warn_shadowed_models(merged_specs)  # the serve loop logs this too; show it on the operator's terminal
 
         record = _build_record(
             args, network_id, engine_id, signaling_url, merged_specs,
-            media=media, meta_name=meta_name, bundles=bundles,
+            media=media, meta_name=meta_name, name_chosen=name_chosen, bundles=bundles,
         )
         # Preserve the live identity's --max-concurrency across an additive join, like media/bundles/meta
         # above. It sizes the running N-worker poll pool (remote/serve._serve_loop), so a re-join that
@@ -1102,6 +1120,62 @@ def _identity_field(live: list[dict[str, object]], key: str) -> object:
     return record.get(key) if record is not None else None
 
 
+def _states_the_same_name_choice(live: list[dict[str, object]], name_chosen: bool) -> bool:
+    """Whether the live identity already claims what this join claims about who named the box.
+
+    ADR 0039 D-n. `--name mybox` on a machine whose hostname is already `mybox` produces the display
+    name the record holds and means the opposite thing about who wrote it, so the string comparison
+    beside this one cannot see the change. Without this the operator is told *"already serving"*, the
+    relay never hears the claim, and the name stays withheld on an `os-community` grid with nothing
+    anywhere to say why.
+
+    ⚠️ **A record that does not state the fact does not disagree with it.** A record written before
+    this key existed says nothing, and "no facts" must never read as "bad facts" — the same rule
+    `service_truth` follows one branch over, and the one
+    `test_remote_join_noop_over_a_record_from_an_older_build_behaves_exactly_as_before` exists to
+    keep: upgrading the CLI is never a new failure, so it must not turn every re-join that passed
+    `--name` into a reload nobody asked for. The key lands on the record the first time this identity
+    is genuinely respawned — which running the new serve child requires anyway, since only that child
+    puts `name_chosen` on the wire.
+
+    Compared by IDENTITY against `True` once the record does state it, for the reason the wire half
+    does: absent and anything-not-`True` both mean *not chosen*, and `"false"` is truthy.
+    """
+    stated = _identity_field(live, "meta_name_chosen")
+    return stated is None or name_chosen == (stated is True)
+
+
+def _dropped_name_claim_note(
+    live: list[dict[str, object]], meta_name: str, name_chosen: bool
+) -> str | None:
+    """The one name change a join makes with nothing on screen to show for it (ADR 0039 D-n).
+
+    `meta_name` is not inherited, so a `grid join` without `--name` has always reset the display name
+    to this box's hostname. On a machine whose hostname IS the name that was chosen, that reset
+    produces the identical string and drops the claim underneath it — the join reports what it always
+    reports, and a grid that publishes only chosen names quietly stops naming the machine.
+
+    Acting on it is correct and is the mirror of the claim: both change what the relay is told. This
+    only says so. Returns None whenever the operator can already see the difference — a name that
+    actually changed is in the join's own output — or when the record never stated a claim, since a
+    record from an older build is not evidence anybody dropped anything.
+
+    ⚠️ **The sentence names no network type.** This repository deliberately holds no `os-community`
+    constant of its own (`tests/test_os_grid_type_lockstep.py` says why), and which grids act on the
+    claim is the relay's business, not this CLI's to re-derive.
+    """
+    if name_chosen or _identity_field(live, "meta_name_chosen") is not True:
+        return None
+    if meta_name != _identity_field(live, "meta_name"):
+        return None
+    return (
+        f"Note: {meta_name!r} is now reported as this machine's hostname rather than a name you "
+        f"chose — the string is the same, the claim is not.\n"
+        f"Some grids publish a machine's name only when its operator chose one; re-run with "
+        f"`--name {meta_name}` to keep it published there."
+    )
+
+
 def _reject_unserveable_union(
     merged_specs: list[dict[str, object]], args: argparse.Namespace, live: list[dict[str, object]]
 ) -> None:
@@ -1413,6 +1487,7 @@ def _build_record(
     specs: list[dict[str, object]],
     media: bool = False,
     meta_name: str | None = None,
+    name_chosen: bool = False,
     bundles: list[str] | None = None,
 ) -> dict[str, object]:
     """The remote engine's run record — non-secret routing only; the token stays in credentials.toml.
@@ -1436,6 +1511,11 @@ def _build_record(
         "node_id": f"node-{uuid.uuid4().hex[:12]}",
         "grid_id": network_id,  # the remote network_id doubles as the run record's grid_id
         "meta_name": meta_name,  # grid-page display name (--name, or hostname); NOT the record key
+        # Whether a PERSON wrote that name, kept apart from it because `meta_name` above cannot say
+        # (ADR 0039 D-n). Read back by `remote.serve._meta` a process later and stated on the wire as
+        # `name_chosen`; a record written before this key existed has none, which reads as NOT chosen
+        # — the fail-closed direction, and the one an os-community grid needs.
+        "meta_name_chosen": name_chosen,
         "pid": 0,
         "signaling_url": signaling_url,
         "endpoint_url": single_endpoint,
