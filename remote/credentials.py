@@ -83,7 +83,7 @@ def save_credentials(data: dict[str, Any]) -> None:
 
 
 def add_network(record: dict[str, Any]) -> None:
-    """Register a remote grid in the local store (e.g. one just created by ``grid up``).
+    """Register a remote grid in the local store (e.g. one just created by ``grid start``).
 
     Idempotent by ``network_id`` — re-adding the same grid drops the stale entry and re-appends
     the new one — and preserves the rest of the credential file (session token, api_url, user).

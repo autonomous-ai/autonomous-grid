@@ -57,11 +57,9 @@ AGNOSTIC = frozenset({
 # ship the remote handlers. NOTE: gated ``engines`` (live, networked) is distinct from the
 # agnostic ``engine`` (local setup) — one keystroke apart.
 GATED = (
-    "up",
-    "down",
-    # `start`/`stop` are `up`/`down` under a name that doesn't clash with `grid join`/`leave`
-    # (cli/parser.py `_build_up_parser`) — same handler, so they need the same remote classification
-    # or they hit the "not classified for remote dispatch" internal-error guard below.
+    # `grid join`/`leave` pair with a grid that starts and stops (cli/parser.py `_build_up_parser`)
+    # — they need the remote classification here or they hit the "not classified for remote
+    # dispatch" internal-error guard below.
     "start",
     "stop",
     # No remote handler on purpose: `cmd_delete` reads LOCAL grid config only (`local.config`), never
@@ -97,8 +95,6 @@ def remote_stub(command: str | None) -> NoReturn:
 _REMOTE_STUBS = {command: (lambda args, _c=command: remote_stub(_c)) for command in GATED}
 REMOTE_HANDLERS = {
     **_REMOTE_STUBS,
-    "up": remote_grid.cmd_remote_up,
-    "down": remote_grid.cmd_remote_down,
     "start": remote_grid.cmd_remote_up,
     "stop": remote_grid.cmd_remote_down,
     "ls": remote_grid.cmd_remote_ls,

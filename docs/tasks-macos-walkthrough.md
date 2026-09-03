@@ -156,7 +156,7 @@ Sessions last 24 hours. When one expires, `grid sync` refreshes it without a bro
 
 ```bash
 # terminal 1 — Alice
-grid up demo                                   # creates it on first run
+grid start demo                                   # creates it on first run
 grid sync
 grid members add demo bob@example.com --role both
 ```
@@ -166,8 +166,8 @@ grid members add demo bob@example.com --role both
 grid sync                                      # the new grid appears; no second login needed
 ```
 
-If `grid up` is refused with `domain_network_locked`, your account cannot create the default network
-type; use `grid up demo --type permissioned-providers`.
+If `grid start` is refused with `domain_network_locked`, your account cannot create the default network
+type; use `grid start demo --type permissioned-providers`.
 
 If `grid join` in the next step answers `503 routing temporarily unavailable`, the grid is still
 warming up. Wait about 90 seconds and run it again.
@@ -362,7 +362,7 @@ Bob must have signed in to the grid at least once (§1–2) before he can be add
 
 > **On grid-wide sharing.** `grid project share` records that anyone on the grid may work in the
 > project without being added — but it only takes **effect** on a grid configured to share projects
-> that way, which is a per-email-domain grid the CLI cannot create. On the network types `grid up`
+> that way, which is a per-email-domain grid the CLI cannot create. On the network types `grid start`
 > makes, the CLI says so plainly: *"It is recorded, but this grid does not share projects grid-wide
 > — only its members can reach it, exactly as before."* So add Bob explicitly, as above.
 >
@@ -512,7 +512,7 @@ conversations across every project you can reach.
 grid leave demo                 # stop and unregister the engine
 # terminal 1
 grid project archive <project-id>     # keeps everything, accepts no new work
-grid down demo                        # take the grid offline; config persists
+grid stop demo                        # take the grid offline; config persists
 ```
 
 `archive` destroys nothing and every read still works — it is the right way to retire a project.

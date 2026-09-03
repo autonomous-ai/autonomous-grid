@@ -5,7 +5,7 @@ Status: accepted (2026-06-28)
 ## Context
 
 ADR 0001 set up modes + dispatch; 0002 sign-in + the per-grid `access_token`; 0003 the remote grid
-lifecycle (`grid up/down/ls/info`) and the `signaling_url` relay base. This slice makes `grid join`
+lifecycle (`grid start/stop/ls/info`) and the `signaling_url` relay base. This slice makes `grid join`
 — the one verb that makes a machine serve models — work in **remote mode**, and lands the **unified
 `grid join` flag set**.
 
@@ -75,7 +75,7 @@ leak into `shared/`/`local/`. One engine per `grid join` here — multi-engine r
 
 8. **`grid join` runs detached; the grid must be up.** `cmd_remote_join` resolves the active grid (reusing
    `cli/remote_grid`'s selection), reads the live `signaling_url` from `…/status`, and refuses to spawn if
-   the grid isn't running or has no relay address (a clear "run `grid up` first" instead of a background
+   the grid isn't running or has no relay address (a clear "run `grid start` first" instead of a background
    loop that can never register). It writes the shared record, spawns `__remote-engine`, and confirms only
    that the process stayed alive — the relay isn't locally pollable, so the success message says
    "starting", never a false "registered". `grid leave` reuses the shared `stop_engine`.

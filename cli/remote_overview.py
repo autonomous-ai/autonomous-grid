@@ -6,9 +6,9 @@ output — but reads the hosted relay's overview instead of the local grid's ``/
 
 The overview route is **public** (no auth), so this resolves the relay base from a signed-in
 session + ``network_id`` only (`remote_grid.resolve_relay_base`) and does **not** require a per-grid
-access token: listing works even before ``grid sync`` stores one after ``grid up``. The token is
+access token: listing works even before ``grid sync`` stores one after ``grid start``. The token is
 sent as Bearer when present and ignored by the public route. A stopped grid raises the same
-"isn't up; run `grid up`" error as every other relay command.
+"isn't up; run `grid start`" error as every other relay command.
 
 The renderers defend against a malformed/partial payload (the body crosses a trust boundary): a
 non-JSON 2xx, a non-dict envelope, or a node whose ``nodes``/``models`` aren't the expected lists

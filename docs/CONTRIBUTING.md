@@ -39,7 +39,7 @@ walkthroughs. In short:
 
 - `server.py` — the grid server / OpenAI-compatible proxy
 - `cli/` — the CLI, split by command group (`parser.py` builds the command tree;
-  `grid.py` holds `up`/`down`/`info`, `provider.py` holds the `join`/`leave` engine
+  `grid.py` holds `start`/`stop`/`info`, `provider.py` holds the `join`/`leave` engine
   lifecycle, `engine.py` holds built-in-engine setup, `models.py` and `request.py` the rest)
 - `provider/`, `models/`, `engine/`, `system/` — engine-side media, model management,
   built-in engine lifecycle, and host/GPU detection

@@ -1,4 +1,4 @@
-"""Grid lifecycle + overview: `grid`, `grid version`, `grid up/down/ls/info`."""
+"""Grid lifecycle + overview: `grid`, `grid version`, `grid start/stop/ls/info`."""
 from __future__ import annotations
 
 import argparse
@@ -89,7 +89,7 @@ def _report_up(cfg: dict[str, Any], local_only: bool) -> None:
 def _resolve_port(cfg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     """Move to a free port rather than asking the reader to pick one.
 
-    `grid up` is the first command anyone runs, and a busy 8090 used to end the story there: an
+    `grid start` is the first command anyone runs, and a busy 8090 used to end the story there: an
     error about a port they never chose, no clue what was holding it, and — until the flag was
     honoured — no escape even by choosing another. A port conflict is not a decision anyone needs
     to be consulted about; it just needs solving, out loud.
@@ -120,7 +120,7 @@ def _apply_up_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> tuple[
     """Let `--port` / `--host` / `--advertise-host` change a grid that already exists.
 
     These used to be read only when creating a grid. Bringing an existing one up dropped them
-    silently, which produced the worst error text in the CLI: `grid up --port 8099` answering
+    silently, which produced the worst error text in the CLI: `grid start --port 8099` answering
     "Port 8090 is already in use. Choose a different --port." — naming the stored port, telling
     you to change a flag you had just changed, and doing it again for every port you tried.
 
@@ -179,7 +179,7 @@ def cmd_down(args: argparse.Namespace) -> int:
 
 
 def _refuse_false_stop(cfg: dict[str, Any], outcome: runtime.StopOutcome) -> None:
-    """Fail a `grid down` that did not stop the grid, naming what is still running and a remedy that
+    """Fail a `grid stop` that did not stop the grid, naming what is still running and a remedy that
     reaches it.
 
     Three ways to get here and each needs a different next step: a server that outlived SIGKILL, a
@@ -393,7 +393,7 @@ def _overview_local(as_json: bool) -> int:
 # helpers
 # ---------------------------------------------------------------------------
 
-# Local grid ids are minted as ``ag-<slug>-<hex8>`` (local/runtime.init_grid_config). `grid up` uses this
+# Local grid ids are minted as ``ag-<slug>-<hex8>`` (local/runtime.init_grid_config). `grid start` uses this
 # to refuse auto-creating a junk grid when the arg is an unsynced id, not a new name (ADR 0011 D-f).
 # fullmatch (anchored) so a real name like ``ag-team`` still creates.
 _GRID_ID_RE = re.compile(r"ag-.+-[0-9a-f]{8}")
@@ -413,7 +413,7 @@ def _reject_foreign_grid(name: str) -> None:
     if remote_grid._by_name(name) is not None:  # a grid from `grid login`, pasted in local mode
         raise SystemExit(
             f"{name!r} is one of your remote grids, not a new local grid. Switch to it with "
-            f"`grid mode remote` (or `grid --remote up {name}`)."
+            f"`grid mode remote` (or `grid --remote start {name}`)."
         )
     if _looks_like_grid_id(name):
         raise SystemExit(
