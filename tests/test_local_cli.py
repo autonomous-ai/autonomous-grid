@@ -11765,11 +11765,105 @@ def test_fetch_tokens_reads_a_non_boolean_os_served_as_unknown(monkeypatch, tmp_
     assert answer.os_served is None
 
 
-def test_fetch_tokens_survives_a_body_that_is_not_an_object(monkeypatch, tmp_path):
-    """A list, or anything else that is not a JSON object, is no networks and no flag — never a crash
-    inside `grid login`. The bundle is the trust boundary; `_validated` is what refuses bad rows."""
-    answer = _fetch_tokens_answer(monkeypatch, tmp_path, [{"network_id": "n1"}])
-    assert (answer.networks, answer.os_served) == ([], None)
+@pytest.mark.parametrize("body", [[{"network_id": "n1"}], [], "ok", 7])
+def test_fetch_tokens_refuses_a_body_that_is_not_an_object(monkeypatch, tmp_path, body):
+    """A 200 whose body is not a JSON object is a DATA error, and must never read as "zero grids".
+
+    ⚠️ **This overturns the rule the previous test encoded** ("no networks and no flag — never a
+    crash"), and the reason is what that rule cost. `_validated` is the trust boundary for bad ROWS,
+    but it iterates a list: a body that is not an object yields no rows to validate, sails through,
+    and `cmd_sync` then writes `networks: []` authoritatively — discarding every grid's access AND
+    refresh token, which refresh rotation makes unrecoverable. A stderr line saying it "may be
+    transient" is not a recovery.
+
+    "Never a crash" is still honoured and was never the same question: `ControlPlaneError` is a
+    `SystemExit` subclass, so this is the CLI's ordinary clean-error idiom — a sentence and a non-zero
+    exit, no traceback — not the `AttributeError` the code raised before the fallback was added.
+    """
+    from remote import control_plane
+
+    with pytest.raises(SystemExit) as exc:
+        _fetch_tokens_answer(monkeypatch, tmp_path, body)
+
+    assert isinstance(exc.value, control_plane.ControlPlaneError)
+    assert "/v1/grid/tokens" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("label", "content"),
+    [("json null", b"null"), ("not json at all", b"<html>502</html>"), ("empty body", b"")])
+def test_fetch_tokens_refuses_a_body_it_cannot_read_as_an_object(
+    monkeypatch, tmp_path, label, content
+):
+    """The shapes that never reach `isinstance` — same fault, same refusal, still no traceback.
+
+    An empty 200 is why this route does not use the module's own `_json_or_empty`: its `{}` is exactly
+    the "zero grids" reading that costs the credential store. `RecursionError` is caught beside
+    `ValueError` because `json.loads` raises it on a deeply nested body and no `except ValueError`
+    would see it.
+    """
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, content=content))
+
+    with pytest.raises(control_plane.ControlPlaneError) as exc:
+        control_plane.fetch_tokens("sess-tok", "dev-1")
+
+    assert "/v1/grid/tokens" in str(exc.value), label
+
+
+def test_the_malformed_body_refusal_is_not_mistaken_for_an_expired_session(monkeypatch, tmp_path):
+    """`cmd_sync` rewrites one class of failure and must not rewrite this one.
+
+    Its `_SESSION_EXPIRED_RE` is anchored on `control_plane._raise`'s "<METHOD> <URL> failed (401):"
+    rendering. A refusal that matched it would tell somebody to run `grid login` for a control plane
+    that answered 200 with a broken body — sending them to re-authenticate against a fault no
+    credential can fix.
+    """
+    with pytest.raises(SystemExit) as exc:
+        _fetch_tokens_answer(monkeypatch, tmp_path, [])
+
+    assert cli.auth._SESSION_EXPIRED_RE.match(str(exc.value)) is None
+
+
+def test_sync_keeps_every_stored_credential_when_the_answer_is_malformed(monkeypatch, tmp_path):
+    """The failure the refusal above exists to prevent, asserted where it would actually happen.
+
+    `cmd_sync`'s overwrite is authoritative and last-writer-wins, so there is no second copy of a
+    refresh token anywhere once it has run.
+    """
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _disable_orphan_sweep(monkeypatch)
+    _sync_seed([_sync_bundle("net-a", refresh_token="RT-a"), _sync_bundle("net-b")])
+    _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, json=[]))
+
+    with pytest.raises(SystemExit):
+        _run_sync()
+
+    data = credentials.load_credentials()
+    assert [n["network_id"] for n in data["networks"]] == ["net-a", "net-b"]
+    assert data["networks"][0]["refresh_token"] == "RT-a"
+
+
+def test_sync_still_accepts_an_ordinary_empty_answer(monkeypatch, tmp_path):
+    """The negative control, and the case the refusal must NOT swallow.
+
+    A control plane that genuinely serves this account no grids answers `{"networks": []}` — an
+    object. That is an ordinary answer, it still clears the stored list, and it still warns. Without
+    this, the refusal above is satisfied by a CLI that had stopped honouring a real removal.
+    """
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _disable_orphan_sweep(monkeypatch)
+    _sync_seed([_sync_bundle("net-a")])
+    _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, json={"networks": []}))
+
+    assert _run_sync() == 0
+    assert credentials.load_credentials()["networks"] == []
 
 
 def test_control_plane_raises_on_error_status(monkeypatch, tmp_path):
@@ -20878,6 +20972,37 @@ def test_a_control_plane_that_serves_no_grid_for_this_os_is_a_different_answer(m
     assert absent is not None
     assert absent.reason == os_grid_notice.NOT_SERVED
     assert (absent.system, absent.os_token) == ("Darwin", "macos")
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux", "Windows"])
+def test_a_deployment_serving_no_os_grid_at_all_still_says_so(monkeypatch, system):
+    """The state a reviewer will read as a bug, pinned as the decision it is (ADR 0039 D-k).
+
+    A control plane with `GRID_OS_GRID_ENABLED` off and nothing provisioned answers `os_served:
+    false` for **every** caller — `grid_networks/handler.get_tokens` computes it as "is an
+    os-community grid among the bundles this call is returning", and `_ensure_os_network` creates
+    none while the switch is off. So on that deployment every user on every supported system sees
+    this line on every sign-in and every sync.
+
+    ⚠️ **That is decided, not accidental.** D-k names *the feature switched off with nothing
+    provisioned* as the first of four states `false` collapses, and says all four reach a person as
+    the same sentence — *this service is not giving me one*. The alternative that would have kept
+    them apart, a reason string, was rejected on three counts, none of which was difficulty.
+
+    So this test exists to make a "fix" fail. Suppressing the line for a not-serving deployment would
+    ALSO suppress it for the three other states, including a provision that failed and left the row
+    `pending` — which is the state somebody actually needs to be told about. If the noise is judged
+    too high, the change is an amendment to D-k.
+    """
+    from cli import os_grid_notice
+
+    absent = _absence(monkeypatch, system, False)
+
+    assert absent is not None, (
+        f"a {system} machine on a deployment serving no OS grid was told nothing — D-k decided it "
+        f"is told; amend the ADR rather than the code")
+    assert absent.reason == os_grid_notice.NOT_SERVED
+    assert "isn't serving one" in absent.line()
 
 
 def _cause_clause(absent):

@@ -22,9 +22,21 @@ person in front of it could take apart:
 
 Three rules the wording and the plumbing both answer to:
 
-- **Quiet in the ordinary case.** Somebody who has an OS grid, and anybody talking to a control plane
-  too old to send the key, sees nothing new. A line on every ordinary sign-in is a line people learn
-  to scroll past, and it would fire for every user of every deployment that has not enabled OS grids.
+- **Quiet in the two cases that are not this feature's answer.** Somebody who has an OS grid sees
+  nothing new, and so does anybody talking to a control plane too old to send the key — ``None`` is
+  not ``False``, and reporting a refusal that was never made is the one direction D-k exists to keep
+  quiet. A line on every ordinary sign-in is a line people learn to scroll past.
+  ⚠️ **A deployment that serves no OS grid is NOT one of those cases, and reading this bullet as
+  though it were is the mistake to avoid.** ``os_served`` is ``False`` there — *the feature switched
+  off with nothing provisioned* is the FIRST of the four deployment states ADR 0039 D-k says
+  ``false`` deliberately collapses — so every user of such a deployment does see this line on every
+  ``grid login`` and ``grid sync``. That is the decision and not an oversight: all four states are
+  one fact to the person in front of them, *this service is not giving me one*, and the alternative
+  that separated them (a reason string) was rejected for publishing a deployment's configuration to
+  every stranger who signs in, on the one grid type whose premise is that its members are strangers.
+  An earlier draft of this bullet implied the opposite and was read in review as a defect;
+  ``test_a_deployment_serving_no_os_grid_at_all_still_says_so`` pins the decided behaviour, and
+  changing it needs an amendment to D-k rather than an edit here.
 - **Never a failure.** An absent OS grid is an ordinary answer — an empty answer that says why is
   still an empty answer. Nothing here touches an exit code, and nothing here raises.
   ⚠️ **And nothing here speaks over a failure either.** `cli.auth.cmd_sync` raises before the fetch

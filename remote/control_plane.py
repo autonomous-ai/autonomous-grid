@@ -120,9 +120,37 @@ def fetch_tokens(session_token: str, device_id: str, api_url: str | None = None)
         params["os"] = machine_os
     with _client(api_url, session_token) as client:
         resp = _send(client, "GET", "/v1/grid/tokens", params=params)
-    payload = resp.json()
+    try:
+        payload = resp.json()
+    except (ValueError, RecursionError):
+        # Not JSON at all, or nested past the parser's recursion limit. ⚠️ `RecursionError` is NOT a
+        # `ValueError` — `json.loads` raises it on a deeply nested body and no `except ValueError`
+        # sees it — and an empty 200 body raises here too, which is why this route does not use
+        # `_json_or_empty`: its `{}` would be read as zero grids, which is the very thing below.
+        payload = None
     if not isinstance(payload, dict):
-        payload = {}  # a body that is not an object carries neither networks nor a flag
+        # ⚠️ **REFUSED, never read as "zero grids".** This used to fall back to `{}`, and the cost of
+        # that is one caller away: `cli.auth.cmd_sync` overwrites `[[networks]]` authoritatively, so
+        # an empty answer discards every grid's access AND refresh token — and refresh rotation makes
+        # them unrecoverable. A body that is not an object is a control-plane fault or something
+        # sitting in front of it, and neither is a reason to destroy a credential store.
+        #
+        # `_validated` does not catch it and cannot: it is the trust boundary for bad ROWS and
+        # iterates the list, so a non-object body yields nothing to validate and sails straight
+        # through. This is the same check one level up, on the shape that holds the rows.
+        #
+        # A `ControlPlaneError` (a `SystemExit` subclass) rather than a raised `AttributeError`: the
+        # CLI's clean-error idiom, a sentence and a non-zero exit. ⚠️ The wording must not match
+        # `cli.auth._SESSION_EXPIRED_RE` — anchored on `_raise`'s "<METHOD> <URL> failed (401):" — or
+        # somebody would be told to run `grid login` for a fault no credential can fix.
+        raise ControlPlaneError(
+            f"The control plane answered GET /v1/grid/tokens with a "
+            f"{type(payload).__name__} rather than an object, so this CLI cannot tell which grids "
+            f"you have. Nothing was changed locally; re-run `grid sync` if this may be transient."
+            # `NoneType` covers both a literal JSON `null` and a body that would not parse — the
+            # remedy is the same sentence, and naming the parse error would put a server's raw output
+            # in front of somebody who can do nothing with it.
+        )
     served = payload.get(OS_SERVED_KEY)
     return TokenFetch(
         # `or []` coerces both a missing key and an explicit null to an empty list.
