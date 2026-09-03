@@ -1103,6 +1103,12 @@ If no durable state path exists, or the requested path cannot be quarantined or 
 After a valid state restore, fresh membership must re-register before destructive work resumes;
 the restart grace period prevents a temporarily incomplete fleet view from causing unloads.
 
+Before rollout, run the resumable [allocator resilience qualification](allocator-resilience.md).
+It drives this production controller and reconciler through repeated supply changes, node
+partitions, relay observation outages, and durable controller-leader replacement. Accelerated mode
+qualifies days of logical time during development; `--wall-clock` provides a genuine elapsed-time
+soak. The harness never alters firewall rules or interrupts a production relay.
+
 ### Single-machine scenario lab and logical fleet test
 
 Use the deterministic scenario lab to explore a large heterogeneous fleet without starting model

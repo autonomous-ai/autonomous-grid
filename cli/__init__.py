@@ -37,6 +37,7 @@ from .allocator import (
     cmd_allocator_token_write,
 )
 from .allocator_scenario import cmd_test_graduate, cmd_test_scenario
+from .allocator_resilience import cmd_allocator_resilience
 from .auth import cmd_login, cmd_logout, cmd_sync
 from .device import cmd_device_info
 from .engine import (
@@ -154,6 +155,7 @@ __all__ = [
     "cmd_allocator_status",
     "cmd_allocator_tick",
     "cmd_allocator_token_write",
+    "cmd_allocator_resilience",
     "cmd_catalog",
     "cmd_chat",
     "cmd_device_info",

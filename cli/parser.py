@@ -79,6 +79,12 @@ from .logical_test import (
     real_request_count,
     real_user_count,
 )
+from .allocator_resilience import (
+    cmd_allocator_resilience,
+    nonnegative_frequency,
+    positive_interval,
+    resilience_hours,
+)
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from . import project_arg
@@ -473,6 +479,57 @@ def _add_allocator(sub) -> None:
         help="Place configured models dynamically across participating hosts",
     )
     allocator_sub = allocator.add_subparsers(dest="allocator_command", required=True)
+
+    resilience = allocator_sub.add_parser(
+        "resilience",
+        help="Qualify controller failover, relay outages, partitions, and long-running safety",
+    )
+    resilience.add_argument(
+        "--duration",
+        type=resilience_hours,
+        default=72.0,
+        metavar="TIME",
+        help="Soak duration such as 72h or 3d (default 72h).",
+    )
+    resilience.add_argument(
+        "--interval",
+        type=positive_interval,
+        default=300.0,
+        metavar="SECONDS",
+        help="Logical observation interval (default 300 seconds).",
+    )
+    resilience.add_argument(
+        "--wall-clock",
+        action="store_true",
+        help="Sleep between cycles for a real elapsed-time soak; default runs accelerated.",
+    )
+    resilience.add_argument("--seed", type=int, default=42)
+    resilience.add_argument(
+        "--node-partition-every",
+        type=nonnegative_frequency,
+        default=17,
+        metavar="N",
+        help="Omit one node heartbeat every N cycles; 0 disables (default 17).",
+    )
+    resilience.add_argument(
+        "--relay-outage-every",
+        type=nonnegative_frequency,
+        default=29,
+        metavar="N",
+        help="Suppress the relay observation every N cycles; 0 disables (default 29).",
+    )
+    resilience.add_argument(
+        "--controller-failover-every",
+        type=nonnegative_frequency,
+        default=43,
+        metavar="N",
+        help="Replace the controller leader every N cycles; 0 disables (default 43).",
+    )
+    resilience.add_argument("--state-dir", default="", metavar="PATH")
+    resilience.add_argument("--resume", action="store_true")
+    resilience.add_argument("--quiet", action="store_true")
+    resilience.add_argument("--json", action="store_true")
+    resilience.set_defaults(handler=cmd_allocator_resilience)
 
     allocator_join = allocator_sub.add_parser(
         "join",
