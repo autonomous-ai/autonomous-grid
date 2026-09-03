@@ -118,10 +118,18 @@ CLAUDE_CONFIG_DIR_ENV = "GRID_TASK_CLAUDE_CONFIG_DIR"
 # The flag is not changed here: it is what closes the execution hole, and buying memory discovery
 # back by reopening that is issue 22's decision to take, not a side effect of this one.
 _SETTING_SOURCES = "user"
-# `.mcp.json` is the same hole wearing a different name — a stdio server is a command line, and it is
-# STARTED at session start (measured: the control run's server process ran; with this flag the init
-# event's `mcp_servers` is empty). It also drops the operator's own MCP servers, which is right for a
-# task agent: nothing about the provider's desktop belongs in a stranger's repository.
+# `.mcp.json` is the same hole wearing a different name — a stdio server is a command line, and a
+# session that registers one runs it. With this flag the init event's `mcp_servers` is empty, so
+# there is nothing to run. It also drops the operator's own MCP servers, which is right for a task
+# agent: nothing about the provider's desktop belongs in a stranger's repository.
+#
+# ⚠️ **WHEN it runs was corrected on 2026-08-24 against 2.1.241**, because the original claim here
+# said "STARTED at session start" and that is no longer true. The servers are now connected LAZILY,
+# in the background, queued behind every other one the operator has configured: measured 16.4 s from
+# spawn to the workspace server's command line running, with the entry sitting at `"status":
+# "pending"` throughout a turn that ended in 2.5 s. Nothing about the hole changes — a registered
+# server is still executed, just later — but a test that watched for the side effect inside a short
+# turn saw nothing in EITHER arm, and `tests/e2e_agent_settings.py` now pins the name instead.
 _STRICT_MCP_CONFIG = "--strict-mcp-config"
 
 
@@ -405,12 +413,15 @@ def transcript_dir_name(cwd: Path) -> str:
 # back and the push lands. Issue 06's failure exactly, re-armed by ADR 0034 D-c, which adds 37
 # characters to every workspace path.
 #
-# ⚠️ **200, not 207, and the data cannot tell them apart.** Every truncated name is 207 long, which
-# is what BOTH "cap at 207" and "cap at 200, then append 7" produce; the only name observed kept
-# whole was 186, which discriminates neither. The direction to be wrong in is refusing a provider
-# that would have worked, never accepting one that silently loses every conversation it runs. The
-# stock layout flattens to **135**, so this has 65 characters of headroom against a real deployment
-# and cannot fire on one.
+# ⚠️ **200 is EXACT, and that was settled on 2026-08-24 against Claude Code 2.1.241.** This comment
+# used to say the data could not tell "cap at 207" from "cap at 200, then append 7" apart, because
+# the only name observed kept whole was 186. Re-measured at the boundary, one character at a time:
+# 197, 199 and **200** are written verbatim; **201**, 203 and 207 are all written as exactly **207**
+# characters. So the rule is a 200-character prefix plus a hyphen and a 6-character hash, and this
+# constant is the limit itself rather than a conservative guess at it.
+# The direction to be wrong in is still refusing a provider that would have worked, never accepting
+# one that silently loses every conversation it runs. The stock layout flattens to **135**, so this
+# has 65 characters of headroom against a real deployment and cannot fire on one.
 TRANSCRIPT_NAME_MAX_CHARS = 200
 
 
@@ -928,10 +939,53 @@ def _require_a_private_directory(root: Path) -> None:
             f"{info.st_uid}), and this provider will not run agents inside it. Give it to this "
             f"account, or name a different one with --tasks-root.")
     if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-        raise OSError(
-            f"the default task workspace root {root} can be read by other accounts on this machine, "
-            f"and members' repositories and conversations are kept under it. Close it with "
-            f"`chmod 700 {root}`, or name a different one with --tasks-root.")
+        raise OSError(_not_private_enough(root))
+
+
+def _shares_the_root_with_a_relay(root: Path) -> bool:
+    """Whether a relay keeps its own project repositories under this root.
+
+    Cheap and read-only: one listing, no recursion. Imported locally because this is the only place
+    in the path layer that needs the sweep's vocabulary, and a module-level import for one constant
+    would couple `task_agent` to the evictor for the whole process.
+
+    Answers False for a root it cannot read, which is the direction that changes nothing: the caller
+    is choosing which of two true sentences to print, and the ordinary one is still correct.
+    """
+    from remote import task_evict
+
+    try:
+        return any(entry.is_dir() and entry.name.endswith(task_evict.RELAY_REPO_SUFFIX)
+                   for entry in (root / "projects").iterdir())
+    except OSError:
+        return False
+
+
+def _not_private_enough(root: Path) -> str:
+    """Why a group- or other-readable task root is refused, and what to do about it.
+
+    ⚠️ **Two sentences, because the obvious advice is destructive on the box this most often bites.**
+    The default root is `/var/grid` on Linux, and grid-src's `config.task_repo_root` is
+    `/var/grid/projects` — so on a machine running a relay AND a provider, which ADR 0033 calls the
+    ordinary small-team case, `chmod 700` is aimed at the server's own 2.1 GB store (measured on the
+    dev VM, where it is mode 755 and holds every project on the grid). Telling an operator to close
+    the permissions on a directory another service is serving from is advice that can take a grid
+    down, and it was the ONLY advice this refusal gave.
+
+    So when the relay's repositories are there, the remedy named is the one that is always safe —
+    give this provider a root of its own — and `chmod` is named as the thing NOT to do, because an
+    operator who has read the first version of this message will otherwise reach for it anyway.
+    """
+    shared = (
+        " It also holds a relay's own project repositories, so this provider is sharing a directory"
+        " with the server for this grid. Do not change this directory's permissions: they are that"
+        " server's to choose, and closing them can stop it serving every project on the grid."
+        if _shares_the_root_with_a_relay(root) else
+        f" Close it with `chmod 700 {root}`, or"
+    )
+    return (f"the default task workspace root {root} can be read by other accounts on this machine, "
+            f"and members' repositories and conversations are kept under it.{shared} "
+            f"Give this provider a root of its own with --tasks-root.")
 
 
 def _require_version_for_the_sandbox(binary: str) -> None:
