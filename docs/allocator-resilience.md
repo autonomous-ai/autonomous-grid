@@ -1,6 +1,6 @@
 # Allocator resilience qualification
 
-`grid allocator resilience` exercises the production allocator controller, planner, reconciler,
+`grid --local allocator resilience` exercises the production allocator controller, planner, reconciler,
 durable command queue, receipts, and single-writer fencing under four conditions:
 
 - changing replica requirements that force warm, drain, and unload operations;
@@ -16,13 +16,13 @@ qualification. Together, the two tests separate control-plane fault safety from 
 Run an accelerated three-day qualification during development:
 
 ```console
-uv run grid allocator resilience --duration 3d
+uv run grid --local allocator resilience --duration 3d
 ```
 
 Run a real elapsed-time three-day soak in a dedicated terminal or service:
 
 ```console
-uv run grid allocator resilience --duration 3d --interval 300 --wall-clock \
+uv run grid --local allocator resilience --duration 3d --interval 300 --wall-clock \
   --state-dir ~/.grid/allocator-resilience/three-day
 ```
 
@@ -33,7 +33,7 @@ that every configuration field matches the checkpoint before continuing. `checkp
 Fault frequencies are configurable by cycle. Set a frequency to zero to disable that fault:
 
 ```console
-uv run grid allocator resilience --duration 24h --node-partition-every 11 \
+uv run grid --local allocator resilience --duration 24h --node-partition-every 11 \
   --relay-outage-every 19 --controller-failover-every 37
 ```
 

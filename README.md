@@ -676,7 +676,7 @@ boundary, and verification commands are in the
 Controller fault safety can be exercised without disrupting a live Grid:
 
 ```bash
-grid allocator resilience --duration 3d
+grid --local allocator resilience --duration 3d
 ```
 
 The default is an accelerated soak. Add `--wall-clock --state-dir <path>` for a resumable real-time
