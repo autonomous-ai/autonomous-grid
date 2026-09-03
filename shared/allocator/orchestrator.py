@@ -461,6 +461,8 @@ class VllmBackend:
         *,
         tensor_parallel_size: int = 1,
         gpu_memory_utilization: float = 0.90,
+        max_model_len: int = 0,
+        enforce_eager: bool = False,
         readiness_timeout: float = 600.0,
         bind_host: str = "127.0.0.1",
         endpoint_host: str | None = None,
@@ -472,6 +474,10 @@ class VllmBackend:
         if not 0.0 < gpu_memory_utilization <= 1.0:
             raise ValueError("gpu_memory_utilization must be in (0, 1]")
         self.gpu_memory_utilization = float(gpu_memory_utilization)
+        if max_model_len < 0:
+            raise ValueError("max_model_len must be non-negative")
+        self.max_model_len = int(max_model_len)
+        self.enforce_eager = bool(enforce_eager)
         self.readiness_timeout = readiness_timeout
         self.bind_host = bind_host
         self.endpoint_host = endpoint_host or bind_host
@@ -549,6 +555,10 @@ class VllmBackend:
             "--gpu-memory-utilization",
             str(self.gpu_memory_utilization),
         ]
+        if self.max_model_len:
+            command.extend(("--max-model-len", str(self.max_model_len)))
+        if self.enforce_eager:
+            command.append("--enforce-eager")
         log_path = self.cache_dir / f"{hashlib.sha256(model_id.encode()).hexdigest()[:16]}.log"
         log = log_path.open("ab")
         try:

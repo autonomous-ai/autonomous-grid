@@ -153,4 +153,6 @@ def test_parser_exposes_physical_runtime_qualification():
     assert args.handler.__name__ == "cmd_allocator_qualify"
     assert args.tensor_parallel_size == 1
     assert args.gpu_memory_utilization == 0.90
+    assert args.max_model_len == 0
+    assert args.enforce_eager is False
     assert args.cleanup_artifact is True
