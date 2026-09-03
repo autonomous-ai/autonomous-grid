@@ -18840,6 +18840,173 @@ def test_meta_uses_meta_name_for_grid_page_name(monkeypatch, tmp_path):
     assert serve._meta({"endpoint_url": "http://h/v1"}, "remote")["name"] == "remote"
 
 
+def test_meta_says_whether_a_person_chose_the_node_name(monkeypatch, tmp_path):
+    """`name_chosen` — the fact the relay needs to publish a name on an `os-community` grid.
+
+    ADR 0039 D-n. The relay never guesses from the string: measured on the live fleet, `Grid`,
+    `mac-studio-turtle` and `8x50902-67-qwen38-27b` are all chosen and all look machine-generated,
+    while `MacBooks-MacBook-Pro-7.local` looks like a model number. So the provider states it, and
+    this is the half of that statement the public CLI sends.
+
+    ⚠️ **A record written before this change has no such key, and must read as NOT chosen.** That is
+    the fail-closed direction and it is load-bearing: this is a new key on an existing payload, so
+    nothing 404s to say it went missing. Same precedent as `meta_name` falling back to `engine_id`
+    for a pre-singleton record.
+    """
+    from remote import serve
+
+    chosen = {"meta_name": "mybox", "meta_name_chosen": True, "endpoint_url": "http://h/v1"}
+    assert serve._meta(chosen, "remote")["name_chosen"] is True
+
+    hostname = {"meta_name": "MacBooks-MacBook-Pro-7.local", "meta_name_chosen": False,
+                "endpoint_url": "http://h/v1"}
+    assert serve._meta(hostname, "remote")["name_chosen"] is False
+
+    # A record written by a build from before this key existed — absent, so not chosen.
+    old = {"meta_name": "mybox", "endpoint_url": "http://h/v1"}
+    assert serve._meta(old, "remote")["name_chosen"] is False, (
+        "a record written before D-n read as CHOSEN, so the hostname of every provider that has "
+        "not re-joined is published on an os-community grid — silently")
+
+    # The name itself is untouched either way: D-n withholds on the relay, never here.
+    assert serve._meta(hostname, "remote")["name"] == "MacBooks-MacBook-Pro-7.local"
+
+
+def test_remote_join_records_whether_the_operator_chose_the_name(monkeypatch, tmp_path):
+    """`--name` given survives into the run record, which is where `_meta` reads it a process later.
+
+    `cmd_remote_join`'s `args.name or socket.gethostname()` collapses two different facts into one
+    string, so the record needs its own key or the distinction is gone by the time the serve child
+    builds the meta a process later.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["meta_name"] == "mybox"
+    assert record["meta_name_chosen"] is True
+
+
+def test_remote_join_without_a_name_records_the_hostname_as_not_chosen(monkeypatch, tmp_path):
+    """The other half, and the one D-n exists for: a hostname nobody typed."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(
+        cli.remote_provider.socket, "gethostname", lambda: "MacBooks-MacBook-Pro-7.local")
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["meta_name"] == "MacBooks-MacBook-Pro-7.local"
+    assert record["meta_name_chosen"] is False
+
+
+def test_dropping_name_on_a_box_the_hostname_already_matches_says_the_claim_was_dropped(
+    monkeypatch, tmp_path, capsys
+):
+    """The mirror of the claim, and the only direction that changes nothing on screen.
+
+    `meta_name` is not inherited — a `grid join` without `--name` has always reset the display name to
+    the hostname. On a box whose hostname IS the name that was chosen, that reset produces the same
+    string and drops the claim underneath it, so an operator sees a join that changed nothing while
+    the grid page quietly stops naming their machine on a type that publishes only chosen names.
+
+    Acting on it is right and is the mirror of `test_choosing_the_name_the_hostname_already_had_is_not
+    _a_no_op`: both change what the relay is told. What is added here is *saying so*.
+
+    ⚠️ The sentence never names a network type. This repository deliberately holds no `os-community`
+    constant — `tests/test_os_grid_type_lockstep.py` says why — so the note describes the claim, and
+    which grids act on it is the relay's business.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.socket, "gethostname", lambda: "mybox")
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    capsys.readouterr()
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["meta_name"] == "mybox" and record["meta_name_chosen"] is False
+    err = capsys.readouterr().err
+    assert "mybox" in err and "--name mybox" in err, (
+        f"the claim was dropped with nothing on screen to say so: {err!r}")
+
+
+def test_a_join_that_keeps_the_claim_says_nothing_about_it(monkeypatch, tmp_path, capsys):
+    """The negative control. A note that fired on an ordinary re-join would be noise on every box."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.socket, "gethostname", lambda: "mybox")
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    capsys.readouterr()
+    assert cli.main(["join", "--at", "http://h:8000/v1", "-m", "qwen", "--name", "mybox"]) == 0
+
+    assert "--name" not in capsys.readouterr().err
+
+
+def test_a_record_that_never_stated_who_named_the_box_does_not_disagree_with_this_join(
+    monkeypatch, tmp_path, capsys
+):
+    """Upgrading is never a new failure — the rule the sidecar gate already keeps, one key over.
+
+    A record written before D-n carries no `meta_name_chosen`, and "no facts" must not read as "bad
+    facts". Read as *not chosen* here, every re-join that passes `--name` on every upgraded provider
+    on every grid type would stop being a no-op and hot-reload a healthy child for a rename nobody
+    asked for. The key lands the first time the identity is genuinely respawned, which running the
+    new serve child needs anyway — only that child puts `name_chosen` on the wire at all.
+
+    Pairs with `test_choosing_the_name_the_hostname_already_had_is_not_a_no_op` below: there the
+    record DOES state the fact and states the other one, so the same-string re-join must act.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ], started_at="2020-01-01T00:00:00+00:00",  # a pre-D-n record: no `meta_name_chosen` at all
+        registered_at="2020-01-01T00:00:01+00:00")
+    _seed_heartbeat_sidecar()
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+
+    assert "Already serving on team; nothing to append." in capsys.readouterr().out
+    assert spawned["signals"] == [], "a healthy child was reloaded for a fact its record never stated"
+
+
+def test_choosing_the_name_the_hostname_already_had_is_not_a_no_op(monkeypatch, tmp_path):
+    """`--name mybox` on a box already called `mybox` CHANGES what the grid may publish.
+
+    The no-op gate compares display names, and these two joins produce the same string — so without
+    `meta_name_chosen` in the gate an operator who deliberately claims their machine's name is told
+    "already serving" and the relay never hears the claim. The name on the page would stay withheld
+    on an os-community grid, with nothing anywhere to say why.
+    """
+    import signal as _sig
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.socket, "gethostname", lambda: "mybox")
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["meta_name_chosen"] is True, (
+        "the claim was swallowed by the no-op gate: same string, different fact")
+    assert spawned["signals"] == [(4242, _sig.SIGHUP)], (
+        "the running child was never told, so it keeps advertising the old fact")
+
+
 def test_meta_labels_all_external_union_as_external(monkeypatch, tmp_path):
     """A union of external --at engines (each engine_label=None) shows engine='external' on the grid page,
     not the built-in 'llama.cpp' default; only a built-in --serve spec (no endpoint_url) is 'llama.cpp'

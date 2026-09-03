@@ -759,3 +759,173 @@ def test_the_flag_this_cli_names_is_the_one_it_actually_reads(monkeypatch, tmp_p
     assert read == {control_plane.OS_SERVED_KEY}, (
         f"`control_plane.OS_SERVED_KEY` is {control_plane.OS_SERVED_KEY!r} but `fetch_tokens` does "
         f"not read that key out of the answer — the constant and the parser have drifted apart")
+
+
+# --- who wrote the machine's name (ADR 0039 D-n, issue 16) ----------------------------------------
+
+# A boolean on the register meta saying whether the machine's `name` was chosen by a PERSON or is
+# just the box's hostname. On `os-community` the relay's public overview publishes the name only when
+# it was chosen; every other type publishes both, unchanged.
+#
+# ⚠️ **THREE copies, and two of them are providers in different repositories.** grid-src's fleet
+# runtime (`provider_runtime/provider/lifecycle.node_name_meta`) and this repository's public CLI
+# (`remote/serve._meta` — the binary an `os-community` member actually installs) each SEND it;
+# grid-src's relay (`private_server/overview.py`, through `member_identity_access
+# .published_node_name`) READS it. A rename on any one of the three leaves the other two green.
+#
+# ⚠️ **It degrades SILENTLY in both directions**, which is what makes this a pin rather than an
+# argument. The register meta is a MERGE, not a schema: an unknown key is stored and ignored, and a
+# missing key is not an error to anybody. Rename the provider's half and every suite in both
+# repositories stays green, every heartbeat succeeds, and the only symptom is that machines whose
+# operators DID name them stop being named on one grid type. Rename the relay's and the same thing
+# happens from the other end.
+#
+# ⚠️ **The rollout order is NONE, in either direction, and it is not hazardous either way** — the
+# fail-closed direction is what buys that. An old provider against a new relay sends nothing, absent
+# reads as *not chosen*, and the name is withheld: the private answer. An old relay against a new
+# provider stores the key and ignores it, which is today's behaviour exactly.
+
+#: The key that has been on this meta since the grid page existed — the positive control on both
+#: sides, and the proof each reader below is looking at the right dict.
+_META_CONTROL_KEY = "name"
+
+#: grid-src's relay half: the module that decides what the public overview calls a machine, and the
+#: function it hands the provider's claim to.
+_OVERVIEW = "grid_cli/private_server/overview.py"
+_OVERVIEW_GATE = "published_node_name"
+#: Its keyword — the argument carrying the provider's claim, as opposed to the name itself.
+_OVERVIEW_CLAIM_KEYWORD = "chosen"
+
+#: grid-src's own provider half: the fleet runtime's, which is NOT the one an os-community member
+#: runs but is the one most likely to be forgotten when the public CLI's is edited.
+_PROVIDER_LIFECYCLE = "grid_cli/provider_runtime/provider/lifecycle.py"
+_PROVIDER_META_FUNCTION = "node_name_meta"
+
+
+def _meta_key_the_relay_reads_as_chosen():
+    """The meta key grid-src's overview hands to its D-n gate, read off the call itself.
+
+    Read from the CALL rather than from a constant in `member_identity_access`, because what has to
+    keep agreeing with this CLI is the string looked up in the provider's payload — and a constant is
+    one refactor away from not being that string. Every shape this cannot read raises: a helper that
+    returned a plausible subset would guard nothing, and what it failed to guard would fail silently
+    too.
+    """
+    tree = _module(_OVERVIEW)
+    calls = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and (getattr(node.func, "id", None) == _OVERVIEW_GATE
+                  or getattr(node.func, "attr", None) == _OVERVIEW_GATE)]
+    assert len(calls) == 1, (
+        f"expected exactly one call to {_OVERVIEW_GATE} in grid-src's {_OVERVIEW}, found "
+        f"{len(calls)} — the overview was restructured, so teach this pin the new shape rather than "
+        f"letting it read the wrong one")
+
+    claim = next((kw for kw in calls[0].keywords if kw.arg == _OVERVIEW_CLAIM_KEYWORD), None)
+    assert claim is not None, (
+        f"grid-src's {_OVERVIEW_GATE} call no longer passes {_OVERVIEW_CLAIM_KEYWORD}= — the claim "
+        f"is spelled somewhere else now, so teach this pin where")
+
+    keys = {node.value for node in ast.walk(claim.value)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    assert len(keys) == 1, (
+        f"grid-src reads its {_OVERVIEW_CLAIM_KEYWORD}= from "
+        f"{sorted(keys) or 'no string key at all'} in {_OVERVIEW}, so this check cannot tell which "
+        f"meta key carries the claim — teach it the new shape rather than deleting the pin")
+    return keys.pop()
+
+
+def _meta_keys_the_grid_src_provider_sends():
+    """Every constant key grid-src's fleet provider puts on the register meta's name pair."""
+    tree = _module(_PROVIDER_LIFECYCLE)
+    function = next(
+        (n for n in tree.body
+         if isinstance(n, ast.FunctionDef) and n.name == _PROVIDER_META_FUNCTION), None)
+    assert function is not None, (
+        f"grid-src's {_PROVIDER_LIFECYCLE} no longer defines {_PROVIDER_META_FUNCTION} — the fleet "
+        f"provider builds its name meta somewhere else now, so teach this pin where it went rather "
+        f"than letting it skip")
+
+    returns = [node for node in ast.walk(function) if isinstance(node, ast.Return)]
+    assert len(returns) == 1 and isinstance(returns[0].value, ast.Dict), (
+        f"grid-src's {_PROVIDER_META_FUNCTION} no longer returns a single dict literal, so this pin "
+        f"cannot read what it sends — teach it the new shape")
+
+    keys = set()
+    for key in returns[0].value.keys:
+        assert isinstance(key, ast.Constant) and isinstance(key.value, str), (
+            f"grid-src's {_PROVIDER_META_FUNCTION} builds a key this pin cannot read "
+            f"({ast.dump(key) if key is not None else '**spread'}); teach it the new shape")
+        keys.add(key.value)
+    return keys
+
+
+def _meta_key_this_cli_sends():
+    """The key this CLI's register meta uses to state that a person chose the name.
+
+    Measured by BUILDING two metas that differ in exactly that fact and asking which key moved,
+    rather than by reading this repository's source: what the relay has to recognise is the string
+    that arrives on the wire, and a pin that parsed `remote/serve.py` would go on agreeing with
+    grid-src about a spelling nobody sends.
+    """
+    from remote import serve
+
+    base = {"meta_name": "mybox", "endpoint_url": "http://h/v1"}
+    chosen = serve._meta({**base, "meta_name_chosen": True}, "remote")
+    unchosen = serve._meta({**base, "meta_name_chosen": False}, "remote")
+
+    # Positive control FIRST: prove `_meta` built a real payload at all. Without it a helper that
+    # returned two empty dicts would report "no key carries the claim" and read as drift that has not
+    # happened — the failure mode every pin in this file guards against explicitly.
+    assert chosen.get(_META_CONTROL_KEY) == "mybox" == unchosen.get(_META_CONTROL_KEY), (
+        f"positive control: `serve._meta` did not even put {_META_CONTROL_KEY!r} on the meta, so its "
+        f"verdict about the claim means nothing — fix the harness before believing it")
+
+    moved = {key for key in set(chosen) | set(unchosen) if chosen.get(key) != unchosen.get(key)}
+    assert len(moved) == 1, (
+        f"`serve._meta` answered differently on {sorted(moved) or 'no key at all'} for a chosen name "
+        f"and an unchosen one, so this check cannot tell which key carries the claim — teach it the "
+        f"new shape rather than deleting the pin")
+    return moved.pop()
+
+
+def test_the_key_saying_who_named_the_machine_is_spelled_the_same_on_both_sides_of_the_call():
+    """What this CLI sends and what grid-src's relay reads, compared against each other.
+
+    Neither repository can catch this alone, which is the whole reason it is written here. This
+    repository's `test_meta_says_whether_a_person_chose_the_node_name` asserts what the CLI sends,
+    grid-src's `test_os_grid_member_identity.py` asserts what the relay reads, and a developer
+    renaming the key updates the test on their own side along with the code. Both suites stay green,
+    the key stops being recognised, and every machine on an `os-community` grid whose operator DID
+    name it goes back to `node-<id>` — silently, because an unknown key on a merged meta payload is
+    stored and ignored rather than refused (ADR 0039 D-n).
+    """
+    read = _meta_key_the_relay_reads_as_chosen()
+    sent = _meta_key_this_cli_sends()
+
+    assert sent == read, (
+        f"this CLI states the claim as {sent!r} and grid-src's {_OVERVIEW} reads {read!r} — the key "
+        f"is dropped in silence, so a name its operator chose stops being published on an "
+        f"os-community grid and NOTHING goes red; edit BOTH sides")
+
+
+def test_the_other_provider_half_in_grid_src_sends_the_same_key():
+    """The half issue 15's audit named and issue 16 nearly repeated: grid-src's own fleet runtime.
+
+    ⚠️ **There are TWO provider halves and they are in different repositories.** An `os-community`
+    member runs the PUBLIC CLI pinned above; the grid-src runtime is what runs on the fleet. A fix
+    applied to one leaves the other publishing hostnames with every suite in both repositories still
+    green — the exact shape that has bitten this codebase before — so the relay's single reader is
+    pinned against BOTH senders rather than against whichever one was edited last.
+    """
+    read = _meta_key_the_relay_reads_as_chosen()
+    sends = _meta_keys_the_grid_src_provider_sends()
+
+    assert _META_CONTROL_KEY in sends, (
+        f"positive control: grid-src's {_PROVIDER_META_FUNCTION} does not appear to send "
+        f"{_META_CONTROL_KEY!r} either, so this check is reading the wrong function — fix the "
+        f"harness before believing its verdict")
+    assert read in sends, (
+        f"grid-src's relay reads {read!r} but its own provider runtime sends {sorted(sends)} — the "
+        f"fleet's machines are all published as `node-<id>` on an os-community grid, or all "
+        f"published by hostname, and nothing anywhere goes red; edit BOTH sides")
