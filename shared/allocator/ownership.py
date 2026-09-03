@@ -26,6 +26,7 @@ def audit_ownership(
     allocator_status: Mapping[str, Any],
     *,
     require_managed: Iterable[str] = (),
+    forbid_external: Iterable[str] = (),
 ) -> OwnershipAudit:
     """Flatten allocator status without allowing host aggregation to hide model ownership."""
 
@@ -89,6 +90,7 @@ def audit_ownership(
         external = model_counts["external_ready"]
         requirements.append(
             {
+                "kind": "require-managed",
                 "model_id": model_id,
                 "passed": managed > 0 and external == 0,
                 "managed_ready_replicas": managed,
@@ -97,6 +99,23 @@ def audit_ownership(
                     "only allocator-owned ready routes are visible"
                     if managed > 0 and external == 0
                     else "requires at least one allocator-owned ready route and zero external ready routes"
+                ),
+            }
+        )
+    for model_id in sorted({str(item) for item in forbid_external if str(item)}):
+        model_counts = by_model.get(model_id, Counter())
+        external = model_counts["external_ready"]
+        requirements.append(
+            {
+                "kind": "forbid-external",
+                "model_id": model_id,
+                "passed": external == 0,
+                "managed_ready_replicas": model_counts["allocator_ready"],
+                "external_ready_replicas": external,
+                "reason": (
+                    "no external ready routes are visible"
+                    if external == 0
+                    else "external ready routes must be drained before cutover"
                 ),
             }
         )

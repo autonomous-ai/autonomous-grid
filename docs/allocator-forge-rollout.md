@@ -48,12 +48,14 @@ Do not encode a marketing model name or a mutable `main` revision directly into 
 
 ```console
 grid --local allocator audit --grid allocator-control \
-  --require-managed <replacement-model>
+  --require-managed <replacement-model> \
+  --forbid-external <legacy-model>
 ```
 
-The gate passes only when at least one allocator-owned replacement route is ready and no external
-route with that same model identity remains. Keep the old artifact until the observation window and
-rollback deadline have passed.
+The gate passes only when at least one allocator-owned replacement route is ready, no external
+route with that replacement identity remains, and the legacy external route is absent. Always use
+the two gates together so an empty/offline fleet cannot look like a completed cutover. Keep the old
+artifact until the observation window and rollback deadline have passed.
 
 ## Bring Machine A's Ollama model under allocation
 

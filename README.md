@@ -685,7 +685,8 @@ fenced commands, and repeated scale-up/down; see the
 [resilience qualification guide](docs/allocator-resilience.md).
 
 For mixed fleets, `grid allocator audit` reports ownership per model rather than only per host. Add
-`--require-managed <model>` to turn a migration expectation into an exit-code gate. The staged
+`--require-managed <replacement>` and `--forbid-external <legacy>` to turn both sides of a
+migration into exit-code gates. The staged
 [Forge rollout and model cutover runbook](docs/allocator-forge-rollout.md) covers physical runtime
 qualification, external-to-managed replacement, verification, and rollback.
 
