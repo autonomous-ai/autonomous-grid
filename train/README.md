@@ -341,6 +341,7 @@ train/
 ├── ui.py                  read-only dashboard of runs and their curves
 ├── capture.py             learn from served work: store, redact, prune, weigh, build a dataset
 ├── goal_dataset.py        verified Goal evidence → redacted, deduped train/held-out datasets
+├── goal_benchmark.py      held-out Goal suite → independently verified pass rate / soak ledger
 ├── autopilot.py           the unattended loop over captured work
 ├── schedule.py            put that loop in the user's own scheduler (launchd / systemd --user)
 ├── connectors.py          pull examples from Zendesk / HubSpot (env-var tokens, never stored)

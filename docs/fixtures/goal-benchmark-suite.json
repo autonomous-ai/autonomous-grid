@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "project": "training-benchmark-sandbox",
+  "agents": ["codex"],
+  "token_budget": 1000000,
+  "cases": [
+    {
+      "id": "health-endpoint",
+      "objective": "Add a small health endpoint and document it.",
+      "done_when": "health.json exists, is valid, and reports ok=true.",
+      "evals": [
+        {
+          "type": "json",
+          "version": 1,
+          "name": "health contract",
+          "path": "health.json",
+          "max_bytes": 4096,
+          "checks": [
+            {"pointer": "/ok", "op": "equals", "value": true}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "operator-notes",
+      "objective": "Write a concise operator runbook for the sample service.",
+      "done_when": "RUNBOOK.md exists and includes startup and rollback instructions.",
+      "evals": [
+        {
+          "type": "file",
+          "version": 1,
+          "name": "runbook contract",
+          "path": "RUNBOOK.md",
+          "min_bytes": 80,
+          "max_bytes": 20000,
+          "contains": ["Startup", "Rollback"]
+        }
+      ]
+    }
+  ]
+}

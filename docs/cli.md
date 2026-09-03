@@ -706,6 +706,8 @@ grid train init [--pack <name>] [--dest <dir>] [--config <path>] [--force]
 grid train packs [--json]                         # bundled task packs for business data
 grid train dataset [--grid <name>] [--goal-id <id>]... [--out <dir>]
                    [--holdout <fraction>] [--seed <seed>] [--format jsonl|parquet|both] [--force]
+grid train benchmark --suite <file> --model <model> --run-dir <dir> [--grid <name>]
+                     [--repeat <n>] [--min-pass-rate <0..1>] [--no-wait]
 
 grid train sft [--backend auto|mlx|torch] [--iters <n>] [--run-dir <dir>] [--config <path>]
 grid train run [--config <path>]                  # the feedback loop (GRPO via TRL)
@@ -764,6 +766,20 @@ every data file, so a training run can name exactly what it consumed.
 grid train dataset --grid forge --out ./forge-goals --format both
 # train on forge-goals/train/sft.jsonl; measure on forge-goals/held_out/
 ```
+
+`grid train benchmark` measures the trained model at the product boundary: can its agent finish
+held-out Goals? A version-1 suite names disposable Grid projects and carries immutable independent
+evals. All cases are submitted before polling, so the existing distributed queue spreads them
+across the fleet. The only headline metric is independently verified Goal pass rate.
+
+The run directory is a durable ledger. Every idempotency key is saved before its create request,
+so closing the terminal or losing a response cannot duplicate a Goal; rerun the same command to
+resume. `--repeat 100 --timeout 172800` turns the suite into a 48-hour soak. The optional evidence
+gates can require several execution nodes, a clean worker revision, or a Codex/Claude handoff.
+Use disposable projects because benchmark agents really act; a held-out test must never mutate a
+production repository or call a production write tool.
+
+See [`fixtures/goal-benchmark-suite.json`](fixtures/goal-benchmark-suite.json) for the file shape.
 
 - **`grid train sft`** is imitation: it learns from the answers your team already wrote and needs
   nothing but the machine in front of you. `--backend auto` picks MLX on Apple Silicon and torch

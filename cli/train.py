@@ -335,6 +335,58 @@ def cmd_train_dataset(args: argparse.Namespace) -> int:
     return 0 if result.accepted else 1
 
 
+def cmd_train_benchmark(args: argparse.Namespace) -> int:
+    """Run an independently evaluated held-out Goal suite on one Grid model."""
+    from remote import relay
+    from train.goal_benchmark import load_suite, run_benchmark
+
+    from .goal import _verify_evidence
+    from .remote_task import _resolve, _resolve_project
+
+    base, token, label = _resolve(args)
+    try:
+        suite = load_suite(args.suite)
+        result = run_benchmark(
+            suite, args.run_dir, grid=label, model=args.model, repeats=args.repeat,
+            threshold=args.min_pass_rate, timeout_seconds=args.timeout,
+            poll_seconds=args.poll, wait=not args.no_wait,
+            resolve_project=lambda project: _resolve_project(base, token, project),
+            submit=lambda case, project_id, key: relay.create_goal(
+                base, token, project_id=project_id, objective=case["objective"],
+                done_when=case["done_when"], model=args.model,
+                token_budget=case.get("token_budget", suite.get("token_budget", 1_000_000)),
+                tools=case.get("tools", suite.get("tools", [])),
+                name=f"benchmark-{case['id']}",
+                agents=case.get("agents", suite.get("agents", ["codex"])),
+                required_capabilities=case.get(
+                    "required_capabilities", suite.get("required_capabilities", [])),
+                evals=case["evals"],
+                allow_subgoals=bool(case.get("allow_subgoals",
+                                             suite.get("allow_subgoals", False))),
+                idempotency_key=key),
+            get_status=lambda goal_id: relay.get_goal(base, token, goal_id),
+            get_evidence=lambda goal_id: relay.get_goal_evidence(base, token, goal_id),
+            verify=lambda evidence: _verify_evidence(
+                evidence, min_execution_nodes=args.min_execution_nodes,
+                require_inference=True,
+                require_worker_revision=args.require_worker_revision,
+                require_agent_sequence=args.require_agent_sequence),
+        )
+    except ValueError as exc:
+        raise SystemExit(f"grid train: {exc}") from None
+    state = "complete" if result.complete else "running"
+    print(f"Goal benchmark: {result.passed}/{result.total} passed "
+          f"({result.pass_rate:.1%}) · {state}")
+    print(f"Run: {result.run_dir / 'benchmark.json'}")
+    if not result.complete:
+        print("Rerun the same command and --run-dir to resume without creating duplicate Goals.")
+    elif result.met_threshold:
+        print(f"PASS — met the {result.threshold:.1%} held-out Goal pass-rate bar.")
+    else:
+        print(f"HOLD — below the {result.threshold:.1%} held-out Goal pass-rate bar.")
+    return 0 if result.met_threshold or (args.no_wait and not result.complete) else 1
+
+
 def cmd_train_autopilot(args: argparse.Namespace) -> int:
     """One unattended cycle over captured work: build tonight's data, train, prove, ship or bin."""
     from train.autopilot import history, run_cycle
