@@ -12658,6 +12658,43 @@ def _has_image_part(body):
     return False
 
 
+def test_probe_sglang_ollama_compat_show_does_not_hide_vision(monkeypatch, tmp_path):
+    """SGLang exposes an Ollama-compatible /api/show but its static capabilities list contains only
+    `completion`, including for a vision model. It marks that synthetic response as format:sglang, so
+    Grid must not mistake the missing `vision` item for authoritative Ollama metadata and gate out the
+    live image probe."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {"image_probe": False}
+
+    def handler(request):
+        path = request.url.path
+        if path == "/props" or path == "/api/v0/models":
+            return httpx.Response(404)
+        if path == "/api/show":
+            return httpx.Response(200, json={
+                "details": {"format": "sglang", "family": "Qwen3.8-Flash-Next-FP8"},
+                "capabilities": ["completion"],
+            })
+        if path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "qwen38-flash-next-sm120"}]})
+        if path.endswith("/chat/completions"):
+            if _has_image_part(json.loads(request.content)):
+                seen["image_probe"] = True
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        return httpx.Response(404)
+
+    _mock_engine(monkeypatch, handler)
+    entry = probe.capabilities(
+        "http://h:8000/v1", "qwen38-flash-next-sm120"
+    )["models"]["qwen38-flash-next-sm120"]
+
+    assert entry["features"]["vision"] is True
+    assert entry["input_modalities"] == ["text", "image"]
+    assert seen["image_probe"] is True
+
+
 def test_probe_vision_from_live_image_probe_when_engine_accepts(monkeypatch, tmp_path):
     """An OpenAI engine with no /props, no /api/show, and no /v1/models capabilities (vLLM / LM Studio /
     MLX shape) still detects vision via a live image probe: send a tiny image, and a model that ACCEPTS
