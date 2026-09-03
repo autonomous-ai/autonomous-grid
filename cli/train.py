@@ -15,6 +15,7 @@ Verbs:
 from __future__ import annotations
 
 import argparse
+import base64
 import dataclasses
 import json
 from pathlib import Path
@@ -546,6 +547,130 @@ def cmd_train_sft(args: argparse.Namespace) -> int:
     adapter = run_sft(cfg, backend=args.backend, iters=args.iters, run_dir=args.run_dir)
     print(f"Adapter saved: {adapter}")
     print("Next: `grid train run` sharpens it with feedback, or `grid train eval` scores it now.")
+    return 0
+
+
+def cmd_train_submit_sft(args: argparse.Namespace) -> int:
+    """Put one local SFT run on the selected Grid's durable task queue."""
+    import tomli_w
+
+    from remote import relay
+    from train.config import load_config
+    from train.sft import load_examples
+
+    from . import project_arg, remote_task
+
+    args = project_arg.resolve(args)
+
+    config_path = args.config or DEFAULT_CONFIG
+    cfg = load_config(config_path)
+    source = Path(args.data).expanduser()
+    if source.is_dir():
+        candidates = (source / "train" / "sft.jsonl", source / "sft.jsonl")
+        source = next((path for path in candidates if path.is_file()), candidates[0])
+    if not source.is_file():
+        raise SystemExit(f"grid train: no SFT dataset found at {source}")
+    # Validate every row and the existing minimum before sending bytes over the network.
+    load_examples(source)
+    data = source.read_bytes()
+
+    def portable(value):
+        if isinstance(value, tuple):
+            return [portable(item) for item in value]
+        if isinstance(value, dict):
+            return {key: portable(item) for key, item in value.items()}
+        return value
+
+    trainer = dataclasses.asdict(cfg.trainer)
+    # The explicit task run-dir is authoritative and inside the result worktree.
+    trainer["output_dir"] = ""
+    portable_config = {
+        "model": {"name": cfg.model_name},
+        "rollout": portable(dataclasses.asdict(cfg.rollout)),
+        "data": {
+            "prompts_jsonl": "grid-train-input/prompts.jsonl",
+            "verifiers_env": "",
+            "verifiers_env_args": {},
+            "learn_from_teachers": cfg.data.learn_from_teachers,
+        },
+        # ``load_config`` requires a rewards path for the shared SFT/RL schema. SFT never imports
+        # it; keep the portable file inert rather than uploading arbitrary local Python.
+        "rewards": {"python_file": "grid-train-input/rewards.py"},
+        "trainer": trainer,
+        "deploy": portable(dataclasses.asdict(cfg.deploy)),
+    }
+    config_bytes = tomli_w.dumps(portable_config).encode("utf-8")
+    reward_stub = b"# SFT does not execute reward functions.\n"
+    files = [
+        {"path": "grid-train-input/grid-train.toml",
+         "content_b64": base64.b64encode(config_bytes).decode("ascii")},
+        {"path": "grid-train-input/sft.jsonl",
+         "content_b64": base64.b64encode(data).decode("ascii")},
+        {"path": "grid-train-input/rewards.py",
+         "content_b64": base64.b64encode(reward_stub).decode("ascii")},
+    ]
+    total = len(config_bytes) + len(data) + len(reward_stub)
+    if max(len(data), len(config_bytes), len(reward_stub)) > remote_task.MAX_FILE_BYTES:
+        raise SystemExit(
+            f"grid train: each submitted file must be at most {remote_task.MAX_FILE_BYTES} bytes")
+    if total > remote_task.MAX_TOTAL_BYTES:
+        raise SystemExit(
+            f"grid train: submitted files total {total} bytes; limit is "
+            f"{remote_task.MAX_TOTAL_BYTES}")
+
+    base, token, label = remote_task._resolve(args)
+    project_id = remote_task._resolve_project(base, token, args.project)
+    timeout_hours = getattr(args, "timeout_hours", 24)
+    queue_timeout_hours = getattr(args, "queue_timeout_hours", 168)
+    if not 1 <= timeout_hours <= 168:
+        raise SystemExit("grid train: --timeout-hours must be 1-168")
+    if not 1 <= queue_timeout_hours <= 720:
+        raise SystemExit("grid train: --queue-timeout-hours must be 1-720")
+    if queue_timeout_hours <= timeout_hours:
+        raise SystemExit(
+            "grid train: --queue-timeout-hours must be greater than --timeout-hours")
+    spec = {
+        "version": 1, "backend": args.backend,
+        "config": "grid-train-input/grid-train.toml", "run_dir": "grid-train-result",
+        "run_timeout_seconds": timeout_hours * 3600,
+        "queue_timeout_seconds": queue_timeout_hours * 3600,
+    }
+    if args.iters is not None:
+        if args.backend != "mlx":
+            raise SystemExit("grid train: --iters only applies to --backend mlx")
+        if args.iters < 1 or args.iters > 10_000_000:
+            raise SystemExit("grid train: --iters must be 1-10000000")
+        spec["iters"] = args.iters
+    job = relay.create_train_job(
+        base, token, project_id=project_id, spec=spec, files=files)
+    if not isinstance(job, dict) or job.get("project_id") != project_id:
+        raise SystemExit("grid train: the relay did not confirm the requested project")
+    if args.json:
+        print(json.dumps(job, indent=2))
+        return 0
+    task_id = job.get("id")
+    print(f"SFT job queued on {label}: {task_id}")
+    print(f"  grid task follow {task_id} --grid {label}")
+    print(f"  grid task fetch {task_id} --grid {label} --into grid-train-result")
+    print("  grid train verify-result grid-train-result/grid-train-result")
+    return 0
+
+
+def cmd_train_verify_result(args: argparse.Namespace) -> int:
+    """Verify the checksums and structure of a fetched distributed SFT result."""
+    from remote.train_worker import verify_result
+
+    try:
+        result = verify_result(Path(args.path))
+    except ValueError as exc:
+        raise SystemExit(f"grid train: {exc}") from None
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"Verified {args.path}")
+        print(f"  {result['backend']} adapter · {len(result['files'])} file(s) · "
+              f"{result['total_bytes']} bytes")
+        print(f"  base model: {result.get('model') or 'not recorded'}")
     return 0
 
 

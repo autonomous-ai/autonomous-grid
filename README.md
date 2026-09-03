@@ -660,6 +660,14 @@ grid train dataset --grid <grid-name> --out ./goal-data
 # Measure the model where it matters: independently completed held-out Goals
 grid train benchmark --suite suite.json --model <model> --run-dir ./benchmark
 
+# Queue local SFT on any compatible machine in a hosted/self-hosted grid
+grid train submit-sft --grid <grid-name> --project <id> \
+  --config grid-train.toml --data ./goal-data --backend mlx
+
+# After the job completes: fetch and verify every adapter byte before use
+grid task fetch <task-id> --grid <grid-name> --into ./trained-result
+grid train verify-result ./trained-result/grid-train-result
+
 # Turn support tickets into a reply-drafting model
 grid train init --pack support-replies
 
@@ -674,6 +682,12 @@ grid train ui
 ```
 
 - The grid samples rollouts across its nodes; one machine holds the trainer.
+- SFT jobs use the same durable task/Git plane as Goals. A matching MLX or torch node claims one;
+  if the machine disappears, its lease expires and another compatible node restarts the job from
+  the immutable input commit.
+- Training jobs have their own bounded clocks (24 hours running and seven days queued by default),
+  and successful results carry a portable SHA-256 manifest. Exit code zero without a real adapter
+  is a failed job, not a false success.
 - The LoRA adapter it produces goes back to the serving nodes under a stable name, where `auto`
   keeps routing to it.
 - Rollouts run on your own hardware: training needs the token ids and logprobs a node sampled,

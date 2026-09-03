@@ -1080,6 +1080,24 @@ def create_task(
     return task
 
 
+def create_train_job(
+    signaling_url: str,
+    access_token: str,
+    *,
+    project_id: str,
+    spec: dict[str, Any],
+    files: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Submit a typed SFT task to a Goal/Train-aware relay."""
+    return _task_oneshot(
+        signaling_url, access_token, "POST", "/relay/v1/train/jobs",
+        json={"project_id": project_id, "spec": spec, "files": files},
+        missing_route_hint=(
+            "This grid's relay does not support Grid Train jobs yet. Upgrade the relay before "
+            "enabling train-mlx or train-torch workers."),
+    )
+
+
 # Every Goal endpoint arrived as one relay feature. A CLI ahead of its relay therefore gets
 # FastAPI's bare framework 404 from any of them. "Not Found" is especially misleading for status,
 # evidence and control: it sounds as if the Goal id is wrong, when the server has never heard of a

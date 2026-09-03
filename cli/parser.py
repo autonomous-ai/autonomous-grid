@@ -1791,6 +1791,8 @@ def _add_train(sub) -> None:
         cmd_train_pull,
         cmd_train_run,
         cmd_train_schedule,
+        cmd_train_submit_sft,
+        cmd_train_verify_result,
         cmd_train_serve,
         cmd_train_sft,
         cmd_train_ui,
@@ -1952,6 +1954,37 @@ def _add_train(sub) -> None:
     sft.add_argument("--run-dir", default=None,
                      help="Where to write adapter/log/run.json (default: a timestamped folder).")
     sft.set_defaults(handler=cmd_train_sft)
+
+    submit_sft = train_sub.add_parser(
+        "submit-sft", help="Queue SFT on any compatible machine in a remote Grid"
+    )
+    submit_sft.add_argument("--grid", default=None, help="Remote grid name or id")
+    project_arg.add_project(
+        submit_sft, required=False,
+        help="Project id carrying input/results (default: your own project named 'default').")
+    submit_sft.add_argument("--config", default=None,
+                            help="Run config (default: ./grid-train.toml)")
+    submit_sft.add_argument("--data", required=True,
+                            help="sft.jsonl or a `grid train dataset` output directory")
+    submit_sft.add_argument("--backend", choices=("mlx", "torch"), required=True,
+                            help="Required worker type; explicit so scheduling is deterministic")
+    submit_sft.add_argument("--iters", type=int, default=None,
+                            help="Training iterations (MLX only)")
+    submit_sft.add_argument(
+        "--timeout-hours", type=int, default=24,
+        help="Maximum runtime after a trainer claims the job (default: 24; max: 168)")
+    submit_sft.add_argument(
+        "--queue-timeout-hours", type=int, default=168,
+        help="Maximum time to wait for a compatible trainer (default: 168; max: 720)")
+    submit_sft.add_argument("--json", action="store_true")
+    submit_sft.set_defaults(handler=cmd_train_submit_sft)
+
+    verify_result = train_sub.add_parser(
+        "verify-result", help="Verify a fetched distributed SFT adapter and its checksums"
+    )
+    verify_result.add_argument("path", help="Fetched grid-train-result directory")
+    verify_result.add_argument("--json", action="store_true")
+    verify_result.set_defaults(handler=cmd_train_verify_result)
 
     nightly = train_sub.add_parser(
         "nightly", help="One unattended cycle: train, prove it, ship it only if it won"
