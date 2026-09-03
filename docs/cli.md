@@ -27,9 +27,9 @@ as a product noun. Those are implementation terms for architecture docs and code
 
 ## Design Rules
 
-- The common path is one screen: `grid up`, `grid join`, `grid models`, `grid chat`.
+- The common path is one screen: `grid start`, `grid join`, `grid models`, `grid chat`.
 - `home` is the default grid. Users name a grid only when they have several.
-- `up` is idempotent: create if missing, start if stopped, print the same contract every time.
+- `start` is idempotent: create if missing, start if stopped, print the same contract every time.
 - Default output is human-readable. Every state-reading command supports `--json` —
   swept by `tests/test_application_surface.py`, so the claim is checked rather than asserted.
 - Use examples before exhaustive flags in help text.
@@ -72,7 +72,7 @@ mode: local
 No grid yet.
 
 Start one:
-  grid up
+  grid start
 
 Then join an engine:
   grid join
@@ -84,7 +84,7 @@ In `remote` mode bare `grid` shows the mode and your active remote grid, then th
 mode: remote
 active grid: research
 
-Sign in with `grid login`, then manage your remote grids with `grid up`/`ls`/`info`, serve models
+Sign in with `grid login`, then manage your remote grids with `grid start`/`ls`/`info`, serve models
 with `grid join`, and use them with `grid chat -m <model> "…"`.
 ```
 
@@ -96,7 +96,7 @@ with `grid join`, and use them with `grid chat -m <model> "…"`.
 Grid runs in one of two modes. **`local`** (the default) is everything documented here: an
 unauthenticated in-memory grid on your local network. **`remote`** is a signed-in thin client to
 autonomous's hosted relay: sign in with `grid login`, then bring up and manage hosted **remote
-grids** with the same `up`/`down`/`ls`/`info` verbs, serve them (`join`/`leave`), consume them
+grids** with the same `start`/`stop`/`ls`/`info` verbs, serve them (`join`/`leave`), consume them
 (`chat`/`image`/`edit`/`video`), price your served models (`grid price`), and manage who may join or
 use them (`grid members`).
 
@@ -115,7 +115,7 @@ persisted mode > `local`. `grid use <name>` sets the persistent default grid, so
 `[grid]` positional on `info`/`models`/`engines`, `--grid` on `chat`/`image`/`edit`/`video`), and a
 stale selection (its grid was removed) is ignored.
 
-In `remote` mode the grid lifecycle (`up`/`down`/`ls`/`info`), live reads (`engines`/`models`),
+In `remote` mode the grid lifecycle (`start`/`stop`/`ls`/`info`), live reads (`engines`/`models`),
 sign-in (`login`/`logout`), serving (`join`/`leave`), consuming (`chat`/`image`/`edit`/`video`),
 handing an app the grid (`grid launch`), and
 membership admin (`grid members`) all work. `grid members` and `grid launch` are remote-only — in
@@ -185,14 +185,14 @@ so a consumer comparing the whole payload shape sees one more key.
 ## Grid Lifecycle
 
 ```
-grid up [name] [--type <t>] [--port <n>] [--host <h>] [--advertise-host <h>]
-grid down [name]                      # stop a grid (may fail loud); the grid/config persists
+grid start [name] [--type <t>] [--port <n>] [--host <h>] [--advertise-host <h>]
+grid stop [name]                      # stop a grid (may fail loud); the grid/config persists
 grid ls [--json]                      # saved grids (local: name, id, where, url · remote: name, id, type)
 grid info [grid] [--json]             # grid, grid_url, live engine count, live models
 grid info [grid] --env                # print OPENAI_* exports (local key, or remote relay URL + token)
 ```
 
-`grid up` output is stable and scriptable:
+`grid start` output is stable and scriptable:
 
 ```text
 grid=home
@@ -203,11 +203,11 @@ grid_url=http://192.168.1.25:8090
 server binds; `--advertise-host` overrides the host published in `grid_url` (otherwise the detected
 LAN IP). Those three are local-only, and `--type` is remote-only (the grid type, set on create).
 
-No separate `create` or `start` in the main surface — `up` is the single lifecycle verb, so
+No separate `create` command — `start` is the single lifecycle verb, so
 first use feels like one operation rather than infrastructure management. (`grid use` only sets
 which grid is *active*; it is a selection pointer, not a lifecycle step — see Modes.)
 
-In `local` mode **`grid down` waits and can fail.** It stops the server it can prove is this grid's
+In `local` mode **`grid stop` waits and can fail.** It stops the server it can prove is this grid's
 own — a recycled or corrupt `server_pid` is reported and never signalled — and then asks the grid's
 own port whether that worked. Exit is non-zero, naming a remedy, when a server outlived SIGKILL, when
 the grid is still answering on its port, or when it could neither verify the pid nor reach the port;
@@ -216,9 +216,9 @@ instant: a wedged server can cost the shared 25s stop grace and, if its process 
 another 25s. Healthy stops return as soon as the process exits, and a grid that is already down
 succeeds quietly. See [ADR 0026](./adr/0026-the-grid-servers-pid-is-a-claim-too.md).
 
-In `remote` mode these same verbs act on hosted **remote grids**: `grid up <name>` create-or-starts
+In `remote` mode these same verbs act on hosted **remote grids**: `grid start <name>` create-or-starts
 one — `--type` is `permissioned-public` (default) or `permissioned-providers`, set on create, and
-creating needs an explicit name (no auto-`home`). `grid down` stops it (the grid persists),
+creating needs an explicit name (no auto-`home`). `grid stop` stops it (the grid persists),
 `grid ls` lists the grids your sign-in fetched (local — no network call, `* ` marking the active
 one, columns name/id/type), and `grid info` prints `grid`, `type`, `status` and `grid_url` — the
 same four keys under `--json`. `status` comes from the creator-only live status, so a member who
@@ -275,7 +275,7 @@ as `:8000`. Each step must resolve to exactly one engine, or it errors listing t
 In remote mode the same verb serves your models on a remote grid: it brings the engine up the same
 way, then runs a detached loop that registers the engine's capabilities with the hosted relay,
 long-polls it for work, forwards each claimed job to the local engine, and heartbeats — `grid
-leave` stops and unregisters it. You must be signed in and the grid must be up (`grid up`) — with one
+leave` stops and unregisters it. You must be signed in and the grid must be up (`grid start`) — with one
 deliberate exception: `grid leave <grid-id>` also works **signed out**, so a serve child left running by
 an earlier sign-out can still be reaped. It stops the process but cannot tell the grid (there is no
 token), so the models drop at the node TTL (~120s) and it says so. `grid
@@ -2414,7 +2414,7 @@ JSON output should use snake_case keys and include enough detail for scripts:
 ## First-Run Happy Path
 
 ```bash
-grid up
+grid start
 grid join
 grid models
 grid chat -m qwen36-27b-mtp "hello"
@@ -2424,7 +2424,7 @@ eval "$(grid info --env)"
 For a machine with no engine:
 
 ```bash
-grid up
+grid start
 grid engine install llama.cpp
 grid pull unsloth/Qwen3.6-35B-A3B-MTP-GGUF:Qwen3.6-35B-A3B-UD-IQ3_S.gguf
 grid join --serve Qwen3.6-35B-A3B-UD-IQ3_S.gguf --advertise-as qwen36-35b-a3b-mtp

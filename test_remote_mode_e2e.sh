@@ -67,10 +67,10 @@ step_login(){
 step_up(){
   bold "[MacBook] create + start the remote grid"
   preflight
-  echo "  GOTCHA: 'grid up' only CREATES on the 1st call; run it AGAIN to START. join/chat need status=running."
-  run grid up "$GRID_NAME" --type permissioned-public || true    # 1st call: create
+  echo "  GOTCHA: 'grid start' only CREATES on the 1st call; run it AGAIN to START. join/chat need status=running."
+  run grid start "$GRID_NAME" --type permissioned-public || true    # 1st call: create
   sleep 2
-  run grid up "$GRID_NAME" || true                                # 2nd call: start
+  run grid start "$GRID_NAME" || true                                # 2nd call: start
   run grid use "$GRID_NAME"
   bold "status (want it 'running'):"; grid info "$GRID_NAME" || true
   ok "grid '$GRID_NAME' should be running — now run 'serve' on the Mac Studio"
@@ -152,7 +152,7 @@ step_leave(){
 step_down(){
   bold "[MacBook] take the grid offline (config persists)"
   preflight
-  run grid down "$GRID_NAME" || warn "down failed"
+  run grid stop "$GRID_NAME" || warn "down failed"
 }
 
 step_logout(){

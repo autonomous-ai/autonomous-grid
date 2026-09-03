@@ -5,7 +5,7 @@ Status: accepted (2026-06-28)
 ## Context
 
 ADR 0001 set up modes + dispatch; 0002 sign-in + the account `session_token`; 0003 the remote grid
-lifecycle (`grid up/down/ls/info`) authenticated with that session token; 0004 the provider serve
+lifecycle (`grid start/stop/ls/info`) authenticated with that session token; 0004 the provider serve
 loop; 0005 the consume path. This slice fills the last remote surface in scope: **membership
 administration** for a remote grid you own. `grid members add [grid] <email> [--role …]`,
 `grid members remove [grid] <email>`, and `grid members list [grid]` manage who may use or serve a
