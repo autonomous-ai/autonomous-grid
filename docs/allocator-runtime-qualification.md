@@ -76,6 +76,10 @@ the OpenAI-compatible chat API, observed zero active requests, stopped the child
 canary artifact. The run also established that fresh Ubuntu needs Python development headers for
 Triton.
 
-ComfyUI must be run on a host where its canary assets are installed. A report is not transferable
-between machines: the engine version, accelerator, driver, and artifacts are part of what the
-physical run is testing.
+Machine A physically passed ComfyUI 0.34.0 with the installed Z-Image bundle on MPS. The run proved
+inventory and artifact identity, loaded the text encoder, diffusion model, and VAE, completed a real
+256-by-256 image workflow, collected the exact output from ComfyUI history, observed an empty queue,
+and released model memory through `/free`.
+
+A report is not transferable between machines: the engine version, accelerator, driver, and
+artifacts are part of what the physical run is testing.
