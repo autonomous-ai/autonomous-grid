@@ -14,7 +14,11 @@ from .allocator import _request
 def cmd_allocator_audit(args: argparse.Namespace) -> int:
     cfg = config.select_grid(getattr(args, "grid", None))
     status = _request(cfg, "GET", "/allocator/status")
-    audit = audit_ownership(status, require_managed=args.require_managed)
+    audit = audit_ownership(
+        status,
+        require_managed=args.require_managed,
+        forbid_external=args.forbid_external,
+    )
     if args.json:
         print(json.dumps(audit.to_dict(), indent=2))
     else:
@@ -37,8 +41,14 @@ def cmd_allocator_audit(args: argparse.Namespace) -> int:
         if audit.requirements:
             print("\nCutover gates")
             for item in audit.requirements:
+                requirement = (
+                    "managed route"
+                    if item["kind"] == "require-managed"
+                    else "external route absent"
+                )
                 print(
-                    f"  {'PASS' if item['passed'] else 'FAIL'} {item['model_id']}: "
+                    f"  {'PASS' if item['passed'] else 'FAIL'} {item['model_id']} "
+                    f"({requirement}): "
                     f"{item['managed_ready_replicas']} managed ready, "
                     f"{item['external_ready_replicas']} external ready"
                 )

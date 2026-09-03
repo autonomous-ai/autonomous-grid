@@ -74,6 +74,27 @@ def test_cutover_gate_requires_managed_ready_and_no_external_ready_route():
     assert passed.passed
 
 
+def test_cutover_can_require_replacement_and_forbid_different_legacy_model():
+    failed = audit_ownership(
+        status_fixture(),
+        require_managed=("coder",),
+        forbid_external=("old-qwen",),
+    )
+    assert not failed.passed
+    requirements = {(item["kind"], item["model_id"]): item for item in failed.requirements}
+    assert requirements[("require-managed", "coder")]["passed"] is True
+    assert requirements[("forbid-external", "old-qwen")]["passed"] is False
+
+    payload = status_fixture()
+    payload["nodes"][0]["residencies"].pop()
+    passed = audit_ownership(
+        payload,
+        require_managed=("coder",),
+        forbid_external=("old-qwen",),
+    )
+    assert passed.passed
+
+
 def test_same_model_mixed_ownership_warns_and_fails_cutover():
     payload = status_fixture()
     payload["nodes"][1]["residencies"].append(
@@ -87,11 +108,20 @@ def test_same_model_mixed_ownership_warns_and_fails_cutover():
 def test_cli_parser_and_json_exit_gate(monkeypatch, capsys):
     parser = build_parser()
     args = parser.parse_args(
-        ["allocator", "audit", "--require-managed", "old-qwen", "--json"]
+        [
+            "allocator",
+            "audit",
+            "--require-managed",
+            "old-qwen",
+            "--forbid-external",
+            "legacy",
+            "--json",
+        ]
     )
     monkeypatch.setattr("cli.allocator_ownership.config.select_grid", lambda _grid: object())
     monkeypatch.setattr("cli.allocator_ownership._request", lambda *_args, **_kwargs: status_fixture())
     assert args.handler is cmd_allocator_audit
+    assert args.forbid_external == ["legacy"]
     assert args.handler(args) == 1
     output = json.loads(capsys.readouterr().out)
     assert output["passed"] is False

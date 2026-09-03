@@ -488,6 +488,13 @@ def _add_allocator(sub) -> None:
         metavar="MODEL",
         help="Fail unless MODEL has managed ready routes and no external ready routes; repeatable.",
     )
+    audit.add_argument(
+        "--forbid-external",
+        action="append",
+        default=[],
+        metavar="MODEL",
+        help="Fail while any ready external route for this model remains; repeatable.",
+    )
     audit.add_argument("--json", action="store_true")
     audit.set_defaults(handler=cmd_allocator_audit)
 
