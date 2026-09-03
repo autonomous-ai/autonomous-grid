@@ -205,12 +205,14 @@ class HuggingFaceDiscovery:
         self.base_url = base_url.rstrip("/")
         self._owns_client = client is None
         self.client = client or httpx.Client(timeout=timeout, follow_redirects=True, trust_env=True)
+        self.issues: list[str] = []
 
     def close(self) -> None:
         if self._owns_client:
             self.client.close()
 
     def discover(self, policy: ScoutPolicy, *, search: str = "") -> tuple[ModelCandidate, ...]:
+        self.issues = []
         queries: list[dict[str, str]] = []
         if "llama.cpp" in policy.runtimes:
             queries.append({"filter": "gguf"})
@@ -221,23 +223,28 @@ class HuggingFaceDiscovery:
         # community conversions and could starve every trusted publisher out of a bounded scan.
         for query in queries:
             for author in policy.trusted_authors:
-                response = self.client.get(
-                    f"{self.base_url}/api/models",
-                    params={
-                        **query,
-                        # Hub owner matching is case-sensitive for some organizations even though
-                        # policy comparison is intentionally canonical and case-insensitive.
-                        "author": _HUB_AUTHOR_CASE.get(author, author),
-                        "sort": "lastModified",
-                        "direction": "-1",
-                        "limit": str(min(policy.max_results, policy.max_repositories)),
-                        **({"search": search} if search else {}),
-                    },
-                )
-                response.raise_for_status()
-                rows = response.json()
+                try:
+                    response = self.client.get(
+                        f"{self.base_url}/api/models",
+                        params={
+                            **query,
+                            # Hub owner matching is case-sensitive for some organizations even though
+                            # policy comparison is intentionally canonical and case-insensitive.
+                            "author": _HUB_AUTHOR_CASE.get(author, author),
+                            "sort": "lastModified",
+                            "direction": "-1",
+                            "limit": str(min(policy.max_results, policy.max_repositories)),
+                            **({"search": search} if search else {}),
+                        },
+                    )
+                    response.raise_for_status()
+                    rows = response.json()
+                except (httpx.HTTPError, ValueError) as exc:
+                    self.issues.append(_discovery_issue("listing", author, exc))
+                    continue
                 if not isinstance(rows, list):
-                    raise RuntimeError("Hugging Face model listing returned a non-list response")
+                    self.issues.append(f"listing {author}: non-list response")
+                    continue
                 for row in rows:
                     if isinstance(row, Mapping):
                         repo_id = str(row.get("id") or row.get("modelId") or "")
@@ -257,15 +264,26 @@ class HuggingFaceDiscovery:
             if bool(summary.get("gated")) or int(summary.get("downloads") or 0) < policy.min_downloads:
                 continue
             inspected += 1
-            detail_response = self.client.get(
-                f"{self.base_url}/api/models/{repo_id}", params={"blobs": "true"}
-            )
-            detail_response.raise_for_status()
-            detail = detail_response.json()
+            try:
+                detail_response = self.client.get(
+                    f"{self.base_url}/api/models/{repo_id}", params={"blobs": "true"}
+                )
+                detail_response.raise_for_status()
+                detail = detail_response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                self.issues.append(_discovery_issue("detail", repo_id, exc))
+                continue
             if not isinstance(detail, Mapping):
+                self.issues.append(f"detail {repo_id}: non-object response")
                 continue
             candidates.extend(_candidates_from_hub_detail(detail, policy))
         return tuple(sorted(candidates, key=_candidate_discovery_sort_key))
+
+
+def _discovery_issue(kind: str, source: str, exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{kind} {source}: HTTP {exc.response.status_code}"
+    return f"{kind} {source}: {type(exc).__name__}"
 
 
 def _candidates_from_hub_detail(

@@ -162,6 +162,33 @@ def test_discovery_rejects_untrusted_gated_mutable_and_unknown_license_repositor
     assert discovery.discover(ScoutPolicy(trusted_authors=("qwen",), runtimes=("llama.cpp",))) == ()
 
 
+def test_discovery_keeps_good_candidates_when_one_repository_is_rate_limited():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/models":
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": "Qwen/rate-limited", "downloads": 10_000},
+                    {"id": "Qwen/Qwen-Coder-GGUF", "downloads": 10_000},
+                ],
+            )
+        if request.url.path.endswith("/rate-limited"):
+            return httpx.Response(429)
+        return httpx.Response(200, json=_detail())
+
+    discovery = HuggingFaceDiscovery(
+        base_url="https://hub.test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    candidates = discovery.discover(
+        ScoutPolicy(trusted_authors=("qwen",), runtimes=("llama.cpp",))
+    )
+
+    assert candidates
+    assert {candidate.repo_id for candidate in candidates} == {"Qwen/Qwen-Coder-GGUF"}
+    assert discovery.issues == ["detail Qwen/rate-limited: HTTP 429"]
+
+
 def test_fleet_fit_fails_closed_on_runtime_memory_disk_and_state():
     candidate = _candidate()
     fits = analyze_fleet_fit(
