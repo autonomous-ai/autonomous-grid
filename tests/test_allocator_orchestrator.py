@@ -252,3 +252,4 @@ def test_vllm_environment_activates_wheel_packaged_cuda_compiler(
 
     assert env["CUDA_HOME"] == str(cuda_bin.parent)
     assert env["PATH"].split(":", 1)[0] == str(cuda_bin)
+    assert str(binary.parent) in env["PATH"].split(":")
