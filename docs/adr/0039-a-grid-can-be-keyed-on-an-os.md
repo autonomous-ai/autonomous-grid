@@ -42,10 +42,40 @@ The closed set is forced by D-d: auto-provisioning on an open value space means 
 string becomes a permanent empty grid. `shared/system/host.platform_kind()` already carries an `other`
 bucket for exactly this reason, and `other` must never reach this path.
 
-⚠️ **Omarchy is Arch-based, and whether `/etc/os-release` distinguishes it from stock Arch is
-UNMEASURED.** `shared/engine/installer._detect_distro` reads `ID=`/`ID_LIKE=` and is the shape to
-follow, but if Omarchy reports `ID=arch` then a second signal is required. Measure on a real Omarchy
-box before implementing; do not infer it.
+**RESOLVED 2026-09-03 (issue 04): Omarchy writes its own `/etc/os-release`, so `ID=omarchy` is the
+signal — and `ID_LIKE=` must stay out of it.** The `omarchy-settings` package generates the file
+(`ID=omarchy`, `ID_LIKE=arch`) and its `post_install`/`post_upgrade` scriptlet `rm -f`s the system's
+copy and `cp -f`s that one over `/etc/os-release` on every install and upgrade. Identical in
+`omarchy-settings-dev`, the edge channel. Stock Arch is `ID=arch` with no `ID_LIKE`.
+
+⚠️ **`shared/engine/installer._detect_distro` is no longer the shape to follow, and this decision is
+the reason.** It reads `ID=` and `ID_LIKE=` into ONE list and matches either. Every Arch derivative
+ships `ID_LIKE=arch` — EndeavourOS, CachyOS, Manjaro — so copied here it would put all of them on the
+Omarchy grid: the exact mis-sorting the closed set exists to prevent. `ID=` is an identity, `ID_LIKE=`
+is a lineage, and only the first one names a community. `shared/system/os_grid._distro_id` reads `ID=`
+alone, and `tests/test_local_cli.py` names those three distributions so that re-merging the two fields
+fails.
+
+⚠️ **The evidence is a SOURCE read of Omarchy's packaging, not a `cat` on a live machine**, and is
+held to the same lower standard as this ADR's hostname sweep below. It is stronger than the
+documentation this decision refused to infer from — it is the code that writes the file — but a live
+reading has still not been taken. The fail direction is the safe one: anything that is not
+`ID=omarchy` still resolves to `linux`, so a wrong reading costs Omarchy users their own grid rather
+than putting Arch users on it. Older Omarchy installs that predate `omarchy-settings` (the
+`boot.sh`-onto-Arch era) do not write the file and land on the general Linux grid for the same reason.
+
+**An Omarchy machine is NOT also on the Linux grid.** `os=` carries one value and the gate is an
+equality test against one grid's own token, so claiming `omarchy` is precisely what takes the machine
+off `linux`. That is the decision and not a gap — "Omarchy is built on Linux, so it should see both"
+is the reading to rule out, and the wire cannot express it anyway.
+
+⚠️ **This gives the token set a rollout order the `os-community` literal does not have, and it points
+the OTHER WAY: the control plane rolls out BEFORE the CLI.** A CLI that has learnt a token the control
+plane does not serve claims it, stops claiming `linux`, and is handed nothing — a machine that was on
+the Linux grid yesterday. Loud (D-k's absence line fires on `os_served: false`) but wrong. Pinned
+across the boundary by `tests/test_os_grid_type_lockstep.py`, which compares
+`shared/system/os_grid.OS_TOKENS` against grid-apis' `DEFAULT_SERVED_OS_TOKENS` — as a SUBSET, so that
+deploying the control plane first is not itself a failure.
 
 `platform_kind()` was rejected as the vocabulary even though it already exists and is already on the
 wire (`remote/serve.py` heartbeat `load["platform"]`). It answers *"which binaries run here"* — a
@@ -170,6 +200,17 @@ and the partial unique index that makes the auto-provision claim atomic sits on 
 `private-domain` makes `name` do two jobs, and `store.domain_gate_for` exists only to hide the fact
 that the two domain types keep their gate in different places. Not repeating that here means a user who
 names their own grid `macos` collides with nothing.
+
+**DECIDED 2026-09-03 (issue 04): the Omarchy grid is named `Omagrid`, and its token stays `omarchy`.**
+`os_networks._OS_LABELS` is a map of **grid names**, not of operating-system names, and this is where
+the two part company: three entries happening to spell their own OS (`macos` → `macOS`) is a
+coincidence of those three, not a rule.
+
+⚠️ It is also the decision that makes the two-values split load-bearing rather than tidy. Until now a
+reviewer could look at `macos`/`macOS` and see one value prettied up; **no derivation from `omarchy`
+produces `Omagrid`**, and one written to try would have to move the gate to do it — which is exactly
+what `create_pending_os_network`'s own warning says must never happen. Nothing compares a grid's name:
+every reader of this value prints it.
 
 ## D-g — Inference on an `os-community` grid is free, and stays free
 

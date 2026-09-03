@@ -11710,13 +11710,28 @@ def test_control_plane_fetch_tokens_defaults_missing_networks_to_empty(monkeypat
 # machine of a given system ends up sending, and the parameter is what the control plane gates on.
 
 
-def _fetch_tokens_query(monkeypatch, system):
-    """The query string `fetch_tokens` builds on a machine whose ``platform.system()`` is ``system``."""
+def _fetch_tokens_query(monkeypatch, tmp_path, system, os_release=None):
+    """The query string `fetch_tokens` builds on a machine whose ``platform.system()`` is ``system``.
+
+    ``os_release`` is that machine's ``/etc/os-release``, or ``None`` for a machine that has none.
+
+    ⚠️ **Both are stubbed on every call, and the second is not optional decoration.** Since `omarchy`
+    landed (issue 04) a Linux machine's token is read off that file, so a test that left the real one
+    alone would be asking whatever host the suite runs on what the answer is — green on this Mac,
+    green on an Ubuntu runner, and quietly wrong the day somebody runs it on Omarchy. Pointing the
+    module at a path that does not exist is the deterministic *no distro signal* case, and it is what
+    keeps `("Linux", "linux")` a statement about the code rather than about the machine.
+    """
     import platform
 
     from remote import control_plane
+    from shared.system import os_grid
 
     monkeypatch.setattr(platform, "system", lambda: system)
+    os_release_path = tmp_path / "os-release"
+    if os_release is not None:
+        os_release_path.write_text(os_release, encoding="utf-8")
+    monkeypatch.setattr(os_grid, "_OS_RELEASE", os_release_path)
     seen = {}
 
     def handler(request):
@@ -11735,7 +11750,7 @@ def test_fetch_tokens_sends_the_os_token_of_the_machine_it_runs_on(
     monkeypatch, tmp_path, system, expected
 ):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    params = _fetch_tokens_query(monkeypatch, system)
+    params = _fetch_tokens_query(monkeypatch, tmp_path, system)
     assert params["os"] == expected
     assert params["device_id"] == "dev-1"  # the OS rides ALONGSIDE the device id, never instead of it
 
@@ -11752,9 +11767,179 @@ def test_fetch_tokens_sends_no_os_parameter_when_the_system_resolves_to_nothing(
     grid still has every other grid it belongs to.
     """
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    params = _fetch_tokens_query(monkeypatch, system)
+    params = _fetch_tokens_query(monkeypatch, tmp_path, system)
     assert "os" not in params
     assert params["device_id"] == "dev-1"
+
+
+# --- Omarchy is its own grid, and Arch is not it (ADR 0039 D-c, issue 04) --------------------------
+# The fourth token is the only one a machine cannot answer from `platform.system()`: Omarchy reports
+# `Linux` like every other distribution, so the signal is `ID=` in `/etc/os-release`, which its
+# `omarchy-settings` package writes and `cp -f`s over the file on every install and upgrade.
+#
+# ⚠️ **`ID=`, and NEVER `ID_LIKE=`.** Omarchy writes `ID=omarchy` AND `ID_LIKE=arch`, and every other
+# Arch derivative writes that same `ID_LIKE`. `shared/engine/installer._detect_distro` — the shape
+# ADR 0039 D-c pointed at — reads the two fields into ONE list and matches either, and copying that
+# here is the mis-sorting the closed set exists to prevent: EndeavourOS, CachyOS and Manjaro would
+# all land on the Omarchy grid. The tests below are written so that copying it fails.
+
+_OMARCHY_OS_RELEASE = (
+    'NAME="Omarchy"\n'
+    'PRETTY_NAME="Omarchy"\n'
+    "ID=omarchy\n"
+    "ID_LIKE=arch\n"
+    'HOME_URL="https://omarchy.org/"\n'
+)
+
+_ARCH_OS_RELEASE = 'NAME="Arch Linux"\nID=arch\nBUILD_ID=rolling\n'
+
+
+def test_fetch_tokens_sends_omarchy_from_a_machine_whose_os_release_says_so(monkeypatch, tmp_path):
+    """The whole point of the fourth token: people running Omarchy meet each other."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(
+        monkeypatch, tmp_path, "Linux", os_release=_OMARCHY_OS_RELEASE)
+    assert params["os"] == "omarchy"
+
+
+def test_a_machine_on_omarchy_does_not_also_claim_the_linux_grid(monkeypatch, tmp_path):
+    """One claim per request, and on Omarchy that claim is NOT `linux`.
+
+    Written as its own case because it is the behaviour somebody is most likely to "fix" back:
+    Omarchy is built on Linux, so a reading that has it join both grids sounds generous. The wire
+    cannot express it — `os=` is a single value — and the gate is an equality test against one grid's
+    own token, so claiming `omarchy` is exactly what takes this machine off the Linux grid. That is
+    the decision (ADR 0039 D-c), not a gap.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(
+        monkeypatch, tmp_path, "Linux", os_release=_OMARCHY_OS_RELEASE)
+    assert params["os"] != "linux"
+
+
+@pytest.mark.parametrize(
+    "label,os_release",
+    [
+        ("stock Arch", _ARCH_OS_RELEASE),
+        # ⚠️ The three below all carry `ID_LIKE=arch`. Read the way `_detect_distro` reads it — ID and
+        # ID_LIKE merged into one list — every one of them would be an Omarchy machine.
+        ("EndeavourOS", 'NAME="EndeavourOS"\nID=endeavouros\nID_LIKE=arch\n'),
+        ("CachyOS", 'NAME="CachyOS"\nID=cachyos\nID_LIKE="arch"\n'),
+        ("Manjaro", 'NAME="Manjaro Linux"\nID=manjaro\nID_LIKE=arch\n'),
+        ("Ubuntu", 'NAME="Ubuntu"\nID=ubuntu\nID_LIKE=debian\n'),
+        ("a distribution nobody has heard of", "ID=serenity\n"),
+        ("a file with no ID at all", 'NAME="Something"\nVERSION_ID="1"\n'),
+        ("an empty file", ""),
+        ("no /etc/os-release at all", None),
+    ])
+def test_every_other_linux_still_claims_the_linux_grid(monkeypatch, tmp_path, label, os_release):
+    """The new branch narrows NOTHING — issue 04's third acceptance criterion.
+
+    An unusual choice of distribution must not exclude somebody from the general Linux grid, and a
+    machine that says nothing about its distribution is an ordinary Linux machine, not a machine with
+    no OS grid. `linux` is the fallback for every Linux; `omarchy` is the one exception to it.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(monkeypatch, tmp_path, "Linux", os_release=os_release)
+    assert params["os"] == "linux", label
+
+
+@pytest.mark.parametrize(
+    "label,line",
+    [
+        ("double-quoted", 'ID="omarchy"'),
+        ("single-quoted", "ID='omarchy'"),
+        ("trailing whitespace", "ID=omarchy   "),
+        ("shouted", "ID=OMARCHY"),
+    ])
+def test_the_id_is_read_the_way_os_release_is_actually_written(monkeypatch, tmp_path, label, line):
+    """os-release values may be quoted, and the file is written by hand as often as by a package.
+
+    Not defensive padding: the same normalisation `installer._detect_distro` already applies, plus a
+    case fold. The cost of missing one of these is a machine silently sorted into the wrong grid, and
+    the cost of applying them is nothing — none of these spellings names any other distribution.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(
+        monkeypatch, tmp_path, "Linux", os_release=f"NAME=x\n{line}\nID_LIKE=arch\n")
+    assert params["os"] == "omarchy", label
+
+
+@pytest.mark.parametrize("system,expected", [("Darwin", "macos"), ("Windows", "windows")])
+def test_a_machine_that_is_not_linux_never_consults_os_release(
+    monkeypatch, tmp_path, system, expected
+):
+    """A Mac with a stray `/etc/os-release` is still a Mac.
+
+    The distro read hangs off the `linux` answer and nothing else. Written down because the file is
+    not Linux's alone — a container image, a Homebrew package or a hand-rolled script can leave one
+    on macOS — and a lookup done before the system is known would move that machine's grid.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(
+        monkeypatch, tmp_path, system, os_release=_OMARCHY_OS_RELEASE)
+    assert params["os"] == expected
+
+
+@pytest.mark.parametrize(
+    "label,content",
+    [("not UTF-8", b"ID=omarchy\n\xff\xfe\x00rubbish\n"), ("a lone NUL", b"\x00\x00\x00")])
+def test_an_unreadable_os_release_never_takes_the_sign_in_down(
+    monkeypatch, tmp_path, label, content
+):
+    """A file this cannot decode is *no signal*, never an exception.
+
+    `installer._detect_distro` guards `OSError` only, and `Path.read_text` on a file that is not
+    UTF-8 raises `UnicodeDecodeError` — a `ValueError`, which no `except OSError` sees. On that path
+    it would surface as a traceback out of `grid login`, on a machine whose only fault is a
+    mis-encoded system file. The first case still holds a readable `ID=omarchy` before the bad bytes
+    and is deliberately NOT required to find it: what is pinned is that the sign-in completes.
+    """
+    from shared.system import os_grid
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    path = tmp_path / "os-release"
+    path.write_bytes(content)
+    monkeypatch.setattr(os_grid, "_OS_RELEASE", path)
+
+    import platform
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    assert os_grid.os_token() in ("linux", "omarchy"), label
+
+
+def test_a_gigantic_os_release_is_not_read_into_memory(monkeypatch, tmp_path):
+    """The read is bounded, so a pathological file cannot be turned into a crash by reading it.
+
+    `/etc/os-release` is root-owned and a few hundred bytes in every real deployment, so this is a
+    bound and not a threat model. It matters because the alternative — an unbounded `read_text` on a
+    path chosen by somebody else's package manager — is the shape that has to be argued about later.
+    Truncation can only LOSE the signal, and losing it lands on `linux`, the safe direction.
+    """
+    from shared.system import os_grid
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    path = tmp_path / "os-release"
+    path.write_text("#" + " " * (os_grid._MAX_OS_RELEASE_BYTES * 2) + "\nID=omarchy\n")
+    monkeypatch.setattr(os_grid, "_OS_RELEASE", path)
+
+    import platform
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    assert os_grid.os_token() == "linux"
+
+
+def test_omarchy_is_one_of_the_tokens_this_cli_can_emit():
+    """The closed set grew, and three things read it rather than writing the members out again.
+
+    `cli/os_grid_notice` names it in the sentence a machine outside the set is shown, and
+    `tests/test_os_grid_type_lockstep` pins it against what the control plane will serve. A token
+    that resolves but is absent from `OS_TOKENS` would be claimable and unmentionable.
+    """
+    from shared.system import os_grid
+
+    assert os_grid.OS_OMARCHY == "omarchy"
+    assert os_grid.OS_OMARCHY in os_grid.OS_TOKENS
 
 
 # --- `os_served`, the answer to "why is there no OS grid in my list" (ADR 0039 D-k) ---------------
