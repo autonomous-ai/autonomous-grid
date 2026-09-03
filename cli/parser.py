@@ -646,6 +646,17 @@ def _add_allocator(sub) -> None:
         default=0.90,
         help="Fraction of each visible GPU vLLM may reserve (default: 0.90).",
     )
+    qualify.add_argument(
+        "--max-model-len",
+        type=int,
+        default=0,
+        help="Override vLLM context length; zero keeps the model default.",
+    )
+    qualify.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA graph compilation for a lower-impact shared-node qualification.",
+    )
     qualify.add_argument("--cache-dir", default=None)
     qualify.add_argument("--prompt", default="Reply with exactly GRID.")
     qualify.add_argument("--max-tokens", type=int, default=32)
