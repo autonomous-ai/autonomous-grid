@@ -631,6 +631,17 @@ before providers can enroll; the complete relay setup, rollout sequence, framewo
 boundary, and verification commands are in the
 [allocator deployment guide](docs/allocator.md#remote-grid-deployment).
 
+Controller fault safety can be exercised without disrupting a live Grid:
+
+```bash
+grid --local allocator resilience --duration 3d
+```
+
+The default is an accelerated soak. Add `--wall-clock --state-dir <path>` for a resumable real-time
+run. It tests persisted controller failover, missing node heartbeats, relay observation outages,
+fenced commands, and repeated scale-up/down; see the
+[resilience qualification guide](docs/allocator-resilience.md).
+
 ---
 
 ## Training (Experimental)
