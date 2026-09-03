@@ -574,10 +574,25 @@ asked for their own `GET /grid/overview`: 11 nodes answered, and one is named
 `MacBooks-MacBook-Pro-7.local` verbatim. ⚠️ **Not a prevalence estimate** — no `os-community` grid
 exists in prod yet, so none of those 11 is the population at issue, and 10 of them are hand-named.
 
-⚠️ **The Linux half is NOT measured, and this decision does not rest on it.** Every Linux node in the
-fleet is a datacenter box named by a provisioner, never by a desktop installer. The desktop that
-matters here is **Omarchy** (issue 04, still `needs-info`), not Ubuntu. Measuring it can only widen
-this decision's reach; it cannot overturn a residue already observed on a live row.
+**The other three tokens of D-c's taxonomy, read the same day.** ⚠️ These are **source reads of the
+installers**, not measurements on installed machines, and are held to that lower standard — they
+bound this decision's reach, they are not what it rests on.
+
+- **`linux` (Ubuntu desktop) leaks too**, by the installer's own generator:
+  `ubuntu-desktop-provision`'s `identity_model.dart` returns `'$username-${_productName.value}'` as
+  the suggested hostname. A login name rather than a full name — weaker than macOS's possessive, and
+  the same class.
+- **`omarchy` does NOT leak**, which matters because it is the one desktop Linux this feature has a
+  grid for. `basecamp/omarchy` contains **zero** hostname references — `boot.sh` layers onto an
+  existing Arch install — so the name comes from `archinstall`, whose default is the constant
+  `hostname: str = 'archlinux'`.
+- **`windows` is unmeasured**, and was never in issue 15's scope.
+- **The fleet as deployed carries no person's name**: the dev VM is `grid-dev` from cloud-init, and
+  every Linux node in the prod sweep is provisioner-named.
+
+So the residue is a **desktop-consumer** phenomenon and, among the four tokens, confirmed on `macos`
+and indicated on `linux`. None of that changes the decision — a residue observed on a live row is not
+overturned by the count of platforms sharing it — but it does say who D-n protects.
 
 **DECIDED 2026-09-03 (issue 15): on `os-community` the overview publishes a node's name only when the
 provider states its operator chose it. Otherwise it falls back to the anonymous label the route
