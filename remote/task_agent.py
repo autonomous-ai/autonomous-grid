@@ -845,7 +845,8 @@ def claude_available() -> bool:
 def _configured_task_harnesses() -> tuple[str, ...]:
     configured = (os.getenv("GRID_TASK_AGENT_KINDS") or "claude,codex").replace(",", " ").split()
     return tuple(dict.fromkeys(
-        kind for kind in configured if kind in ("claude", "codex")))
+        kind for kind in configured
+        if kind in ("claude", "codex", "train-mlx", "train-torch")))
 
 
 def preflight_before_serving() -> None:
@@ -853,8 +854,8 @@ def preflight_before_serving() -> None:
 
     A task-only node is agent capacity, not specifically Claude capacity.  Codex-only company
     machines are valid Grid workers, so a missing Claude binary must not reject one that can run
-    Codex's native Goal harness.  Conversely, merely having one of the two names configured is not
-    enough: the provider may advertise only a harness whose real binary and safety checks pass.
+    Codex's native Goal harness or a local trainer. Conversely, merely configuring a name is not
+    enough: the provider advertises only a worker whose real binary/dependency checks pass.
 
     Claude uses the same `preflight`/`resolve_binary`/sandbox-package checks as its claim path.
     Codex uses `task_codex.resolve_binary`, including the measured native-Goal protocol probe.  The
@@ -867,7 +868,8 @@ def preflight_before_serving() -> None:
     configured = _configured_task_harnesses()
     if not configured:
         raise RuntimeError(
-            "GRID_TASK_AGENT_KINDS enables no supported task harness; choose codex, claude, or both")
+            "GRID_TASK_AGENT_KINDS enables no supported task harness; choose claude, codex, "
+            "train-mlx and/or train-torch")
 
     failures: list[str] = []
     causes: list[BaseException] = []
@@ -893,6 +895,21 @@ def preflight_before_serving() -> None:
         except (Exception, SystemExit) as exc:
             failures.append(f"codex: {str(exc) or exc.__class__.__name__}")
             causes.append(exc)
+
+    if not usable:
+        # Imported here so normal task startup never imports optional training libraries.
+        from . import train_worker
+
+        for kind in ("train-mlx", "train-torch"):
+            if kind not in configured:
+                continue
+            try:
+                train_worker.preflight(kind)
+                usable = True
+                break
+            except (Exception, SystemExit) as exc:
+                failures.append(f"{kind}: {str(exc) or exc.__class__.__name__}")
+                causes.append(exc)
 
     if usable:
         # This is shared infrastructure, not a harness opinion. Ask once after at least one harness

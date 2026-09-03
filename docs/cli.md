@@ -710,6 +710,8 @@ grid train benchmark --suite <file> --model <model> --run-dir <dir> [--grid <nam
                      [--repeat <n>] [--min-pass-rate <0..1>] [--no-wait]
 
 grid train sft [--backend auto|mlx|torch] [--iters <n>] [--run-dir <dir>] [--config <path>]
+grid train submit-sft --data <sft.jsonl|dataset-dir> --backend mlx|torch
+                      [--grid <name>] [--project <id>] [--config <path>] [--iters <n>] [--json]
 grid train run [--config <path>]                  # the feedback loop (GRPO via TRL)
 grid train eval --run <dir> --candidate <name> [--adapter <dir>] [--base <name>] [--config <path>]
 grid train deploy --adapter <dir> [--gate] [--run <dir>] [--node <url>]... [--name <n>] [--config <path>]
@@ -780,6 +782,41 @@ Use disposable projects because benchmark agents really act; a held-out test mus
 production repository or call a production write tool.
 
 See [`fixtures/goal-benchmark-suite.json`](fixtures/goal-benchmark-suite.json) for the file shape.
+
+### Run SFT on the Grid
+
+`grid train submit-sft` schedules one complete SFT run on a compatible company machine. It reuses
+the existing durable task queue instead of creating a training scheduler: the config and dataset
+are committed to the selected project's Git history, a worker advertising exactly `train-mlx` or
+`train-torch` claims it, and the adapter/result directory is pushed back as the task result.
+
+```bash
+# Relay first, then enable compatible workers. Training is opt-in and is never in the default list.
+GRID_TASK_AGENT_KINDS=codex,train-mlx grid join forge --tasks-only --respawn
+
+grid train submit-sft --grid forge --project <project-id> \
+  --config grid-train.toml --data ./forge-goals --backend mlx
+grid task follow <task-id> --grid forge
+grid task fetch <task-id> --grid forge --out ./trained-result
+```
+
+Use `train-torch`/`--backend torch` on CUDA or other torch training machines. Install `grid[train]`
+on a training worker; it advertises no training capacity unless every dependency for its backend
+is present. The backend is explicit, so the relay never guesses from a machine name.
+
+For runs longer than the one-hour task default, raise both sides deliberately: set
+`TASK_DEADLINE_SECONDS` on the self-hosted relay (and keep `TASK_QUEUE_DEADLINE_SECONDS` larger),
+then set the matching `GRID_TASK_TIMEOUT_SECONDS` on training workers. For example, a 24-hour run
+uses `86400`, with a relay queue deadline greater than `86400`. If the base model is not already
+cached, pass its registry credential explicitly with `GRID_TASK_ENV_PASSTHROUGH=HF_TOKEN`; normal
+worker environments do not leak ambient credentials into tasks.
+
+This is node scheduling and failover, not cross-machine DDP: one node owns the trainer for one job.
+If that node disappears, the task lease is reclaimed and another compatible node starts from the
+same immutable input. Version 1 restarts that training attempt rather than resuming an optimizer
+checkpoint. Data and adapters cross only the selected Grid's self-hosted relay/project Git plane;
+project membership remains the authorization boundary. Deploy the Train-aware relay before
+enabling Train-aware workers.
 
 - **`grid train sft`** is imitation: it learns from the answers your team already wrote and needs
   nothing but the machine in front of you. `--backend auto` picks MLX on Apple Silicon and torch

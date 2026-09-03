@@ -37175,6 +37175,8 @@ _BOTH_SPELLINGS: list[tuple[list[str], list[str]]] = [
       "--model", "grid-model"],
      ["goal", "run", "--project", "P1", "--objective", "build", "--done-when",
       "checks pass", "--model", "grid-model"]),
+    (["train", "submit-sft", "P1", "--data", "sft.jsonl", "--backend", "mlx"],
+     ["train", "submit-sft", "--project", "P1", "--data", "sft.jsonl", "--backend", "mlx"]),
 ]
 
 

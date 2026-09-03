@@ -34,7 +34,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from . import (relay, task_agent, task_capacity, task_codex, task_codex_proxy, task_evict,
-               task_repo, task_stream)
+               task_repo, task_stream, train_worker)
 from shared.runtime_identity import grid_runtime_identity
 
 # Queue sentinels. Plain `object()`s rather than None or "" — a task's output legitimately contains
@@ -330,21 +330,24 @@ def decline_claim_once(serve_state: Any, task_id: str, *, attempt: int,
 def _configured_agent_kinds() -> tuple[str, ...]:
     """Supported harnesses the operator enabled, independent of temporary binary availability."""
     configured = (os.getenv("GRID_TASK_AGENT_KINDS") or "claude,codex").replace(",", " ").split()
-    allowed = {kind for kind in configured if kind in ("claude", "codex")}
-    invalid = [kind for kind in configured if kind not in ("claude", "codex")]
+    supported = ("claude", "codex", "train-mlx", "train-torch")
+    allowed = {kind for kind in configured if kind in supported}
+    invalid = [kind for kind in configured if kind not in supported]
     for kind in invalid:
         _warn(f"ignoring unsupported harness {kind!r} in GRID_TASK_AGENT_KINDS")
     # Empty or wholly invalid is fail closed: this provider claims no tasks instead of running a
     # harness its operator meant to disable.
-    return tuple(kind for kind in ("claude", "codex") if kind in allowed)
+    return tuple(kind for kind in supported if kind in allowed)
 
 
 def _agent_kinds() -> tuple[str, ...]:
-    """Harnesses this process can really execute; never advertise either one optimistically."""
+    """Workers this process can really execute; never advertise one optimistically."""
     configured = _configured_agent_kinds()
     kinds = ["claude"] if "claude" in configured and task_agent.claude_available() else []
     if "codex" in configured and task_codex.available():
         kinds.append("codex")
+    kinds.extend(kind for kind in ("train-mlx", "train-torch")
+                 if kind in configured and train_worker.available(kind))
     return tuple(kinds)
 
 
@@ -406,6 +409,9 @@ def _agent_profiles() -> tuple[dict[str, Any], ...]:
                                    | _declared_capabilities("GRID_CODEX_GOAL_CAPABILITIES")),
             "version": task_codex.distributed_goal_version(),
         })
+    for kind in ("train-mlx", "train-torch"):
+        if kind in kinds:
+            profiles.append({"kind": kind, "capabilities": ["sft"]})
     return tuple(profiles)
 
 
@@ -433,10 +439,9 @@ def has_non_claude_claim_capacity() -> bool:
     """Whether this process can keep claiming while Claude's subscription is paused.
 
     Kept beside the actual profile builder so heartbeat telemetry cannot invent a second admission
-    rule. Today Codex is the independent harness; future harnesses can extend this predicate when
-    they have their own capacity signal.
+    rule. Codex and local trainers have capacity independent of Claude's subscription.
     """
-    return any(profile.get("kind") == "codex" for profile in _agent_profiles())
+    return any(profile.get("kind") != "claude" for profile in _agent_profiles())
 
 
 def _claim_supported_now(job: dict[str, Any]) -> bool:
@@ -853,7 +858,7 @@ def run_task(job: dict[str, Any],
         return failed(f"task has no usable prompt (got {type(prompt).__name__})")
 
     agent_kind = str(job.get("agent_kind") or "claude")
-    if agent_kind not in ("claude", "codex"):
+    if agent_kind not in ("claude", "codex", "train-mlx", "train-torch"):
         return failed(f"the relay requested unsupported agent kind {agent_kind!r}")
     goal = job.get("goal")
     is_claude_goal = agent_kind == "claude" and isinstance(goal, dict)
@@ -918,8 +923,12 @@ def run_task(job: dict[str, Any],
         task_evict.touch(workspace)
         # Resolved HERE rather than with the argv below, which is now built after the checkout: a
         # provider with no Claude Code installed must fail before it fetches anything, not after.
-        binary = (task_codex.resolve_binary() if agent_kind == "codex"
-                  else task_agent.resolve_binary())
+        if agent_kind.startswith("train-"):
+            train_worker.preflight(agent_kind)
+            binary = ""
+        else:
+            binary = (task_codex.resolve_binary() if agent_kind == "codex"
+                      else task_agent.resolve_binary())
         if is_claude_goal:
             # Recheck after the claim as well as in the advertised profile. A binary can be
             # downgraded, replaced or runtime-quarantined while another worker's long poll is open;
@@ -1023,6 +1032,25 @@ def run_task(job: dict[str, Any],
             raise
         except (Exception, SystemExit) as exc:
             return failed(f"could not prepare the task's workspace: {exc}")
+
+    if agent_kind.startswith("train-"):
+        try:
+            argv = train_worker.command(job, workspace)
+            _returncode, raw = _run_child(
+                argv, timeout=timeout, publish=sink, cwd=str(workspace),
+                env=task_agent.child_env(
+                    author=task_repo.identity_or_default(
+                        job.get("author_name"), job.get("author_email")),
+                    workspace=workspace),
+                on_spawn=on_spawn)
+        except subprocess.TimeoutExpired:
+            return failed(f"training timed out after {timeout:.0f}s")
+        except _ChildFailed as exc:
+            return failed(f"training exited {exc.returncode}: {exc.stderr[-500:].strip()}")
+        except (Exception, SystemExit) as exc:
+            return failed(f"could not run training: {exc}")
+        output = raw.strip() or f"{agent_kind.removeprefix('train-')} SFT complete"
+        return TaskOutcome("completed", output[-_TASK_OUTPUT_MAX_CHARS:], None)
 
     if agent_kind == "codex":
         if inference is None:
@@ -1338,7 +1366,7 @@ def task_loop(state: Any, capacity: Any = None) -> None:
     `capacity` is this provider's reading of its own Claude subscription (issue 09), consulted before
     every claim. It defaults to the PROCESS-wide gate, which is what makes several Claude workers
     throttle on one reading of the one subscription they all spend. A mixed worker continues to
-    advertise Codex-only capacity because Codex uses Grid inference rather than that Claude window.
+    advertise non-Claude capacity because Codex and local trainers do not spend that Claude window.
     Withdrawing a harness is simply not advertising it at claim time: the queue waits for a provider
     that can run it.
     """
@@ -1349,7 +1377,7 @@ def task_loop(state: Any, capacity: Any = None) -> None:
         # configured harness whose binary is temporarily unavailable takes the recoverable suspend
         # path below instead, so installing/replacing it does not require an inference restart.
         _warn("task serving retired because GRID_TASK_AGENT_KINDS enables no supported harness; "
-              "choose codex, claude, or both (inference is unaffected)")
+              "choose claude, codex, train-mlx and/or train-torch (inference is unaffected)")
         state.tasks_stop.set()
         return
     # Two counters, not one: a provider alternating between a missing plane and a refusal would
@@ -1362,17 +1390,18 @@ def task_loop(state: Any, capacity: Any = None) -> None:
         excluded_agent_kinds: tuple[str, ...] = ()
         if pause > 0:
             # This signal belongs to Claude's subscription, not to the provider process and not to
-            # Codex. A mixed worker keeps offering its independent Codex harness instead of turning
-            # a vendor-specific refusal into fleet-wide Goal withdrawal.
-            codex_configured = "codex" in _configured_agent_kinds()
-            codex_available = codex_configured and any(
-                profile.get("kind") == "codex" for profile in _agent_profiles())
-            if not codex_available:
+            # Codex or local trainers. A mixed worker keeps offering independent capacity instead
+            # of turning a vendor-specific refusal into fleet-wide withdrawal.
+            configured_independent = {
+                kind for kind in _configured_agent_kinds() if kind != "claude"}
+            independent_available = any(
+                profile.get("kind") != "claude" for profile in _agent_profiles())
+            if not independent_available:
                 # Waiting on `tasks_stop` rather than sleeping, so teardown does not have to sit out
-                # the window. A Claude-only policy can wait for the vendor's exact reset. When Codex
-                # is configured but temporarily absent/quarantined, recheck locally at the ordinary
-                # claim backoff so installing or replacing it does not wait out a five-hour window.
-                wait = min(pause, _CLAIM_BACKOFF_SECONDS) if codex_configured else pause
+                # the window. A Claude-only policy can wait for the vendor's exact reset. When an
+                # independent worker is configured but temporarily absent, recheck locally at the
+                # ordinary claim backoff so installing it does not wait out a five-hour window.
+                wait = min(pause, _CLAIM_BACKOFF_SECONDS) if configured_independent else pause
                 state.tasks_stop.wait(wait)
                 continue
             excluded_agent_kinds = ("claude",)

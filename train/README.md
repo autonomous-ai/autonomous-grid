@@ -368,6 +368,13 @@ relates to all this is [`docs/topologies.md`](../docs/topologies.md).
 Heavy dependencies (torch, TRL, peft) live behind `pip install 'grid[train]'` and are imported
 lazily, so the rest of the CLI — and every test in this repo — runs without them.
 
+SFT can also be scheduled on the fleet with `grid train submit-sft`. This is deliberately the
+existing task/Git plane: an explicit `train-mlx` or `train-torch` capability selects one compatible
+node, leases recover a job when a node disappears, and the adapter returns in the result commit.
+It is not distributed-data-parallel training; one job has one trainer, which is the architecture
+above. The first release restarts from the immutable input after node loss rather than resuming an
+optimizer checkpoint.
+
 ## Not built yet
 
 Said plainly, because this branch is open and someone will look.
