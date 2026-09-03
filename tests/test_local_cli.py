@@ -587,6 +587,26 @@ def test_image_gen_steps_default_comes_from_the_workflow():
         assert asked["prompt"][sampler_id]["inputs"]["steps"] == 12
 
 
+def test_media_handler_builds_comfyui_websocket_url():
+    from shared.media.media_handler import MediaHandler
+
+    assert MediaHandler._websocket_url("http://127.0.0.1:8188") == "ws://127.0.0.1:8188/ws"
+    assert MediaHandler._websocket_url("https://comfy.example/api/") == "wss://comfy.example/ws"
+
+
+def test_media_handler_prefers_the_installed_comfyui_output(monkeypatch, tmp_path):
+    from shared.media import media_handler
+
+    installed = tmp_path / "services" / "ComfyUI" / "output"
+    legacy = tmp_path / "public" / "temp_comfy_output"
+    installed.mkdir(parents=True)
+    legacy.mkdir(parents=True)
+    monkeypatch.setattr(media_handler.paths, "home", lambda: tmp_path)
+    monkeypatch.setattr(media_handler.httpx, "get", lambda *args, **kwargs: SimpleNamespace(status_code=500))
+
+    assert media_handler.MediaHandler("http://127.0.0.1:8188")._get_output_dir() == str(installed)
+
+
 def test_create_venv_seeds_pip_into_the_uv_venv(monkeypatch, tmp_path):
     """`uv venv` ships no pip; when uv resolves a system Python that lacks ensurepip (a 3.11 rc did
     exactly this) grid's pip bootstrap has nothing to fall back to. `_create_venv` must pass `--seed`
