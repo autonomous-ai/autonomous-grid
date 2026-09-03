@@ -45,6 +45,7 @@ def cmd_allocator_scout_run(args: argparse.Namespace) -> int:
         "state_file": str(state_path),
         "discovered": len(candidates),
         "benchmark_ready": sum(item.state == "benchmark-ready" for item in proposals),
+        "discovery_issues": list(discovery.issues),
         "proposals": [item.to_dict() for item in proposals],
     }
     if args.json:
@@ -55,6 +56,10 @@ def cmd_allocator_scout_run(args: argparse.Namespace) -> int:
             f"{payload['benchmark_ready']} fit this fleet"
         )
         _print_proposals(proposals)
+        if discovery.issues:
+            print(f"  warning  {len(discovery.issues)} Hub source(s) skipped")
+            for issue in discovery.issues[:5]:
+                print(f"    {issue}")
         print(f"  state  {state_path}")
     return 0
 
