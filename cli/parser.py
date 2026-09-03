@@ -640,6 +640,12 @@ def _add_allocator(sub) -> None:
     qualify.add_argument("--artifact-size-mb", type=int, default=0)
     qualify.add_argument("--port", type=int, default=28901)
     qualify.add_argument("--tensor-parallel-size", type=int, default=1)
+    qualify.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.90,
+        help="Fraction of each visible GPU vLLM may reserve (default: 0.90).",
+    )
     qualify.add_argument("--cache-dir", default=None)
     qualify.add_argument("--prompt", default="Reply with exactly GRID.")
     qualify.add_argument("--max-tokens", type=int, default=32)

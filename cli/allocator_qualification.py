@@ -24,6 +24,8 @@ def cmd_allocator_qualify(args: argparse.Namespace) -> int:
         raise SystemExit("--timeout must be positive and --artifact-size-mb must be non-negative")
     if args.tensor_parallel_size < 1 or args.max_tokens < 1:
         raise SystemExit("tensor parallel size and max tokens must be positive")
+    if not 0.0 < args.gpu_memory_utilization <= 1.0:
+        raise SystemExit("--gpu-memory-utilization must be in (0, 1]")
     if args.image_size < 64 or args.steps < 1:
         raise SystemExit("ComfyUI image size must be at least 64 and steps must be positive")
     backend = _backend(args)
@@ -67,6 +69,7 @@ def _backend(args: argparse.Namespace) -> Any:
     return VllmBackend(
         cache,
         tensor_parallel_size=args.tensor_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
         readiness_timeout=args.timeout,
     )
 

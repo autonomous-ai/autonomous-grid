@@ -460,6 +460,7 @@ class VllmBackend:
         cache_dir: Path,
         *,
         tensor_parallel_size: int = 1,
+        gpu_memory_utilization: float = 0.90,
         readiness_timeout: float = 600.0,
         bind_host: str = "127.0.0.1",
         endpoint_host: str | None = None,
@@ -468,6 +469,9 @@ class VllmBackend:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_path = self.cache_dir / "artifacts.json"
         self.tensor_parallel_size = max(1, int(tensor_parallel_size))
+        if not 0.0 < gpu_memory_utilization <= 1.0:
+            raise ValueError("gpu_memory_utilization must be in (0, 1]")
+        self.gpu_memory_utilization = float(gpu_memory_utilization)
         self.readiness_timeout = readiness_timeout
         self.bind_host = bind_host
         self.endpoint_host = endpoint_host or bind_host
@@ -542,6 +546,8 @@ class VllmBackend:
             model_id,
             "--tensor-parallel-size",
             str(self.tensor_parallel_size),
+            "--gpu-memory-utilization",
+            str(self.gpu_memory_utilization),
         ]
         log_path = self.cache_dir / f"{hashlib.sha256(model_id.encode()).hexdigest()[:16]}.log"
         log = log_path.open("ab")
