@@ -13,6 +13,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -255,13 +256,19 @@ class OllamaBackend:
         source_model = unquote(f"{parsed.netloc}{parsed.path}").lstrip("/")
         if source_model != model_id:
             raise RuntimeError("Ollama source model does not match the placement model")
+        expected = canonical_sha256(expected_sha256)
+        if model_id in self.cached_models():
+            existing = self.artifact_sha256(model_id)
+            if existing != expected:
+                raise RuntimeError("refusing to replace an existing Ollama tag with another digest")
+            return existing
         response = self.client.post(
             f"{self.base_url}/api/pull",
             json={"model": model_id, "stream": False},
         )
-        response.raise_for_status()
+        _raise_engine_error(response, "Ollama pull")
         digest = self.artifact_sha256(model_id)
-        if digest != canonical_sha256(expected_sha256):
+        if digest != expected:
             self.evict_artifact(model_id, digest)
             raise RuntimeError("pulled Ollama model digest does not match the pinned artifact")
         for item in self._json("GET", "/api/tags").get("models", []):
@@ -278,7 +285,7 @@ class OllamaBackend:
         response = self.client.request(
             "DELETE", f"{self.base_url}/api/delete", json={"model": model_id}
         )
-        response.raise_for_status()
+        _raise_engine_error(response, "Ollama delete")
 
     def start(self, model_id: str, port: int) -> RuntimeHandle:
         del port
@@ -286,7 +293,7 @@ class OllamaBackend:
             f"{self.base_url}/api/generate",
             json={"model": model_id, "prompt": "", "stream": False, "keep_alive": -1},
         )
-        response.raise_for_status()
+        _raise_engine_error(response, "Ollama warm")
         handle = RuntimeHandle(
             pid=os.getpid(),
             port=self.port,
@@ -329,7 +336,15 @@ class OllamaBackend:
             f"{self.base_url}/api/generate",
             json={"model": model_id, "prompt": "", "stream": False, "keep_alive": 0},
         )
-        response.raise_for_status()
+        _raise_engine_error(response, "Ollama unload")
+        deadline = time.monotonic() + 30.0
+        while self.ready(handle, model_id) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if self.ready(handle, model_id):
+            raise RuntimeError(f"Ollama did not unload {model_id!r} within 30 seconds")
+
+    def close(self) -> None:
+        self.client.close()
 
     def active_requests(self, handle: RuntimeHandle, model_id: str) -> int | None:
         del handle, model_id
@@ -423,6 +438,9 @@ class ComfyUIBackend:
         except (httpx.HTTPError, ValueError):
             return None
 
+    def close(self) -> None:
+        self.client.close()
+
     def _healthy(self) -> bool:
         try:
             return self.client.get(f"{self.base_url}/system_stats").status_code == 200
@@ -443,6 +461,10 @@ class VllmBackend:
         cache_dir: Path,
         *,
         tensor_parallel_size: int = 1,
+        gpu_memory_utilization: float = 0.90,
+        max_model_len: int = 0,
+        enforce_eager: bool = False,
+        use_flashinfer_sampler: bool | None = None,
         readiness_timeout: float = 600.0,
         bind_host: str = "127.0.0.1",
         endpoint_host: str | None = None,
@@ -451,6 +473,14 @@ class VllmBackend:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_path = self.cache_dir / "artifacts.json"
         self.tensor_parallel_size = max(1, int(tensor_parallel_size))
+        if not 0.0 < gpu_memory_utilization <= 1.0:
+            raise ValueError("gpu_memory_utilization must be in (0, 1]")
+        self.gpu_memory_utilization = float(gpu_memory_utilization)
+        if max_model_len < 0:
+            raise ValueError("max_model_len must be non-negative")
+        self.max_model_len = int(max_model_len)
+        self.enforce_eager = bool(enforce_eager)
+        self.use_flashinfer_sampler = use_flashinfer_sampler
         self.readiness_timeout = readiness_timeout
         self.bind_host = bind_host
         self.endpoint_host = endpoint_host or bind_host
@@ -511,6 +541,10 @@ class VllmBackend:
             raise RuntimeError(f"vLLM snapshot is not cached: {model_id!r}")
         binary = shutil.which("vllm")
         if not binary:
+            sibling = Path(sys.executable).with_name("vllm")
+            if sibling.is_file():
+                binary = str(sibling)
+        if not binary:
             raise RuntimeError("vLLM is not installed on this node")
         model_path = str(Path(str(item["path"])).resolve())
         command = [
@@ -525,15 +559,24 @@ class VllmBackend:
             model_id,
             "--tensor-parallel-size",
             str(self.tensor_parallel_size),
+            "--gpu-memory-utilization",
+            str(self.gpu_memory_utilization),
         ]
+        if self.max_model_len:
+            command.extend(("--max-model-len", str(self.max_model_len)))
+        if self.enforce_eager:
+            command.append("--enforce-eager")
         log_path = self.cache_dir / f"{hashlib.sha256(model_id.encode()).hexdigest()[:16]}.log"
         log = log_path.open("ab")
         try:
             process = subprocess.Popen(
-                command,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
+            command,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=_vllm_process_env(
+                Path(binary), use_flashinfer_sampler=self.use_flashinfer_sampler
+            ),
+            start_new_session=True,
             )
         finally:
             log.close()
@@ -558,6 +601,10 @@ class VllmBackend:
         raise RuntimeError(f"vLLM readiness timed out; see {log_path}")
 
     def alive(self, handle: RuntimeHandle) -> bool:
+        with self._lock:
+            process = self._spawned.get(handle.pid)
+        if process is not None:
+            return process.poll() is None
         try:
             os.kill(handle.pid, 0)
             return True
@@ -598,6 +645,10 @@ class VllmBackend:
             time.sleep(0.1)
         if self.alive(handle):
             raise RuntimeError("vLLM did not drain and stop within 30 seconds")
+        with self._lock:
+            process = self._spawned.pop(handle.pid, None)
+        if process is not None:
+            process.wait(timeout=1.0)
 
     def active_requests(self, handle: RuntimeHandle, model_id: str) -> int | None:
         del model_id
@@ -615,6 +666,30 @@ class VllmBackend:
                 except ValueError:
                     return None
         return int(total) if found and total.is_integer() else None
+
+
+def _vllm_process_env(
+    binary: Path, *, use_flashinfer_sampler: bool | None = None
+) -> dict[str, str]:
+    """Activate a wheel-packaged CUDA compiler when the host has drivers only."""
+
+    env = os.environ.copy()
+    binary_dir = binary.resolve().parent
+    env["PATH"] = f"{binary_dir}{os.pathsep}{env.get('PATH', '')}"
+    if use_flashinfer_sampler is not None:
+        env["VLLM_USE_FLASHINFER_SAMPLER"] = "1" if use_flashinfer_sampler else "0"
+    if env.get("CUDA_HOME") or shutil.which("nvcc", path=env.get("PATH")):
+        return env
+    venv_root = binary_dir.parent
+    candidates = sorted(
+        venv_root.glob("lib/python*/site-packages/nvidia/cu*/bin/nvcc"), reverse=True
+    )
+    if not candidates:
+        return env
+    cuda_bin = candidates[0].parent
+    env["CUDA_HOME"] = str(cuda_bin.parent)
+    env["PATH"] = f"{cuda_bin}{os.pathsep}{env['PATH']}"
+    return env
 
 
 def build_engine_orchestrator(
@@ -655,6 +730,21 @@ def _ollama_digest(value: Any) -> str:
     if digest.startswith("sha256:"):
         digest = digest.removeprefix("sha256:")
     return canonical_sha256(digest, "Ollama model digest")
+
+
+def _raise_engine_error(response: httpx.Response, operation: str) -> None:
+    """Preserve a native engine's bounded error text instead of hiding it behind status only."""
+
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        try:
+            payload = response.json()
+            detail = str(payload.get("error") or payload.get("detail") or "")
+        except (ValueError, AttributeError):
+            detail = response.text[:500]
+        suffix = f": {detail[:500]}" if detail else ""
+        raise RuntimeError(f"{operation} failed with HTTP {response.status_code}{suffix}") from exc
 
 
 def _handle_with_runtime(handle: RuntimeHandle, runtime: str) -> RuntimeHandle:
