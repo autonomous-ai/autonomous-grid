@@ -22,7 +22,7 @@ from urllib.parse import urlencode
 from shared import run_records
 
 if TYPE_CHECKING:  # annotations only (PEP 563) — the runtime import stays lazy, in the handlers
-    from . import signout
+    from . import os_grid_notice, signout
 
 
 # Cap the server-supplied poll interval so a misbehaving/misconfigured control plane can't
@@ -38,7 +38,7 @@ _SESSION_EXPIRED_RE = re.compile(r"[A-Z]+ \S+ failed \((?:401|403)\):")
 def cmd_login(args: argparse.Namespace) -> int:
     from remote import control_plane, credentials
 
-    from . import signout
+    from . import os_grid_notice, signout
 
     as_json = getattr(args, "json", False)
     api_url = credentials.api_url()
@@ -65,7 +65,8 @@ def cmd_login(args: argparse.Namespace) -> int:
         raise SystemExit("Sign-in was approved but the control plane returned no session token. "
                          "Run `grid login` to try again.")
     user = approved.get("user") or {}
-    networks = _validated(control_plane.fetch_tokens(session_token, device_id, api_url))
+    fetched = control_plane.fetch_tokens(session_token, device_id, api_url)
+    networks = _validated(fetched.networks)
 
     credentials.save_credentials({
         "session_token": session_token,
@@ -75,7 +76,8 @@ def cmd_login(args: argparse.Namespace) -> int:
     })
     signout.warn_stranded(previous_networks, networks)
     # Deliberately no `state.set_active("remote", …)` here — login never auto-selects a grid.
-    return _report_login(user.get("email", ""), networks, as_json=as_json)
+    return _report_login(user.get("email", ""), networks,
+                         absence=os_grid_notice.absence(fetched.os_served), as_json=as_json)
 
 
 def _await_approval(started: dict[str, Any], api_url: str) -> dict[str, Any]:
@@ -141,10 +143,12 @@ def _print_signin_prompt(url: str, user_code: str, *, to_stderr: bool) -> None:
     print(f"  Code: {user_code}", file=stream)
 
 
-def _report_login(email: str, networks: list[dict[str, Any]], *, as_json: bool) -> int:
+def _report_login(email: str, networks: list[dict[str, Any]], *,
+                  absence: os_grid_notice.OsGridAbsence | None = None, as_json: bool) -> int:
     if as_json:
         grids = [{"name": n["name"], "type": n.get("network_type")} for n in networks]
-        print(json.dumps({"signed_in": True, "email": email, "grids": grids, "active": None}))
+        print(json.dumps({"signed_in": True, "email": email, "grids": grids, "active": None,
+                          "os_grid": absence.as_json() if absence else None}))
         return 0
     if networks:
         listed = ", ".join(n["name"] for n in networks)
@@ -152,6 +156,7 @@ def _report_login(email: str, networks: list[dict[str, Any]], *, as_json: bool) 
         print("Run `grid use <name>` to pick one.")
     else:
         print(f"Signed in as {email}. You don't belong to any grids yet.")
+    _print_os_grid_absence(absence)
     return 0
 
 
@@ -360,7 +365,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     """
     from remote import control_plane, credentials
 
-    from . import signout
+    from . import os_grid_notice, signout
 
     as_json = getattr(args, "json", False)
     # One credentials snapshot for both the auth gate and the merge below. Reading the session token
@@ -388,7 +393,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         raise
     # Validate outside the try: a malformed bundle is a data error, not a session error, so it must
     # surface as-is (never rewritten to "session expired").
-    networks = _validated(raw)
+    networks = _validated(raw.networks)
     # Authoritative overwrite of the stored grid list; session_token / api_url / user are preserved.
     # Immutable update — a fresh dict, never the loaded one mutated in place. state.json is untouched.
     credentials.save_credentials({**data, "networks": networks})
@@ -404,17 +409,33 @@ def cmd_sync(args: argparse.Namespace) -> int:
             "were cleared locally. Re-run `grid sync` if this may be transient.",
             file=sys.stderr,
         )
-    return _report_sync(networks, as_json=as_json)
+    return _report_sync(networks, absence=os_grid_notice.absence(raw.os_served), as_json=as_json)
 
 
-def _report_sync(networks: list[dict[str, Any]], *, as_json: bool) -> int:
+def _report_sync(networks: list[dict[str, Any]], *,
+                 absence: os_grid_notice.OsGridAbsence | None = None, as_json: bool) -> int:
     if as_json:
         grids = [{"name": n["name"], "type": n.get("network_type")} for n in networks]
-        print(json.dumps({"synced": True, "grids": grids}))
+        print(json.dumps({"synced": True, "grids": grids,
+                          "os_grid": absence.as_json() if absence else None}))
         return 0
     if networks:
         listed = ", ".join(n["name"] for n in networks)
         print(f"Synced {len(networks)} grid(s): {listed}.")
     else:
         print("Synced 0 grids.")
+    _print_os_grid_absence(absence)
     return 0
+
+
+def _print_os_grid_absence(absence: os_grid_notice.OsGridAbsence | None) -> None:
+    """Say why there is no OS grid in the list, on the human path only (ADR 0039 D-k).
+
+    Stdout beside the command's own report, not stderr: this is part of the answer to what was asked,
+    not a warning that something went wrong — and it never is. ``--json`` never reaches here; the same
+    fact rides the ``os_grid`` field instead, so stdout stays parseable and a script sees what a
+    person sees. ``None`` — an OS grid you have, or a control plane too old to have said — prints
+    nothing at all, which is this whole feature's ordinary case.
+    """
+    if absence is not None:
+        print(absence.line())

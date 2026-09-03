@@ -25,44 +25,13 @@ and its grid-src resolver is different: that file names one worktree by absolute
 its checks skip in every *other* worktree. This one derives the sibling from its own location.
 """
 
-import os
-import pathlib
-
 import pytest
+
+from tests.grid_src_repo import grid_src_private_server as _grid_src_private_server
 
 # The grid-src module holding the relay's copy, and the name of the copy inside it.
 _RELAY_MODULE = "starter_engine.py"
 _RELAY_CONSTANT = "GRID_RUN_ENGINE_KINDS"
-
-
-def _grid_src_private_server():
-    """grid-src's `private_server` package, or ``None`` when this machine does not have it.
-
-    Derived from THIS file's location rather than written out, so the check runs in whichever
-    worktree it is checked out into instead of skipping everywhere but one. The convention is
-    `<repo>-feats/<slug>` beside `<repo>`, so a worktree of `autonomous-grid` at
-    `…/autonomous-grid-feats/<slug>` looks for `…/grid-src-feats/<slug>` first and falls back to the
-    main `…/grid-src` checkout.
-
-    `GRID_SRC_REPO` — the cross-repo E2E's own override — wins over both, so a machine that lays the
-    repositories out differently can still run this.
-    """
-    override = os.environ.get("GRID_SRC_REPO")
-    if override:
-        return pathlib.Path(override) / "grid_cli" / "private_server"
-
-    here = pathlib.Path(__file__).resolve().parent.parent  # the autonomous-grid checkout
-    projects = here.parent
-    candidates = []
-    if projects.name == "autonomous-grid-feats":
-        candidates.append(projects.parent / "grid-src-feats" / here.name)
-        candidates.append(projects.parent / "grid-src")
-    else:
-        candidates.append(projects / "grid-src")
-    for candidate in candidates:
-        if (candidate / "grid_cli" / "private_server").is_dir():
-            return candidate / "grid_cli" / "private_server"
-    return None
 
 
 def _relay_grid_run_kinds():

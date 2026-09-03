@@ -1089,7 +1089,8 @@ def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
 
     The display name comes from the record's ``meta_name`` (the ``--name`` a remote operator gave, or
     the box's hostname when omitted), falling back to ``engine_id`` for a record written before the
-    singleton change. A multi-engine identity shows the kinds it gathered (e.g. ``ollama+vllm``) when no
+    singleton change. ``name_chosen`` says which of those two it was — see the comment on it below.
+    A multi-engine identity shows the kinds it gathered (e.g. ``ollama+vllm``) when no
     explicit ``--engine-label`` was given, so the page reflects what is actually serving.
     """
     label = record.get("engine_label")
@@ -1109,7 +1110,22 @@ def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
             label = "comfyui"
         else:
             label = "llama.cpp"
-    meta = {"name": record.get("meta_name") or engine_id, "engine": label}
+    # `name_chosen` is the second half of the name and travels with it: whether a PERSON wrote that
+    # string or it is just this box's hostname (ADR 0039 D-n, issue 16). The relay publishes an
+    # unchosen name on every grid type but `os-community`, where a hostname is a stranger's machine
+    # naming its owner to anyone with the URL. It is never inferred from the string — measured on the
+    # live fleet, a heuristic gets `MacBooks-MacBook-Pro-7.local` (not chosen) and `Grid` (chosen)
+    # backwards — so the provider states it and the relay believes it.
+    #
+    # ⚠️ **`is True`, not truthiness.** A record written before this key existed has none, and absent
+    # must read as NOT chosen: this is a new key on an existing payload, so it degrades in silence and
+    # the fail-closed direction is the only thing standing in for a 404 nobody gets. Same precedent as
+    # the `engine_id` fallback above.
+    meta = {
+        "name": record.get("meta_name") or engine_id,
+        "name_chosen": record.get("meta_name_chosen") is True,
+        "engine": label,
+    }
     # What the machine IS — chip on Apple Silicon, card elsewhere. Without it the grid page can only
     # say the hostname and the OS ("Grid-Relay · macOS"), which is the same sentence for a laptop
     # and for a 192 GB Mac Studio. Empty fields are dropped rather than sent blank: the relay merges

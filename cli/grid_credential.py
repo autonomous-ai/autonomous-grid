@@ -105,10 +105,25 @@ class _RefreshFailed(Exception):
         if self.status == 401:
             return f"{lead}\nRun `grid login` to sign in again."
         if self.status == 403:
-            # The refresh credential is fine; the *membership* it names is not. `grid login` re-mints
-            # from the same membership, so recommending it would send the user in a circle.
-            return (f"{lead}\nThat is about your membership of this grid, not your sign-in — "
-                    f"`grid login` will not change it.")
+            # The refresh credential is fine; the *membership* it names is not. What re-establishes a
+            # membership is **not the same on every grid type**, so this may not promise an outcome:
+            # on the types that predate OS grids it is a row somebody else controls and re-signing in
+            # is a circle, while on an `os-community` grid (ADR 0039 D-e) there is no row at all —
+            # membership is re-derived from the `os=` claim that only the token fetch sends, so
+            # `grid sync` is the entire repair. Naming the cheap thing to try and what it means when
+            # it does not work is true of both.
+            #
+            # ⚠️ **Deliberately not branched on the grid's type.** The stored record does carry a
+            # `network_type`, but it is a snapshot from the last login/sync that nothing refreshes on
+            # a token exchange — and keying the advice on it would put a fourth copy of the
+            # `os-community` literal in this repository, which by decision holds none (see
+            # `tests/test_os_grid_type_lockstep.py`). That copy would degrade silently: renamed at
+            # the far end the branch simply stops firing and the inverted sentence is back, with
+            # nothing red. A refusal `code` on the wire is worse still — exactly three are parsed
+            # across these seams and keeping that count low is the contract.
+            return (f"{lead}\nThat is about your membership of this grid, not your sign-in. Run "
+                    f"`grid sync` to re-check it; if the grid still refuses afterwards the "
+                    f"membership itself is gone, and signing in again will not bring it back.")
         return (f"{lead}\nNothing is wrong with your sign-in; the control plane could not mint a "
                 f"token. Try again shortly.")
 

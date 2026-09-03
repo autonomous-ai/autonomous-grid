@@ -11,13 +11,15 @@ is reached in local mode (dispatch gates the remote commands to remote mode).
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
-from . import credentials
+from shared.system import os_grid
 
+from . import credentials
 
 # Control-plane HTTP timeout (seconds). The default suits every fast call; managed-network *create* is
 # synchronous and can exceed it while the backend boots the master, so it is overridable via
@@ -64,11 +66,102 @@ def poll_device_login(device_code: str, api_url: str | None = None) -> dict[str,
         return _send(client, "POST", "/v1/grid/auth/device/poll", json={"device_code": device_code}).json()
 
 
-def fetch_tokens(session_token: str, device_id: str, api_url: str | None = None) -> list[dict[str, Any]]:
+#: The key on the token-fetch reply that says whether this machine was handed an OS grid (ADR 0039
+#: D-k). Named once, because the pin comparing it to grid-apis' own spelling reads it from here —
+#: `tests/test_os_grid_type_lockstep.py`.
+OS_SERVED_KEY = "os_served"
+
+
+@dataclass(frozen=True)
+class TokenFetch:
+    """What ``GET /v1/grid/tokens`` answered: the grids, and why an OS grid may not be among them.
+
+    ``os_served`` is a *tri-state* and every one of the three means something different (ADR 0039
+    D-k):
+
+    - ``True`` — this call was handed a credential for an OS grid. Nothing to report.
+    - ``False`` — this call was handed none. ⚠️ **Not "none for the OS this machine claimed"** — the
+      far end answers for what is IN the body, and the visibility query admits a row six ways of
+      which only one consults the claim (ownership does not), so the platform account that owns every
+      OS grid reads ``True`` whatever it claims. The difference reaches no ordinary user and reaches
+      no printed line, but the sentence has to stay honest about what the flag measures.
+    - ``None`` — the control plane did not say. A new key on an existing endpoint degrades silently,
+      so this is what an older control plane produces, and it must print exactly nothing.
+
+    ⚠️ **`False` and `None` are not interchangeable.** Collapsing them would put "this control plane
+    isn't serving one" in front of everybody who has not upgraded their control plane yet — the one
+    direction ADR 0039 D-k exists to keep quiet.
+    """
+
+    networks: list[dict[str, Any]]
+    os_served: bool | None
+
+
+def fetch_tokens(session_token: str, device_id: str, api_url: str | None = None) -> TokenFetch:
+    """Every grid this account may reach from THIS machine, each with a fresh credential.
+
+    Carries the machine's **OS token** as ``os=`` beside ``device_id`` when it has one (ADR 0039 D-e),
+    which is what decides whether an OS grid is among them. Both call sites — `grid login` and
+    `grid sync` — go through here, so the machine speaks for itself once rather than in two places
+    that could answer differently.
+
+    The parameter is **omitted entirely** on a machine outside the closed token set, never sent empty:
+    the far end gates by equality against a grid's own token, and an empty string would be a second
+    spelling of "no claim" for it to recognise. It is also new on an existing endpoint, so an older
+    control plane simply ignores it and this call behaves exactly as it did before (ADR 0039 D-j — the
+    public CLI has no rollout ordering in either direction).
+
+    Answers the ``os_served`` key alongside them (ADR 0039 D-k) — see :class:`TokenFetch`, which is
+    what turns an empty grid list into one that can say WHY it is empty.
+    """
+    params = {"device_id": device_id}
+    machine_os = os_grid.os_token()
+    if machine_os:
+        params["os"] = machine_os
     with _client(api_url, session_token) as client:
-        resp = _send(client, "GET", "/v1/grid/tokens", params={"device_id": device_id})
+        resp = _send(client, "GET", "/v1/grid/tokens", params=params)
+    try:
+        payload = resp.json()
+    except (ValueError, RecursionError):
+        # Not JSON at all, or nested past the parser's recursion limit. ⚠️ `RecursionError` is NOT a
+        # `ValueError` — `json.loads` raises it on a deeply nested body and no `except ValueError`
+        # sees it — and an empty 200 body raises here too, which is why this route does not use
+        # `_json_or_empty`: its `{}` would be read as zero grids, which is the very thing below.
+        payload = None
+    if not isinstance(payload, dict):
+        # ⚠️ **REFUSED, never read as "zero grids".** This used to fall back to `{}`, and the cost of
+        # that is one caller away: `cli.auth.cmd_sync` overwrites `[[networks]]` authoritatively, so
+        # an empty answer discards every grid's access AND refresh token — and refresh rotation makes
+        # them unrecoverable. A body that is not an object is a control-plane fault or something
+        # sitting in front of it, and neither is a reason to destroy a credential store.
+        #
+        # `_validated` does not catch it and cannot: it is the trust boundary for bad ROWS and
+        # iterates the list, so a non-object body yields nothing to validate and sails straight
+        # through. This is the same check one level up, on the shape that holds the rows.
+        #
+        # A `ControlPlaneError` (a `SystemExit` subclass) rather than a raised `AttributeError`: the
+        # CLI's clean-error idiom, a sentence and a non-zero exit. ⚠️ The wording must not match
+        # `cli.auth._SESSION_EXPIRED_RE` — anchored on `_raise`'s "<METHOD> <URL> failed (401):" — or
+        # somebody would be told to run `grid login` for a fault no credential can fix.
+        raise ControlPlaneError(
+            f"The control plane answered GET /v1/grid/tokens with a "
+            f"{type(payload).__name__} rather than an object, so this CLI cannot tell which grids "
+            f"you have. Nothing was changed locally; re-run `grid sync` if this may be transient."
+            # `NoneType` covers both a literal JSON `null` and a body that would not parse — the
+            # remedy is the same sentence, and naming the parse error would put a server's raw output
+            # in front of somebody who can do nothing with it.
+        )
+    served = payload.get(OS_SERVED_KEY)
+    return TokenFetch(
         # `or []` coerces both a missing key and an explicit null to an empty list.
-        return list(resp.json().get("networks") or [])
+        networks=list(payload.get("networks") or []),
+        # Compared by IDENTITY against the two booleans, never for truthiness. `"false"` is the value
+        # that makes this matter: it is truthy in Python, so a truthiness test would read a control
+        # plane refusing to serve an OS grid as serving one. Anything that is not a real `bool` — a
+        # string, a number, a null — is read as "did not say" and prints nothing, which is the same
+        # clean degrade an older control plane already gets.
+        os_served=served if served is True or served is False else None,
+    )
 
 
 def refresh_network_token(
@@ -79,11 +172,30 @@ def refresh_network_token(
     Unauthenticated by design — the ``refresh_token`` in the body *is* the credential, so no
     session/access Bearer is attached (matches the reference client). A failed refresh surfaces as
     a clean ``SystemExit`` via ``_send``; the caller treats that as end-of-run.
+
+    **The OS claim rides this call too** (ADR 0039 D-e, issue 10), and it has to. On an
+    ``os-community`` grid the request IS the whole membership fact — nothing about the OS is stored —
+    so an exchange that carried no claim matched nothing, and the bundle ``fetch_tokens`` hands out
+    contained a ``refresh_token`` that was inert on exactly that one network type. A machine serving
+    an OS grid then went dark the first time the grid's ``network_epoch`` moved, since that is what
+    makes the relay answer 401 and sends the serve loop here.
+
+    Same discipline as the fetch: read from the one place that decides, and **omit the key entirely**
+    when this machine claims no OS rather than sending an empty string, so the far end never has a
+    second spelling of "no claim" to recognise. Also the same absence of rollout ordering, and for a
+    reason worth keeping written down: the far end's body model does not forbid unknown fields, so a
+    newer CLI against an older control plane has this key dropped in silence and behaves exactly as it
+    did before. That was **measured, not assumed** — a sibling model elsewhere in these repos refuses
+    unknown keys and answers 422, which would have made this a break rather than a degrade.
     """
+    body: dict[str, Any] = {"refresh_token": refresh_token}
+    machine_os = os_grid.os_token()
+    if machine_os:
+        body["os"] = machine_os
     with _client(api_url) as client:
         return _send(
             client, "POST", f"/v1/grid/tokens/{network_id}",
-            json={"refresh_token": refresh_token},
+            json=body,
         ).json()
 
 
