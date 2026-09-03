@@ -6,7 +6,7 @@ local grid proxy, and accepts the remote-only `--target-provider` / `--allow-sel
 flags (DECISIONS D16). The media SSE consumption + file IO are the shared ones (`cli/media_io.py`).
 
 The relay address is **live-only** (the login bundle carries the access token but not the
-`signaling_url`), so each handler resolves it from `…/status` exactly like `grid join`/`up`/`info`.
+`signaling_url`), so each handler resolves it from `…/status` exactly like `grid join`/`start`/`info`.
 A 401 is a clear "run `grid login`" — refresh-on-401 stays in the long-running serve loop (ADR 0004),
 not on this one-shot path.
 

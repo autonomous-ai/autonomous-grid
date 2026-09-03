@@ -87,7 +87,7 @@ is more history, not more training time.
 at — the address of the engine you chose on the machines step, and the model's name:
 
 ```
-OPENAI_BASE_URL=http://127.0.0.1:8090/v1      # your grid's own endpoint (`grid up`)
+OPENAI_BASE_URL=http://127.0.0.1:8090/v1      # your grid's own endpoint (`grid start`)
 model: <your-model>
 ```
 

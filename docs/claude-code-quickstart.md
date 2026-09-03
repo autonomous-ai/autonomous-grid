@@ -53,7 +53,7 @@ grid                       # overview: mode, active grid, engines, models
 against a different grid just once, name it: `grid launch claude <name>` (a grid name or an `ag-…`
 id, exactly like `grid info` / `grid models` / `grid engines`).
 
-The grid must be **up** (`grid up`) and your sign-in must be a member of it.
+The grid must be **up** (`grid start`) and your sign-in must be a member of it.
 
 ## 3. Pick a model the grid serves
 

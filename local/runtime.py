@@ -150,7 +150,7 @@ def start_grid(cfg: dict[str, Any]) -> int:
     # OverflowError), and it answers "not alive" for a zombie or a recycled pid — both of which used
     # to read as a live server and cost a 3s health wait before falling through anyway.
     identity = _server_identity(cfg)
-    _note_unusable_pid(cfg, identity)  # `grid up` overwrites it below; say so before the evidence goes
+    _note_unusable_pid(cfg, identity)  # `grid start` overwrites it below; say so before the evidence goes
     if run_records.record_alive(identity):
         try:
             wait_for_health(cfg, timeout=3)
@@ -188,7 +188,7 @@ def _note_unusable_pid(cfg: dict[str, Any], identity: dict[str, Any]) -> None:
     """Say when the config's ``server_pid`` is not a process id at all.
 
     Unusable shapes (a string, a negative, out of range, a list) signal nothing, which is correct and
-    was completely silent — so `grid down` reported success having done nothing, and `grid up`
+    was completely silent — so `grid stop` reported success having done nothing, and `grid start`
     silently overwrote the damaged value with a fresh stamp, destroying the only evidence. ``0``/absent
     is NOT this case: that is the ordinary never-started or already-stopped config, and it must stay
     quiet on both commands.
@@ -207,7 +207,7 @@ def _terminate_server(cfg: dict[str, Any], identity: dict[str, Any]) -> run_reco
     ``pid_alive`` reports EPERM as **alive** (ADR 0024: calling another user's process dead would let
     a teardown claim it reaped something still running), so a drifted ``server_pid`` can reach
     ``terminate_pid`` and raise ``PermissionError`` — which, uncaught, is a raw traceback out of
-    `grid down`. Caught here and deliberately **not** inside ``terminate_pid``:
+    `grid stop`. Caught here and deliberately **not** inside ``terminate_pid``:
     ``orphan_sweep.terminate`` depends on that exception escaping to classify a swept match as
     ``foreign`` rather than reaped, so swallowing it there would blind both modes' `grid leave` to
     another user's serve child.
@@ -229,7 +229,7 @@ def _terminate_server(cfg: dict[str, Any], identity: dict[str, Any]) -> run_reco
 
 
 class StopOutcome(NamedTuple):
-    """What one `grid down` established — and they are two different questions.
+    """What one `grid stop` established — and they are two different questions.
 
     ``teardown`` says what happened to the process the config *named*; ``serving`` says whether the
     grid is still answering on its own port. Neither alone is the answer: a teardown can be
@@ -275,7 +275,7 @@ def stop_grid(cfg: dict[str, Any]) -> StopOutcome:
 
 
 # A grid server binds `cfg["host"]`, and a wildcard bind is reachable on loopback. Anything else has
-# to be addressed as itself: `grid up --host 10.0.0.5` really does bind only that address, so probing
+# to be addressed as itself: `grid start --host 10.0.0.5` really does bind only that address, so probing
 # 127.0.0.1 would report a perfectly healthy grid as unreachable — a 30s timeout in `wait_for_health`,
 # and in `stop_grid` something worse, since "nothing answers" is promoted there to *proof* the grid
 # stopped.
@@ -343,7 +343,7 @@ def _nothing_is_listening(host: str, port: int) -> bool:
     ``socket.gaierror``, ``ENETUNREACH`` and ``EHOSTUNREACH`` are all plain ``OSError``s — so httpcore
     maps every one of them to the same ``ConnectError`` a genuine refusal produces. Treating that as
     proof is the laundering this whole probe exists to prevent, and it is not hypothetical: a laptop
-    that roams networks between `grid up --host <lan-ip>` and `grid down` would have its live server
+    that roams networks between `grid start --host <lan-ip>` and `grid stop` would have its live server
     reported as stopped and its recorded pid — the only handle a retry has — thrown away.
 
     ``ConnectionRefusedError`` is the precise builtin (PEP 3151 gives every errno its own subclass),
@@ -380,7 +380,7 @@ def _still_serving(cfg: dict[str, Any]) -> bool | None:
         body = resp.json() if resp.status_code == 200 else None
     except Exception as exc:
         # Something is listening but would not tell us what it is. Said out loud rather than degraded
-        # in silence: it is the difference between the two failing branches of `grid down`, and the
+        # in silence: it is the difference between the two failing branches of `grid stop`, and the
         # operator is about to be told this command established nothing.
         # `!r` on the url as well as the exception: it is built from the config's `host`, so it is
         # config-controlled text reaching the terminal, and a raw control/ANSI sequence in it would be

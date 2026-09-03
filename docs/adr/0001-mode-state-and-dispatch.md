@@ -42,7 +42,7 @@ Hard invariant: an existing local user with no state file must behave **exactly*
 
 6. **Command classification.** Mode-agnostic (run unchanged in both modes): `version`, `catalog`,
    `pull`, `rm`/`remove`, `engine *`, plus the new `mode` / `use` and bare `grid` (mode-aware
-   display, but never gated). Mode-gated (remote → stub now): `up`, `down`, `ls`/`list`, `info`,
+   display, but never gated). Mode-gated (remote → stub now): `start`, `stop`, `ls`/`list`, `info`,
    `join`, `leave`, `models`, `engines`, `chat`, `image`, `edit`, `video`.
 
 ## Consequences
@@ -50,7 +50,7 @@ Hard invariant: an existing local user with no state file must behave **exactly*
 - local behavior is unchanged when `state.json` is absent; the existing test suite stays green.
 - The dispatch table is the single seam later remote slices plug real handlers into.
 - `select_grid()` becomes the one chokepoint where the active selection takes effect, so `chat` /
-  `info` / `down` / `models` / `engines` / `join` / `leave` all honor `grid use` for free.
+  `info` / `stop` / `models` / `engines` / `join` / `leave` all honor `grid use` for free.
 - A future local-only command added without classifying it in `AGNOSTIC`/`REMOTE_HANDLERS` fails the
   coverage test rather than silently running local code in remote mode.
 - The override is matched as a bare token anywhere in `argv`; it is documented (not shown in

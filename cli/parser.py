@@ -148,22 +148,14 @@ def _add_credential(sub) -> None:
 
 
 def _add_grid_lifecycle(sub) -> None:
-    # `start`/`stop` beside `up`/`down`. The command names are the vocabulary a reader learns, and
-    # two metaphors is one too many: a grid went "up" while a computer "joined" it, so nothing
-    # paired with `grid leave`. Now the grid **starts** and **stops**, computers **join** and
-    # **leave**, and the docs can say one thing. `up`/`down` keep working — every existing script,
-    # every older README and every muscle memory still resolves.
-    for _verb, _summary in (("up", "Start a grid (creates it on first run; default: home)"),
-                            ("start", "Start a grid — same as `grid up`")):
-        _build_up_parser(sub, _verb, _summary)
+    # The command names are the vocabulary a reader learns. A grid **starts** and **stops**,
+    # computers **join** and **leave** — one metaphor each, so the docs can say one thing.
+    _build_up_parser(sub, "start", "Start a grid (creates it on first run; default: home)")
 
-
-    for _verb, _summary in (("down", "Stop a grid (its setup is kept)"),
-                            ("stop", "Stop a grid — same as `grid down`")):
-        _d = sub.add_parser(_verb, help=_summary)
-        _d.add_argument("name", nargs="?", default=None,
-                        help="Grid name or id (ag-…). Omit for the active grid.")
-        _d.set_defaults(handler=cmd_down)
+    _d = sub.add_parser("stop", help="Stop a grid (its setup is kept)")
+    _d.add_argument("name", nargs="?", default=None,
+                    help="Grid name or id (ag-…). Omit for the active grid.")
+    _d.set_defaults(handler=cmd_down)
 
     delete = sub.add_parser(
         "delete", help="Delete a grid's local config for good (`grid stop` only pauses it)"
@@ -205,7 +197,7 @@ def _build_up_parser(sub, verb: str, summary: str):
     parser.add_argument("--advertise-host", default=None,
                         help="Address to hand out to other computers, when the one Grid picks is "
                              "not reachable. Use 127.0.0.1 to keep everything on this machine.")
-    # Remote-only (local cmd_up ignores it): the network type set when `grid up` creates a remote
+    # Remote-only (local cmd_up ignores it): the network type set when `grid start` creates a remote
     # grid. default=None lets the remote handler tell an explicit value from this create default.
     parser.add_argument(
         "--type",
