@@ -4,7 +4,7 @@
 # Prerequisites:
 #   - DOGGI_API_KEY set in environment (or pass --api-key)
 #   - grid login completed (remote mode)
-#   - A running relay (grid up)
+#   - A running relay (grid start)
 #
 # Usage (env var):
 #   export DOGGI_API_KEY=<secret>

@@ -134,5 +134,5 @@ Hard invariant: local mode stays local-only, unauthenticated, stateless — unch
 - `grid sync` (amendment) makes `REMOTE_ONLY` `{"login", "logout", "sync"}`; the classification test
   covers it. Sync is the first command to find a **session** token expired long after login, so it
   introduces the session-expiry → re-login message; the other account-level commands
-  (`up`/`down`/`ls`/`info`/`members`) still surface raw control-plane errors today, and unifying that
+  (`start`/`stop`/`ls`/`info`/`members`) still surface raw control-plane errors today, and unifying that
   is intentionally out of scope here.

@@ -19,11 +19,11 @@ because one "runs from a clean checkout" promise was made across all of them.
     # 1 · the git tier — measurements 1 and 2. Needs a large repository, read-only.
     #     Use the one 0033 issue 16a measured, so the disk figures are comparable.
     .venv/bin/python tests/measure_non_dev_design.py --tier git \
-        --repo ~/Projects/eternal-ai-website
+        --repo ~/Projects/large-website-repo
 
     # 2 · the estimate tier — measurement 6. Needs a repository with a real TEAM in its history.
     .venv/bin/python tests/measure_non_dev_design.py --tier estimate \
-        --repo ~/Projects/eternal-ai-website
+        --repo ~/Projects/large-website-repo
 
     # 3 · the agent tier — measurements 3, 4 and 5. Needs a logged-in Claude Code, and SPENDS a
     #     real subscription.

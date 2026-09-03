@@ -405,8 +405,7 @@ client.chat.completions.create(
 | `grid ls` / `grid use` | list grids, pick the active one |
 | `grid mode` | switch between local and remote |
 
-`grid up` and `grid down` still work — older names for `start` and `stop`. Full reference:
-[docs/cli.md](docs/cli.md).
+Full reference: [docs/cli.md](docs/cli.md).
 
 
 ## Working from anywhere

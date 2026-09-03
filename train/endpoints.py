@@ -2,7 +2,7 @@
 
 Two deployments, one command surface (ADR 0019 D11):
 
-* **LAN mode** — everyone in one building. The local proxy `grid up` created is the endpoint;
+* **LAN mode** — everyone in one building. The local proxy `grid start` created is the endpoint;
   nodes are reachable by address, so the trainer can push adapters straight to them.
 * **Relay mode** — offices in different places. The hosted relay is the endpoint; nodes poll it
   outbound, which is what lets a laptop in another city serve without an open port.
@@ -97,6 +97,6 @@ def resolve(preferred: str | None = None) -> list[Endpoint]:
 def describe(endpoints: list[Endpoint]) -> str:
     """One line for a CLI or a page."""
     if not endpoints:
-        return ("No grid found on this computer. `grid up` starts one for this network, or "
+        return ("No grid found on this computer. `grid start` starts one for this network, or "
                 "`grid login` connects to your hosted grid.")
     return " · ".join(f"{e.display}: {e.base_url}" for e in endpoints)

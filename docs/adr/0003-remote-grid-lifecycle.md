@@ -1,4 +1,4 @@
-# ADR 0003 — Remote grid lifecycle (`grid up` / `down` / `ls` / `info`)
+# ADR 0003 — Remote grid lifecycle (`grid start` / `stop` / `ls` / `info`)
 
 Status: accepted (2026-06-27)
 
@@ -6,8 +6,8 @@ Status: accepted (2026-06-27)
 
 ADR 0001 set up modes, `state.json`, and mode-aware dispatch (remote lifecycle verbs routed to a
 stub). ADR 0002 filled sign-in and introduced `credentials.toml` (the session token plus the
-per-grid `[[networks]]` bundles). This slice fills the remote grid **lifecycle**: `grid up` /
-`down` / `ls` / `info` against autonomous's hosted **remote grids**, mirroring the local verbs the
+per-grid `[[networks]]` bundles). This slice fills the remote grid **lifecycle**: `grid start` /
+`stop` / `ls` / `info` against autonomous's hosted **remote grids**, mirroring the local verbs the
 user already knows — there are no separate create/start commands.
 
 The reference client `grid-src/grid_cli/` (`control_plane.py`, `cli.py:cmd_network_*`) is the port
@@ -23,7 +23,7 @@ stays a **thin client**; no relay/Postgres/billing ships in-repo; tokens are nev
 
 1. **The local grid registry is `credentials.toml [[networks]]` — `ls` is local, not a live
    list.** `grid ls` reads the bundles `grid login` already fetched (name + `network_type`); it
-   makes **no** network call. `up` / `down` / `info` / `use` resolve a `name → network_id`
+   makes **no** network call. `start` / `stop` / `info` / `use` resolve a `name → network_id`
    against the same file. This keeps `ls` consistent with `grid use` (ADR 0002 already resolves
    the active grid against these bundles) and mirrors local `ls` (which lists local config without
    probing a server). **This supersedes D12's `ls = GET /v1/grid/networks`** — there is
@@ -35,25 +35,25 @@ stays a **thin client**; no relay/Postgres/billing ships in-repo; tokens are nev
 2. **Lifecycle authenticates with the account `session_token`, not the per-grid `access_token`.**
    create/start/stop/status are account-level operations, so they carry the session token
    (`credentials.require_session()`) and hit the **managed-networks** endpoints (D11):
-   - `up` (create) → `POST /v1/grid/managed-networks` (body `name`, `network_type`)
-   - `up` (start) / `down` → `POST …/managed-networks/{id}/start` | `…/{id}/stop`
+   - `start` (create) → `POST /v1/grid/managed-networks` (body `name`, `network_type`)
+   - `start` (start-existing) / `stop` → `POST …/managed-networks/{id}/start` | `…/{id}/stop`
    - `info` → `GET …/managed-networks/{id}/status`
 
    The per-grid `access_token` is for **consuming through the relay** and is untouched here. This
    is the clean 04 (lifecycle) / 05 (use-path) seam.
 
-3. **`grid up` is create-or-start; creating requires an explicit name (a deliberate divergence
-   from local).** `grid up <name>`: in the registry → start; not in the registry → create, then
+3. **`grid start` is create-or-start; creating requires an explicit name (a deliberate divergence
+   from local).** `grid start <name>`: in the registry → start; not in the registry → create, then
    append the returned record (`network_id`, `name`, `network_type`, `signaling_url`, `status`)
-   to `credentials.toml` so `ls`/`use`/`info` see it immediately. Bare `grid up` only **starts**
-   the active/sole grid; with nothing to resolve it errors (`need a name to create: grid up
+   to `credentials.toml` so `ls`/`use`/`info` see it immediately. Bare `grid start` only **starts**
+   the active/sole grid; with nothing to resolve it errors (`need a name to create: grid start
    <name>`). Unlike local it never auto-creates a grid named `home` — a remote grid is hosted
    (carries a `plan`), so creating one silently under a default name is the wrong default.
    `--type` (choices `permissioned-public` (default) | `permissioned-providers`, per D11) applies
    on **create only**; passed on a start it is ignored with a one-line note.
 
-4. **`grid down` stops; it does not delete.** `POST …/{id}/stop` — the grid persists in the
-   registry and `grid up <name>` brings it back (mirroring local's "config kept"). There is no
+4. **`grid stop` stops; it does not delete.** `POST …/{id}/stop` — the grid persists in the
+   registry and `grid start <name>` brings it back (mirroring local's "config kept"). There is no
    delete verb in v1; deletion/cancellation lives on the website (PRD Out of Scope).
 
 5. **`grid info` maps the status response to grid vocabulary and hides proprietary internals.**
@@ -79,12 +79,12 @@ stays a **thin client**; no relay/Postgres/billing ships in-repo; tokens are nev
 
 8. **Seam.** Remote lifecycle handlers live in a new remote-only `cli/remote_grid.py`
    (`cmd_remote_up` / `_down` / `_ls` / `_info`), wired into `dispatch.REMOTE_HANDLERS` in place of
-   the `up`/`down`/`ls`/`info` stubs (the remaining gated commands stay stubs). `remote/
+   the `start`/`stop`/`ls`/`info` stubs (the remaining gated commands stay stubs). `remote/
    control_plane.py` gains `create_managed_network` / `start_managed_network` /
    `stop_managed_network` / `get_managed_network_status` (session-token Bearer, managed-networks
    URLs). `remote/credentials.py` gains a thin `add_network(record)` (append to `[[networks]]`);
    the selection precedence lives in `cli/remote_grid.py` because it needs `shared.state`, which
-   `credentials.py` deliberately does not import. `--type` is added to the shared `up` subparser
+   `credentials.py` deliberately does not import. `--type` is added to the shared `start` subparser
    (local `cmd_up` ignores it). Tests go in `tests/test_local_cli.py` via the existing
    `_mock_control_plane` (httpx `MockTransport`) + a seeded `credentials.toml`, driving
    `cli.main` in remote mode, covering create / start / stop / list / status,

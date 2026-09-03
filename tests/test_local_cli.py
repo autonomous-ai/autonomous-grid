@@ -4866,7 +4866,7 @@ def test_join_help_marks_mode_scoped_flags():
 
 
 def test_positional_grid_help_present():
-    assert "Grid name or id" in _subcmd_help("up")
+    assert "Grid name or id" in _subcmd_help("start")
     assert "Grid name or id" in _subcmd_help("join")
 
 
@@ -5013,37 +5013,37 @@ def test_looks_like_grid_id_detector():
     assert cli.grid._looks_like_grid_id("ag-team") is False  # no hex8 suffix → still a creatable name
 
 
-def test_up_rejects_unknown_grid_id_without_creating(monkeypatch, tmp_path):
+def test_start_rejects_unknown_grid_id_without_creating(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     with pytest.raises(SystemExit) as exc:
-        cli.main(["up", "ag-home-deadbeef"])
+        cli.main(["start", "ag-home-deadbeef"])
     assert "grid ls" in str(exc.value)
     from local import config as local_config
     assert local_config.iter_grid_configs() == []  # nothing created, nothing spawned
 
 
-def test_up_creates_for_human_name(monkeypatch, tmp_path):
+def test_start_creates_for_human_name(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     monkeypatch.setattr(cli.grid.runtime, "start_grid", lambda cfg: None)
-    assert cli.main(["up", "workshop"]) == 0
+    assert cli.main(["start", "workshop"]) == 0
     from local import config as local_config
     assert any(c["name"] == "workshop" for c in local_config.iter_grid_configs())
 
 
-def test_up_starts_existing_grid_by_id(monkeypatch, tmp_path):
+def test_start_starts_existing_grid_by_id(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     cfg = runtime.init_grid_config(name="home", port=8090)
     monkeypatch.setattr(cli.grid.runtime, "start_grid", lambda cfg: None)
-    assert cli.main(["up", cfg["grid_id"]]) == 0  # found by id → guard skipped
+    assert cli.main(["start", cfg["grid_id"]]) == 0  # found by id → guard skipped
 
 
-def test_up_rejects_known_remote_grid_in_local_mode(monkeypatch, tmp_path):
+def test_start_rejects_known_remote_grid_in_local_mode(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
     state.set_mode("local")  # the remote grid is known via credentials, but we're in local mode
     from local import config as local_config
     for arg in ("team", "n1"):  # matched by name and by network_id
         with pytest.raises(SystemExit) as exc:
-            cli.main(["up", arg])
+            cli.main(["start", arg])
         assert "remote" in str(exc.value).lower()
     assert local_config.iter_grid_configs() == []  # nothing created
 
@@ -7168,12 +7168,12 @@ def test_grid_use_rejects_unknown_grid_in_local(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_resolve_override_strips_flag_in_any_position():
-    assert dispatch.resolve_override(["--remote", "up"]) == ("remote", ["up"])
-    assert dispatch.resolve_override(["up", "--remote"]) == ("remote", ["up"])
+    assert dispatch.resolve_override(["--remote", "start"]) == ("remote", ["start"])
+    assert dispatch.resolve_override(["start", "--remote"]) == ("remote", ["start"])
     assert dispatch.resolve_override(["models", "--local", "home"]) == ("local", ["models", "home"])
-    assert dispatch.resolve_override(["up"]) == (None, ["up"])
+    assert dispatch.resolve_override(["start"]) == (None, ["start"])
     with pytest.raises(SystemExit):
-        dispatch.resolve_override(["--local", "--remote", "up"])
+        dispatch.resolve_override(["--local", "--remote", "start"])
 
 
 def test_remote_engines_models_require_session_when_signed_out(monkeypatch, tmp_path):
@@ -7194,39 +7194,39 @@ def test_remote_lifecycle_requires_session_when_signed_out(monkeypatch, tmp_path
     state.set_mode("remote")  # remote mode, but not signed in
 
     # The lifecycle verbs are no longer stubbed: they reach the auth gate, not the old stub.
-    for argv in (["up", "team"], ["down", "team"], ["info", "team"]):
+    for argv in (["start", "team"], ["stop", "team"], ["info", "team"]):
         with pytest.raises(SystemExit) as exc:
             cli.main(argv)
         assert "login" in str(exc.value).lower()
 
 
-def test_remote_up_create_rejects_missing_network_id(monkeypatch, tmp_path):
+def test_remote_start_create_rejects_missing_network_id(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path)
     # 200 OK but no network_id (API regression): a clean error, not false success + a later KeyError.
     _mock_lifecycle(monkeypatch, create={"name": "team", "network_type": "permissioned-public"})
     with pytest.raises(SystemExit) as exc:
-        cli.main(["up", "team"])
+        cli.main(["start", "team"])
     assert "no usable id" in str(exc.value).lower()
 
     from remote import credentials
     assert credentials.load_credentials()["networks"] == []  # nothing persisted
 
 
-def test_remote_down_rejects_unsafe_network_id(monkeypatch, tmp_path):
+def test_remote_stop_rejects_unsafe_network_id(monkeypatch, tmp_path):
     # A stored id that could re-target the request path is refused before any control-plane call.
     _seed_remote(monkeypatch, tmp_path, networks=[{"network_id": "n1/../admin", "name": "team"}])
     calls = _mock_lifecycle(monkeypatch, stop={"status": "stopped"})
     with pytest.raises(SystemExit):
-        cli.main(["down", "team"])
+        cli.main(["stop", "team"])
     assert "stop" not in calls  # rejected before reaching the network
 
 
-def test_remote_down_bare_stops_active_grid(monkeypatch, tmp_path, capsys):
+def test_remote_stop_bare_stops_active_grid(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}, {"network_id": "n2", "name": "lab"}],
                 active="lab")
     calls = _mock_lifecycle(monkeypatch, stop={"status": "stopped"})
-    assert cli.main(["down"]) == 0  # no name → the active grid
+    assert cli.main(["stop"]) == 0  # no name → the active grid
     assert calls.get("stop") == {"session": "sess-tok", "network_id": "n2"}
     assert "lab" in capsys.readouterr().out
 
@@ -12841,6 +12841,43 @@ def _has_image_part(body):
         ):
             return True
     return False
+
+
+def test_probe_sglang_ollama_compat_show_does_not_hide_vision(monkeypatch, tmp_path):
+    """SGLang exposes an Ollama-compatible /api/show but its static capabilities list contains only
+    `completion`, including for a vision model. It marks that synthetic response as format:sglang, so
+    Grid must not mistake the missing `vision` item for authoritative Ollama metadata and gate out the
+    live image probe."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {"image_probe": False}
+
+    def handler(request):
+        path = request.url.path
+        if path == "/props" or path == "/api/v0/models":
+            return httpx.Response(404)
+        if path == "/api/show":
+            return httpx.Response(200, json={
+                "details": {"format": "sglang", "family": "Qwen3.8-Flash-Next-FP8"},
+                "capabilities": ["completion"],
+            })
+        if path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "qwen38-flash-next-sm120"}]})
+        if path.endswith("/chat/completions"):
+            if _has_image_part(json.loads(request.content)):
+                seen["image_probe"] = True
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        return httpx.Response(404)
+
+    _mock_engine(monkeypatch, handler)
+    entry = probe.capabilities(
+        "http://h:8000/v1", "qwen38-flash-next-sm120"
+    )["models"]["qwen38-flash-next-sm120"]
+
+    assert entry["features"]["vision"] is True
+    assert entry["input_modalities"] == ["text", "image"]
+    assert seen["image_probe"] is True
 
 
 def test_probe_vision_from_live_image_probe_when_engine_accepts(monkeypatch, tmp_path):
@@ -21606,14 +21643,14 @@ def _mock_lifecycle(monkeypatch, *, create=None, start=None, stop=None, status=N
     return calls
 
 
-def test_remote_up_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
+def test_remote_start_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path)
     calls = _mock_lifecycle(monkeypatch, create={
         "network_id": "n-new", "name": "team", "network_type": "permissioned-public",
         "signaling_url": "https://relay.example", "status": "running",
     })
 
-    assert cli.main(["up", "team"]) == 0
+    assert cli.main(["start", "team"]) == 0
     out = capsys.readouterr().out
     assert calls["create"] == {"session": "sess-tok", "name": "team", "network_type": "permissioned-public"}
     assert "create" in calls and "start" not in calls
@@ -21625,90 +21662,90 @@ def test_remote_up_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
     assert nets[0]["signaling_url"] == "https://relay.example"
 
 
-def test_remote_up_starts_when_name_known(monkeypatch, tmp_path, capsys):
+def test_remote_start_starts_when_name_known(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "network_type": "permissioned-public",
          "signaling_url": "https://relay.example", "status": "stopped"}])
     calls = _mock_lifecycle(monkeypatch, start={"status": "running", "signaling_url": "https://relay.example"})
 
-    assert cli.main(["up", "team"]) == 0
+    assert cli.main(["start", "team"]) == 0
     out = capsys.readouterr().out
     assert calls.get("start") == {"session": "sess-tok", "network_id": "n1"}
     assert "create" not in calls  # known grid → start, not create
     assert "grid=team" in out and "grid_url=https://relay.example" in out
 
 
-def test_remote_up_bare_starts_active_grid(monkeypatch, tmp_path, capsys):
+def test_remote_start_bare_starts_active_grid(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "signaling_url": "https://r1"},
         {"network_id": "n2", "name": "lab", "signaling_url": "https://r2"}],
         active="lab")
     calls = _mock_lifecycle(monkeypatch, start={"status": "running"})
 
-    assert cli.main(["up"]) == 0  # no name → the active grid
+    assert cli.main(["start"]) == 0  # no name → the active grid
     out = capsys.readouterr().out
     assert calls.get("start") == {"session": "sess-tok", "network_id": "n2"}
     assert "create" not in calls
     assert "grid=lab" in out
 
 
-def test_remote_up_bare_errors_when_unresolvable(monkeypatch, tmp_path):
+def test_remote_start_bare_errors_when_unresolvable(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path, networks=[])  # signed in, but no grids and no active
     _mock_lifecycle(monkeypatch)
     with pytest.raises(SystemExit) as exc:
-        cli.main(["up"])
+        cli.main(["start"])
     assert "name" in str(exc.value).lower()  # guidance to name a grid to create
 
 
-def test_remote_up_type_on_create_sets_network_type(monkeypatch, tmp_path, capsys):
+def test_remote_start_type_on_create_sets_network_type(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path)
     calls = _mock_lifecycle(monkeypatch, create={
         "network_id": "n1", "name": "lab", "network_type": "permissioned-providers",
         "signaling_url": "https://r"})
 
-    assert cli.main(["up", "lab", "--type", "permissioned-providers"]) == 0
+    assert cli.main(["start", "lab", "--type", "permissioned-providers"]) == 0
     capsys.readouterr()
     assert calls["create"]["network_type"] == "permissioned-providers"
 
 
-def test_remote_up_type_on_start_warns_and_ignores(monkeypatch, tmp_path, capsys):
+def test_remote_start_type_on_start_warns_and_ignores(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "signaling_url": "https://r"}])
     calls = _mock_lifecycle(monkeypatch, start={"status": "running"})
 
-    assert cli.main(["up", "team", "--type", "permissioned-providers"]) == 0
+    assert cli.main(["start", "team", "--type", "permissioned-providers"]) == 0
     out = capsys.readouterr().out
     assert "start" in calls and "create" not in calls
     assert "type" in out.lower()  # a note that --type is ignored on an existing grid
     assert calls["start"] == {"session": "sess-tok", "network_id": "n1"}  # start carries no type
 
 
-def test_remote_up_start_reports_grid_url_from_status(monkeypatch, tmp_path, capsys):
+def test_remote_start_reports_grid_url_from_status(monkeypatch, tmp_path, capsys):
     # Live shape: start → {network_id, status} (no signaling_url); the bundle has none stored either,
-    # so `up` reads the address from the status endpoint.
+    # so `start` reads the address from the status endpoint.
     _seed_remote(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
     _mock_lifecycle(monkeypatch, start={"network_id": "n1", "status": "running"},
                     status={"state": "running", "signaling_url": "https://live.relay"})
 
-    assert cli.main(["up", "team"]) == 0
+    assert cli.main(["start", "team"]) == 0
     assert "grid_url=https://live.relay" in capsys.readouterr().out
 
 
-def test_remote_down_stops(monkeypatch, tmp_path, capsys):
+def test_remote_stop_stops(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
     calls = _mock_lifecycle(monkeypatch, stop={"status": "stopped"})
 
-    assert cli.main(["down", "team"]) == 0
+    assert cli.main(["stop", "team"]) == 0
     out = capsys.readouterr().out
     assert calls.get("stop") == {"session": "sess-tok", "network_id": "n1"}
     assert "team" in out and "down" in out.lower()
 
 
-def test_remote_down_errors_when_unresolvable(monkeypatch, tmp_path):
+def test_remote_stop_errors_when_unresolvable(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
     _mock_lifecycle(monkeypatch)
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "ghost"])  # not a known grid
+        cli.main(["stop", "ghost"])  # not a known grid
     assert "ghost" in str(exc.value)
 
 
@@ -29898,7 +29935,7 @@ def test_engine_health_follows_a_hot_reload_that_repoints_a_model(monkeypatch, t
 
 
 # ---------------------------------------------------------------------------
-# `grid down` — the grid server's pid is a claim, not a handle (grid-leave issue 18, ADR 0026)
+# `grid stop` — the grid server's pid is a claim, not a handle (grid-leave issue 18, ADR 0026)
 # ---------------------------------------------------------------------------
 
 def _no_signals_anywhere(monkeypatch):
@@ -29949,9 +29986,9 @@ def _grid_port(monkeypatch, answers: dict[str, Any] | None) -> SimpleNamespace:
     return seen
 
 
-def test_grid_down_never_signals_a_recycled_server_pid(monkeypatch, tmp_path):
+def test_grid_stop_never_signals_a_recycled_server_pid(monkeypatch, tmp_path):
     """`server_pid` is written once at `start_grid` and can be arbitrarily stale — a reboot, a crash,
-    a machine that has run something else since. `grid down` used to hand that bare number straight to
+    a machine that has run something else since. `grid stop` used to hand that bare number straight to
     `os.killpg`, so a recycled pid SIGTERMed an unrelated process **group** the operator owns.
 
     The stamped `(pid, start_time)` is what tells them apart: same number, different token ⇒
@@ -29979,7 +30016,7 @@ def test_grid_down_never_signals_a_recycled_server_pid(monkeypatch, tmp_path):
     assert sent == [], "signalled a recycled server pid — that is somebody else's process"
 
 
-def test_grid_down_never_signals_the_group_stamped_beside_a_recycled_pid(monkeypatch, tmp_path):
+def test_grid_stop_never_signals_the_group_stamped_beside_a_recycled_pid(monkeypatch, tmp_path):
     """The second half, which needs its own arrangement to reach at all.
 
     `killpg(pgid, 0)` proves a process group exists, never that it is *ours* — the only thing that
@@ -30036,9 +30073,9 @@ def _fake_server_spawn(monkeypatch, pid: int):
 
 
 @pytest.mark.parametrize("corrupt", ["abc", -1, 2**63, [], True])
-def test_grid_up_does_not_traceback_on_a_corrupt_server_pid(monkeypatch, tmp_path, corrupt):
+def test_grid_start_does_not_traceback_on_a_corrupt_server_pid(monkeypatch, tmp_path, corrupt):
     """`start_grid` read `int(cfg.get("server_pid") or 0)`, so a hand-edited or corrupt config took
-    `grid up` down before it could do anything about it: `"abc"` raised `ValueError` at the `int()`,
+    `grid start` down before it could do anything about it: `"abc"` raised `ValueError` at the `int()`,
     and an out-of-range value reached `os.kill` inside the old `_pid_alive`, which raises
     `OverflowError` — an `ArithmeticError`, which that function's own `except OSError` never caught.
 
@@ -30058,12 +30095,12 @@ def test_grid_up_does_not_traceback_on_a_corrupt_server_pid(monkeypatch, tmp_pat
 
 
 @pytest.mark.parametrize("corrupt", ["abc", -1, 2**63, []])
-def test_grid_down_says_when_the_recorded_server_pid_is_not_a_process_id(
+def test_grid_stop_says_when_the_recorded_server_pid_is_not_a_process_id(
     monkeypatch, tmp_path, capsys, corrupt
 ):
     """A `server_pid` of an unusable shape correctly signals nothing — and said nothing about it.
 
-    That silence is the failure: `grid down` would print "is down" having signalled nothing, over a
+    That silence is the failure: `grid stop` would print "is down" having signalled nothing, over a
     server that may well still be running. Name what was unusable, the way the run-record reap does
     (`run_records.discard_own_record`). Whether it *mattered* is the port probe's answer, not this
     note's — so this is a note on stderr, not a refusal.
@@ -30096,7 +30133,7 @@ def _server_dies_when_signalled(monkeypatch):
     return sent
 
 
-def test_grid_down_still_stops_a_server_recorded_before_identity_tokens_existed(monkeypatch, tmp_path):
+def test_grid_stop_still_stops_a_server_recorded_before_identity_tokens_existed(monkeypatch, tmp_path):
     """Every grid config already on a user's machine carries `server_pid` and nothing beside it.
 
     `record_verdict` calls that `LIVE_UNVERIFIED` — no token is neither a match nor a mismatch — and
@@ -30119,7 +30156,7 @@ def test_grid_down_still_stops_a_server_recorded_before_identity_tokens_existed(
     assert [pid for pid, _ in sent] == [4242], "a pre-token config's server was not stopped"
 
 
-def test_grid_down_confirms_a_zombie_server_without_burning_the_stop_grace(monkeypatch, tmp_path):
+def test_grid_stop_confirms_a_zombie_server_without_burning_the_stop_grace(monkeypatch, tmp_path):
     """In a container whose PID 1 never reaps, a dead server leaves a permanent `Z` entry that
     `os.kill(pid, 0)` reports as alive. The old teardown would SIGTERM the corpse, wait out the full
     25s grace, SIGKILL it, and still read it as running. A corpse is already stopped: nothing to
@@ -30146,8 +30183,8 @@ def test_grid_down_confirms_a_zombie_server_without_burning_the_stop_grace(monke
     assert time.monotonic() - started < 5, "burned the stop grace on a process that had already exited"
 
 
-def test_grid_up_stamps_the_servers_identity_beside_its_pid(monkeypatch, tmp_path):
-    """A pid on its own cannot be verified later — which is the whole reason `grid down` could signal
+def test_grid_start_stamps_the_servers_identity_beside_its_pid(monkeypatch, tmp_path):
+    """A pid on its own cannot be verified later — which is the whole reason `grid stop` could signal
     a stranger. `start_grid` now writes the same `(pid, start_time, pgid)` a run record carries, under
     `server_`-prefixed keys, in the **one** config write: that is what lets a verified pid vouch for
     the group id stored beside it (ADR 0020).
@@ -30173,10 +30210,10 @@ def test_grid_up_stamps_the_servers_identity_beside_its_pid(monkeypatch, tmp_pat
     assert saved["server_pid"] == os.getpid(), "server_pid must stay the config's one pid"
 
 
-def test_grid_down_fails_loud_when_the_grid_is_still_answering_on_its_port(
+def test_grid_stop_fails_loud_when_the_grid_is_still_answering_on_its_port(
     monkeypatch, tmp_path, capsys
 ):
-    """The tracer bullet for the honest report: `grid down` printed "is down" unconditionally.
+    """The tracer bullet for the honest report: `grid stop` printed "is down" unconditionally.
 
     A config whose pid names nothing is reachable in one command — `start_grid` saves the pid *before*
     `wait_for_health`, so a health failure leaves a live server behind — and the old teardown then
@@ -30196,7 +30233,7 @@ def test_grid_down_fails_loud_when_the_grid_is_still_answering_on_its_port(
     _grid_port(monkeypatch, {"grid_id": cfg["grid_id"], "name": "home"})  # …but the grid is up
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "8090" in str(exc.value), str(exc.value)
     assert "down" not in capsys.readouterr().out.lower(), "claimed the grid was down while it served"
@@ -30209,7 +30246,7 @@ def test_grid_down_fails_loud_when_the_grid_is_still_answering_on_its_port(
 def test_the_grid_health_probe_addresses_the_host_the_server_bound(
     monkeypatch, tmp_path, host, addressed
 ):
-    """`grid up --host 10.0.0.5` really binds only that address (`cli/_main.cmd_internal_server`), but
+    """`grid start --host 10.0.0.5` really binds only that address (`cli/_main.cmd_internal_server`), but
     both health probes asked `127.0.0.1`. A wildcard bind is reachable on loopback so it maps there;
     anything specific has to be addressed as itself.
 
@@ -30229,7 +30266,7 @@ def test_the_grid_health_probe_addresses_the_host_the_server_bound(
     assert seen.targets == [(addressed, 8090)], seen.targets
 
 
-def test_grid_down_does_not_traceback_on_a_corrupt_port(monkeypatch, tmp_path):
+def test_grid_stop_does_not_traceback_on_a_corrupt_port(monkeypatch, tmp_path):
     """The regression this change could have introduced. `stop_grid` read no port at all before; its
     new probe does, and a bare `int(cfg["port"])` would have added a fresh traceback to the very
     command whose promise is that a hand-edited config no longer produces one.
@@ -30248,16 +30285,16 @@ def test_grid_down_does_not_traceback_on_a_corrupt_port(monkeypatch, tmp_path):
     _no_signals_anywhere(monkeypatch)
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "'abc'" in str(exc.value), str(exc.value)
 
 
-def test_grid_down_keeps_the_pid_and_fails_loud_when_the_server_outlives_sigkill(
+def test_grid_stop_keeps_the_pid_and_fails_loud_when_the_server_outlives_sigkill(
     monkeypatch, tmp_path
 ):
-    """The honest teardown. `grid down` wrote `server_pid = 0` unconditionally, so a server that
-    ignored SIGTERM survived *and* lost the only handle to it — after which `grid up` dead-ends on
+    """The honest teardown. `grid stop` wrote `server_pid = 0` unconditionally, so a server that
+    ignored SIGTERM survived *and* lost the only handle to it — after which `grid start` dead-ends on
     "Port 8090 is already in use" with nothing left able to stop the thing holding it."""
     from shared import process_identity, run_records
 
@@ -30276,13 +30313,13 @@ def test_grid_down_keeps_the_pid_and_fails_loud_when_the_server_outlives_sigkill
     _grid_port(monkeypatch, None)
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "4242" in str(exc.value) and "kill -9 4242" in str(exc.value), str(exc.value)
     assert config.load_grid_config(cfg["grid_id"])["server_pid"] == 4242, "threw away the handle"
 
 
-def test_grid_down_names_a_surviving_process_group_as_a_group(monkeypatch, tmp_path):
+def test_grid_stop_names_a_surviving_process_group_as_a_group(monkeypatch, tmp_path):
     """A group id printed as a pid tells the operator to `kill -9 <group leader>` — and the leader is
     precisely the process that is already gone, so the command they are handed does nothing while the
     server keeps running."""
@@ -30296,18 +30333,18 @@ def test_grid_down_names_a_surviving_process_group_as_a_group(monkeypatch, tmp_p
     )
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "process group 777" in str(exc.value) and "kill -9 -777" in str(exc.value), str(exc.value)
 
 
-def test_grid_down_converges_when_the_pid_is_unprovable_but_the_port_is_dead(
+def test_grid_stop_converges_when_the_pid_is_unprovable_but_the_port_is_dead(
     monkeypatch, tmp_path, capsys
 ):
     """The convergence rule, and the reason the port probe exists at all.
 
     A config whose pid cannot be verified — never stamped, recycled, long dead — classifies
-    `verified=False`, the same as every alarming case. Keyed on that alone, `grid down` would fail on
+    `verified=False`, the same as every alarming case. Keyed on that alone, `grid stop` would fail on
     an already-stopped grid **forever**, and there is no `grid rm` to escape with. Nothing listening on
     the grid's own port is positive proof it is down, whatever the pid could not tell us.
     """
@@ -30322,13 +30359,13 @@ def test_grid_down_converges_when_the_pid_is_unprovable_but_the_port_is_dead(
     _no_signals_anywhere(monkeypatch)
     _grid_port(monkeypatch, None)
 
-    assert cli.main(["down", "home"]) == 0
+    assert cli.main(["stop", "home"]) == 0
     assert "stopped" in capsys.readouterr().out
     saved = config.load_grid_config(cfg["grid_id"])
     assert runtime._server_identity(saved) == {"pid": 0, "pid_start_time": None, "pgid": None}
 
 
-def test_grid_down_says_so_when_it_could_neither_verify_the_pid_nor_reach_the_port(
+def test_grid_stop_says_so_when_it_could_neither_verify_the_pid_nor_reach_the_port(
     monkeypatch, tmp_path
 ):
     """Both nets blind at once — ADR 0025's rule for local leave, applied to the lifecycle verb.
@@ -30353,13 +30390,13 @@ def test_grid_down_says_so_when_it_could_neither_verify_the_pid_nor_reach_the_po
         httpx.ReadTimeout("timed out")))
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "curl -s 'http://127.0.0.1:8090/grid/info'" in str(exc.value), str(exc.value)
     assert config.load_grid_config(cfg["grid_id"])["server_pid"] == 4242, "threw away the handle"
 
 
-def test_grid_down_on_an_already_stopped_grid_is_quiet(monkeypatch, tmp_path, capsys):
+def test_grid_stop_on_an_already_stopped_grid_is_quiet(monkeypatch, tmp_path, capsys):
     """The ordinary repeat. A `server_pid` of 0 is the config's own "nothing is running" — not a
     corrupt value, so no note — and with nothing listening the command simply succeeds again."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
@@ -30367,21 +30404,21 @@ def test_grid_down_on_an_already_stopped_grid_is_quiet(monkeypatch, tmp_path, ca
     sent = _no_signals_anywhere(monkeypatch)
     _grid_port(monkeypatch, None)
 
-    assert cli.main(["down", "home"]) == 0
+    assert cli.main(["stop", "home"]) == 0
 
     out, err = capsys.readouterr()
     assert "stopped" in out and sent == []
     assert err == "", f"an already-stopped grid should say nothing on stderr: {err}"
 
 
-def test_grid_down_does_not_traceback_when_the_recorded_pid_is_not_ours_to_signal(
+def test_grid_stop_does_not_traceback_when_the_recorded_pid_is_not_ours_to_signal(
     monkeypatch, tmp_path, capsys
 ):
     """`pid_alive` reports EPERM as **alive** (ADR 0024: calling another user's process dead would let
     a teardown claim it reaped something still running), so a `server_pid` that has drifted onto a
     process owned by another principal reaches `terminate_pid` — whose `os.kill` catches only
     `ProcessLookupError`. Reproduced against pid 1: a raw `PermissionError` traceback out of
-    `grid down`, which is precisely what this change promises the command no longer does.
+    `grid stop`, which is precisely what this change promises the command no longer does.
 
     The catch belongs at this call site and **not** inside `terminate_pid`: `orphan_sweep.terminate`
     depends on that exception escaping — it is how a swept match is classified `foreign` instead of
@@ -30404,7 +30441,7 @@ def test_grid_down_does_not_traceback_when_the_recorded_pid_is_not_ours_to_signa
         PermissionError(1, "Operation not permitted")))
     _grid_port(monkeypatch, None)  # nothing is serving this grid — so it really is down
 
-    assert cli.main(["down", "home"]) == 0
+    assert cli.main(["stop", "home"]) == 0
 
     assert "4242" in capsys.readouterr().err
 
@@ -30414,7 +30451,7 @@ def test_a_pid_we_could_not_signal_never_counts_as_a_verified_teardown(monkeypat
 
     The sibling above exits 0 only because the *port* proved the grid was down. Take that second
     opinion away — an unusable port, so there is nothing to probe with — and the teardown's own answer
-    is all that is left: it must be `verified=False`, or `grid down` reports success over a live
+    is all that is left: it must be `verified=False`, or `grid stop` reports success over a live
     process it was refused permission to touch.
     """
     from shared import process_identity, run_records
@@ -30430,14 +30467,14 @@ def test_a_pid_we_could_not_signal_never_counts_as_a_verified_teardown(monkeypat
         PermissionError(1, "Operation not permitted")))
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "nothing about this box was established" in str(exc.value), str(exc.value)
 
 
 def test_a_closed_port_really_is_proof_that_nothing_is_serving(monkeypatch, tmp_path):
     """The positive direction, against a real socket rather than a mocked exception: a port nothing
-    is listening on must still read as proof, or `grid down` never succeeds on an unverifiable pid."""
+    is listening on must still read as proof, or `grid stop` never succeeds on an unverifiable pid."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     with socket.socket() as sock:  # bind then release, so the port is genuinely closed
         sock.bind(("127.0.0.1", 0))
@@ -30454,7 +30491,7 @@ def test_an_unreachable_host_is_not_proof_that_the_grid_stopped(monkeypatch, tmp
     `ENETUNREACH` and `EHOSTUNREACH` are all plain `OSError`s — so httpcore maps every one of them to
     the same `ConnectError` a genuine refusal produces. Reading that as proof is the exact laundering
     ADR 0026 exists to forbid, and it is reachable through the `--host` support this change added: a
-    laptop that roams networks between `grid up --host <lan-ip>` and `grid down` would have its live
+    laptop that roams networks between `grid start --host <lan-ip>` and `grid stop` would have its live
     server reported as stopped and the recorded pid — the only handle a retry has — thrown away.
 
     Hermetic on purpose: a real `.invalid` lookup makes the test's speed a property of the resolver.
@@ -30475,7 +30512,7 @@ def test_an_unreachable_host_is_not_proof_that_the_grid_stopped(monkeypatch, tmp
         httpx.ConnectError("[Errno 8] nodename nor servname provided, or not known")))
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "nothing about this box was established" in str(exc.value), str(exc.value)
     assert config.load_grid_config(cfg["grid_id"])["server_pid"] == 4242, "threw away the handle"
