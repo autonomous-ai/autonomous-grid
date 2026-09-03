@@ -654,6 +654,9 @@ than a generalist — worse than the frontier at everything, better at your thin
 # Ready-made setups for real business data
 grid train packs
 
+# Turn successful, independently evaluated agent work into training data
+grid train dataset --grid <grid-name> --out ./goal-data
+
 # Turn support tickets into a reply-drafting model
 grid train init --pack support-replies
 

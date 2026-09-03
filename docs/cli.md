@@ -704,6 +704,8 @@ grid train doctor [--config <path>] [--json]      # what this computer can do ri
 grid train where                                  # which grids training can use (LAN and hosted)
 grid train init [--pack <name>] [--dest <dir>] [--config <path>] [--force]
 grid train packs [--json]                         # bundled task packs for business data
+grid train dataset [--grid <name>] [--goal-id <id>]... [--out <dir>]
+                   [--holdout <fraction>] [--seed <seed>] [--format jsonl|parquet|both] [--force]
 
 grid train sft [--backend auto|mlx|torch] [--iters <n>] [--run-dir <dir>] [--config <path>]
 grid train run [--config <path>]                  # the feedback loop (GRPO via TRL)
@@ -744,6 +746,24 @@ Ready for stage one. `grid train sft` works on this computer right now.
 
 (The first line reads `torch on this machine` off Apple Silicon.) It exits 0 when either rung is
 ready, so a machine that can do stage one is not reported as a failure.
+
+### Learn from completed Goals
+
+`grid train dataset --grid <name>` turns Goal history into a local, versioned dataset. It accepts
+only completed trajectories with independently accepted Grid evals, and it runs the same offline
+evidence verifier used by `grid goal evidence --verify` before writing a byte. Incomplete,
+self-graded, pruned, tampered and duplicate trajectories go to `rejected.jsonl` with a reason.
+
+The command recursively redacts credentials and common personal identifiers, keeps complete Goals
+together, and makes a deterministic train/held-out split. It writes `trajectories.jsonl` for the
+full tool/eval history and `sft.jsonl` for today's trainers. `--format both` also writes Parquet
+(with `grid[train]` installed). `manifest.json` pins the schema, split seed, counts and SHA-256 of
+every data file, so a training run can name exactly what it consumed.
+
+```bash
+grid train dataset --grid forge --out ./forge-goals --format both
+# train on forge-goals/train/sft.jsonl; measure on forge-goals/held_out/
+```
 
 - **`grid train sft`** is imitation: it learns from the answers your team already wrote and needs
   nothing but the machine in front of you. `--backend auto` picks MLX on Apple Silicon and torch

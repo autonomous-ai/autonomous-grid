@@ -340,6 +340,7 @@ train/
 ├── deploy.py              hot-load an adapter onto serving nodes
 ├── ui.py                  read-only dashboard of runs and their curves
 ├── capture.py             learn from served work: store, redact, prune, weigh, build a dataset
+├── goal_dataset.py        verified Goal evidence → redacted, deduped train/held-out datasets
 ├── autopilot.py           the unattended loop over captured work
 ├── schedule.py            put that loop in the user's own scheduler (launchd / systemd --user)
 ├── connectors.py          pull examples from Zendesk / HubSpot (env-var tokens, never stored)

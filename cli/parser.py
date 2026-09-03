@@ -1779,6 +1779,7 @@ def _add_train(sub) -> None:
         cmd_train_autopilot,
         cmd_train_collect,
         cmd_train_convert,
+        cmd_train_dataset,
         cmd_train_deploy,
         cmd_train_doctor,
         cmd_train_eval,
@@ -1877,6 +1878,24 @@ def _add_train(sub) -> None:
     collect.add_argument("--days", type=int, default=30, help="Window to summarise.")
     collect.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     collect.set_defaults(handler=cmd_train_collect)
+
+    dataset = train_sub.add_parser(
+        "dataset", help="Build verified training data from completed Grid Goals"
+    )
+    dataset.add_argument("--grid", default=None,
+                         help="Remote grid to read (default: the active remote grid).")
+    dataset.add_argument("--goal-id", action="append", default=[],
+                         help="Only include this Goal (repeatable; default: all history).")
+    dataset.add_argument("--out", default=None,
+                         help="Output directory (default: grid-goals-<timestamp>).")
+    dataset.add_argument("--holdout", type=float, default=0.1,
+                         help="Fraction of whole Goals held out (default: 0.1).")
+    dataset.add_argument("--seed", default="1729",
+                         help="Stable split seed (default: 1729).")
+    dataset.add_argument("--format", choices=("jsonl", "parquet", "both"), default="jsonl")
+    dataset.add_argument("--force", action="store_true",
+                         help="Replace an existing output directory.")
+    dataset.set_defaults(handler=cmd_train_dataset)
 
     auto = train_sub.add_parser(
         "autopilot", help="Improve a model from captured work, unattended (see `schedule`)"
