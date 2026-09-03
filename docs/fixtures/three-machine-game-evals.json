@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "evals": [
+    {
+      "type": "file",
+      "name": "playable accessible game page",
+      "path": "index.html",
+      "min_bytes": 700,
+      "max_bytes": 30000,
+      "contains": [
+        "<canvas id=\"game\"",
+        "id=\"score\"",
+        "id=\"lives\"",
+        "id=\"high-score\"",
+        "id=\"start-button\"",
+        "aria-live=\"polite\"",
+        "href=\"style.css\"",
+        "src=\"game.js\""
+      ]
+    },
+    {
+      "type": "file",
+      "name": "complete game behavior",
+      "path": "game.js",
+      "min_bytes": 3000,
+      "max_bytes": 60000,
+      "contains": [
+        "requestAnimationFrame",
+        "keydown",
+        "pointerdown",
+        "localStorage",
+        "collision",
+        "restartGame",
+        "highScore",
+        "score",
+        "lives"
+      ]
+    },
+    {
+      "type": "file",
+      "name": "responsive keyboard-visible styling",
+      "path": "style.css",
+      "min_bytes": 600,
+      "max_bytes": 30000,
+      "contains": [
+        "canvas",
+        "@media",
+        ":focus-visible"
+      ]
+    },
+    {
+      "type": "file",
+      "name": "three-stage distributed handoff",
+      "path": "HANDOFF.md",
+      "min_bytes": 250,
+      "max_bytes": 12000,
+      "contains": [
+        "A_ACCEPTED_CHECKPOINT",
+        "B_RECONSTRUCTED_CHECKPOINT",
+        "C_FINAL_RECONSTRUCTION"
+      ]
+    },
+    {
+      "type": "file",
+      "name": "operator instructions",
+      "path": "README.md",
+      "min_bytes": 500,
+      "max_bytes": 24000,
+      "contains": [
+        "How to play",
+        "python3 -m http.server",
+        "Controls",
+        "npm test",
+        "Tests"
+      ]
+    },
+    {
+      "type": "file",
+      "name": "browser-independent behavior tests",
+      "path": "tests/game.test.mjs",
+      "min_bytes": 800,
+      "max_bytes": 30000,
+      "contains": [
+        "node:test",
+        "node:assert",
+        "collision",
+        "restart",
+        "high score"
+      ]
+    },
+    {
+      "type": "file",
+      "name": "dependency-free test command",
+      "path": "package.json",
+      "min_bytes": 50,
+      "max_bytes": 4000,
+      "contains": [
+        "\"test\"",
+        "node --test"
+      ]
+    }
+  ]
+}

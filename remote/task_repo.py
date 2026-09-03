@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from . import task_worktree
 
@@ -111,6 +113,19 @@ _GIT_TIMEOUT_SECONDS = 120
 # Raised from 300s for ADR 0033 issue 16a: a real 581 MiB / 29,133-commit repository takes ~11s to
 # fetch on a fast local disk, and the relay is allowed ten minutes for the case that is not fast.
 _GIT_NETWORK_TIMEOUT_SECONDS = 900
+# Git changes an HTTP push from a Content-Length request to a chunked one once the request exceeds
+# ``http.postBuffer`` (1 MiB by default).  That is legal HTTP, and the relay accepts it directly,
+# but real reverse proxies in front of a remote Grid do not all preserve Git's chunked request body
+# faithfully.  A long native-agent transcript reproduced the failure through a Cloudflare tunnel:
+# Git's empty authentication probe succeeded, then the real receive-pack body reached the relay as
+# a malformed pkt-line stream and the completed Goal was retried from scratch.
+#
+# Buffer ordinary task-plane pushes through the relay's own default 64 MiB request ceiling.  This
+# does not raise what Grid accepts and it does not force a large project import into memory: an
+# import larger than this still uses Git's chunked path, which is why the relay supports that path.
+# It only makes the result/transcript pushes that already fit the ordinary ceiling travel as one
+# Content-Length request, the shape commodity proxies handle reliably.
+_GIT_HTTP_POST_BUFFER_BYTES = 64 * 1024 * 1024
 # Wall-clock ceiling for the workspace listing (ADR 0032 issue 08). Much SHORTER than the local one,
 # and that is the whole reason it exists rather than reusing it: this call runs on the lease
 # renewer's beat, and `_GIT_TIMEOUT_SECONDS` is 120s — the relay's entire lease TTL. A listing
@@ -133,6 +148,12 @@ class GitRemote:
 
     url: str
     token: str
+    claim_id: str | None = None
+    token_provider: Callable[[], str] | None = None
+
+    def live_token(self) -> str:
+        """Read the latest process credential while keeping static test/local remotes simple."""
+        return str(self.token_provider() if self.token_provider is not None else self.token)
 
 
 @dataclass(frozen=True)
@@ -321,7 +342,8 @@ GIT_SAFETY_CONFIG: tuple[tuple[str, str], ...] = (
 )
 
 
-def _env(token: str | None = None, author: GitIdentity | None = None) -> dict[str, str]:
+def _env(token: str | None = None, author: GitIdentity | None = None, *,
+         claim_id: str | None = None) -> dict[str, str]:
     """The environment every git child gets.
 
     **Author and committer are different people, and that is the point** (ADR 0033 D-m). The author
@@ -360,17 +382,23 @@ def _env(token: str | None = None, author: GitIdentity | None = None) -> dict[st
         "GIT_COMMITTER_EMAIL": DEFAULT_IDENTITY.email,
     }
     if token:
+        entries = [("http.extraHeader", f"Authorization: Bearer {token}")]
+        if claim_id:
+            entries.append(("http.extraHeader", f"X-Grid-Task-Claim: {claim_id}"))
+        entries.append(("http.followRedirects", "false"))
+        entries.append(("http.postBuffer", str(_GIT_HTTP_POST_BUFFER_BYTES)))
         env.update({
-            "GIT_CONFIG_COUNT": "2",
-            "GIT_CONFIG_KEY_0": "http.extraHeader",
-            "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
-            "GIT_CONFIG_KEY_1": "http.followRedirects",
-            "GIT_CONFIG_VALUE_1": "false",
+            "GIT_CONFIG_COUNT": str(len(entries)),
+            **{f"GIT_CONFIG_KEY_{index}": key
+               for index, (key, _value) in enumerate(entries)},
+            **{f"GIT_CONFIG_VALUE_{index}": value
+               for index, (_key, value) in enumerate(entries)},
         })
     return env
 
 
 def _run(workspace: Path, *args: str, token: str | None = None,
+         claim_id: str | None = None,
          timeout: float = _GIT_TIMEOUT_SECONDS,
          author: GitIdentity | None = None,
          index: Path | None = None) -> str:
@@ -389,7 +417,7 @@ def _run(workspace: Path, *args: str, token: str | None = None,
     safety: list[str] = []
     for key, value in GIT_SAFETY_CONFIG:
         safety += ["-c", f"{key}={value}"]
-    env = _env(token, author)
+    env = _env(token, author, claim_id=claim_id)
     if index is not None:
         env["GIT_INDEX_FILE"] = str(index)
     try:
@@ -453,7 +481,9 @@ def _ensure_repo(workspace: Path) -> None:
 
 def materialize(workspace: Path, *, url: str, token: str, branch: str,
                 input_commit: str, merge_ref: str = "",
-                transcript_ref: str = "", transcript_commit: str = "") -> None:
+                transcript_ref: str = "", transcript_commit: str = "",
+                reset_agent_state: bool = False,
+                claim_id: str | None = None) -> None:
     """Bring `workspace` to exactly `input_commit` on `branch`. Raises `CheckoutError` on any failure.
 
     Raising rather than returning a status is deliberate: the ONLY safe response to input that did
@@ -519,14 +549,20 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
         # describes, and reported terminally it burns the turn on one machine's full disk with
         # nothing to retry it. Found in review.
         task_worktree.ensure_store(store)
-        _run(store, "fetch", "--quiet", url, f"+refs/heads/{branch}:refs/heads/{branch}",
-             token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+        # A retry on the same provider already has this branch checked out in its linked worktree.
+        # Fetch normally refuses to update such a ref even when the oid is unchanged. We are about
+        # to hard-reset that worktree to the relay-pinned input, so this is exactly the plumbing use
+        # ``--update-head-ok`` exists for; without it cross-machine recovery works while same-node
+        # recovery fails before the agent starts.
+        _run(store, "fetch", "--quiet", "--update-head-ok", url,
+             f"+refs/heads/{branch}:refs/heads/{branch}",
+             token=token, claim_id=claim_id, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
         if merge_ref:
             # Its own invocation rather than a second refspec on the one above: a relay that has
             # collected this ref early answers with a failure naming the ref, and combining them
             # would lose the input fetch's success to the merge ref's failure.
             _run(store, "fetch", "--quiet", url, f"+{merge_ref}:{merge_ref}",
-                 token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+                 token=token, claim_id=claim_id, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
         if transcript_commit:
             # THE CONVERSATION (ADR 0034 D-j, issue 39), and only when the relay pinned one. An
             # unpinned turn fetches nothing: either the conversation has no transcript yet, or the
@@ -544,7 +580,7 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
             # distinguishable, because "the relay says a transcript exists and I could not get it"
             # must NOT become a silent fresh session.
             _run(store, "fetch", "--quiet", url, f"+{transcript_ref}:{transcript_ref}",
-                 token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+                 token=token, claim_id=claim_id, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
 
         # This conversation's working tree, cut from the store the fetch just filled. Cheap on every
         # turn after the first — the worktree is already there and this is a probe.
@@ -570,6 +606,21 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
     # a nested repository a previous agent may have cloned, and `-e` spares the one directory that
     # is ours rather than the task's.
     _run(workspace, "clean", "--quiet", "-ffdx", "-e", RESERVED_DIR)
+
+    # A pinned task is allowed to see exactly the pinned agent state, not a failed attempt's newer
+    # local files. Codex Goals need the same reset even on their first turn (whose pin is empty),
+    # because an automatic retry of that first turn can land back on the same provider. Keep the
+    # explicit flag narrow: an old Claude relay sends no pin and historically relies on `.grid/`
+    # surviving materialization, so changing the default would destroy that conversation.
+    if transcript_commit or reset_agent_state:
+        agent_state = workspace / RESERVED_DIR / TRANSCRIPT_DIR
+        try:
+            if agent_state.is_symlink() or (agent_state.exists() and not agent_state.is_dir()):
+                agent_state.unlink()
+            elif agent_state.is_dir():
+                shutil.rmtree(agent_state)
+        except OSError as exc:
+            raise InputFetchError(f"could not reset the task's pinned agent state: {exc}") from None
 
     if transcript_commit:
         # The conversation, put where Claude Code will look for it (ADR 0034 D-j, issue 39). AFTER
@@ -627,7 +678,8 @@ def _split(output: str) -> list[str]:
 
 
 def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
-                    message: str, author: GitIdentity | None = None) -> Pushed:
+                    message: str, author: GitIdentity | None = None,
+                    claim_id: str | None = None) -> Pushed:
     """Commit whatever the agent left and push `branch`. Returns the result commit and what the
     agent left unresolved.
 
@@ -724,7 +776,7 @@ def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
         # The refspec is spelled out rather than pushed as `HEAD`: the relay authorizes the exact
         # ref name it is handed, and a detached or re-pointed HEAD would name something else.
         _run(workspace, "push", "--quiet", url, f"refs/heads/{branch}:refs/heads/{branch}",
-             token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+             token=token, claim_id=claim_id, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
     except CheckoutError as exc:
         raise PushError(f"could not push {branch}: {exc}") from None
     return Pushed(commit=commit, unresolved=unresolved, unchecked=unchecked)
@@ -747,7 +799,8 @@ def transcript_ref(conversation_id: str) -> str:
     return f"{TRANSCRIPT_PREFIX}{conversation_id}" if conversation_id else ""
 
 
-def push_transcript(workspace: Path, *, url: str, token: str, ref: str) -> str | None:
+def push_transcript(workspace: Path, *, url: str, token: str, ref: str,
+                    claim_id: str | None = None) -> str | None:
     """Publish this conversation's transcript to its side ref (ADR 0034 D-j, issue 39).
 
     Answers the commit pushed, or `None` when the agent produced no transcript at all — a turn whose
@@ -804,7 +857,7 @@ def push_transcript(workspace: Path, *, url: str, token: str, ref: str) -> str |
     if url:
         try:
             _run(workspace, "fetch", "--quiet", url, f"+{ref}:{ref}",
-                 token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+                 token=token, claim_id=claim_id, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
         except CheckoutError:
             pass
 
@@ -870,7 +923,7 @@ def push_transcript(workspace: Path, *, url: str, token: str, ref: str) -> str |
 
     try:
         _run(workspace, "push", "--quiet", url, f"{commit}:{ref}",
-             token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+             token=token, claim_id=claim_id, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
     except CheckoutError as exc:
         raise PushError(f"could not push the conversation's transcript to {ref}: {exc}") from None
     return commit

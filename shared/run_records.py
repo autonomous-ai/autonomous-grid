@@ -31,14 +31,16 @@ from shared.models import api_catalog
 
 _IS_WINDOWS = sys.platform == "win32"
 
-# The argv marker of the detached REMOTE serve subprocess: `<cli> __remote-engine <network_id>
-# <engine_id>`. The join spawn (`cli/remote_provider._spawn_remote_engine`) builds it and the leave
+# The argv marker of the detached REMOTE serve subprocess: `<cli> --grid-home-tag=<digest>
+# __remote-engine <network_id> <engine_id>`. The join spawn
+# (`cli/remote_provider._spawn_remote_engine`) builds it and the leave
 # orphan sweep (`shared/orphan_sweep`) matches on it, so they share ONE constant and can never drift.
 # A third copy is the dispatch literal in `cli/_main.py` (kept in lockstep by hand, like the sibling
 # `__server` dispatch key).
 REMOTE_ENGINE_MARKER = "__remote-engine"
 
-# The same, for the detached LOCAL engine subprocess: `<cli> __engine <grid_id> <engine_id>`. Built by
+# The same, for the detached LOCAL engine subprocess: `<cli> --grid-home-tag=<digest> __engine
+# <grid_id> <engine_id>`. Built by
 # `cli/provider._spawn_engine`, matched by the same sweep, and — like its remote sibling — a hand-kept
 # copy of the `cli/_main.py` dispatch literal. The two markers are distinct whole tokens, so neither
 # sweep can ever match the other mode's children.

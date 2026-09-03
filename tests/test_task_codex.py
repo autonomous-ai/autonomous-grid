@@ -1,0 +1,758 @@
+"""Native Codex Goal slices and machine-independent Git checkpoint handoff."""
+from __future__ import annotations
+
+import io
+import json
+import subprocess
+import threading
+import time
+from email.message import Message
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import httpx
+import pytest
+
+from remote import task_codex, task_codex_proxy, task_repo
+
+
+class _OpenStringIO(io.StringIO):
+    def close(self):
+        pass
+
+
+class _FakeProcess:
+    def __init__(self, messages):
+        self.stdin = _OpenStringIO()
+        self.stdout = io.StringIO("".join(json.dumps(row) + "\n" for row in messages))
+        self.stderr = io.StringIO()
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = 0
+
+    def wait(self, timeout=None):
+        self.returncode = 0
+        return 0
+
+    def kill(self):
+        self.returncode = -9
+
+
+class _CreateRolloutOnActivation(_OpenStringIO):
+    def __init__(self, rollout: Path):
+        super().__init__()
+        self.rollout = rollout
+
+    def write(self, value):
+        written = super().write(value)
+        if '"method":"thread/goal/set"' in value and not self.rollout.exists():
+            self.rollout.parent.mkdir(parents=True, exist_ok=True)
+            self.rollout.write_text("{}\n", encoding="utf-8")
+        return written
+
+
+def _messages(rollout_path, status="complete", *, steered=False):
+    messages = [
+        {"id": 1, "result": {"userAgent": "codex"}},
+        {"id": 2, "result": {"thread": {
+            "id": "thread-portable", "path": str(rollout_path)}}},
+        {"method": "turn/started", "params": {
+            "threadId": "thread-portable", "turn": {"id": "turn-native"}}},
+        {"id": 3, "result": {"goal": {"status": "active"}}},
+    ]
+    if steered:
+        messages.extend([
+            {"id": 4, "result": {}},
+            {"id": 5, "result": {"goal": {"status": "paused"}}},
+        ])
+        goal_response_id = 6
+    else:
+        messages.append({"id": 4, "result": {"goal": {"status": "paused"}}})
+        goal_response_id = 5
+    messages.extend([
+        {"method": "thread/tokenUsage/updated", "params": {
+            "tokenUsage": {"total": {"totalTokens": 450}}}},
+        {"method": "turn/completed", "params": {
+            "turn": {"id": "turn-1", "status": "completed", "output": "done"}}},
+        {"id": goal_response_id, "result": {"goal": {
+            "status": status, "tokensUsed": 321, "timeUsedSeconds": 9}}},
+    ])
+    return messages
+
+
+def _job(**changes):
+    value = {
+        "task_id": "turn-1", "conversation_id": "goal-1", "agent_kind": "codex",
+        "goal": {
+            "objective": "Build the game", "done_when": "all four features and tests pass",
+            "model": "grid-coder", "tools": [], "token_budget": 10_000,
+            "turns_completed": 0, "tokens_used": 0, "time_used_seconds": 0,
+        },
+    }
+    value.update(changes)
+    return value
+
+
+def test_continuation_adds_exact_failed_eval_contracts_from_goal_metadata():
+    job = _job(prompt="Grid evaluation failed: instructions are absent")
+    job["goal"]["evals"] = [
+        {"type": "file", "name": "instructions", "path": "README.md", "exists": True,
+         "definition_id": "eval-readme", "definition_hash": "hash-readme"},
+        {"type": "file", "name": "game", "path": "game.js", "exists": True,
+         "definition_id": "eval-game", "definition_hash": "hash-game"},
+    ]
+    job["goal"]["last_eval"] = {"results": [
+        {"id": "eval-readme", "passed": False},
+        {"id": "eval-game", "passed": True},
+    ]}
+
+    prompt = task_codex._continuation_prompt(job, 1)
+
+    assert prompt is not None
+    assert "Grid evaluation failed" in prompt
+    assert '"path": "README.md"' in prompt
+    assert '"path": "game.js"' not in prompt
+    assert "definition_id" not in prompt
+
+
+def test_continuation_does_not_duplicate_relay_supplied_exact_contracts():
+    prompt = "Failure\nExact immutable check: {\"path\": \"README.md\"}"
+    job = _job(prompt=prompt)
+    assert task_codex._continuation_prompt(job, 1) == prompt
+
+
+def test_continuation_matches_failed_contract_names_when_old_relay_omits_last_eval():
+    job = _job(prompt="Grid evaluation failed:\n- instructions: required file is absent")
+    job["goal"]["evals"] = [
+        {"type": "file", "name": "instructions", "path": "README.md", "exists": True,
+         "definition_id": "eval-readme"},
+        {"type": "file", "name": "game", "path": "game.js", "exists": True,
+         "definition_id": "eval-game"},
+    ]
+
+    prompt = task_codex._continuation_prompt(job, 1)
+
+    assert prompt is not None
+    assert '"path": "README.md"' in prompt
+    assert '"path": "game.js"' not in prompt
+
+
+def test_goal_inference_proxy_attributes_requests_to_durable_turn_and_conversation():
+    class Handler:
+        headers = Message()
+
+    Handler.headers["Content-Type"] = "application/json"
+    proxy = task_codex_proxy.InferenceProxy(
+        "https://grid.test/relay/v1", "grid-secret",
+        turn_id="turn-1", conversation_id="goal-1", claim_id="claim-generation-7")
+    try:
+        headers = proxy._upstream_headers(Handler())
+    finally:
+        proxy.server.server_close()
+
+    assert headers["Authorization"] == "Bearer grid-secret"
+    assert headers["X-Request-Id"] == "turn-1"
+    assert headers["X-Grid-Conversation"] == "goal-1"
+    assert headers["X-Grid-Task-Claim"] == "claim-generation-7"
+
+
+def test_grid_inference_builds_one_canonical_relay_api_root():
+    assert task_codex.GridInference("https://grid.test", "secret").relay_base_url == (
+        "https://grid.test/relay/v1")
+    assert task_codex.GridInference("https://grid.test/relay/v1/", "secret").relay_base_url == (
+        "https://grid.test/relay/v1")
+
+
+def test_goal_inference_proxy_rewrites_claude_alias_to_exact_grid_model():
+    proxy = task_codex_proxy.InferenceProxy(
+        "https://grid.test/relay/v1", "grid-secret", upstream_model="Qwen3.6-35B-A3B")
+    messages = json.dumps({"model": "sonnet", "messages": [{"role": "user", "content": "hi"}]})
+    try:
+        rewritten = json.loads(proxy._upstream_body("messages", messages.encode()))
+        responses = proxy._upstream_body(
+            "responses", b'{"model":"codex-alias","input":"hi"}')
+    finally:
+        proxy.server.server_close()
+
+    assert rewritten["model"] == "Qwen3.6-35B-A3B"
+    assert rewritten["messages"] == [{"role": "user", "content": "hi"}]
+    assert responses == b'{"model":"codex-alias","input":"hi"}'
+
+
+def test_goal_inference_proxy_refreshes_expired_node_token_once():
+    seen_tokens = []
+    live = {"token": "expired-node-token"}
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length)
+            token = self.headers.get("Authorization")
+            seen_tokens.append(token)
+            status = 401 if token == "Bearer expired-node-token" else 200
+            payload = json.dumps({"ok": status == 200}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format, *_args):
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    refreshes = []
+
+    def refresh(stale):
+        refreshes.append(stale)
+        live["token"] = "fresh-node-token"
+        return True
+
+    proxy = task_codex_proxy.InferenceProxy(
+        f"http://127.0.0.1:{upstream.server_address[1]}",
+        lambda: live["token"], refresh_token=refresh,
+        turn_id="turn-1", conversation_id="goal-1")
+    proxy.start()
+    try:
+        response = httpx.post(
+            proxy.base_url + "/responses",
+            headers={"Authorization": f"Bearer {proxy.child_token}"},
+            json={"model": "grid-coder", "input": "continue"}, timeout=5)
+    finally:
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=5)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert seen_tokens == ["Bearer expired-node-token", "Bearer fresh-node-token"]
+    assert refreshes == ["expired-node-token"]
+    assert proxy.last_failure is None
+
+
+def test_goal_inference_proxy_bounds_a_half_open_upstream_stream(monkeypatch):
+    release_upstream = threading.Event()
+    upstream_started = threading.Event()
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.flush()
+            upstream_started.set()
+            # Model a relay/tunnel that sent headers but then disappeared without closing its
+            # socket.  The test releases this server after the proxy proves it has a read bound.
+            release_upstream.wait(timeout=5)
+
+        def log_message(self, _format, *_args):
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    monkeypatch.setattr(task_codex_proxy, "_UPSTREAM_READ_TIMEOUT_SECONDS", 0.1)
+
+    proxy = task_codex_proxy.InferenceProxy(
+        f"http://127.0.0.1:{upstream.server_address[1]}", "grid-secret")
+    proxy.start()
+    started = time.monotonic()
+    try:
+        response = httpx.post(
+            proxy.base_url + "/responses",
+            headers={"Authorization": f"Bearer {proxy.child_token}"},
+            json={"model": "grid-coder", "input": "continue"}, timeout=2)
+        assert upstream_started.wait(timeout=1)
+    finally:
+        release_upstream.set()
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=5)
+
+    assert response.status_code == 200
+    assert time.monotonic() - started < 1.5
+    assert proxy.last_failure == (
+        "Grid inference transport failed for /responses: ReadTimeout")
+
+
+def test_codex_goal_capability_requires_a_measured_native_goal_version(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(task_codex.shutil, "which", lambda _name: "/fake/codex")
+    monkeypatch.setattr(task_codex, "_protocol_capability", lambda _binary: (True, ""))
+    monkeypatch.setattr(task_codex, "_binary_version", lambda _binary: (0, 150, 0))
+
+    assert task_codex.available() is False
+    assert task_codex.supports_distributed_goals("/fake/codex") is False
+    try:
+        task_codex.resolve_binary()
+    except task_codex.CodexGoalError as exc:
+        assert "install 0.150.1 or newer" in str(exc)
+    else:
+        raise AssertionError("an old Codex binary was accepted as a native Goal provider")
+
+    monkeypatch.setattr(task_codex, "_binary_version", lambda _binary: (0, 150, 1))
+    assert task_codex.available() is True
+    assert task_codex.supports_distributed_goals("/fake/codex") is True
+    assert task_codex.resolve_binary() == "/fake/codex"
+
+
+def test_codex_resolution_prefers_the_install_owned_by_this_grid_home(tmp_path, monkeypatch):
+    from shared.agent import codex_installer
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    installed = codex_installer.codex_bin()
+    installed.parent.mkdir(parents=True)
+    installed.write_text("owned binary", encoding="utf-8")
+    monkeypatch.setattr(task_codex.shutil, "which", lambda _name: "/global/codex")
+    monkeypatch.setattr(
+        task_codex, "_require_distributed_goal_capability", lambda binary: binary)
+    monkeypatch.setattr(task_codex, "supports_distributed_goals", lambda _binary: True)
+
+    assert task_codex.resolve_binary() == str(installed)
+    assert task_codex.available() is True
+
+
+def test_codex_goal_capability_requires_the_exact_experimental_protocol(monkeypatch):
+    monkeypatch.setattr(task_codex, "_binary_version", lambda _binary: (999, 0, 0))
+    monkeypatch.setattr(
+        task_codex, "_protocol_capability",
+        lambda _binary: (False, "schema lacks thread/goal/get"))
+
+    assert task_codex.supports_distributed_goals("/future/codex") is False
+    try:
+        task_codex._require_distributed_goal_capability("/future/codex")
+    except task_codex.CodexProtocolError as exc:
+        assert "schema lacks thread/goal/get" in str(exc)
+    else:
+        raise AssertionError("a version-new but protocol-incompatible Codex binary was accepted")
+
+
+def test_codex_protocol_schema_probe_checks_every_method_and_caches_failures(
+        tmp_path, monkeypatch):
+    binary = tmp_path / "codex"
+    binary.write_text("fake executable revision\n")
+    calls = []
+
+    def generate(argv, **_kwargs):
+        calls.append(argv)
+        output = Path(argv[argv.index("--out") + 1])
+        # Deliberately omit item/tool/call. A node unable to expose business actions must not claim
+        # a Goal merely because all of its thread lifecycle methods happen to exist.
+        methods = sorted(task_codex._REQUIRED_PROTOCOL_METHODS - {"item/tool/call"})
+        (output / "codex_app_server_protocol.schemas.json").write_text(
+            json.dumps({"nested": {"methods": methods}}))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(task_codex, "_PROTOCOL_CACHE", {})
+    monkeypatch.setattr(task_codex.subprocess, "run", generate)
+    first = task_codex._protocol_capability(str(binary))
+    second = task_codex._protocol_capability(str(binary))
+
+    assert first == second
+    assert first[0] is False and "item/tool/call" in first[1]
+    assert len(calls) == 1, "a cached incompatible binary was probed on every claim poll"
+
+    binary.chmod(0o755)
+    third = task_codex._protocol_capability(str(binary))
+    assert third[0] is False
+    assert len(calls) == 2, "repairing executable permissions did not invalidate the failed probe"
+
+
+def test_runtime_method_drift_quarantines_codex_before_another_goal_claim(
+        tmp_path, monkeypatch):
+    # This test supplies its own PATH candidate. Do not let a developer's real default-GRID_HOME
+    # install replace that fixture now that providers correctly prefer their owned install.
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "grid-home"))
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    monkeypatch.setattr(task_codex, "_PROTOCOL_CACHE", {})
+    monkeypatch.setattr(task_codex, "_binary_version", lambda _binary: (999, 0, 0))
+    binary = tmp_path / "codex"
+    binary.write_text("future codex revision\n")
+    process = _FakeProcess([
+        {"id": 1, "result": {"serverInfo": {"name": "future-codex"}}},
+        {"id": 2, "error": {"code": -32601, "message": "thread/start removed"}},
+    ])
+
+    try:
+        task_codex.run_slice(
+            _job(), tmp_path, inference=task_codex.GridInference("https://grid.test", "secret"),
+            executable=str(binary), timeout=30, publish=lambda *_args, **_kwargs: None,
+            process_factory=lambda argv, env, cwd: process)
+    except task_codex.CodexProtocolError as exc:
+        assert "thread/start removed" in str(exc)
+    else:
+        raise AssertionError("method-not-found protocol drift was not retryable")
+
+    # The binary's stat-key is now poisoned. supports_distributed_goals() must fail without probing
+    # again, causing this node's next scheduler profile to omit native_goal.
+    assert task_codex.supports_distributed_goals(str(binary)) is False
+    from remote import tasks
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setattr(task_codex.shutil, "which", lambda _name: str(binary))
+    assert tasks._agent_profiles() == ()
+
+
+def test_unknown_native_goal_status_is_retryable_protocol_drift():
+    """An upgraded Codex must not turn a status this worker does not know into `failed`.
+
+    That would be a fabricated terminal verdict. Raising lets the provider classify it as a
+    harness failure and hand the durable Goal to another compatible machine within its retry cap.
+    """
+    assert task_codex._public_status("failed") == "failed"
+    try:
+        task_codex._public_status("awaitingHumanReview")
+    except task_codex.CodexProtocolError as exc:
+        assert "unsupported native Goal status" in str(exc)
+    else:
+        raise AssertionError("unknown Codex Goal status became a terminal verdict")
+
+
+def test_one_native_turn_is_checkpointed_below_grid_agent(tmp_path, monkeypatch):
+    events = []
+    spawned = {}
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "provider-anthropic-secret")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "x-provider-secret: hidden")
+    monkeypatch.setenv("GRID_TASK_ENV_PASSTHROUGH", "OPENAI_API_KEY CODEX_API_KEY")
+    monkeypatch.setenv("OPENAI_API_KEY", "provider-openai-secret")
+    monkeypatch.setenv("CODEX_API_KEY", "provider-codex-secret")
+    monkeypatch.setenv("NO_PROXY", "internal.example")
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    rollout = (tmp_path / task_codex.AGENT_DIR / task_codex.HOME_DIR
+               / "sessions/fake/rollout-thread-portable.jsonl")
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    process = _FakeProcess(_messages(rollout))
+
+    def spawn(argv, env, cwd):
+        spawned.update(argv=argv, env=env, cwd=cwd)
+        return process
+
+    result = task_codex.run_slice(
+        _job(), tmp_path, inference=task_codex.GridInference(
+            "https://grid.test", "secret", claim_id="claim-generation-secret"),
+        executable="/fake/codex", timeout=30,
+        publish=lambda event, **fields: events.append((event, fields)),
+        process_factory=spawn)
+
+    assert result.status == "complete"
+    assert result.thread_id == "thread-portable"
+    assert result.turns_completed == 1 and result.tokens_used == 450
+    checkpoint = json.loads((tmp_path / ".grid/agent/codex/goal-state.json").read_text())
+    assert checkpoint["thread_id"] == "thread-portable"
+    assert checkpoint["version"] == 2
+    assert checkpoint["rollout_relpath"] == "sessions/fake/rollout-thread-portable.jsonl"
+    sent = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
+    assert sent[0]["method"] == "initialize"
+    assert sent[1] == {"method": "initialized"}
+    # Creating the thread is the only thread/start request. Activating a native Codex Goal starts
+    # its turn automatically; Grid must not add a second, ordinary user turn of its own.
+    starts = [row for row in sent if row.get("method") == "thread/start"]
+    assert len(starts) == 1
+    assert starts[0]["params"]["sandbox"] == "workspace-write"
+    assert any(row.get("method") == "thread/goal/set"
+               and row["params"].get("status") == "paused" for row in sent)
+    assert "secret" not in process.stdin.getvalue()
+    assert "claim-generation-secret" not in repr(spawned)
+    assert "claim-generation-secret" not in process.stdin.getvalue()
+    assert not any(name.startswith(("ANTHROPIC_", "OPENAI_"))
+                   for name in spawned["env"])
+    assert "CODEX_API_KEY" not in spawned["env"]
+    assert spawned["env"]["NO_PROXY"] == "internal.example,127.0.0.1,localhost"
+    assert spawned["env"]["no_proxy"] == spawned["env"]["NO_PROXY"]
+    assert events[-1][0] == "goal.slice.completed"
+
+
+def test_thread_start_may_promise_rollout_before_activation_creates_it(tmp_path, monkeypatch):
+    """Measured against Codex 0.150.1: thread/start returns a path that is not a file yet."""
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    rollout = (tmp_path / task_codex.AGENT_DIR / task_codex.HOME_DIR
+               / "sessions/fake/rollout-thread-portable.jsonl")
+    process = _FakeProcess(_messages(rollout))
+    process.stdin = _CreateRolloutOnActivation(rollout)
+
+    result = task_codex.run_slice(
+        _job(), tmp_path, inference=task_codex.GridInference("https://grid.test", "secret"),
+        executable="/fake/codex", timeout=30, publish=lambda *_args, **_kwargs: None,
+        process_factory=lambda _argv, _env, _cwd: process)
+
+    assert result.status == "complete"
+    assert rollout.is_file()
+
+
+def test_missing_pre_activation_rollout_restarts_only_uncompleted_native_thread(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    state_dir = tmp_path / task_codex.AGENT_DIR
+    state_dir.mkdir(parents=True)
+    (state_dir / task_codex.STATE_FILE).write_text(json.dumps({
+        "version": 2, "thread_id": "never-activated",
+        "rollout_relpath": "sessions/missing.jsonl", "status": "active",
+        "turns_completed": 0, "tokens_used": 0, "time_used_seconds": 0,
+    }), encoding="utf-8")
+    rollout = (state_dir / task_codex.HOME_DIR
+               / "sessions/fake/rollout-thread-portable.jsonl")
+    process = _FakeProcess(_messages(rollout))
+    process.stdin = _CreateRolloutOnActivation(rollout)
+
+    task_codex.run_slice(
+        _job(), tmp_path, inference=task_codex.GridInference("https://grid.test", "secret"),
+        executable="/fake/codex", timeout=30, publish=lambda *_args, **_kwargs: None,
+        process_factory=lambda _argv, _env, _cwd: process)
+
+    sent = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
+    assert any(row.get("method") == "thread/start" for row in sent)
+    assert not any(row.get("method") == "thread/resume" for row in sent)
+
+
+def test_missing_rollout_after_a_completed_turn_is_never_silently_restarted(
+        tmp_path, monkeypatch):
+    """Losing real native history must fail closed instead of fabricating a fresh thread."""
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    state_dir = tmp_path / task_codex.AGENT_DIR
+    state_dir.mkdir(parents=True)
+    (state_dir / task_codex.STATE_FILE).write_text(json.dumps({
+        "version": 2, "thread_id": "completed-on-worker-a",
+        "rollout_relpath": "sessions/missing.jsonl", "status": "active",
+        "turns_completed": 1, "tokens_used": 42, "time_used_seconds": 3,
+    }), encoding="utf-8")
+    process = _FakeProcess([{"id": 1, "result": {"userAgent": "codex"}}])
+
+    with pytest.raises(task_codex.MissingRollout, match="checkpoint rollout is missing"):
+        task_codex.run_slice(
+            _job(turns_completed=1), tmp_path,
+            inference=task_codex.GridInference("https://grid.test", "secret"),
+            executable="/fake/codex", timeout=30, publish=lambda *_args, **_kwargs: None,
+            process_factory=lambda _argv, _env, _cwd: process)
+
+    sent = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
+    assert not any(row.get("method") in {"thread/start", "thread/resume"} for row in sent)
+
+
+def test_promised_rollout_is_contained_before_it_exists(tmp_path):
+    home = tmp_path / "portable-home"
+    home.mkdir()
+    outside = tmp_path / "future-rollout.jsonl"
+
+    with pytest.raises(task_codex.CodexGoalError, match="outside the portable Codex home"):
+        task_codex._relative_rollout(home, str(outside), require_exists=False)
+
+
+def test_mid_slice_crash_still_publishes_a_portable_codex_thread_pointer(tmp_path, monkeypatch):
+    """The retry must resume the native Goal thread, not merely inherit its partially edited files."""
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    rollout = (tmp_path / task_codex.AGENT_DIR / task_codex.HOME_DIR
+               / "sessions/fake/rollout-crashed-thread.jsonl")
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    # EOF immediately after thread/start: activation never answers and the slice fails, but the
+    # relay-published transcript now has enough information for another node's thread/resume.
+    process = _FakeProcess([
+        {"id": 1, "result": {"userAgent": "codex"}},
+        {"id": 2, "result": {"thread": {
+            "id": "crashed-thread", "path": str(rollout)}}},
+    ])
+    try:
+        task_codex.run_slice(
+            _job(), tmp_path,
+            inference=task_codex.GridInference("https://grid.test", "secret"),
+            executable="/fake/codex", timeout=30,
+            publish=lambda *_args, **_kwargs: None,
+            process_factory=lambda _argv, _env, _cwd: process)
+    except task_codex.CodexGoalError:
+        pass
+    else:
+        raise AssertionError("the deliberately truncated app-server exchange did not fail")
+
+    checkpoint = json.loads((tmp_path / ".grid/agent/codex/goal-state.json").read_text())
+    assert checkpoint == {
+        "version": 2, "thread_id": "crashed-thread",
+        "rollout_relpath": "sessions/fake/rollout-crashed-thread.jsonl",
+        "status": "active", "turns_completed": 0, "tokens_used": 0,
+        "time_used_seconds": 0,
+    }
+
+
+def test_resumed_native_goal_receives_grid_budget_and_continuation_evidence(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(task_codex.InferenceProxy, "start", lambda self: None)
+    monkeypatch.setattr(task_codex.InferenceProxy, "stop", lambda self: None)
+    rollout = (tmp_path / task_codex.AGENT_DIR / task_codex.HOME_DIR
+               / "sessions/fake/rollout-resumed-budget.jsonl")
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    (tmp_path / task_codex.AGENT_DIR / task_codex.STATE_FILE).write_text(json.dumps({
+        "version": 2, "thread_id": "thread-portable",
+        "rollout_relpath": "sessions/fake/rollout-resumed-budget.jsonl",
+        "status": "active", "turns_completed": 1, "tokens_used": 500,
+        "time_used_seconds": 5,
+    }))
+    process = _FakeProcess(_messages(rollout, steered=True))
+    job = _job()
+    job["goal"] = {**job["goal"], "turns_completed": 1, "tokens_used": 500,
+                   "time_used_seconds": 5, "token_budget": 7_500}
+    job["prompt"] = (
+        "Continue working toward the active Goal.\n\n"
+        "Grid's independent evaluation did not pass:\n- README: required file is absent")
+
+    task_codex.run_slice(
+        job, tmp_path, inference=task_codex.GridInference("https://grid.test", "secret"),
+        executable="/fake/codex", timeout=30, publish=lambda *_args, **_kwargs: None,
+        process_factory=lambda argv, env, cwd: process)
+
+    sent = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
+    activated = [row for row in sent if row.get("method") == "thread/goal/set"
+                 and row.get("params", {}).get("status") == "active"]
+    assert len(activated) == 1
+    assert activated[0]["params"]["tokenBudget"] == 7_500
+    assert "objective" not in activated[0]["params"]
+    steered = [row for row in sent if row.get("method") == "turn/steer"]
+    assert len(steered) == 1
+    assert steered[0]["params"]["expectedTurnId"] == "turn-native"
+    assert steered[0]["params"]["input"] == [{
+        "type": "text", "text": job["prompt"],
+    }]
+
+
+def test_copied_codex_checkpoint_rebases_rollout_to_the_new_worker(tmp_path):
+    worker_b_home = tmp_path / "worker-b" / "home"
+    rollout = worker_b_home / "sessions/2026/rollout-thread-portable.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+
+    resolved = task_codex._resume_rollout(worker_b_home, {
+        "thread_id": "thread-portable",
+        "rollout_relpath": "sessions/2026/rollout-thread-portable.jsonl",
+    }, "thread-portable")
+
+    assert resolved == rollout.resolve()
+    assert str(resolved).startswith(str(worker_b_home.resolve()))
+
+
+def test_legacy_codex_checkpoint_discovers_copied_rollout_but_refuses_escape(tmp_path):
+    home = tmp_path / "home"
+    rollout = home / "sessions/2026/rollout-thread-portable.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+
+    assert task_codex._resume_rollout(home, {}, "thread-portable") == rollout.resolve()
+    try:
+        task_codex._resume_rollout(
+            home, {"rollout_relpath": "../../outside.jsonl"}, "thread-portable")
+    except task_codex.CodexGoalError as exc:
+        assert "escapes its Codex home" in str(exc)
+    else:
+        raise AssertionError("a checkpoint path escaped the portable Codex home")
+
+
+def _git(directory: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=directory, text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def _remote(tmp_path: Path) -> tuple[Path, str]:
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init", "-q", "-b", "main")
+    _git(source, "config", "user.name", "test")
+    _git(source, "config", "user.email", "test@example.invalid")
+    (source / "README.md").write_text("start\n")
+    _git(source, "add", "README.md")
+    _git(source, "commit", "-q", "-m", "start")
+    commit = _git(source, "rev-parse", "HEAD")
+    bare = tmp_path / "relay.git"
+    _git(tmp_path, "clone", "-q", "--bare", str(source), str(bare))
+    return bare, commit
+
+
+def _workspace(root: Path) -> Path:
+    return root / "project" / "member" / "goal-conversation" / "workspace"
+
+
+def test_three_isolated_workers_reconstruct_goal_only_from_relay_git(tmp_path):
+    bare, initial = _remote(tmp_path)
+    url = str(bare)
+
+    # Worker A has its own object store, worktree and Codex home.
+    _git(bare, "branch", "task/A", initial)
+    a = _workspace(tmp_path / "node-a")
+    task_repo.materialize(a, url=url, token="", branch="task/A", input_commit=initial)
+    (a / "feature-1.txt").write_text("worker A\n")
+    state_a = task_codex.state_dir(a)
+    (state_a / "home").mkdir()
+    (state_a / "home/state.sqlite").write_bytes(b"codex-a")
+    (state_a / task_codex.STATE_FILE).write_text(json.dumps({
+        "thread_id": "portable-thread", "turns_completed": 1}))
+    pin_a = task_repo.push_transcript(a, url=url, token="",
+                                      ref=task_repo.transcript_ref("goal-conversation"))
+    result_a = task_repo.commit_and_push(
+        a, url=url, token="", branch="task/A", message="A").commit
+
+    # Worker B starts with no files from A. Materialize must fetch both commits from relay Git.
+    _git(bare, "branch", "task/B", result_a)
+    b = _workspace(tmp_path / "node-b")
+    task_repo.materialize(
+        b, url=url, token="", branch="task/B", input_commit=result_a,
+        transcript_ref=task_repo.transcript_ref("goal-conversation"), transcript_commit=pin_a)
+    assert (b / "feature-1.txt").read_text() == "worker A\n"
+    assert json.loads((task_codex.state_dir(b) / task_codex.STATE_FILE).read_text())[
+        "thread_id"] == "portable-thread"
+    assert (task_codex.state_dir(b) / "home/state.sqlite").read_bytes() == b"codex-a"
+    (b / "feature-2.txt").write_text("worker B\n")
+    (task_codex.state_dir(b) / "home/state.sqlite").write_bytes(b"codex-b")
+    (task_codex.state_dir(b) / task_codex.STATE_FILE).write_text(json.dumps({
+        "thread_id": "portable-thread", "turns_completed": 2}))
+    pin_b = task_repo.push_transcript(b, url=url, token="",
+                                      ref=task_repo.transcript_ref("goal-conversation"))
+    result_b = task_repo.commit_and_push(
+        b, url=url, token="", branch="task/B", message="B").commit
+
+    # Worker C is isolated again and sees exactly the state B published.
+    _git(bare, "branch", "task/C", result_b)
+    c = _workspace(tmp_path / "node-c")
+    task_repo.materialize(
+        c, url=url, token="", branch="task/C", input_commit=result_b,
+        transcript_ref=task_repo.transcript_ref("goal-conversation"), transcript_commit=pin_b)
+    assert (c / "feature-1.txt").is_file() and (c / "feature-2.txt").is_file()
+    assert (task_codex.state_dir(c) / "home/state.sqlite").read_bytes() == b"codex-b"
+    assert json.loads((task_codex.state_dir(c) / task_codex.STATE_FILE).read_text())[
+        "turns_completed"] == 2
+
+
+def test_retry_discards_same_machine_state_newer_than_the_pinned_commit(tmp_path):
+    bare, initial = _remote(tmp_path)
+    url = str(bare)
+    _git(bare, "branch", "task/retry", initial)
+    workspace = _workspace(tmp_path / "node-a")
+    task_repo.materialize(workspace, url=url, token="", branch="task/retry",
+                          input_commit=initial)
+    state = task_codex.state_dir(workspace)
+    (state / task_codex.STATE_FILE).write_text('{"turns_completed":1}')
+    pin = task_repo.push_transcript(workspace, url=url, token="",
+                                    ref=task_repo.transcript_ref("goal-conversation"))
+    # Failed attempt left newer local state and an extra SQLite WAL not present in the pin.
+    (state / task_codex.STATE_FILE).write_text('{"turns_completed":99}')
+    (state / "home").mkdir(exist_ok=True)
+    (state / "home/state.sqlite-wal").write_bytes(b"failed-attempt")
+    task_repo.materialize(
+        workspace, url=url, token="", branch="task/retry", input_commit=initial,
+        transcript_ref=task_repo.transcript_ref("goal-conversation"), transcript_commit=pin)
+    assert json.loads((state / task_codex.STATE_FILE).read_text())["turns_completed"] == 1
+    assert not (state / "home/state.sqlite-wal").exists()

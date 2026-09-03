@@ -212,6 +212,23 @@ did not create the grid sees it blank. `grid info --env` prints your access toke
 `OPENAI_BASE_URL` as the grid's relay base + `/relay/v1`, so any OpenAI SDK can call it.
 See [ADR 0003](./adr/0003-remote-grid-lifecycle.md).
 
+## Relay information
+
+```
+grid relay info [relay-id|relay-url|grid] [--json]
+```
+
+**Remote-only and read-only.** Shows one relay and every locally known Grid configured to use it.
+With no argument it uses the active Grid's relay, or the sole relay when that is unambiguous. The
+argument may be a relay id, relay URL, Grid name, or Grid id. Human output has stable `relay_id`,
+`relay_url`, and `grids` fields followed by the matching Grid names and ids; `--json` emits those
+same fields without credentials.
+
+Relay ownership is stored once: **Goal → Grid → Relay**. A Goal does not copy `relay_id`. During a
+rolling upgrade, records without a server-issued relay id are grouped by their normalized relay URL,
+so existing and newly refreshed Grids remain visible together. Run `grid sync` when a Grid's local
+record has no relay information.
+
 ## Engines
 
 ```
@@ -1537,6 +1554,59 @@ if that is not what you want for it.
 alone, exactly as before. The relay decides that from its own configuration — it must be running
 against the hosted control plane *and* be a one-grid-per-email-domain network — rather than from
 anything a client sends. `grid project status` reports which, so you never have to guess.
+
+## Goal
+
+```
+grid goal run --project <project-id> --objective <text> --done-when <text> --model <model>
+              [--token-budget <n>] [--tools <json-file>] [--name <name>]
+              [--idempotency-key <key>] [--grid <grid>] [--json]
+grid goal list [--all] [--grid <grid>] [--json]
+grid goal status <goal-id> [--grid <grid>] [--json]
+grid goal evidence <goal-id> [--verify] [--min-execution-nodes <n>] [--require-inference]
+                   [--require-worker-revision <git-revision>]
+                   [--require-agent-sequence codex,claude,...] [--grid <grid>]
+grid goal pause <goal-id> [--grid <grid>] [--json]
+grid goal resume <goal-id> [--token-budget <tokens>] [--grid <grid>] [--json]
+grid goal cancel <goal-id> [--grid <grid>] [--json]
+```
+
+**Remote-only and experimental.** A Goal is one measurable Codex objective continued across
+ordinary distributed task leases until native Codex Goal state says it is complete, blocked or
+limited. The Goal id is its conversation id. `list` omits ended Goals unless `--all` is supplied.
+Creation automatically uses a unique request key and retries one transport failure safely. If the
+response remains uncertain, reuse the key printed in the error with `--idempotency-key`; a different
+request cannot reuse that key.
+
+`resume --token-budget` raises the cumulative cap of a `budget_limited` root Goal and continues its
+existing branch and native transcript. The value must be a positive whole number larger than the
+old cap and every consumed/reserved token. It cannot revive completed, failed or cancelled Goals,
+and child Goal budgets remain reserved and controlled by their parent.
+
+The computer running Codex and the computer serving `--model` need not be the same node. Agent state
+and project state move through the relay's Git refs at successful turn boundaries; a replacement
+provider cannot recover uncommitted work from a node that disappeared mid-turn.
+
+`goal evidence --verify --require-agent-sequence codex,claude` is an acceptance gate for a real
+mixed-harness run. It matches an ordered subsequence of relay-stamped attempt starts, including an
+interrupted predecessor that has authoritative retry evidence; agent-authored handoff files cannot
+satisfy it. Combine it with `--min-execution-nodes`, `--require-worker-revision`, and
+`--require-inference` when proving a physical rollout.
+
+A Goal turn is claimable only while the Grid has a live, healthy, tool-capable route for the model
+and the selected harness dialect (Responses for Codex, Messages/chat for Claude Code). Otherwise it
+stays queued without incrementing `attempt`; model recovery makes that same row claimable. `auto`
+waits the same way when routing is disabled or its compatible pool is empty. This is a readiness
+gate, not an inference reservation: request-time load, trust, quotas, and later node loss still
+belong to the inference router.
+
+While an active queued turn is held by that gate, `status` reports the compatible harnesses or a
+model-wait explanation, and the human `list` view shows `waiting-model`. JSON includes
+`model_readiness.state` (`ready` or `waiting`) and `model_readiness.agents`; the durable Goal status
+remains `active`, because model availability is live Grid state rather than a terminal outcome.
+
+See [Distributed Goals](goals-quickstart.md) for provider setup, HTTP observe/act tools, lifecycle
+semantics and the three-node handoff test.
 
 ## Task
 

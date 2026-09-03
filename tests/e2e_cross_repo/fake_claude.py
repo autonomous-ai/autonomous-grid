@@ -43,6 +43,7 @@ import subprocess
 import sys
 import time
 import uuid
+from urllib import request as urllib_request
 
 _TRANSCRIPT_NAME = re.compile(r"[^A-Za-z0-9]")
 
@@ -52,11 +53,28 @@ def _emit(record: dict) -> None:
     sys.stdout.flush()
 
 
+def _exercise_grid_inference() -> None:
+    """Make one genuine Messages request through Claude's loopback Grid proxy."""
+    payload = json.dumps({
+        "model": os.environ["ANTHROPIC_MODEL"], "max_tokens": 16, "stream": False,
+        "messages": [{"role": "user", "content": "prove Claude child inference routing"}],
+    }, separators=(",", ":")).encode()
+    request = urllib_request.Request(
+        os.environ["ANTHROPIC_BASE_URL"].rstrip("/") + "/v1/messages",
+        data=payload, method="POST",
+        headers={"Authorization": f"Bearer {os.environ['ANTHROPIC_AUTH_TOKEN']}",
+                 "Content-Type": "application/json", "Accept": "application/json"})
+    with urllib_request.urlopen(request, timeout=20) as response:
+        answer = json.loads(response.read())
+    if answer.get("type") != "message" or answer.get("content", [{}])[0].get("text") != "grid inference ok":
+        raise RuntimeError(f"Claude received invalid Grid inference response: {answer!r}")
+
+
 # What this fake claims to be when asked. `resolve_binary()` gates on a minimum version since issue
 # 23, because `--settings` is the one flag that fails OPEN on a binary too old to understand its
 # contents — so a stand-in that could not answer `--version` would fail every task here for a reason
 # that has nothing to do with what these tests are about.
-_VERSION = "2.1.223 (Claude Code)"
+_VERSION = "2.1.251 (Claude Code)"
 
 
 def _parse_argv(argv: list[str]) -> tuple[str, str | None]:
@@ -290,6 +308,183 @@ def main() -> int:
         # Appended, never rewritten: a resume continues the same file and keeps the same id.
         with (transcript / f"{session}.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"sessionId": session, "prompt": prompt}) + "\n")
+
+    if os.environ.get("GRID_E2E_GOAL_SCENARIO") in (
+            "subgoal", "subgoal_retry", "subgoal_mixed_retry", "subgoal_fanout",
+            "subgoal_required_failure"):
+        scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
+        node = os.environ.get("GRID_E2E_GOAL_NODE")
+        expected_node = "C" if scenario in (
+            "subgoal_retry", "subgoal_mixed_retry", "subgoal_fanout",
+            "subgoal_required_failure") else "B"
+        if node != expected_node or not prompt.startswith("/goal ") or resume is not None:
+            sys.stderr.write("fake Claude received an invalid child Goal assignment\n")
+            return 2
+        if scenario == "subgoal_fanout":
+            _exercise_grid_inference()
+            pathlib.Path("CLAUDE_CHILD.md").write_text(
+                "# Claude C\n\nClaude C completed its parallel child on an isolated Grid root.\n")
+            # Match Codex B's synchronization window so the driver can observe both relay rows in
+            # `running` without giving the two workers any shared filesystem state.
+            time.sleep(2)
+            _emit({"type": "assistant", "message": {"usage": {
+                "input_tokens": 18, "output_tokens": 10}, "content": [
+                {"type": "text", "text": "Claude C completed its parallel child"}]}})
+            _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": True,
+                   "reason": "CLAUDE_CHILD.md exists", "iterations": 1, "tokens": 28}})
+            return 0
+        if scenario == "subgoal_required_failure":
+            pathlib.Path("SLOW_STARTED.md").write_text(
+                "Claude C started work before its required sibling failed.\n")
+            _emit({"type": "assistant", "message": {"usage": {
+                "input_tokens": 12, "output_tokens": 6}, "content": [
+                {"type": "text", "text": "Claude C started the slow required child"}]}})
+            # Grid must cancel this process after the sibling's semantic failure. Returning on its
+            # own would test ordinary completion, not the lease-fenced dependency stop.
+            time.sleep(90)
+            return 2
+        if scenario == "subgoal_mixed_retry":
+            partial = pathlib.Path("CHILD_PARTIAL.md")
+            if (not partial.is_file() or "Codex B checkpoint" not in partial.read_text()
+                    or "Grid retry handoff:" not in prompt):
+                sys.stderr.write(
+                    "Claude C did not receive Codex B's same-turn child checkpoint\n")
+                return 2
+            pathlib.Path("CHILD_DONE.md").write_text(
+                "# Mixed child complete\n\nClaude C resumed the exact Codex B checkpoint.\n")
+            _emit({"type": "assistant", "message": {"usage": {
+                "input_tokens": 20, "output_tokens": 12}, "content": [
+                {"type": "text", "text": "Claude resumed Codex's child checkpoint"}]}})
+            _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": True,
+                   "reason": "CHILD_DONE.md proves the mixed-harness child recovery",
+                   "iterations": 2, "tokens": 32}})
+            return 0
+        pathlib.Path("README.md").write_text(
+            "# Child instructions\n\nOpen the finished parent artifact and follow the guide.\n")
+        _emit({"type": "assistant", "message": {"usage": {
+            "input_tokens": 15, "output_tokens": 10}, "content": [
+            {"type": "text", "text": "Claude completed the child instructions"}]}})
+        _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": True,
+               "reason": "README.md exists", "iterations": 1, "tokens": 25}})
+        return 0
+
+    # The mixed-harness Goal E2E. This is intentionally inside the ordinary fake Claude binary:
+    # the provider must select Claude through the real capability claim, build `/goal` on the first
+    # slice, and `--resume` the session on the next. No test helper calls this behavior directly.
+    scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
+    if scenario == "claude_protocol_drift":
+        node = os.environ.get("GRID_E2E_GOAL_NODE")
+        if node != "A" or resume is not None or not prompt.startswith("/goal "):
+            sys.stderr.write("fake Claude protocol drift reached an invalid assignment\n")
+            return 2
+        pathlib.Path("PARTIAL.md").write_text(
+            "# Claude checkpoint\n\nClaude A wrote this before its Goal attachment disappeared.\n")
+        _emit({"type": "assistant", "message": {"usage": {
+            "input_tokens": 12, "output_tokens": 8}, "content": [
+            {"type": "text", "text": "Claude wrote a partial artifact before protocol drift"}]}})
+        # Synchronize the race proof with a NEW claim poll, not merely a second thread that once
+        # polled before this child started. The relay's E2E claim timeout is intentionally short;
+        # removing the marker forces us to observe another worker enter a fresh long-poll while
+        # this executable is still advertised, then the protocol disappears immediately.
+        marker_value = os.environ.get("GRID_E2E_CLAIM_MARKER")
+        if marker_value:
+            marker = pathlib.Path(marker_value)
+            marker.unlink(missing_ok=True)
+            required_polls = int(os.environ.get("GRID_E2E_STALE_POLLS_REQUIRED", "1"))
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                observed = (marker.read_text().count("\n") if marker.exists() else 0)
+                if observed >= required_polls:
+                    break
+                time.sleep(0.02)
+            else:
+                observed = 0
+            if observed < required_polls:
+                sys.stderr.write(
+                    f"only {observed}/{required_polls} concurrent stale claim polls entered "
+                    "before Claude drift\n")
+                return 2
+        # Exit zero without goal_status. Grid must classify this as deterministic native protocol
+        # drift, quarantine this exact Claude revision, and hand its Git/transcript checkpoint to a
+        # different harness instead of accepting success or letting A consume another attempt.
+        return 0
+    if scenario == "codex_protocol_drift":
+        node = os.environ.get("GRID_E2E_GOAL_NODE")
+        if node != "B" or resume is not None or not prompt.startswith("/goal "):
+            sys.stderr.write("fake Claude Codex-drift recovery reached an invalid assignment\n")
+            return 2
+        partial = pathlib.Path("PARTIAL.md")
+        if not partial.is_file() or "Codex A" not in partial.read_text():
+            sys.stderr.write("Claude B did not receive Codex A's accepted partial worktree\n")
+            return 2
+        pathlib.Path("DONE.md").write_text(
+            "# Recovered\n\nClaude B finished the same Goal turn after Codex protocol drift.\n")
+        _emit({"type": "assistant", "message": {"usage": {
+            "input_tokens": 12, "output_tokens": 8}, "content": [
+            {"type": "text", "text": "Claude recovered Codex's protocol checkpoint"}]}})
+        _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": True,
+               "reason": "DONE.md proves cross-harness protocol recovery", "iterations": 1,
+               "tokens": 20}})
+        return 0
+    if scenario in ("mixed", "mixed_eval_repair"):
+        node = os.environ.get("GRID_E2E_GOAL_NODE")
+        if node not in ("B", "D"):
+            sys.stderr.write(f"fake claude goal unexpectedly reached node {node!r}\n")
+            return 2
+        if node == "D":
+            if (scenario != "mixed_eval_repair" or resume != session
+                    or prompt.startswith("/goal ")):
+                sys.stderr.write("Claude D did not resume B's native Goal session\n")
+                return 2
+            if ("Grid's independent evaluation of the previous commit" not in prompt
+                    or "required literal content is absent" not in prompt
+                    or "addEventListener('click'" not in prompt):
+                sys.stderr.write("Claude D did not receive relay-authored failed-eval guidance\n")
+                return 2
+            if not pathlib.Path("style.css").exists() or not pathlib.Path("README.md").exists():
+                sys.stderr.write("Claude D did not receive Codex C's nominated result tree\n")
+                return 2
+            pathlib.Path("game.js").write_text(
+                "let score=0;document.querySelector('#target').addEventListener('click',()=>{"
+                "document.querySelector('#score').textContent=String(++score)});\n")
+            _emit({"type": "assistant", "message": {"usage": {
+                "input_tokens": 30, "output_tokens": 15}, "content": [
+                {"type": "text", "text": "Claude D repaired the failed behavior eval"}]}})
+            _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": True,
+                   "reason": "all independent behavior checks now pass", "iterations": 3,
+                   "tokens": 45}})
+            return 0
+        if not pathlib.Path("game.js").exists():
+            if not prompt.startswith("/goal ") or resume is not None:
+                sys.stderr.write("fake claude did not receive native /goal on its first slice\n")
+                return 2
+            if ("Grid handoff for this distributed turn:" not in prompt
+                    or "A completed feature 1" not in prompt):
+                sys.stderr.write(
+                    "fake claude started a native /goal but did not receive Codex A's "
+                    "relay-authored turn handoff\n")
+                return 2
+            if not pathlib.Path("index.html").exists():
+                sys.stderr.write("fake claude did not receive Codex's committed feature 1\n")
+                return 2
+            pathlib.Path("game.js").write_text(
+                "let score=0;document.querySelector('#target').addEventListener('click',()=>{"
+                "document.querySelector('#score').textContent=String(++score)});\n")
+            _emit({"type": "assistant", "message": {"usage": {
+                "input_tokens": 20, "output_tokens": 10}, "content": [
+                {"type": "text", "text": "Claude completed feature 2"}]}})
+            _emit({"type": "attachment", "attachment": {"type": "goal_status", "met": False,
+                   "reason": "features 3 and 4 remain"}})
+            # Grid interrupts here, after the evaluator checkpoint. If it does not, this timeout
+            # makes the defect loud instead of letting one process consume the whole Goal.
+            time.sleep(90)
+            return 2
+        if resume != session or prompt.startswith("/goal "):
+            sys.stderr.write("fake claude reset /goal instead of resuming its native session\n")
+            return 2
+        pathlib.Path("partial-feature-34.tmp").write_text("Claude B died here\n")
+        time.sleep(90)
+        return 2
 
     merge = _MERGE_INSTRUCTION.search(prompt)
     if merge:

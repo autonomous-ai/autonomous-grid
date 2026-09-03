@@ -1,8 +1,7 @@
-"""Which ``GRID_HOME`` a live process belongs to — the one thing ``grid leave``'s argv sweep cannot
-read off a command line.
+"""Installation identity for detached Grid processes, plus legacy Linux environment inspection.
 
-``shared/orphan_sweep.py`` identifies an engine child by its argv, ``<cli> __remote-engine
-<network_id> <engine_id>``. That is the identity of a **grid**, not of an **installation**. Two
+``shared/orphan_sweep.py`` once identified an engine child only as ``<cli> __remote-engine
+<network_id> <engine_id>``. That is the identity of a **grid**, not an **installation**. Two
 accounts serving the same grid from one provider box — the shared, internally operated host ADR 0032
 is written for — spawn children whose argv agrees in every token, so ``grid leave`` run from one
 ``GRID_HOME`` unregistered and killed the other account's provider, silently (dev-VM finding E-03,
@@ -11,24 +10,28 @@ residual on the reasoning that two configs sharing a grid id are one grid to thi
 a *local* grid id, which is an accident when it collides, and does not hold for a remote network id,
 which is **shared by design** — joining one grid from several accounts is what a grid is for.
 
-Nothing in the argv separates them. ``GRID_HOME`` does: it is what the run records, the credentials,
-the engine logs and the node identity are all keyed by, so two of them on one box are two
-installations by definition.
+Current children therefore carry ``--grid-home-tag=<sha256(canonical GRID_HOME)>`` immediately
+before the marker. It is non-secret, stable, cross-platform, and exposes no path. ``GRID_HOME`` is
+the correct identity because run records, credentials, engine logs and node identity are all keyed
+by it; two homes on one box are two installations by definition.
 
-**Linux only, and the failure direction is deliberate.** ``/proc/<pid>/environ`` is readable by the
+For pre-tag children, environment inspection remains a **Linux-only compatibility backstop**.
+``/proc/<pid>/environ`` is readable by the
 process's own uid and by root, and by nobody else — but that is exactly the case that needs it. A
 match owned by a *different user* is already declined by POSIX at signal time and reported as
 ``foreign`` (see ``orphan_sweep``'s module docstring), so the hole left open is same-uid,
 different-``GRID_HOME`` — which is precisely where the file is readable. macOS has no equivalent:
 measured on 26.6, ``ps -E``/``ps eww`` print no environment at all, not even for the caller's own
 child. Windows would need a remote-thread read of the PEB. On both, and for anything we cannot pin
-down, the answer is ``None`` — *unknown* — and every caller treats unknown as ours, i.e. exactly the
-pre-fix behaviour. This module can only ever make a sweep kill **less**, never more, which is what
-makes it safe to consult unconditionally.
+down, the answer is ``None`` — *unknown*. Legacy unknowns retain the pre-tag behaviour so an upgrade
+does not strand record-less workers; current children never need that inference because their argv
+identity is definitive.
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import sys
 from collections.abc import Iterable
 from pathlib import Path
@@ -53,6 +56,14 @@ _ENVIRON_MAX_BYTES = 1 << 20
 # A pid the kernel will never assign, for the "names nothing" test. ``0`` is the caller's own process
 # group and negative values are groups, so neither is a pid that is merely absent.
 _UNUSED_PID_PROBE = 2**31 - 1
+
+# Detached engine children carry this non-secret, one-token installation discriminator immediately
+# before their internal dispatch marker. The digest names the canonical GRID_HOME, not its contents:
+# it reveals no credential or path and remains stable across processes while separating two Grid
+# installations serving the same network from one OS account.
+HOME_TAG_ARG_PREFIX = "--grid-home-tag="
+_HOME_TAG_HEX_LEN = 64
+_HOME_TAG_RE = re.compile(rf"[0-9a-f]{{{_HOME_TAG_HEX_LEN}}}\Z")
 
 
 def _environ_path(pid: int) -> Path:
@@ -156,6 +167,38 @@ def own_home() -> str | None:
         return _canonical(str(paths.grid_home()))
     except (OSError, RuntimeError, ValueError):
         return None
+
+
+def tag_for_home(home: str) -> str:
+    """A non-secret, fixed-width identity for one canonical Grid installation path."""
+    return hashlib.sha256(_canonical(home).encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def own_tag() -> str | None:
+    """This process's installation tag, or ``None`` when its Grid home cannot be resolved."""
+    home = own_home()
+    return None if home is None else tag_for_home(home)
+
+
+def own_tag_arg() -> str:
+    """The argv token placed on a detached engine child.
+
+    Spawning without a discriminator would reopen cross-installation teardown on platforms that
+    cannot inspect another process's environment, so an unresolvable home is a hard refusal rather
+    than a legacy-shaped child.
+    """
+    tag = own_tag()
+    if tag is None:
+        raise RuntimeError("could not resolve GRID_HOME for detached engine process isolation")
+    return HOME_TAG_ARG_PREFIX + tag
+
+
+def tag_from_arg(token: str) -> str | None:
+    """Parse a well-formed installation argv token; malformed/non-tag tokens answer ``None``."""
+    if not token.startswith(HOME_TAG_ARG_PREFIX):
+        return None
+    value = token[len(HOME_TAG_ARG_PREFIX):]
+    return value if _HOME_TAG_RE.fullmatch(value) else None
 
 
 def home_of(pid: int) -> str | None:

@@ -16,6 +16,7 @@ The modules are `e2e_*.py`, not `test_*.py` — the same convention as `tests/e2
 
 ```bash
 .venv/bin/python -m pytest tests/e2e_cross_repo/e2e_cross_repo.py -q   # ~2 min, free
+.venv/bin/python -m pytest tests/e2e_cross_repo/e2e_goal.py -q         # ~2 min, free
 .venv/bin/python -m pytest tests/e2e_cross_repo/e2e_live_agent.py  -q   # ~45 s, SPENDS A SUBSCRIPTION
 .venv/bin/python -m pytest tests/e2e_agent_settings.py -q               # ~45 s, SPENDS A SUBSCRIPTION
 ```
@@ -38,6 +39,74 @@ up the same way.
 
 The lease is 6s against a 0.5s renewal rather than the production 120s/30s. The **ratio** is what is
 kept (ADR 0032 D-c: a TTL several beats wider than the interval), so what is tested is the mechanism.
+
+## Goal scenario matrix
+
+`e2e_goal.py` runs the private relay and every provider in separate OS processes with distinct
+task roots. It exercises HTTP auth, claims and leases, Git fetch/push and exact commit pins, native
+harness protocols, transcript checkpoints, independent evals, and relay-authored evidence. The
+fake model and fake native binaries keep failures deterministic; the Grid protocol between them is
+real.
+
+The fake Codex also implements the installed-binary schema command used by provider admission. This
+means every Codex process in the matrix must first prove the exact `thread/resume`,
+`thread/goal/{set,get}`, event and dynamic-tool surface before it can advertise `native_goal`; the
+interactive JSON-RPC fixture then proves those declared methods during execution.
+
+| Scenario | Nodes and harnesses | Failure or constraint | Proof |
+|---|---|---|---|
+| Root create replay | Client -> relay twice | First acknowledgement may be lost | Same member key returns one Goal and one turn; changed body conflicts |
+| Same-node claim ABA | A claim 1 -> A claim 2 | An old process retains the same reusable node credential | Missing/old generations fail on lease, events, retry, result, inference, Git, and child create/replay; claim 2 stays live with no false eval/evidence |
+| Model arrival | A Codex polls; inference-only C joins | Requested route does not exist yet | Same row remains attempt 0, then A claims attempt 1 when C advertises it |
+| Quota recovery | A Codex polls; inference-only C heartbeats | Route exists but its subscription seat reports `serving: false` | No attempt/evidence during withdrawal; same row wakes on C's healthy heartbeat |
+| Four-feature game | A Codex -> B Codex -> C Codex | A and B are killed mid-turn | Same rows are reclaimed; commit-pinned wiring/click/score/style evals pass |
+| Native crash checkpoint | A Codex -> B Codex | A's app-server fails after partial work | Same turn immediately requeues; B restores partial tree/thread and behavior evals pass |
+| Claude protocol drift | A Claude (2 workers) -> B Codex | A exits zero without its native evaluator attachment while worker 2 has a stale capability poll | Worker 2 visibly declines the delivery without spending an attempt; A stays online; same turn/checkpoint moves to B and evals pass |
+| Codex protocol drift | A Codex (4 workers) -> B Claude | Schema passes, then `thread/goal/get` returns method-not-found while three siblings have stale capability polls | All three deliveries are visibly declined without spending an attempt; A stays online; same turn/checkpoint moves to B and evals pass |
+| Native crash after API commit | A Codex -> B Codex | A's app-server fails after a successful business mutation | Stable key yields one side effect; both attempts retain request/result evidence |
+| Machine death in API result window | B Codex -> C Codex | B is SIGKILLed after the API commits but before Grid records the result | C reconciles the unmatched request with the same key; one side effect and independently verified evidence |
+| Mixed game | A Codex -> B Claude -> C Codex | Two machine losses across unlike harnesses | Shared continuity plus commit-pinned behavior evals across harnesses |
+| Cross-harness eval repair | A Codex -> B Claude -> C Codex -> D Claude | C nominates plausible but broken interaction | D restores B's Claude session across Codex, consumes failed eval evidence, and repairs it |
+| Image artifact | B Claude polls; A Codex executes | Goal requires `image_generation` | Ineligible node spends no attempt; independent PNG eval passes |
+| Support reply | A polls; B Codex -> C Codex | Origin restriction, crash after API commit, failed first eval | One business side effect, stable idempotency key, repair turn passes |
+| Required child | A parent model; B Claude child specialist model; C parent | Parent waits while child runs | Child model/harness survives the tool bridge; evaluated commit fans in once; allocation becomes one actual token charge |
+| Mixed child reclaim | A Codex parent -> B Codex child -> C Claude child -> D Codex parent | B's native child harness fails after partial work | C reclaims the exact child turn at attempt 2 from Git/transcript checkpoints; its accepted eval gates one fan-in before D resumes the parent |
+| Parallel child fan-out | A Codex parent -> B Codex and C Claude children -> D Codex parent; inference E/F | Two required children run simultaneously on separate roots, harnesses, capabilities, and models | Children make real Responses/Messages calls through distinct Grid providers; signed evidence binds exact model/provider/executor/attempt/token usage; both evals pass before deterministic fan-in |
+| Required child failure | A Codex parent -> B Codex and C Claude children | B returns a native semantic failure while C is still running a required sibling | Parent blocks; Grid cancels and lease-fences C, releases all reservations, and exports the cancellation in Goal evidence |
+| Child spawn reconstruction | A Codex -> B Codex -> C Claude -> D Codex | A fails after the durable spawn; B reconstructs different optional child policy | Both attempts receive one child identity and one fan-in; action evidence carries one stable key |
+| Optional child | A parent; B child; C parent | Child returns native `failed` verdict | Failure remains evidence and does not block parent completion |
+
+The native-crash case starts each provider in one-claim mode so A withdraws after handing off its
+checkpoint and cannot race B for its own immediate retry. This changes only the test process
+lifecycle; production claim, checkpoint, retry, and settlement code remains untouched.
+
+The two protocol-drift cases do the opposite: A runs multiple real task-loop threads. The fake
+native harness clears a counted synchronization file and waits until every sibling enters a fresh
+claim long-poll with the pre-quarantine profile, then triggers drift. Claude uses one stale sibling;
+Codex uses three, enough to exhaust the ordinary retry cap if even one delivery were charged. The
+test does not start B until A's log proves every stale delivery was declined and the relay again
+shows the same turn queued at attempt 1. B must therefore receive attempt 2; a lucky race by B or a
+hidden retry-budget burn cannot make either case pass.
+The full matrix also leaves providers long-polling immediately before fixture teardown. The relay
+checks socket disconnects on both sides of assignment and returns any response that cannot be
+delivered to the queue without consuming an attempt; otherwise an orphan request from one scenario
+can steal the next scenario's first Goal turn.
+The four-node repair case proves that Grid keeps Codex and Claude histories side by side rather than
+overwriting or translating either: D's fresh disk contains both opaque namespaces, resumes B's
+Claude session after C's intervening Codex turn, and receives the failed deterministic score as
+relay-authored guidance. Evidence retains C's accepted failing score and D's accepted passing score
+against their distinct result commits. Retry evidence also retains the relay-selected harness for
+the lost attempt, so a row later claimed by Claude cannot rewrite an earlier Codex attempt (or vice
+versa) in the training trajectory.
+The crash-after-action case covers the stronger handoff path while A still owns the lease. Grid
+flushes the action request/result trajectory before the retry endpoint revokes event authority,
+accepts exact worktree and transcript pins, and requeues the same logical turn immediately. B's
+replay carries the identical Goal-wide idempotency key, so the business API performs no duplicate
+mutation.
+The child-spawn reconstruction case applies the same rule to Grid's own dependency table. A and B
+use different native sessions and deliberately restate the child eval and routing hints differently;
+the normalized objective still produces one parent-turn action key, so the relay returns the first
+reserved child and the parent later fans in exactly one branch.
 
 ## Prerequisites
 

@@ -143,6 +143,14 @@ _ENV_ALLOWLIST = frozenset({
 # what the agent gets, the sandbox governs what its children see.
 _ENV_ALLOWED_PREFIXES = ("LC_", "ANTHROPIC_")
 
+# Native Goals authenticate model traffic only with a short-lived loopback proxy token. Ordinary
+# Claude tasks still need the provider's Anthropic environment, but reusing it for a Goal would
+# hand those credentials to an autonomous process that is explicitly configured to call Grid.
+# Include opt-in passthrough names for both supported harnesses so an operator extending the
+# ordinary task environment cannot accidentally create a second model-authentication path.
+_GOAL_MODEL_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_")
+_GOAL_MODEL_ENV_NAMES = frozenset({"CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY"})
+
 # The operator's own extension to the allowlist — comma- or space-separated names. It exists because
 # an allowlist nobody can extend is one a provider works around by not upgrading: a team with a
 # private package registry needs its token in a build, and "hand the agent the whole environment
@@ -473,6 +481,13 @@ def transcript_dir(workspace: Path, member_key: str) -> Path:
             / _safe_segment("member key", member_key))
 
 
+def session_transcript_path(directory: Path, session_id: str) -> Path:
+    """A validated native Claude transcript path inside Grid's linked directory."""
+    if not isinstance(session_id, str) or not _SAFE_SESSION_ID.match(session_id):
+        raise ValueError(f"Claude returned unsafe session id {session_id!r}")
+    return directory / f"{session_id}.jsonl"
+
+
 def link_transcript(workspace: Path, member_key: str) -> Path:
     """Point Claude Code's per-cwd transcript folder at the workspace, and return the target.
 
@@ -568,7 +583,7 @@ def resumable_session(workspace: Path, requested: str | None, member_key: str) -
         # `workspace_for` applies to a project id, for the same reason: `..` and separators resolve.
         return ResumeDecision(reason=f"the relay named session {requested!r}, which is not a safe id")
 
-    path = transcript_dir(workspace, member_key) / f"{requested}.jsonl"
+    path = session_transcript_path(transcript_dir(workspace, member_key), requested)
     if path.is_symlink():
         # Nothing legitimate plants one: the transcript is written by the agent through our own
         # symlink, and a checkout cannot create one (`core.symlinks=false`). Following it would read
@@ -674,6 +689,9 @@ def agent_argv(binary: str, prompt: str, *, workspace: Path,
 # contents: unknown settings keys are dropped in silence, so an old agent would run unconfined and
 # report success. The flags refuse themselves; the policy cannot.
 MIN_CLAUDE_VERSION = (2, 1, 221)
+# Claude restored active Goals on every `--resume` route from this release. Earlier builds can run
+# `/goal`, but a distributed worker may silently lose it on the handoff route Grid uses.
+MIN_DISTRIBUTED_GOAL_VERSION = (2, 1, 239)
 _VERSION_TIMEOUT_SECONDS = 10
 # `claude --version` answers `2.1.223 (Claude Code)`. Anchored at the start so a wrapper that prints
 # its own banner first is treated as unreadable rather than having a number picked out of its prose.
@@ -686,16 +704,22 @@ _VERSION_PATTERN = re.compile(r"\A(\d+)\.(\d+)\.(\d+)")
 # direction that decides this is the dangerous one: a downgrade remembered as new enough would run
 # every task unconfined for the life of the process, which is precisely what the gate exists to stop.
 # A `stat` costs microseconds; a process launch does not.
-_VERSION_CACHE: dict[tuple[str, int, int], tuple[int, int, int]] = {}
+BinaryRevision = tuple[str, int, int, int, int, int, int]
+_VERSION_CACHE: dict[BinaryRevision, tuple[int, int, int]] = {}
+# A binary can satisfy the measured version floor yet change the undocumented stream attachment
+# used by native /goal.  Quarantine only that exact executable revision after deterministic runtime
+# drift; ordinary Claude tasks remain available and replacing/repairing the binary clears the key.
+_DISTRIBUTED_GOAL_FAILURES: dict[BinaryRevision, str] = {}
 
 
-def _version_cache_key(binary: str) -> tuple[str, int, int] | None:
-    """`(path, mtime, size)`, or `None` when the file cannot be stat'd and nothing may be cached."""
+def _version_cache_key(binary: str) -> BinaryRevision | None:
+    """Exact executable revision, or ``None`` when nothing may be cached."""
     try:
         info = os.stat(binary)  # follows the installer's symlink to the version actually installed
     except OSError:
         return None
-    return (binary, info.st_mtime_ns, info.st_size)
+    return (binary, info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _binary_version(binary: str) -> tuple[int, int, int]:
@@ -748,6 +772,46 @@ def resolve_binary() -> str:
     )
 
 
+def require_distributed_goal(binary: str) -> str:
+    """Refuse a Claude revision that cannot safely own a distributed native Goal turn."""
+    version = _binary_version(binary)
+    if version < MIN_DISTRIBUTED_GOAL_VERSION:
+        found = ".".join(str(part) for part in version)
+        required = ".".join(str(part) for part in MIN_DISTRIBUTED_GOAL_VERSION)
+        raise RuntimeError(
+            f"Claude Code {found} cannot resume distributed native Goals; install {required} or "
+            "newer")
+    key = _version_cache_key(binary)
+    reason = _DISTRIBUTED_GOAL_FAILURES.get(key) if key is not None else None
+    if reason:
+        raise RuntimeError(
+            f"this Claude Code revision was quarantined from native Goals: {reason}")
+    return binary
+
+
+def distributed_goal_version(binary: str | None = None) -> str:
+    """The exact resumable Claude Code revision this worker would execute."""
+    resolved = binary or resolve_binary()
+    require_distributed_goal(resolved)
+    return ".".join(str(part) for part in _binary_version(resolved))
+
+
+def remember_distributed_goal_failure(binary: str, reason: str) -> None:
+    """Withdraw native_goal after deterministic attachment drift, until the binary changes."""
+    key = _version_cache_key(binary)
+    if key is not None:
+        _DISTRIBUTED_GOAL_FAILURES[key] = reason
+
+
+def distributed_goal_available() -> bool:
+    """Whether this provider can resume Claude's native `/goal` without a known route gap."""
+    try:
+        require_distributed_goal(resolve_binary())
+    except (Exception, SystemExit):
+        return False
+    return True
+
+
 def preflight() -> None:
     """Everything about this provider's own configuration that can be checked before work starts.
 
@@ -767,26 +831,83 @@ def preflight() -> None:
         task_sandbox.preflight(task_root=workspace_root())
 
 
+def claude_available() -> bool:
+    """Whether this process can safely advertise the ordinary Claude task harness right now."""
+    try:
+        preflight()
+        resolve_binary()
+        _require_the_sandbox_packages()
+    except (Exception, SystemExit):
+        return False
+    return True
+
+
+def _configured_task_harnesses() -> tuple[str, ...]:
+    configured = (os.getenv("GRID_TASK_AGENT_KINDS") or "claude,codex").replace(",", " ").split()
+    return tuple(dict.fromkeys(
+        kind for kind in configured if kind in ("claude", "codex")))
+
+
 def preflight_before_serving() -> None:
-    """Everything a task will need, asked before there is a task — for `grid join` (issue 58).
+    """Prove that at least one configured task harness can run before `grid join` succeeds.
 
-    `run_task` asks `preflight()` and `resolve_binary()` at claim time, which is after a member is
-    already waiting on this provider. Until this existed, that was the ONLY moment either was asked:
-    `grid join` printed its banner, `grid project status` said online, and the provider looked
-    healthy right up until somebody else's task died on it.
+    A task-only node is agent capacity, not specifically Claude capacity.  Codex-only company
+    machines are valid Grid workers, so a missing Claude binary must not reject one that can run
+    Codex's native Goal harness.  Conversely, merely having one of the two names configured is not
+    enough: the provider may advertise only a harness whose real binary and safety checks pass.
 
-    The **same two functions**, never a copy of them. A second opinion here about the sandbox, the
-    permission mode or the version floor would be one more thing to keep in step, and every failure
-    this plane has recorded is two readings of one rule that got edited apart.
+    Claude uses the same `preflight`/`resolve_binary`/sandbox-package checks as its claim path.
+    Codex uses `task_codex.resolve_binary`, including the measured native-Goal protocol probe.  The
+    shared workspace-root check applies whichever harness wins.
 
     One question is asked here and nowhere else — whether the workspace root is reachable at all —
     and it is asked **unconditionally**, unlike the checks inside `preflight()` that belong to the
     sandbox. An unwritable root fails every task with the sandbox on or off.
     """
-    preflight()
-    resolve_binary()
-    _require_the_sandbox_packages()
-    _require_a_reachable_workspace_root()
+    configured = _configured_task_harnesses()
+    if not configured:
+        raise RuntimeError(
+            "GRID_TASK_AGENT_KINDS enables no supported task harness; choose codex, claude, or both")
+
+    failures: list[str] = []
+    causes: list[BaseException] = []
+    usable = False
+    if "claude" in configured:
+        try:
+            preflight()
+            resolve_binary()
+            _require_the_sandbox_packages()
+            usable = True
+        except (Exception, SystemExit) as exc:
+            failures.append(f"claude: {str(exc) or exc.__class__.__name__}")
+            causes.append(exc)
+
+    if not usable and "codex" in configured:
+        try:
+            # Imported here to avoid task_agent -> task_codex -> task_agent at module import time.
+            from . import task_codex
+
+            task_codex.resolve_binary()
+            _require_codex_sandbox_package()
+            usable = True
+        except (Exception, SystemExit) as exc:
+            failures.append(f"codex: {str(exc) or exc.__class__.__name__}")
+            causes.append(exc)
+
+    if usable:
+        # This is shared infrastructure, not a harness opinion. Ask once after at least one harness
+        # passes its own checks, and preserve the exact path-specific OSError. Checking it first
+        # would hide a more actionable harness refusal (and made CI depend on whether `/var` happened
+        # to be writable before it could exercise the configured permission policy).
+        _require_a_reachable_workspace_root()
+        return
+
+    # Preserve Claude's established sandbox-package OSError when Codex fallback is also absent.
+    # The operator gets the exact package/install guidance and existing callers retain the useful
+    # exception class. Other multi-harness failures are combined so neither missing binary is hidden.
+    if causes and isinstance(causes[0], OSError):
+        raise causes[0]
+    raise RuntimeError("no configured task harness is usable (" + "; ".join(failures) + ")")
 
 
 # What the Linux sandbox needs on the box, and it is **two packages, not one** (issue 59). MEASURED
@@ -797,6 +918,25 @@ def preflight_before_serving() -> None:
 # socat not installed` — so an operator who meets both messages is reading about one thing.
 _SANDBOX_PACKAGES = (("bwrap", "bubblewrap (bwrap)"), ("socat", "socat"))
 _SANDBOX_PACKAGE_INSTALL = "apt install bubblewrap socat"
+
+
+def _require_codex_sandbox_package() -> None:
+    """Refuse a Linux Codex worker that cannot execute sandboxed commands.
+
+    The standalone Codex binary uses bubblewrap directly.  Unlike Claude Code it does not need the
+    socat bridge, so requiring both packages would reject otherwise healthy Codex-only workers.
+    The check belongs at join time: accepting tasks first produces a healthy-looking node that can
+    infer and converse but fails every file action inside the native harness.
+    """
+    if sys.platform != "linux" or not task_sandbox.enabled():
+        return
+    if shutil.which("bwrap") is not None:
+        return
+    raise OSError(
+        "the Codex task sandbox needs bubblewrap (bwrap) on this box, and it is not installed — "
+        "every task would fail inside Codex with `bubblewrap is unavailable`. Install it with: "
+        "apt install bubblewrap, or set "
+        f"{task_sandbox.SANDBOX_ENV}=0 to run agents unconfined deliberately.")
 
 
 def _require_the_sandbox_packages() -> None:
@@ -1094,4 +1234,36 @@ def child_env(author=None, workspace: Path | None = None) -> dict[str, str]:
     # grant, and the failure is the `EROFS` this exists to remove.
     if workspace is not None:
         env.update(_cache_env(workspace))
+    return env
+
+
+def goal_child_env(author=None, workspace: Path | None = None) -> dict[str, str]:
+    """A task child environment with ambient model credentials removed.
+
+    Goal runners add exactly one harness-specific loopback credential after this boundary. Keep
+    this separate from :func:`child_env`: ordinary Claude tasks intentionally authenticate with
+    the provider's installation, while a distributed Goal must send every model request through
+    Grid so inference attribution, lease fencing, and credential refresh remain authoritative.
+    """
+    env = child_env(author=author, workspace=workspace)
+    env = {
+        name: value for name, value in env.items()
+        if name not in _GOAL_MODEL_ENV_NAMES
+        and not name.startswith(_GOAL_MODEL_ENV_PREFIXES)
+    }
+    # Both native harnesses call a credential-bearing proxy on 127.0.0.1. Corporate proxy
+    # variables remain useful to the agent's shell commands and business traffic, but the model
+    # request must never leave the machine or depend on a proxy's localhost-bypass defaults.
+    bypasses: list[str] = []
+    for inherited_no_proxy in (env.get("NO_PROXY", ""), env.get("no_proxy", "")):
+        for part in inherited_no_proxy.split(","):
+            part = part.strip()
+            if part and part not in bypasses:
+                bypasses.append(part)
+    for loopback in ("127.0.0.1", "localhost"):
+        if loopback not in bypasses:
+            bypasses.append(loopback)
+    loopback_no_proxy = ",".join(bypasses)
+    env["NO_PROXY"] = loopback_no_proxy
+    env["no_proxy"] = loopback_no_proxy
     return env

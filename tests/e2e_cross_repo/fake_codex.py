@@ -1,0 +1,822 @@
+"""A deterministic Codex app-server for the distributed Goal cross-repo E2E.
+
+It implements only the JSON-RPC methods the Grid Goal runner uses. The behavior is deliberately
+node-specific so the test can kill A and B mid-turn and prove C receives only relay-published Git
+state, never a shared directory or process object.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import os
+import sys
+import time
+import uuid
+from pathlib import Path
+from urllib import request as urllib_request
+
+
+def emit(value: dict) -> None:
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+
+def reply(request: dict, result: dict | None = None) -> None:
+    emit({"id": request["id"], "result": result or {}})
+
+
+def history_path() -> Path:
+    home = Path(os.environ["CODEX_HOME"])
+    home.mkdir(parents=True, exist_ok=True)
+    return home / "fake-history.json"
+
+
+def rollout_path(thread_id: str) -> Path:
+    directory = Path(os.environ["CODEX_HOME"]) / "sessions" / "fake"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"rollout-fake-{thread_id}.jsonl"
+
+
+def load_history() -> list[dict]:
+    path = history_path()
+    if not path.is_file():
+        return []
+    value = json.loads(path.read_text())
+    if not isinstance(value, list):
+        raise TypeError("distributed history is not a list")
+    return value
+
+
+def save_history(value: list[dict]) -> None:
+    history_path().write_text(json.dumps(value, separators=(",", ":")) + "\n")
+
+
+def _exercise_grid_inference(config: dict[str, str]) -> None:
+    """Make one genuine Responses request through the worker's loopback Grid proxy."""
+    payload = json.dumps({
+        "model": config["model"], "input": "prove Codex child inference routing",
+        "stream": False,
+    }, separators=(",", ":")).encode()
+    request = urllib_request.Request(
+        config["base_url"].rstrip("/") + "/responses", data=payload, method="POST",
+        headers={"Authorization": f"Bearer {os.environ['GRID_GOAL_API_KEY']}",
+                 "Content-Type": "application/json", "Accept": "application/json"})
+    with urllib_request.urlopen(request, timeout=20) as response:
+        answer = json.loads(response.read())
+    if answer.get("status") != "completed" or answer.get("model") != config["model"]:
+        raise RuntimeError(f"Codex received invalid Grid inference response: {answer!r}")
+
+
+def run_turn(node: str, call_tool=None, *, inference: dict[str, str] | None = None
+             ) -> tuple[str, str, int]:
+    cwd = Path.cwd()
+    history = load_history()
+    scenario = os.environ.get("GRID_E2E_GOAL_SCENARIO")
+    mixed = scenario in ("mixed", "mixed_eval_repair")
+
+    if scenario == "model_readiness":
+        if node != "A" or history:
+            raise RuntimeError(
+                f"model-readiness Goal reached the wrong worker: {node}, {history!r}")
+        (cwd / "READY.md").write_text(
+            "# Ready\n\nThe task node started only after a separate Grid inference route appeared.\n")
+        history.append({"node": "A", "model_readiness": True})
+        save_history(history)
+        return "complete", "A completed the first attempt after model recovery", 100
+
+    if scenario == "prestart_recovery":
+        if history:
+            raise RuntimeError(
+                f"pre-start recovery unexpectedly received prior native history: {history!r}")
+        (cwd / "READY.md").write_text(
+            "# Ready\n\nA real worker completed attempt one after three claims expired.\n")
+        history.append({"node": node, "prestart_recovery": True})
+        save_history(history)
+        return "complete", f"{node} completed reused attempt one", 100
+
+    if scenario == "claude_protocol_drift":
+        if node != "B" or history:
+            raise RuntimeError(
+                f"Claude protocol-drift handoff reached the wrong Codex state: {node}, {history!r}")
+        partial = cwd / "PARTIAL.md"
+        if not partial.is_file() or "Claude A" not in partial.read_text():
+            raise RuntimeError("Codex B did not receive Claude A's accepted partial worktree")
+        (cwd / "DONE.md").write_text(
+            "# Recovered\n\nCodex B finished the same Goal turn after Claude protocol drift.\n")
+        history.append({"node": "B", "after": "claude-protocol-drift"})
+        save_history(history)
+        return "complete", "Codex B recovered Claude A's protocol-drift checkpoint", 200
+
+    if scenario == "codex_protocol_drift":
+        if node != "A" or history:
+            raise RuntimeError(
+                f"Codex protocol-drift scenario reached an invalid state: {node}, {history!r}")
+        (cwd / "PARTIAL.md").write_text(
+            "# Codex checkpoint\n\nCodex A wrote this before an app-server method disappeared.\n")
+        history.append({"node": "A", "protocol": "thread-goal-get-removed"})
+        save_history(history)
+        return "active", "Codex wrote a partial artifact before protocol drift", 100
+
+    if scenario == "graceful_crash":
+        if node == "A" and not history:
+            (cwd / "index.html").write_text(
+                "<!doctype html><title>Crash-safe Grid Goal</title>"
+                "<button id=\"target\">Play</button><output id=\"score\">0</output>"
+                "<script src=\"game.js\"></script>\n")
+            (cwd / "PARTIAL.md").write_text(
+                "Node A created the first feature before its native harness crashed.\n")
+            history.append({"node": "A", "native_thread": "partial-feature-1"})
+            save_history(history)
+            # The app-server remains responsive long enough to emit a failed native turn. Grid's
+            # provider classifies that as a harness failure, pushes a coherent checkpoint, and
+            # POSTs /retry while it still owns the lease.
+            raise RuntimeError("simulated Codex app-server failure after partial work")
+        expected = [{"node": "A", "native_thread": "partial-feature-1"}]
+        if node != "B" or history != expected:
+            raise RuntimeError(
+                f"node B did not resume A's native Codex checkpoint: {node}, {history!r}")
+        if not (cwd / "PARTIAL.md").is_file() or not (cwd / "index.html").is_file():
+            raise RuntimeError("node B received native history without A's partial worktree")
+        (cwd / "game.js").write_text(
+            "let score=0;document.querySelector('#target').addEventListener('click',()=>{"
+            "document.querySelector('#score').textContent=String(++score)});\n")
+        (cwd / "style.css").write_text(
+            "body{font:18px system-ui;text-align:center;background:#eef}\n")
+        (cwd / "README.md").write_text(
+            "# Crash-safe game\n\nNode B resumed node A's native Goal and completed it.\n")
+        history.append({"node": "B", "resumed_native_thread": True})
+        save_history(history)
+        return "complete", "B resumed A's mid-slice Codex thread and completed the game", 200
+
+    if scenario == "graceful_business_crash":
+        if call_tool is None:
+            raise RuntimeError("graceful business crash received no dynamic tool bridge")
+        arguments = {
+            "ticket_id": "T-42",
+            "reply": "Use the verified password-reset link and contact support if it expires.",
+        }
+        if node == "A" and not history:
+            result = call_tool("send_reply", arguments)
+            if not result.get("success"):
+                raise RuntimeError(f"node A's business action failed: {result!r}")
+            (cwd / "ACTION.md").write_text(
+                "Node A received success after the business API committed the reply.\n")
+            history.append({"node": "A", "action": "committed-before-native-crash"})
+            save_history(history)
+            raise RuntimeError("simulated Codex app-server failure after committed business action")
+        expected = [{"node": "A", "action": "committed-before-native-crash"}]
+        if node != "B" or history != expected or not (cwd / "ACTION.md").is_file():
+            raise RuntimeError(
+                f"node B did not resume A's action checkpoint: {node}, {history!r}")
+        result = call_tool("send_reply", arguments)
+        envelope = json.loads(((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+        if not result.get("success") or not (envelope.get("body") or {}).get("replayed"):
+            raise RuntimeError(f"node B did not idempotently replay A's action: {result!r}")
+        (cwd / "DONE.md").write_text(
+            "# Reply complete\n\nNode B resumed node A's accepted native checkpoint and "
+            "replayed the same business action without a duplicate side effect.\n")
+        history.append({"node": "B", "action": "idempotent-replay"})
+        save_history(history)
+        return "complete", "B safely reconciled A's committed action", 200
+
+    if scenario == "business_result_window":
+        if call_tool is None:
+            raise RuntimeError("business result-window scenario received no dynamic tool bridge")
+        arguments = {
+            "ticket_id": "T-42",
+            "reply": "Use the verified password-reset link and contact support if it expires.",
+        }
+        result = call_tool("send_reply", arguments)
+        envelope = json.loads(((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+        if not result.get("success"):
+            raise RuntimeError(f"business result-window action failed: {result!r}")
+        if node == "B":
+            # The real provider is SIGKILLed while call_tool waits for the response, so this return
+            # belongs only to the now-orphaned fake app-server and can never be pushed or reported.
+            return "complete", "B's orphan received the response after its provider died", 100
+        if node != "C" or not (envelope.get("body") or {}).get("replayed"):
+            raise RuntimeError(f"replacement did not reconcile the committed action: {result!r}")
+        (cwd / "DONE.md").write_text(
+            "# Reply reconciled\n\nNode C replayed the stable action key after node B died "
+            "between the business commit and Grid's durable result event.\n")
+        return "complete", "C reconciled B's unaudited committed action", 200
+
+    if scenario == "business_tools":
+        if call_tool is None:
+            raise RuntimeError("business Goal received no dynamic tool bridge")
+        if not (cwd / "ticket.json").exists():
+            if node != "B" or history:
+                raise RuntimeError(f"business observation reached wrong state: {node}, {history!r}")
+            result = call_tool("read_ticket", {"ticket_id": "T-42"})
+            envelope = json.loads(((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+            ticket = envelope.get("body") or {}
+            if not result.get("success") or ticket.get("ticket_id") != "T-42":
+                raise RuntimeError(f"ticket observation failed: {result!r}")
+            (cwd / "ticket.json").write_text(json.dumps(ticket, sort_keys=True) + "\n")
+            history.append({"node": "B", "observed": "T-42"})
+            save_history(history)
+            return "active", "B observed ticket T-42", 100
+
+        arguments = {
+            "ticket_id": "T-42",
+            "reply": "Use the verified password-reset link and contact support if it expires.",
+        }
+        if node == "B":
+            result = call_tool("send_reply", arguments)
+            if not result.get("success"):
+                raise RuntimeError(f"first reply action failed: {result!r}")
+            # The API committed the action, but neither this file nor this turn can cross the lease
+            # fence. C must retry the same logical action from B's last published checkpoint.
+            (cwd / "partial-reply.tmp").write_text("B died after the API accepted the reply\n")
+            time.sleep(90)
+            raise RuntimeError("node B was expected to be killed after its business action")
+        expected = [{"node": "B", "observed": "T-42"}]
+        after_failed_eval = [*expected, {"node": "C", "eval_retry": 1}]
+        if node != "C" or history not in (expected, after_failed_eval):
+            raise RuntimeError(f"business retry did not resume B's checkpoint: {node}, {history!r}")
+        if (cwd / "partial-reply.tmp").exists():
+            raise RuntimeError("B's uncommitted post-action file crossed the lease fence")
+        result = call_tool("send_reply", arguments)
+        envelope = json.loads(((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+        if not result.get("success") or not (envelope.get("body") or {}).get("replayed"):
+            raise RuntimeError(f"replacement action was not safely replayed: {result!r}")
+        verified = call_tool("check_ticket", {"ticket_id": "T-42"})
+        verify_envelope = json.loads(
+            ((verified.get("contentItems") or [{}])[0]).get("text") or "{}")
+        verify_body = verify_envelope.get("body") or {}
+        if (not verified.get("success") or verify_body.get("status") != "resolved"
+                or verify_body.get("side_effects") != 1):
+            raise RuntimeError(
+                f"authoritative ticket verification did not pass: {verified!r}")
+        if history == expected:
+            # Nominate completion with deliberately insufficient evidence. Grid's independent eval
+            # must reject it and create another turn without allowing the action to duplicate.
+            (cwd / "DONE.md").write_text("# Ticket T-42 resolved\n\nPending full audit proof.\n")
+            (cwd / "metrics.json").write_text(json.dumps({
+                "ticket_id": "T-42", "side_effects": 1, "audit_complete": False,
+            }, sort_keys=True) + "\n")
+            history.append({"node": "C", "eval_retry": 1})
+            save_history(history)
+            return "complete", "C nominated completion before the evidence was sufficient", 200
+        (cwd / "DONE.md").write_text(
+            "# Ticket T-42 resolved\n\nThe reply action was idempotently confirmed after worker "
+            "failover and again after an independent evaluation rejected the first proof. The "
+            "business API performed exactly one side effect across every replay. This expanded "
+            "artifact is the independently measurable completion evidence.\n")
+        (cwd / "metrics.json").write_text(json.dumps({
+            "ticket_id": "T-42", "side_effects": 1, "audit_complete": True,
+        }, sort_keys=True) + "\n")
+        history.append({"node": "C", "eval_retry": 2, "replayed": "R-1"})
+        save_history(history)
+        return "complete", "C repaired the evidence without duplicating the reply", 300
+
+    if scenario == "image":
+        if node != "A" or history:
+            raise RuntimeError(f"image Goal reached the wrong worker: {node}, {history!r}")
+        # A valid 1x1 PNG. The scenario measures capability-aware placement and durable artifact
+        # transport; image quality belongs to a model/tool eval, not this protocol fixture.
+        (cwd / "poster.png").write_bytes(base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+            "/x8AAusB9Wl2nCEAAAAASUVORK5CYII="))
+        history.append({"node": "A", "capability": "image_generation"})
+        save_history(history)
+        return "complete", "A generated the requested PNG", 100
+
+    if scenario == "optional_subgoal":
+        if node == "A" and not history:
+            if call_tool is None:
+                raise RuntimeError("optional subgoal scenario received no dynamic tool bridge")
+            result = call_tool("grid_spawn_subgoal", {
+                "objective": "Explore a disposable game mechanic",
+                "done_when": "Report whether the experiment worked",
+                "agents": ["codex"],
+                "required_capabilities": ["optional_worker"],
+                "required": False,
+                "token_budget": 2_000,
+            })
+            content = ((result.get("contentItems") or [{}])[0]).get("text")
+            envelope = json.loads(content or "{}")
+            child_id = ((envelope.get("body") or {}).get("id"))
+            if not result.get("success") or not child_id:
+                raise RuntimeError(f"optional subgoal creation failed: {result!r}")
+            history.append({"node": "A", "spawned_optional_child": child_id})
+            save_history(history)
+            return "active", f"A spawned optional child Goal {child_id}", 100
+        if node == "B" and not history:
+            # A semantic native Goal verdict, not a harness crash. Grid must store it terminally
+            # rather than exercising the bounded infrastructure-retry path.
+            return "failed", "the optional experiment is impossible as designed", 100
+        if node == "C" and len(history) == 1 and history[0].get("node") == "A":
+            (cwd / "FINAL.md").write_text(
+                "# Parent complete\n\nThe optional experiment failed without blocking delivery.\n")
+            history.append({"node": "C", "ignored_optional_failure": True})
+            save_history(history)
+            return "complete", "C completed the parent after optional child failure", 200
+        raise RuntimeError(f"unexpected optional subgoal turn on {node}: {history!r}")
+
+    if scenario == "subgoal_fanout":
+        if node == "A" and not history:
+            if call_tool is None:
+                raise RuntimeError("fan-out subgoal scenario received no dynamic tool bridge")
+            requests = [
+                {
+                    "objective": "Build the Codex half of the parallel release",
+                    "done_when": "CODEX_CHILD.md exists",
+                    "model": "fake-grid-child-model",
+                    "agents": ["codex"],
+                    "required_capabilities": ["fanout_codex"],
+                    "evals": [{
+                        "type": "file", "name": "Codex child", "path": "CODEX_CHILD.md",
+                        "max_bytes": 2_000, "contains": ["Codex B", "parallel child"],
+                    }],
+                    "token_budget": 2_000,
+                },
+                {
+                    "objective": "Build the Claude half of the parallel release",
+                    "done_when": "CLAUDE_CHILD.md exists",
+                    "model": "fake-grid-model",
+                    "agents": ["claude"],
+                    "required_capabilities": ["fanout_claude"],
+                    "evals": [{
+                        "type": "file", "name": "Claude child", "path": "CLAUDE_CHILD.md",
+                        "max_bytes": 2_000, "contains": ["Claude C", "parallel child"],
+                    }],
+                    "token_budget": 2_000,
+                },
+            ]
+            child_ids = []
+            for arguments in requests:
+                result = call_tool("grid_spawn_subgoal", arguments)
+                envelope = json.loads(
+                    ((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+                child_id = ((envelope.get("body") or {}).get("id"))
+                if not result.get("success") or not child_id:
+                    raise RuntimeError(f"parallel child creation failed: {result!r}")
+                child_ids.append(child_id)
+            if len(set(child_ids)) != 2:
+                raise RuntimeError(f"fan-out returned duplicate child identities: {child_ids!r}")
+            history.append({"node": "A", "fanout_children": child_ids})
+            save_history(history)
+            return "active", f"A spawned two independent child Goals: {child_ids}", 100
+        if node == "B" and not history:
+            if not inference:
+                raise RuntimeError("Codex child received no Grid inference configuration")
+            _exercise_grid_inference(inference)
+            (cwd / "CODEX_CHILD.md").write_text(
+                "# Codex B\n\nCodex B completed its parallel child on an isolated Grid root.\n")
+            # Keep the relay row running long enough for the driver to prove the Claude sibling is
+            # running at the same time. This is synchronization only; the workers share no disk.
+            time.sleep(2)
+            history.append({"node": "B", "parallel_child": "codex"})
+            save_history(history)
+            return "complete", "Codex B completed its parallel child", 100
+        if (node == "D" and len(history) == 1
+                and history[0].get("node") == "A"):
+            if not (cwd / "CODEX_CHILD.md").is_file() or not (cwd / "CLAUDE_CHILD.md").is_file():
+                raise RuntimeError("parent D resumed before both parallel children were fanned in")
+            (cwd / "FINAL.md").write_text(
+                "# Parallel fan-in complete\n\nCodex D received independently evaluated output from "
+                "Codex B and Claude C before resuming the parent.\n")
+            history.append({"node": "D", "fan_in": ["codex", "claude"]})
+            save_history(history)
+            return "complete", "D completed the parent after parallel fan-in", 200
+        raise RuntimeError(f"unexpected fan-out subgoal turn on {node}: {history!r}")
+
+    if scenario == "subgoal_required_failure":
+        if node == "A" and not history:
+            if call_tool is None:
+                raise RuntimeError("required-failure scenario received no dynamic tool bridge")
+            requests = [
+                {
+                    "objective": "Build the required Codex release half",
+                    "done_when": "FAIL_CHILD.md exists",
+                    "model": "fake-grid-child-model",
+                    "agents": ["codex"],
+                    "required_capabilities": ["failure_codex"],
+                    "evals": [{"type": "file", "name": "required Codex half",
+                               "path": "FAIL_CHILD.md", "max_bytes": 2_000}],
+                    "token_budget": 2_000,
+                },
+                {
+                    "objective": "Build the required Claude release half",
+                    "done_when": "SLOW_CHILD.md exists",
+                    "model": "fake-grid-model",
+                    "agents": ["claude"],
+                    "required_capabilities": ["slow_claude"],
+                    "evals": [{"type": "file", "name": "required Claude half",
+                               "path": "SLOW_CHILD.md", "max_bytes": 2_000}],
+                    "token_budget": 2_000,
+                },
+            ]
+            child_ids = []
+            for arguments in requests:
+                result = call_tool("grid_spawn_subgoal", arguments)
+                envelope = json.loads(
+                    ((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+                child_id = ((envelope.get("body") or {}).get("id"))
+                if not result.get("success") or not child_id:
+                    raise RuntimeError(f"required child creation failed: {result!r}")
+                child_ids.append(child_id)
+            history.append({"node": "A", "required_children": child_ids})
+            save_history(history)
+            return "active", f"A spawned two required child Goals: {child_ids}", 100
+        if node == "B" and not history:
+            # Let Claude C enter its native process before this semantic failure blocks the parent.
+            time.sleep(2)
+            return "failed", "the required Codex child is impossible", 40
+        raise RuntimeError(f"unexpected required-child failure turn on {node}: {history!r}")
+
+    if scenario == "subgoal_mixed_retry":
+        if node == "A" and not history:
+            if call_tool is None:
+                raise RuntimeError("mixed-retry subgoal scenario received no dynamic tool bridge")
+            result = call_tool("grid_spawn_subgoal", {
+                "objective": "Build the crash-safe child artifact",
+                "done_when": "CHILD_DONE.md proves the child resumed across native harnesses",
+                "model": "fake-grid-child-model",
+                "agents": ["codex", "claude"],
+                "evals": [{
+                    "type": "file", "name": "mixed child completion", "path": "CHILD_DONE.md",
+                    "max_bytes": 2_000, "contains": ["Claude C", "Codex B checkpoint"],
+                }],
+                "token_budget": 3_000,
+            })
+            envelope = json.loads(
+                ((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+            child_id = ((envelope.get("body") or {}).get("id"))
+            if not result.get("success") or not child_id:
+                raise RuntimeError(f"mixed-retry child creation failed: {result!r}")
+            history.append({"node": "A", "spawned_mixed_child": child_id})
+            save_history(history)
+            return "active", f"A spawned mixed-harness child Goal {child_id}", 100
+        if node == "B" and not history:
+            (cwd / "CHILD_PARTIAL.md").write_text(
+                "# Codex B checkpoint\n\nCodex B wrote this before its native harness failed.\n")
+            history.append({"node": "B", "child_checkpoint": "CHILD_PARTIAL.md"})
+            save_history(history)
+            # The child stays one logical relay turn. Grid must publish both checkpoint refs and
+            # let a Claude-capable machine reclaim attempt 2 rather than opening a new child turn.
+            raise RuntimeError("simulated Codex child harness failure after partial work")
+        if (node == "D" and len(history) == 1
+                and history[0].get("node") == "A"):
+            partial = cwd / "CHILD_PARTIAL.md"
+            completed = cwd / "CHILD_DONE.md"
+            if (not partial.is_file() or "Codex B checkpoint" not in partial.read_text()
+                    or not completed.is_file() or "Claude C" not in completed.read_text()):
+                raise RuntimeError("parent D resumed without the mixed child fan-in")
+            (cwd / "FINAL.md").write_text(
+                "# Parent complete\n\nCodex B checkpointed the child, Claude C resumed it, "
+                "and Codex D received the independently evaluated fan-in.\n")
+            history.append({"node": "D", "fan_in": "mixed-child"})
+            save_history(history)
+            return "complete", "D completed the parent after mixed child recovery", 200
+        raise RuntimeError(f"unexpected mixed-retry subgoal turn on {node}: {history!r}")
+
+    if scenario == "subgoal":
+        if node == "A" and not history:
+            if call_tool is None:
+                raise RuntimeError("subgoal scenario received no dynamic tool bridge")
+            result = call_tool("grid_spawn_subgoal", {
+                "objective": "Write the child instructions",
+                "done_when": "README.md exists",
+                "model": "fake-grid-child-model",
+                "agents": ["claude"],
+                "evals": [{"type": "file", "name": "instructions", "path": "README.md"}],
+                "token_budget": 2_000,
+            })
+            content = ((result.get("contentItems") or [{}])[0]).get("text")
+            envelope = json.loads(content or "{}")
+            child_id = ((envelope.get("body") or {}).get("id"))
+            if not result.get("success") or not child_id:
+                raise RuntimeError(f"subgoal creation failed: {result!r}")
+            history.append({"node": "A", "spawned_child": child_id})
+            save_history(history)
+            return "active", f"A spawned child Goal {child_id}", 100
+        if node == "C" and len(history) == 1 and history[0].get("node") == "A":
+            if not (cwd / "README.md").exists():
+                raise RuntimeError("parent C resumed without the child README fan-in")
+            (cwd / "FINAL.md").write_text("# Parent complete\n\nChild instructions were merged.\n")
+            history.append({"node": "C", "fan_in": "README.md"})
+            save_history(history)
+            return "complete", "C verified child fan-in and completed parent", 200
+        raise RuntimeError(f"unexpected subgoal parent turn on {node}: {history!r}")
+
+    if scenario == "subgoal_retry":
+        if call_tool is None:
+            raise RuntimeError("subgoal retry scenario received no dynamic tool bridge")
+        objective = "Write the one crash-safe child instruction file"
+        if node == "A" and not history:
+            result = call_tool("grid_spawn_subgoal", {
+                "objective": objective,
+                "done_when": "README.md exists",
+                "model": "fake-grid-child-model",
+                "agents": ["claude"],
+                "evals": [{
+                    "type": "file", "name": "instructions v1", "path": "README.md",
+                    "exists": True,
+                }],
+                "token_budget": 2_000,
+            })
+            envelope = json.loads(
+                ((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+            child_id = ((envelope.get("body") or {}).get("id"))
+            if not result.get("success") or not child_id:
+                raise RuntimeError(f"first subgoal creation failed: {result!r}")
+            history.append({"node": "A", "spawned_child": child_id})
+            save_history(history)
+            # The action request and result are durable, but the native turn fails before it can
+            # settle. A replacement session must be free to reconstruct the delegation without
+            # creating a semantically duplicate child from differently-spelled optional policy.
+            raise RuntimeError("simulated parent harness failure after child spawn")
+        if (node == "B" and len(history) == 1
+                and history[0].get("node") == "A"):
+            result = call_tool("grid_spawn_subgoal", {
+                "objective": f"  {objective}  ",
+                "done_when": "README.md exists and has the child marker",
+                "model": "fake-grid-child-model",
+                "agents": ["claude"],
+                "evals": [{
+                    "type": "file", "name": "instructions reconstructed", "path": "README.md",
+                    "exists": True, "min_bytes": 20, "max_bytes": 2_000,
+                    "contains": ["Child instructions"],
+                }],
+                "required_capabilities": ["reconstructed-policy"],
+                "token_budget": 2_000,
+            })
+            envelope = json.loads(
+                ((result.get("contentItems") or [{}])[0]).get("text") or "{}")
+            child_id = ((envelope.get("body") or {}).get("id"))
+            if (not result.get("success")
+                    or child_id != history[0].get("spawned_child")):
+                raise RuntimeError(
+                    f"replacement did not replay the original child: {result!r}")
+            history.append({"node": "B", "replayed_child": child_id})
+            save_history(history)
+            return "active", "B reconciled A's one child spawn", 100
+        if (node == "D" and len(history) == 2
+                and history[1].get("node") == "B"):
+            if not (cwd / "README.md").is_file():
+                raise RuntimeError("parent D resumed without the child README fan-in")
+            (cwd / "FINAL.md").write_text(
+                "# Parent complete\n\nOne crash-safe child was replayed and merged exactly once.\n")
+            history.append({"node": "D", "fan_in": "README.md"})
+            save_history(history)
+            return "complete", "D verified one idempotent child fan-in", 200
+        raise RuntimeError(f"unexpected subgoal retry turn on {node}: {history!r}")
+
+    if not (cwd / "index.html").exists():
+        if node != "A" or history:
+            raise RuntimeError(f"feature 1 reached {node} with unexpected history {history!r}")
+        (cwd / "index.html").write_text("""<!doctype html>
+<html><head><meta charset=\"utf-8\"><title>Grid Click</title><link rel=\"stylesheet\" href=\"style.css\"></head>
+<body><main><h1>Grid Click</h1><p>Score: <strong id=\"score\">0</strong></p><button id=\"target\">Click me</button></main><script src=\"game.js\"></script></body></html>
+""")
+        history.append({"node": "A", "feature": 1})
+        save_history(history)
+        return "active", "A completed feature 1", 100
+
+    if not (cwd / "game.js").exists():
+        if node == "A":
+            # This file exists only in A's uncommitted worktree. B must not see it after reclaim.
+            (cwd / "partial-feature-2.tmp").write_text("A died here\n")
+            time.sleep(90)
+            raise RuntimeError("node A was expected to be killed")
+        if node != "B" or history != [{"node": "A", "feature": 1}]:
+            raise RuntimeError(f"B did not receive A's exact checkpoint: {history!r}")
+        assert not (cwd / "partial-feature-2.tmp").exists(), "A's uncommitted file crossed nodes"
+        (cwd / "game.js").write_text("""const score = document.querySelector('#score');
+const target = document.querySelector('#target');
+let points = 0;
+target.addEventListener('click', () => {
+  points += 1; score.textContent = String(points);
+  target.style.transform = `translate(${Math.random()*220-110}px, ${Math.random()*120-60}px)`;
+});
+""")
+        history.append({"node": "B", "feature": 2})
+        save_history(history)
+        return "active", "B completed feature 2", 200
+
+    if not (cwd / "style.css").exists():
+        if mixed:
+            if node != "C" or history != [{"node": "A", "feature": 1}]:
+                raise RuntimeError(
+                    f"Codex C did not resume its own A checkpoint after Claude B: {history!r}")
+            if "addEventListener('click'" not in (cwd / "game.js").read_text():
+                raise RuntimeError("Codex C did not receive Claude B's committed feature 2")
+            assert not (cwd / "partial-feature-34.tmp").exists(), (
+                "Claude B's uncommitted file crossed machines")
+            if scenario == "mixed_eval_repair":
+                # Nominate completion with a plausible-looking but non-interactive implementation.
+                # Grid—not Codex—must reject it and give the exact failed literal checks to D.
+                (cwd / "game.js").write_text(
+                    "document.querySelector('#score').textContent='not wired';\n")
+            (cwd / "style.css").write_text(
+                "body{font:18px system-ui;background:#111827;color:#f9fafb;text-align:center}\n")
+            (cwd / "README.md").write_text(
+                "# Grid Click\n\nCodex, Claude, and Codex completed this game across Grid nodes.\n")
+            history.append({
+                "node": "C", "features": [3, 4], "after": "claude-B",
+                **({"eval_nomination": "missing-click-handler"}
+                   if scenario == "mixed_eval_repair" else {}),
+            })
+            save_history(history)
+            return "complete", "C completed features 3 and 4 after Claude B", 300
+        if node == "B":
+            (cwd / "partial-feature-34.tmp").write_text("B died here\n")
+            time.sleep(90)
+            raise RuntimeError("node B was expected to be killed")
+        expected = [{"node": "A", "feature": 1}, {"node": "B", "feature": 2}]
+        if node != "C" or history != expected:
+            raise RuntimeError(f"C did not receive A+B's exact checkpoint: {history!r}")
+        assert not (cwd / "partial-feature-34.tmp").exists(), "B's uncommitted file crossed nodes"
+        (cwd / "style.css").write_text("""body{font:18px system-ui;background:#111827;color:#f9fafb;text-align:center}main{margin:12vh auto;max-width:32rem}button{padding:1rem 2rem;border:0;border-radius:999px;background:#34d399;font-weight:700;cursor:pointer;transition:transform .15s}
+""")
+        (cwd / "README.md").write_text("""# Grid Click
+
+Open `index.html`, then click the moving button to increase your score.
+""")
+        history.append({"node": "C", "features": [3, 4]})
+        save_history(history)
+        return "complete", "C completed features 3 and 4", 300
+
+    return "complete", "already complete", 300
+
+
+def main() -> int:
+    if sys.argv[1:] == ["--version"]:
+        print("codex-cli 0.150.1")
+        return 0
+    if sys.argv[1:3] == ["app-server", "generate-json-schema"]:
+        arguments = sys.argv[3:]
+        try:
+            output = Path(arguments[arguments.index("--out") + 1])
+        except (ValueError, IndexError):
+            print("missing --out", file=sys.stderr)
+            return 2
+        output.mkdir(parents=True, exist_ok=True)
+        # Provider capability discovery must exercise the same fail-closed protocol probe as a real
+        # Codex installation.  Keep this fixture intentionally minimal: Grid scans exact schema
+        # string values, while the interactive fake below proves their actual runtime behavior.
+        methods = [
+            "initialize", "initialized", "thread/start", "thread/resume", "thread/goal/set",
+            "thread/goal/get", "thread/tokenUsage/updated", "turn/started", "turn/steer",
+            "turn/completed", "item/tool/call",
+        ]
+        (output / "codex_app_server_protocol.schemas.json").write_text(
+            json.dumps({"methods": methods}, separators=(",", ":")) + "\n")
+        return 0
+    node = os.environ.get("GRID_E2E_GOAL_NODE", "?")
+    thread_id = "grid-e2e-" + str(uuid.uuid4())
+    native_status = "paused"
+    tokens = 0
+    dynamic_tools: list[dict] = []
+    early_pause = False
+    initialized = False
+    tool_calls = 0
+    inference: dict[str, str] | None = None
+
+    def call_tool(name: str, arguments: dict) -> dict:
+        nonlocal early_pause, tool_calls
+        tool_calls += 1
+        request_id = 90_000 + tool_calls
+        emit({"id": request_id, "method": "item/tool/call", "params": {
+            "tool": name, "arguments": arguments, "callId": f"tool-call-{tool_calls}"}})
+        while True:
+            response_line = sys.stdin.readline()
+            if not response_line:
+                raise RuntimeError("Grid closed before answering the subgoal tool call")
+            response = json.loads(response_line)
+            # Grid pauses native continuation as soon as it sees turn/started. A tool request can
+            # make that client request arrive before the tool response; fenced steering can arrive
+            # in the same window on resumed turns. Service both without losing the in-flight call.
+            if response.get("method") == "turn/steer":
+                expected = response.get("params", {}).get("expectedTurnId")
+                inputs = response.get("params", {}).get("input")
+                if not isinstance(expected, str) or not expected or not isinstance(inputs, list):
+                    emit({"id": response["id"], "error": {
+                        "code": -32602, "message": "invalid turn/steer parameters"}})
+                else:
+                    reply(response, {})
+                continue
+            if (response.get("method") == "thread/goal/set"
+                    and response.get("params", {}).get("status") == "paused"):
+                early_pause = True
+                reply(response, {"goal": {"status": "paused"}})
+                continue
+            if response.get("id") != request_id or "result" not in response:
+                raise RuntimeError(f"unexpected subgoal tool response: {response!r}")
+            return response["result"]
+    for line in sys.stdin:
+        request = json.loads(line)
+        method = request.get("method")
+        if "id" not in request:
+            if method == "initialized":
+                initialized = True
+            continue
+        if method == "initialize":
+            reply(request, {"serverInfo": {"name": "fake-codex"}})
+        elif not initialized:
+            emit({"id": request["id"], "error": {
+                "code": -32600, "message": "Not initialized"}})
+        elif method == "thread/start":
+            params = request.get("params", {})
+            dynamic_tools = params.get("dynamicTools") or []
+            provider = ((params.get("config") or {}).get("model_providers") or {}).get("grid") or {}
+            if isinstance(provider.get("base_url"), str) and isinstance(params.get("model"), str):
+                inference = {"base_url": provider["base_url"], "model": params["model"]}
+            rollout = rollout_path(thread_id)
+            # Real Codex 0.150.1 persists dynamic tool declarations in the rollout and restores
+            # them when a fresh app-server process resumes by path. Model that contract: otherwise
+            # multi-turn business/subgoal tests silently exercise a weaker fake than production.
+            rollout.write_text(json.dumps({
+                "dynamic_tools": dynamic_tools,
+            }, separators=(",", ":")) + "\n")
+            reply(request, {"thread": {"id": thread_id, "path": str(rollout)}})
+        elif method == "thread/resume":
+            params = request.get("params", {})
+            thread_id = params.get("threadId") or thread_id
+            supplied = Path(params.get("path") or "")
+            provider = ((params.get("config") or {}).get("model_providers") or {}).get("grid") or {}
+            if isinstance(provider.get("base_url"), str) and isinstance(params.get("model"), str):
+                inference = {"base_url": provider["base_url"], "model": params["model"]}
+            home = Path(os.environ["CODEX_HOME"]).resolve()
+            if (not supplied.is_file() or not supplied.resolve().is_relative_to(home)
+                    or not supplied.name.endswith(f"-{thread_id}.jsonl")):
+                emit({"id": request["id"], "error": {
+                    "code": -32600, "message": f"non-portable rollout path: {supplied}"}})
+                continue
+            checkpoint = json.loads(supplied.read_text().splitlines()[0])
+            dynamic_tools = checkpoint.get("dynamic_tools") or []
+            reply(request, {"thread": {"id": thread_id, "path": str(supplied)}})
+        elif method == "turn/steer":
+            # Grid fences continuation evidence to the exact native turn. The deterministic
+            # scenario itself already derives its next action from durable worktree/history, but
+            # the fake must still implement the production acknowledgement contract.
+            expected = request.get("params", {}).get("expectedTurnId")
+            inputs = request.get("params", {}).get("input")
+            if not isinstance(expected, str) or not expected or not isinstance(inputs, list):
+                emit({"id": request["id"], "error": {
+                    "code": -32602, "message": "invalid turn/steer parameters"}})
+                continue
+            reply(request, {})
+        elif method == "thread/goal/set":
+            desired = request.get("params", {}).get("status")
+            # Either terminal verdict wins the runner's pause request, as it does in native Goal
+            # state. A delayed pause must not resurrect an impossible Goal as active.
+            if native_status not in ("complete", "failed"):
+                native_status = desired or native_status
+            reply(request, {"goal": {"status": native_status}})
+            if desired == "active":
+                emit({"method": "turn/started", "params": {"threadId": thread_id,
+                                                               "turn": {"id": str(uuid.uuid4())}}})
+                try:
+                    bridge = call_tool if dynamic_tools else None
+                    native_status, output, tokens = run_turn(
+                        node, bridge, inference=inference)
+                    if early_pause and native_status not in ("complete", "failed"):
+                        native_status = "paused"
+                    emit({"method": "thread/tokenUsage/updated", "params": {
+                        "tokenUsage": {"total": {"totalTokens": tokens}}}})
+                    emit({"method": "turn/completed", "params": {
+                        "threadId": thread_id,
+                        "turn": {"status": "completed", "output": output}}})
+                except Exception as exc:  # noqa: BLE001 - emulate an app-server terminal event
+                    emit({"method": "turn/completed", "params": {
+                        "threadId": thread_id,
+                        "turn": {"status": "failed", "error": str(exc)}}})
+        elif method == "thread/goal/get":
+            if os.environ.get("GRID_E2E_GOAL_SCENARIO") == "codex_protocol_drift":
+                # Hold the disappearing method until another worker has entered a NEW claim poll
+                # with this still-admitted executable revision. Removing the marker prevents an
+                # old/expired poll from satisfying the proof; the next provider poll recreates it.
+                marker_value = os.environ.get("GRID_E2E_CLAIM_MARKER")
+                if marker_value:
+                    marker = Path(marker_value)
+                    marker.unlink(missing_ok=True)
+                    required_polls = int(os.environ.get("GRID_E2E_STALE_POLLS_REQUIRED", "1"))
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        observed = (marker.read_text().count("\n") if marker.exists() else 0)
+                        if observed >= required_polls:
+                            break
+                        time.sleep(0.02)
+                    else:
+                        observed = 0
+                    if observed < required_polls:
+                        emit({"id": request["id"], "error": {
+                            "code": -32000,
+                            "message": (f"only {observed}/{required_polls} concurrent stale claim "
+                                        "polls entered before drift")}})
+                        continue
+                emit({"id": request["id"], "error": {
+                    "code": -32601, "message": "thread/goal/get removed after schema generation"}})
+            else:
+                reply(request, {"goal": {"status": native_status, "tokensUsed": tokens,
+                                          "timeUsedSeconds": 1}})
+        else:
+            emit({"id": request["id"], "error": {"code": -32601,
+                                                   "message": f"unsupported {method}"}})
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

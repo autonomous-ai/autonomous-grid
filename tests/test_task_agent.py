@@ -9,6 +9,7 @@ import stat
 import sys
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -514,6 +515,22 @@ def test_the_cached_version_does_not_survive_the_binary_changing_underneath_it(
     with pytest.raises(RuntimeError) as excinfo:
         task_agent.resolve_binary()
     assert "2.0.9" in str(excinfo.value)
+
+
+def test_distributed_claude_goal_requires_measured_resume_version_and_tracks_replacement(
+        monkeypatch, tmp_path):
+    from remote import task_agent
+
+    monkeypatch.setattr(task_agent, "_DISTRIBUTED_GOAL_FAILURES", {})
+    binary, _ = _claude_reporting(tmp_path, "2.1.238 (Claude Code)", name="goal-claude")
+    _resolving_to(monkeypatch, binary)
+
+    assert task_agent.distributed_goal_available() is False
+    with pytest.raises(RuntimeError, match="install 2.1.239 or newer"):
+        task_agent.require_distributed_goal(binary)
+
+    _claude_reporting(tmp_path, "2.1.239 (Claude Code)", name="goal-claude")
+    assert task_agent.distributed_goal_available() is True
 
 
 def test_a_version_that_cannot_be_read_is_refused_rather_than_assumed_good(monkeypatch, tmp_path):
@@ -2166,6 +2183,96 @@ def test_the_git_remote_is_built_for_this_tasks_own_project(monkeypatch):
     assert reported["state"] == "completed", reported
 
 
+def test_the_git_remote_is_fenced_to_this_exact_claim_generation():
+    from remote import tasks
+
+    remote = tasks._git_remote(_FakeState(), {
+        "task_id": "T-42", "project_id": "proj-1", "input_commit": "c" * 40,
+        "claim_id": "claim-generation-7",
+    })
+
+    assert remote is not None
+    assert remote.claim_id == "claim-generation-7"
+
+
+def test_the_git_remote_adopts_a_token_refreshed_during_a_long_goal():
+    from remote import tasks
+
+    live = {"token": "claim-time-token"}
+    state = SimpleNamespace(
+        signaling_url="http://relay", token=lambda: live["token"])
+    remote = tasks._git_remote(state, {
+        "task_id": "T-42", "project_id": "proj-1", "input_commit": "c" * 40,
+        "claim_id": "claim-generation-7",
+    })
+    assert remote is not None and remote.token == "claim-time-token"
+
+    live["token"] = "heartbeat-refreshed-token"
+
+    assert remote.live_token() == "heartbeat-refreshed-token"
+    assert remote.claim_id == "claim-generation-7", "the lease generation must never rotate"
+
+
+def test_checkout_reads_the_live_token_instead_of_the_claim_time_snapshot(
+        agent, monkeypatch):
+    from remote import task_repo, tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    live = {"token": "claim-time-token"}
+    remote = task_repo.GitRemote(
+        url="https://relay.example/git/project", token=live["token"],
+        claim_id="claim-generation-7", token_provider=lambda: live["token"])
+    live["token"] = "heartbeat-refreshed-token"
+    seen = {}
+
+    def materialize(*_args, **kwargs):
+        seen.update(kwargs)
+        raise task_repo.InputFetchError("stop after observing the credential")
+
+    monkeypatch.setattr(task_repo, "materialize", materialize)
+    with pytest.raises(task_repo.InputFetchError):
+        tasks.run_task(
+            _job(input_commit="c" * 40, branch="task/T1"), remote=remote)
+
+    assert seen["token"] == "heartbeat-refreshed-token"
+    assert seen["claim_id"] == "claim-generation-7"
+
+
+def test_transcript_and_result_push_each_read_the_latest_token(tmp_path, monkeypatch):
+    from remote import task_repo, tasks
+
+    live = {"token": "token-before-transcript"}
+    remote = task_repo.GitRemote(
+        url="https://relay.example/git/project", token="claim-time-token",
+        claim_id="claim-generation-7", token_provider=lambda: live["token"])
+    seen = []
+    monkeypatch.setattr(
+        tasks.task_agent, "workspace_for", lambda *_args: tmp_path)
+
+    def push_transcript(_workspace, **kwargs):
+        seen.append(("transcript", kwargs["token"], kwargs.get("claim_id")))
+        live["token"] = "token-before-result"
+        return "a" * 40
+
+    def push_result(_workspace, **kwargs):
+        seen.append(("result", kwargs["token"], kwargs.get("claim_id")))
+        return task_repo.Pushed("b" * 40)
+
+    monkeypatch.setattr(task_repo, "push_transcript", push_transcript)
+    monkeypatch.setattr(task_repo, "commit_and_push", push_result)
+    outcome, landed = tasks._push_result(
+        {"task_id": "T1", "project_id": "P1", "member_key": "M1",
+         "conversation_id": "G1", "branch": "task/T1"},
+        tasks.TaskOutcome("completed", "ok", None), True, remote, _NullPublisher())
+
+    assert landed is True
+    assert outcome.result_commit == "b" * 40
+    assert seen == [
+        ("transcript", "token-before-transcript", "claim-generation-7"),
+        ("result", "token-before-result", "claim-generation-7"),
+    ]
+
+
 class _NullPublisher:
     def publish(self, *_a, **_k):
         return True
@@ -2182,6 +2289,53 @@ class _FakeState:
 
     def refresh(self, stale_token=None):
         return False
+
+
+def test_goal_supervisor_wires_live_inference_token_and_refresh(monkeypatch):
+    """A long Goal slice must not retain the node JWT captured when it started."""
+    from remote import tasks
+
+    captured = {}
+
+    class State:
+        signaling_url = "http://relay"
+        current = "expired-node-token"
+
+        def token(self):
+            return self.current
+
+        def refresh(self, stale_token=None):
+            assert stale_token == "expired-node-token"
+            self.current = "fresh-node-token"
+            return True
+
+    class Renewer:
+        lost = False
+        cancelled = False
+
+        def close(self):
+            return None
+
+    def fake_run(job, publish=None, on_spawn=None, remote=None, inference=None, capacity=None):
+        captured["inference"] = inference
+        return tasks.TaskOutcome("completed", "ok", None, goal_status="complete")
+
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *_a, **_k: _NullPublisher())
+    monkeypatch.setattr(tasks, "_git_remote", lambda *_a, **_k: None)
+    monkeypatch.setattr(tasks, "_lease_renewer", lambda *_a, **_k: Renewer())
+    monkeypatch.setattr(tasks, "run_task", fake_run)
+    monkeypatch.setattr(tasks, "_push_result", lambda _j, outcome, *_a: (outcome, True))
+    monkeypatch.setattr(tasks, "report_once", lambda *_a, **_k: None)
+
+    state = State()
+    tasks._supervise_one_task(state, {
+        "task_id": "turn-1", "agent_kind": "codex", "goal": {"model": "grid-model"},
+    }, "turn-1", None)
+
+    inference = captured["inference"]
+    assert inference.current_token() == "expired-node-token"
+    assert inference.refresh_token("expired-node-token") is True
+    assert inference.current_token() == "fresh-node-token"
 
 
 def test_a_runner_that_raises_does_not_publish_the_exceptions_words_verbatim(monkeypatch):
@@ -2936,6 +3090,8 @@ def test_the_projects_own_gitignore_cannot_suppress_the_conversation(
     tasks._run_and_report(_FakeState(), _job_with_input(commit))
 
     assert reported["state"] == "completed"
+    assert reported["transcript_result_commit"] == _git(
+        remote.url, "rev-parse", task_repo.transcript_ref(_CONVERSATION)).stdout.strip()
     ref = task_repo.transcript_ref(_CONVERSATION)
     listing = _git(remote.url, "ls-tree", "-r", "--name-only", ref).stdout.split()
     assert f".grid/agent/{_MEMBER}/sess-1.jsonl" in listing, listing
@@ -3630,6 +3786,34 @@ def test_a_workspace_that_could_not_be_prepared_pushes_nothing(agent, tmp_path, 
 
     assert reported["state"] == "failed"
     assert reported["result_commit"] is None, "a result was published for an agent that never ran"
+    assert _git(remote.url, "rev-parse", "refs/heads/task/T1").stdout.strip() == commit
+
+
+def test_a_goal_whose_harness_never_started_is_left_for_another_machine(
+        agent, tmp_path, monkeypatch):
+    """A node-local pre-spawn fault must not terminally fail a durable distributed Goal."""
+    from remote import task_repo, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    real_run = task_repo._run
+
+    def fail_on_clean(workspace, *args, **kwargs):
+        if args and args[0] == "clean":
+            raise task_repo.CheckoutError("git clean failed (1): node-local permission denied")
+        return real_run(workspace, *args, **kwargs)
+
+    monkeypatch.setattr(task_repo, "_run", fail_on_clean)
+    reports = []
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reports.append(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+    job = _job_with_input(commit)
+    job["goal"] = {"status": "active", "objective": "finish", "done_when": "checks pass"}
+
+    tasks._run_and_report(_FakeState(), job)
+
+    assert reports == [], "one broken node terminally failed a Goal another node could run"
     assert _git(remote.url, "rev-parse", "refs/heads/task/T1").stdout.strip() == commit
 
 
@@ -5489,6 +5673,55 @@ def test_preflight_before_serving_asks_what_a_claim_would_ask(monkeypatch, tmp_p
     assert asked == ["preflight", "binary"]
 
 
+def test_codex_only_preflight_does_not_require_claude(monkeypatch, tmp_path):
+    """A company machine with Codex but no Claude is still real distributed Goal capacity."""
+    from remote import task_agent, task_codex
+
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    monkeypatch.setattr(
+        task_agent, "preflight",
+        lambda: pytest.fail("Codex-only node ran Claude's configuration preflight"))
+    monkeypatch.setattr(
+        task_agent, "resolve_binary",
+        lambda: pytest.fail("Codex-only node tried to resolve Claude"))
+    monkeypatch.setattr(task_codex, "resolve_binary", lambda: "/opt/grid/bin/codex")
+    _sandbox_packages_present(monkeypatch)
+
+    task_agent.preflight_before_serving()
+
+
+def test_preflight_accepts_codex_when_default_claude_is_missing(monkeypatch, tmp_path):
+    """The default `claude,codex` means either usable harness, not an accidental Claude mandate."""
+    from remote import task_agent, task_codex
+
+    monkeypatch.delenv("GRID_TASK_AGENT_KINDS", raising=False)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(
+        task_agent, "resolve_binary", lambda: (_ for _ in ()).throw(RuntimeError("no Claude")))
+    monkeypatch.setattr(task_codex, "resolve_binary", lambda: "/opt/grid/bin/codex")
+    _sandbox_packages_present(monkeypatch)
+
+    task_agent.preflight_before_serving()
+
+
+def test_preflight_refuses_when_every_configured_harness_is_unusable(monkeypatch, tmp_path):
+    from remote import task_agent, task_codex
+
+    monkeypatch.delenv("GRID_TASK_AGENT_KINDS", raising=False)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(
+        task_agent, "resolve_binary", lambda: (_ for _ in ()).throw(RuntimeError("no Claude")))
+    monkeypatch.setattr(
+        task_codex, "resolve_binary", lambda: (_ for _ in ()).throw(RuntimeError("no Codex")))
+    _sandbox_packages_present(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="claude: no Claude.*codex: no Codex"):
+        task_agent.preflight_before_serving()
+
+
 def test_preflight_before_serving_refuses_a_workspace_root_it_cannot_write(monkeypatch, tmp_path):
     """The macOS shape: `/var` is root-owned, so a provider without sudo fails EVERY task with
     "could not create /var/grid/…" — one member's task at a time, forever, every signal green."""
@@ -5737,6 +5970,7 @@ def test_a_linux_provider_missing_a_sandbox_package_is_told_at_join(
 
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delenv("GRID_TASK_SANDBOX", raising=False)
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude")
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
     _packages(monkeypatch, present)
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
@@ -5761,6 +5995,38 @@ def test_a_linux_provider_with_both_packages_is_allowed(monkeypatch, tmp_path):
     _packages(monkeypatch, ("bwrap", "socat"))
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    task_agent.preflight_before_serving()
+
+
+def test_a_linux_codex_provider_missing_bubblewrap_is_told_at_join(monkeypatch, tmp_path):
+    """Codex uses bwrap directly and must not advertise task capacity without it."""
+    from remote import task_agent, task_codex
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("GRID_TASK_SANDBOX", raising=False)
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    _packages(monkeypatch, ())
+    monkeypatch.setattr(task_codex, "resolve_binary", lambda: "codex")
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.preflight_before_serving()
+
+    assert "bubblewrap is unavailable" in str(excinfo.value)
+    assert "apt install bubblewrap" in str(excinfo.value)
+
+
+def test_a_linux_codex_provider_does_not_require_claudes_socat(monkeypatch, tmp_path):
+    """Codex needs bwrap, but rejecting it for Claude's socat bridge would remove valid capacity."""
+    from remote import task_agent, task_codex
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("GRID_TASK_SANDBOX", raising=False)
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    _packages(monkeypatch, ("bwrap",))
+    monkeypatch.setattr(task_codex, "resolve_binary", lambda: "codex")
 
     task_agent.preflight_before_serving()
 

@@ -27,7 +27,7 @@ from typing import NamedTuple
 import uuid
 from typing import TYPE_CHECKING
 
-from shared import logging_setup, orphan_sweep, paths, run_records
+from shared import logging_setup, orphan_sweep, paths, process_home, run_records
 from shared.filelock import file_lock
 from shared.models import api_catalog
 
@@ -158,7 +158,7 @@ class _TaskServing(NamedTuple):
 
 
 def _task_env_from_flags(args: argparse.Namespace) -> dict[str, str]:
-    """What `--tasks`/`--max-tasks`/`--tasks-root` change in the serve child's environment.
+    """What task flags change in the serve child's environment.
 
     The flags SET the environment the child is handed rather than moving the reading into the run
     record, and that is deliberate — `task_opt_in.serving_enabled`'s docstring records why the
@@ -172,7 +172,7 @@ def _task_env_from_flags(args: argparse.Namespace) -> dict[str, str]:
     from remote import task_agent, task_opt_in
 
     overrides: dict[str, str] = {}
-    if getattr(args, "tasks", None):
+    if getattr(args, "tasks", None) or getattr(args, "tasks_only", None):
         overrides[task_opt_in.SERVING_ENV] = "1"
     count = getattr(args, "max_tasks", None)
     if count is not None:
@@ -320,6 +320,9 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     from . import provider, remote_grid
 
     _reject_local_only_flags(args)
+    tasks_only = bool(getattr(args, "tasks_only", False))
+    if tasks_only:
+        _reject_tasks_only_conflicts(args)
     if getattr(args, "api", None) is not None:  # `--api ""` must error, not fall through to hardware
         _reject_api_conflicts(args)
     if args.serve and args.models:
@@ -365,13 +368,15 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     respawn = bool(getattr(args, "respawn", False))  # never no-op, never SIGHUP — always stop-and-start
     key_rotated = False  # a `join --api` that stored a NEW key must reach a live identity via respawn
     deferred_target_error: SystemExit | None = None
-    if getattr(args, "api", None) is not None:
+    if tasks_only:
+        specs, media_detected = [], False
+    elif getattr(args, "api", None) is not None:
         specs, key_rotated = _resolve_api_targets(args, network_id)
         media_detected = False
     else:
         specs, media_detected, deferred_target_error = _resolve_or_defer(args, respawn=respawn)
     media = bool(getattr(args, "media", False)) or media_detected
-    if not specs and not media and deferred_target_error is None:
+    if not specs and not media and deferred_target_error is None and not tasks_only:
         # engines detected and the operator declined, or nothing to serve
         print("Nothing joined.")
         return 0
@@ -386,8 +391,13 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # get rather than the one this shell happens to export (issue 61).
     task_flags = _task_env_from_flags(args)
     with _as_the_child_will_see_it(task_flags):
-        task_serving = _decide_task_serving(may_make_the_root=bool(getattr(args, "tasks", None)))
+        task_serving = _decide_task_serving(
+            may_make_the_root=bool(getattr(args, "tasks", None) or tasks_only))
     if task_serving.problem:
+        if tasks_only:
+            raise SystemExit(
+                f"Cannot join as a task-only agent worker: {task_serving.problem}\n"
+                "Fix that problem and run the same command again; no Grid node was started.")
         print(
             f"Task serving is off for this join: {task_serving.problem}\n"
             f"Inference is unaffected. Fix that and re-run `grid join --respawn` to claim tasks.",
@@ -424,6 +434,14 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
             raise deferred_target_error
         base = live or list(run_records.read_records(network_id).values())
         merged_specs, changed = _merge_engines(_engine_union(base), specs)
+        # Aliases belong to the singleton identity's flat model list. A bare `--respawn` names no
+        # aliases because it names no engine at all, so inherit the existing list; dropping it would
+        # make the restarted node advertise a filename the Grid has never seen. An explicit list may
+        # replace it when it covers the whole (still single-engine) union.
+        base_aliases = next(
+            (list(rec.get("advertise_as") or []) for rec in base if rec.get("advertise_as")), [])
+        requested_aliases = list(getattr(args, "advertise_as", []) or [])
+        effective_aliases = requested_aliases or base_aliases
         # A rotated key only matters when this kind's API spec is already LIVE. A reload WOULD re-read the
         # key store and swap the bearer in place (issue 05), but rotation deliberately RESPAWNS so the
         # operator has certainty the new key is live — never a no-op, never SIGHUP. Kept at the call sites
@@ -441,6 +459,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         if (
             live and not changed and media == base_media and bundles == base_bundles
             and meta_name == _identity_field(live, "meta_name") and not rotated_live
+            and effective_aliases == list(_identity_field(live, "advertise_as") or [])
             and not respawn
         ):
             # Lazy, per this module's import rule: `cli.dispatch` imports it while `cli` is still
@@ -477,13 +496,16 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
             return 0
-        _reject_unserveable_union(merged_specs, args, base)
+        _reject_unserveable_union(merged_specs, effective_aliases)
         _warn_shadowed_models(merged_specs)  # the serve loop logs this too; show it on the operator's terminal
 
         record = _build_record(
             args, network_id, engine_id, signaling_url, merged_specs,
             media=media, meta_name=meta_name, bundles=bundles,
         )
+        # `_build_record` sees only this invocation. Put the inherited-or-explicit complete alias
+        # list back after it projects args, so a bare restart is identity-preserving.
+        record["advertise_as"] = effective_aliases
         # Preserve the live identity's --max-concurrency across an additive join, like media/bundles/meta
         # above. It sizes the running N-worker poll pool (remote/serve._serve_loop), so a re-join that
         # doesn't re-pass --max-concurrency must NOT reset it to the default 1 — that would silently
@@ -521,7 +543,11 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
 
     appended = bool(live)
     verb = "Appended to" if appended else "Joining"
-    print(f"{verb} {label} (pid={record['pid']}) — {'re-serving' if appended else 'serving'} the union via the relay.")
+    if tasks_only and not record["engines"] and not media:
+        print(f"{verb} {label} (pid={record['pid']}) — task-only agent worker via the relay.")
+    else:
+        print(f"{verb} {label} (pid={record['pid']}) — "
+              f"{'re-serving' if appended else 'serving'} the union via the relay.")
     if len(record["engines"]) > 1:
         print(f"engines={len(record['engines'])} (serving the union under one identity)")
     elif record["endpoint_url"]:
@@ -559,6 +585,20 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
             for line in provider.chat_hints(advertised[0], provider.serves_vision(args)):
                 print(line)
     return 0
+
+
+def _reject_tasks_only_conflicts(args: argparse.Namespace) -> None:
+    """A task-only node carries agent capacity and deliberately no model capacity."""
+    conflicts = (
+        ("at", "--at"), ("serve", "--serve"), ("models", "-m/--model"),
+        ("api", "--api"), ("media", "--media"), ("bundles", "--bundle"),
+        ("kind", "--kind"), ("all", "--all"), ("advertise_as", "--advertise-as"),
+    )
+    used = [flag for attr, flag in conflicts if getattr(args, attr, None)]
+    if used:
+        raise SystemExit(
+            "--tasks-only does not advertise inference and cannot combine with "
+            f"{', '.join(used)}. Use --tasks (without --tasks-only) to serve both.")
 
 
 def _resolve_api_targets(
@@ -1103,25 +1143,24 @@ def _identity_field(live: list[dict[str, object]], key: str) -> object:
 
 
 def _reject_unserveable_union(
-    merged_specs: list[dict[str, object]], args: argparse.Namespace, live: list[dict[str, object]]
+    merged_specs: list[dict[str, object]], advertise_as: list[str]
 ) -> None:
     """Guard the merged union: the built-in engine can't join a multi-engine identity (external-only,
-    ADR 0007 D4), and ``--advertise-as`` aliases only a single engine (so appending onto an already-aliased
-    identity is rejected rather than silently dropping the alias)."""
+    ADR 0007 D4), and ``--advertise-as`` aliases only a single engine. A same-engine restart is safe;
+    an append is refused rather than silently dropping or positionally misapplying an alias."""
     if len(merged_specs) > 1 and any(not spec.get("endpoint_url") for spec in merged_specs):
         raise SystemExit(
             "The built-in engine (`--serve`) serves a single model and can't join a multi-engine "
             "identity. Run `grid leave`, then re-join every engine as external `--at <url> -m <model>`."
         )
-    # --advertise-as aliases don't merge across joins (the record's `advertise_as` is a flat, positionally
-    # keyed list), so appending onto — or with — an alias would drop an alias or mismatch the alias/model
-    # counts (which crashes the reload's _advertised_models). Reject any changing append touching aliases;
-    # the no-op case already returned earlier, so `live` here means a real change (ADR 0010).
-    aliased = bool(getattr(args, "advertise_as", []) or []) or any(rec.get("advertise_as") for rec in live)
-    if aliased and (len(merged_specs) > 1 or live):
+    # The record's aliases are flat and positionally keyed to its flat models. Multiple engines make
+    # that ownership ambiguous, and an additive same-engine join can leave fewer aliases than models.
+    # Both are refused before a record is written (the latter would crash `_advertised_models`).
+    model_count = sum(len(spec.get("models") or []) for spec in merged_specs)
+    if advertise_as and (len(merged_specs) > 1 or len(advertise_as) != model_count):
         raise SystemExit(
             "--advertise-as aliases are single-engine and don't merge across joins. Run `grid leave`, "
-            "then re-join every engine in one command with its -m/--advertise-as pairs."
+            "then re-join the engine in one command with every -m/--advertise-as pair."
         )
 
 
@@ -1324,6 +1363,16 @@ def _resolve_or_defer(
         args.at, args.serve, getattr(args, "models", None), getattr(args, "media", False),
         getattr(args, "kind", None),
     ))
+    # A bare respawn is a restart of the recorded identity, never a fresh auto-detection. Detection
+    # can find a newly started local engine and accidentally append it to the live union; for an
+    # aliased identity that is refused as an ambiguous multi-engine alias, and without aliases it
+    # silently changes what the node serves. The existing record is the complete restart input.
+    if respawn and named_nothing:
+        return [], False, SystemExit(
+            "No running engine detected on this box. Point at one with "
+            "`grid join --at <url> -m <model>`, or start the built-in engine with "
+            "`grid join --serve <model>`."
+        )
     try:
         specs, media_detected = _resolve_serve_targets(args)
     except SystemExit as exc:
@@ -1481,7 +1530,8 @@ def _spawn_remote_engine(
     paths.ensure_dir(log_path.parent)
     log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
     return subprocess.Popen(
-        runtime.cli_command() + [run_records.REMOTE_ENGINE_MARKER, network_id, engine_id],
+        runtime.cli_command()
+        + [process_home.own_tag_arg(), run_records.REMOTE_ENGINE_MARKER, network_id, engine_id],
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,

@@ -781,7 +781,10 @@ def _follow_created(base: str, token: str, task_id: str, *, as_json: bool) -> in
     # One flush here covers all three shapes of preamble — the human report, this banner, and
     # `--json`'s compact create line.
     sys.stdout.flush()
-    terminal = _follow_stream(base, token, task_id, after_seq=-1, as_json=as_json)
+    interrupted, terminal = _follow_interruptibly(
+        base, token, task_id, after_seq=-1, as_json=as_json)
+    if interrupted:
+        return 130
     if terminal is None:
         # `_follow_stream` has already said what went wrong with the STREAM. What it cannot say is
         # that the task is still out there running — it does not know one was just created — and
@@ -825,14 +828,37 @@ def _task_follow(args: argparse.Namespace) -> int:
             "  grid task follow <task-id>\n"
             "  grid task follow --conversation <conversation-id>")
 
-    stop = _follow_stream(
+    interrupted, stop = _follow_interruptibly(
         base, token, conversation_id or args.task_id,
         after_seq=int(getattr(args, "after_seq", -1) or -1),
         as_json=bool(getattr(args, "json", False)),
         conversation=bool(conversation_id))
+    if interrupted:
+        return 130
     if conversation_id:
         return _conversation_exit_code(stop)
     return _follow_exit_code(stop)
+
+
+def _follow_interruptibly(base: str, token: str, target_id: str, *,
+                          after_seq: int, as_json: bool,
+                          conversation: bool = False) -> tuple[bool, dict | None]:
+    """Run the shared follower, turning Ctrl-C into a clean shell outcome.
+
+    The task belongs to the Grid once it has been created.  Interrupting this read-side command
+    must therefore stop only the watcher: no cancel request is sent and no traceback should imply
+    that the task itself crashed.  Keep the interrupted bit separate from ``None`` because ``None``
+    means the stream failed or ended ambiguously and has different diagnostics and exit semantics.
+    """
+    try:
+        return False, _follow_stream(
+            base, token, target_id, after_seq=after_seq, as_json=as_json,
+            conversation=conversation)
+    except KeyboardInterrupt:
+        noun = "conversation" if conversation else "task"
+        print(f"\nStopped watching {noun} {target_id}; the Grid work was not cancelled.",
+              file=sys.stderr)
+        return True, None
 
 
 def _follow_exit_code(terminal: dict | None) -> int:
@@ -1213,6 +1239,14 @@ def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = 
         provider = event.get("provider_id")
         where = f" on {provider}" if provider else ""
         print(f"[{seq}] attempt {event.get('attempt')} started{where}")
+    elif kind == "task.claim_expired":
+        provider = event.get("previous_provider_id")
+        where = f" on {provider}" if provider else ""
+        print(
+            f"[{seq}] the claim for attempt {event.get('attempt')}{where} expired before the "
+            "agent started; that attempt remains available for another machine.",
+            file=sys.stderr,
+        )
     elif kind == "task.retry":
         # On stderr with the other disclosures, and worded so the asymmetry is unmissable: the relay
         # resets the TASK's branch to its input commit before the next attempt, and a user who is

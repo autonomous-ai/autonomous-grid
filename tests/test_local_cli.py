@@ -3260,6 +3260,18 @@ def test_pick_codex_build_follows_os_and_architecture(monkeypatch, system, machi
     assert build.url.endswith(asset)
 
 
+def test_pinned_codex_installer_can_run_the_distributed_goal_protocol():
+    from remote import task_codex
+
+    pinned = tuple(int(part) for part in codex_installer.CODEX_RELEASE.removeprefix(
+        "rust-v").split("."))
+
+    assert pinned >= task_codex.MIN_DISTRIBUTED_GOAL_VERSION
+    assert len(codex_installer.CODEX_BUILDS) == 6
+    assert len({build.sha256 for build in codex_installer.CODEX_BUILDS.values()}) == 6
+    assert all(len(build.sha256) == 64 for build in codex_installer.CODEX_BUILDS.values())
+
+
 def test_agent_install_is_a_no_op_when_hermes_is_already_there(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     hermes = agent_installer.hermes_bin()
@@ -3354,6 +3366,8 @@ def test_agent_install_forces_a_reinstall_when_asked(monkeypatch, tmp_path):
 
 
 def test_agent_install_is_a_no_op_when_codex_is_already_there(monkeypatch, tmp_path, capsys):
+    from remote import task_codex
+
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     codex = codex_installer.codex_bin()
     codex.parent.mkdir(parents=True)
@@ -3363,11 +3377,29 @@ def test_agent_install_is_a_no_op_when_codex_is_already_there(monkeypatch, tmp_p
         raise AssertionError("must not reinstall when codex is present")
 
     monkeypatch.setattr(codex_installer, "install_codex", fail)
+    monkeypatch.setattr(task_codex, "supports_distributed_goals", lambda _binary: True)
 
     rc = cli.cmd_agent_install(argparse.Namespace(name="codex", force=False))
 
     assert rc == 0
     assert "already installed" in capsys.readouterr().out
+
+
+def test_agent_install_upgrades_codex_that_cannot_resume_goals(monkeypatch, tmp_path, capsys):
+    from remote import task_codex
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    old = codex_installer.codex_bin()
+    old.parent.mkdir(parents=True)
+    old.write_text("#!/bin/sh\n", encoding="utf-8")
+    upgraded = tmp_path / "new-codex"
+    monkeypatch.setattr(task_codex, "supports_distributed_goals", lambda _binary: False)
+    monkeypatch.setattr(codex_installer, "install_codex", lambda: upgraded)
+
+    rc = cli.cmd_agent_install(argparse.Namespace(name="codex", force=False))
+
+    assert rc == 0
+    assert "upgrading" in capsys.readouterr().out
 
 
 def test_agent_install_rejects_an_unknown_agent():
@@ -3865,6 +3897,8 @@ def test_join_at_writes_record_and_spawns_detached(monkeypatch, tmp_path):
     assert records["mac"]["models"] == ["llama3"]
     assert records["mac"]["pid"] == 4321
     assert spawned["cmd"][-3:] == ["__engine", cfg["grid_id"], "mac"]
+    from shared import process_home
+    assert spawned["cmd"][-4] == process_home.own_tag_arg()
     assert spawned["kwargs"]["start_new_session"] is True
 
 
@@ -6324,6 +6358,98 @@ def test_sweep_orphans_spares_a_child_that_belongs_to_another_grid_home(monkeypa
     assert "222" in err and "/root/.grid-provider3" in err  # never silent: it names pid AND home
 
 
+def test_sweep_orphans_uses_argv_home_tag_on_every_platform(monkeypatch, capsys):
+    """A current-version child is isolated without reading its environment.
+
+    This is the physical macOS failure: two task workers serve the same network under one uid, and
+    ``home_of`` is unknowable for both. The canonical-home digest in argv is enough to reap ours and
+    spare the neighbour on macOS/Windows as well as Linux.
+    """
+    from shared import orphan_sweep, process_home
+
+    monkeypatch.setenv("GRID_HOME", "/root/.grid-provider")
+    mine = process_home.own_tag_arg()
+    other_tag = process_home.tag_for_home("/root/.grid-provider3")
+    other = process_home.HOME_TAG_ARG_PREFIX + other_tag
+    monkeypatch.setattr(
+        orphan_sweep,
+        "_process_table_output",
+        lambda: "\n".join([
+            f"  111 /bin/grid {mine} __remote-engine n1 codex",
+            f"  222 /bin/grid {other} __remote-engine n1 claude",
+            f"  333 /bin/grid {other} __remote-engine n2 claude",  # another grid, not ours to report
+            f"  444 /bin/grid {other} __remote-engine n1 claude extra",  # bystander shape
+        ]),
+    )
+    monkeypatch.setattr(process_home, "home_of", lambda pid: None)
+    killed = []
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", lambda pid: not killed.append(pid))
+
+    result = orphan_sweep.sweep_orphans("__remote-engine", "n1")
+
+    assert killed == [111]
+    assert result.reaped == (111,) and result.survivors == ()
+    err = capsys.readouterr().err
+    assert "222" in err and other_tag[:12] in err and "left it alone" in err
+    assert "333" not in err and "444" not in err
+
+
+def test_sweep_orphans_rejects_malformed_home_tag_instead_of_treating_it_as_legacy(monkeypatch):
+    """Corrupting one digest character cannot erase the installation safety boundary."""
+    from shared import orphan_sweep, process_home
+
+    malformed = process_home.HOME_TAG_ARG_PREFIX + ("0" * 63) + "z"
+    monkeypatch.setattr(
+        orphan_sweep,
+        "_process_table_output",
+        lambda: f"  111 /bin/grid {malformed} __remote-engine n1 codex",
+    )
+    monkeypatch.setattr(
+        orphan_sweep.run_records,
+        "terminate_pid",
+        lambda pid: pytest.fail(f"malformed tagged child must not be signalled: {pid}"),
+    )
+
+    assert orphan_sweep.sweep_orphans("__remote-engine", "n1").reaped == ()
+
+
+def test_grid_home_tag_is_canonical_fixed_width_and_contains_no_path(monkeypatch, tmp_path):
+    from shared import process_home
+
+    real = tmp_path / "real-home"
+    real.mkdir()
+    alias = tmp_path / "alias-home"
+    alias.symlink_to(real, target_is_directory=True)
+    monkeypatch.setenv("GRID_HOME", str(alias))
+
+    token = process_home.own_tag_arg()
+    digest = process_home.tag_from_arg(token)
+
+    assert digest == process_home.tag_for_home(str(real))
+    assert len(digest) == 64 and set(digest) <= set("0123456789abcdef")
+    assert str(real) not in token and str(alias) not in token
+
+
+def test_internal_engine_dispatch_accepts_only_its_own_grid_home_tag(monkeypatch):
+    from cli import _main
+    from remote import serve
+    from shared import process_home
+
+    monkeypatch.setenv("GRID_HOME", "/root/.grid-provider")
+    called = []
+    monkeypatch.setattr(serve, "run_remote_engine_from_record",
+                        lambda grid_id, engine_id: called.append((grid_id, engine_id)) or 17)
+
+    assert _main._maybe_internal([
+        process_home.own_tag_arg(), "__remote-engine", "n1", "remote"
+    ]) == 17
+    assert called == [("n1", "remote")]
+
+    wrong = process_home.HOME_TAG_ARG_PREFIX + process_home.tag_for_home("/root/someone-else")
+    with pytest.raises(SystemExit, match="GRID_HOME identity does not match"):
+        _main._maybe_internal([wrong, "__remote-engine", "n1", "remote"])
+
+
 def test_sweep_orphans_still_reaps_a_child_whose_home_it_cannot_read(monkeypatch):
     """The positive control that keeps the fix from becoming a bigger bug than E-03.
 
@@ -7294,6 +7420,8 @@ def test_remote_join_serve_writes_record_and_spawns_remote_engine(monkeypatch, t
     assert record["models"] == ["m"] and record["endpoint_url"] is None and record["grid_id"] == "n1"
     assert "access_token" not in record  # the token stays in credentials.toml, never the run record
     assert spawned["cmd"][-3:] == ["__remote-engine", "n1", engine_id]
+    from shared import process_home
+    assert spawned["cmd"][-4] == process_home.own_tag_arg()
 
 
 def test_remote_join_at_serves_external_engine(monkeypatch, tmp_path):
@@ -9363,6 +9491,62 @@ def test_remote_join_rejoin_aliased_engine_with_new_alias_is_rejected(monkeypatc
     assert "advertise-as" in str(exc.value).lower()
 
 
+def test_remote_join_respawn_preserves_a_single_engines_alias(monkeypatch, tmp_path):
+    """A restart is not an append. `--respawn` is the documented repair path for task-serving drift,
+    so an aliased inference node must be restartable without dropping its public model name."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    stopped = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: stopped.append(pid) or True)
+
+    assert cli.main([
+        "join", "--at", "http://h:11434/v1", "-m", "real", "--advertise-as", "public"
+    ]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["join", "--respawn"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["advertise_as"] == ["public"]
+    assert record["engines"] == [
+        {"endpoint_url": "http://h:11434/v1", "models": ["real"], "engine_label": None}
+    ]
+    assert stopped == [4242]
+
+
+def test_remote_join_same_aliased_builtin_can_respawn_to_enable_tasks(
+        monkeypatch, tmp_path):
+    """The physical C failure: a built-in model already advertised under an alias was unable to
+    apply the Codex task opt-in after its worker upgraded. The exact re-join must restart it, preserve
+    the alias, and hand task serving to the new child."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    stopped = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: stopped.append(pid) or True)
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+    root = tmp_path / "work"
+
+    assert cli.main([
+        "join", "--serve", "model.gguf", "--advertise-as", "public"
+    ]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main([
+        "join", "--serve", "model.gguf", "--advertise-as", "public", "--tasks",
+        "--tasks-root", str(root), "--respawn"
+    ]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["advertise_as"] == ["public"]
+    assert record["tasks"] is True
+    assert _the_child_would_claim_tasks(spawned)
+    assert stopped == [4242]
+
+
 def test_remote_join_aborts_when_prior_process_wont_die(monkeypatch, tmp_path):
     """On the respawn path (here a pre-handler prior that can't be SIGHUP-hot-reloaded), if the prior
     can't be confirmed stopped the join aborts BEFORE spawning — spawning anyway would put two processes
@@ -11381,6 +11565,8 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
         "router": ["router", "status"],
         "task": ["task", "get", "T1"],
         "project": ["project", "list"],
+        "goal": ["goal", "list"],
+        "relay": ["relay", "info"],
     }
     # A reason must be None or real text. An empty one would be masked by the `or` in ``local_stub``
     # *and* skipped by the `is None` filter below — the one state that is invisible in both
@@ -13296,9 +13482,10 @@ def test_a_task_capacity_block_changes_nothing_the_relay_ROUTES_ON(monkeypatch, 
     """
     from shared.system import gpu
 
-    from remote import task_capacity
+    from remote import task_capacity, tasks
 
     monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(tasks, "has_non_claude_claim_capacity", lambda: False)
     gate = task_capacity.TaskCapacity()
     monkeypatch.setattr(task_capacity, "shared", lambda: gate)
     state = _serve_state(monkeypatch, tmp_path)
@@ -13320,9 +13507,10 @@ def test_a_provider_out_of_task_headroom_says_when_it_comes_back(monkeypatch, tm
     nothing was moving, because nothing published this."""
     from shared.system import gpu
 
-    from remote import task_capacity
+    from remote import task_capacity, tasks
 
     monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(tasks, "has_non_claude_claim_capacity", lambda: False)
     gate = task_capacity.TaskCapacity()
     monkeypatch.setattr(task_capacity, "shared", lambda: gate)
     state = _serve_state(monkeypatch, tmp_path)
@@ -13347,9 +13535,10 @@ def test_a_provider_that_came_back_stops_publishing_the_pause(monkeypatch, tmp_p
     back an hour ago still reads as withdrawn to every member of every project."""
     from shared.system import gpu
 
-    from remote import task_capacity
+    from remote import task_capacity, tasks
 
     monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(tasks, "has_non_claude_claim_capacity", lambda: False)
     gate = task_capacity.TaskCapacity()
     monkeypatch.setattr(task_capacity, "shared", lambda: gate)
     state = _serve_state(monkeypatch, tmp_path)
@@ -13359,6 +13548,25 @@ def test_a_provider_that_came_back_stops_publishing_the_pause(monkeypatch, tmp_p
 
     gate.observe({"status": "allowed", "rateLimitType": "five_hour"})
 
+    assert task_capacity.PAUSED_LOAD_KEY not in state.load()
+
+
+def test_a_claude_pause_is_not_reported_as_full_withdrawal_when_codex_remains(
+        monkeypatch, tmp_path):
+    """Project status must not say a mixed provider withdrew while it still claims Codex work."""
+    from shared.system import gpu
+
+    from remote import task_capacity, tasks
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(tasks, "has_non_claude_claim_capacity", lambda: True)
+    gate = task_capacity.TaskCapacity()
+    monkeypatch.setattr(task_capacity, "shared", lambda: gate)
+    state = _serve_state(monkeypatch, tmp_path)
+    gate.observe({"status": "rejected", "rateLimitType": "five_hour",
+                  "resetsAt": int(time.time() + 3600)})
+
+    assert gate.pause_seconds() > 0.0
     assert task_capacity.PAUSED_LOAD_KEY not in state.load()
 
 
@@ -13779,6 +13987,23 @@ def test_report_task_result_carries_the_session_id_when_there_is_one(monkeypatch
     assert seen["body"]["session_id"] == "012c9e09-abcd"
 
 
+def test_report_task_result_carries_the_published_transcript_commit(monkeypatch):
+    """The relay can prove which resumable agent history this worker actually published."""
+    from remote import relay
+
+    seen = {}
+    _mock_serve_engine(monkeypatch, lambda request: (
+        seen.update(body=json.loads(request.content)),
+        httpx.Response(200, json={}))[-1])
+
+    commit = "a" * 40
+    relay.report_task_result(
+        "https://relay.example", "AT", "T1", state="completed", output="hi", error=None,
+        transcript_result_commit=commit)
+
+    assert seen["body"]["transcript_result_commit"] == commit
+
+
 def test_report_task_result_omits_the_session_id_rather_than_sending_null(monkeypatch):
     """Absent must mean "do not change it", not "clear it".
 
@@ -13813,6 +14038,80 @@ def test_report_task_result_percent_encodes_the_task_id(monkeypatch):
 
     # `raw_path` is what goes on the wire; `URL.path` would show it already decoded and hide this.
     assert seen["raw"] == b"/relay/v1/tasks/..%2F..%2Fnodes%2Fevil/result"
+
+
+def test_checkpoint_task_retry_posts_both_distributed_pins(monkeypatch):
+    from remote import relay
+
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"state": "queued", "attempt": 1})
+
+    _mock_serve_engine(monkeypatch, handler)
+    answer = relay.checkpoint_task_retry(
+        "https://relay.example", "AT", "T1", reason="app-server disconnected",
+        result_commit="a" * 40, transcript_result_commit="b" * 40,
+        session_id="session-1")
+
+    assert seen["path"] == "/relay/v1/tasks/T1/retry"
+    assert seen["body"] == {
+        "reason": "app-server disconnected", "result_commit": "a" * 40,
+        "transcript_result_commit": "b" * 40, "session_id": "session-1",
+    }
+    assert answer["state"] == "queued"
+
+
+def test_goal_mutation_requests_carry_the_exact_claim_generation(monkeypatch):
+    """One opaque generation fences every non-Git provider write plane."""
+    from remote import relay
+
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.path, request.headers.get("X-Grid-Task-Claim")))
+        return httpx.Response(200, json={})
+
+    _mock_serve_engine(monkeypatch, handler)
+    claim = "claim-generation-7"
+    relay.report_task_result(
+        "https://relay.example", "AT", "T1", state="completed", output="ok", error=None,
+        claim_id=claim)
+    relay.checkpoint_task_retry(
+        "https://relay.example", "AT", "T1", reason="handoff", claim_id=claim)
+    relay.renew_task_lease(
+        "https://relay.example", "AT", "T1", claim_id=claim)
+    relay.publish_task_events(
+        "https://relay.example", "AT", "T1", [{"type": "task.output"}], claim_id=claim)
+
+    assert seen == [
+        ("/relay/v1/tasks/T1/result", claim),
+        ("/relay/v1/tasks/T1/retry", claim),
+        ("/relay/v1/tasks/T1/lease", claim),
+        ("/relay/v1/tasks/T1/events", claim),
+    ]
+
+
+def test_goal_event_publisher_forwards_the_claim_generation(monkeypatch):
+    from remote import task_events
+
+    seen = []
+
+    def publish(_url, _token, _task_id, events, **kwargs):
+        seen.append((events, kwargs))
+        return {}
+
+    monkeypatch.setattr(task_events.relay, "publish_task_events", publish)
+    publisher = task_events.TaskEventPublisher(
+        _publisher_state(), "T1", claim_id="claim-generation-7")
+    publisher.publish("task.output", text="working")
+    publisher.flush()
+
+    assert seen == [([{"type": "task.output", "text": "working"}], {
+        "claim_id": "claim-generation-7",
+    })]
 
 
 def test_report_task_result_raises_on_failure(monkeypatch):
@@ -18305,6 +18604,29 @@ def test_serve_heartbeat_once_ok_reports_inflight_load(monkeypatch, tmp_path):
     assert seen["load"] == {"active_tasks": 0, "platform": "linux"}
 
 
+def test_task_worker_heartbeat_carries_goal_runtime_provenance(monkeypatch, tmp_path):
+    from remote import relay, serve
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(serve, "_goal_worker_meta", lambda: {"goal_runtime": {
+        "schema_version": 1,
+        "grid": {"version": "0.3.28", "revision": "4e5dcc7a3fa929b7", "dirty": False},
+        "agents": {"codex": {"version": "0.150.1"}},
+    }})
+    state = _serve_state(monkeypatch, tmp_path)
+    seen = {}
+    monkeypatch.setattr(
+        relay, "heartbeat",
+        lambda url, tok, *, load, meta=None: seen.update(meta=meta) or "ok",
+    )
+
+    assert serve.heartbeat_once(state) == "ok"
+    assert seen["meta"]["goal_runtime"]["grid"]["revision"] == "4e5dcc7a3fa929b7"
+    assert seen["meta"]["goal_runtime"]["agents"] == {
+        "codex": {"version": "0.150.1"}}
+
+
 def test_serve_heartbeat_once_re_registers_when_pruned(monkeypatch, tmp_path):
     from remote import relay, serve
 
@@ -21197,6 +21519,28 @@ def test_remote_models_json_carries_per_engine_responses_flag(monkeypatch, tmp_p
     assert {"model": "qwen-3", "engine": "MLX", "node": "mac-studio", "responses": False} in payload
 
 
+def test_remote_models_restores_case_before_matching_responses_subset(
+        monkeypatch, tmp_path, capsys):
+    """The relay normalizes node arrays but its top-level model list retains request-safe case."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    overview = {
+        "models": [{"id": "Qwen3.6-35B-A3B"}],
+        "nodes": [{
+            "name": "relay-host", "engine": "external",
+            "models": ["qwen3.6-35b-a3b"],
+            "responses_models": ["qwen3.6-35b-a3b"], "online": True,
+        }],
+    }
+    _mock_overview(monkeypatch, overview)
+
+    assert cli.main(["models", "--json"]) == 0
+
+    assert json.loads(capsys.readouterr().out) == [{
+        "model": "Qwen3.6-35B-A3B", "engine": "external",
+        "node": "relay-host", "responses": True,
+    }]
+
+
 def test_remote_models_verbose_degrades_when_responses_field_absent(monkeypatch, tmp_path, capsys):
     # An older master's overview omits responses_models entirely → nothing annotated, no crash.
     _seed_running_remote_grid(monkeypatch, tmp_path)
@@ -22668,6 +23012,29 @@ def test_task_follow_discloses_a_retry_and_keeps_one_unbroken_cursor(monkeypatch
     assert "attempt 2 started" in captured.out
 
 
+def test_task_follow_distinguishes_an_expired_claim_from_a_failed_agent_attempt(
+        monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.claim_expired", "reason": "lease_expired_before_start",
+                   "attempt": 1, "max_attempts": 3, "attempt_reused": True,
+                   "previous_provider_id": "node-2", "previous_agent_kind": "codex"}),
+        _block(1, {"type": "task.attempt_started", "attempt": 1,
+                   "provider_id": "node-9"}),
+        _block(2, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    assert cli.main(["task", "follow", "T1"]) == 0
+    captured = capsys.readouterr()
+    assert "expired before the agent started" in captured.err
+    assert "attempt remains available" in captured.err
+    assert "attempt 1 started on node-9" in captured.out
+
+
 def test_task_follow_no_longer_claims_a_lost_attempts_git_changes_are_undone(
         monkeypatch, tmp_path, capsys):
     """ADR 0033 D-c makes the old sentence FALSE, and it was printed verbatim.
@@ -23293,6 +23660,46 @@ def test_task_follow_json_still_carries_the_whole_tree(monkeypatch, tmp_path, ca
     first = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][0])
 
     assert first["event"]["paths"] == ["a.py", "b.py"]
+
+
+def test_task_follow_ctrl_c_stops_only_the_watcher_without_a_traceback(
+        monkeypatch, tmp_path, capsys):
+    """A physical Goal operator uses Ctrl-C to detach from a long stream, not to cancel its task.
+
+    ``KeyboardInterrupt`` is a ``BaseException``, so the follower's relay-error guards do not catch
+    it.  Letting it escape prints a traceback and makes a healthy distributed task look crashed.
+    Code 130 preserves the conventional shell signal while the message states the key invariant.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    from cli import remote_task
+
+    monkeypatch.setattr(
+        remote_task, "_follow_stream",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    assert cli.main(["task", "follow", "T1"]) == 130
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Stopped watching task T1" in captured.err
+    assert "not cancelled" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_task_create_follow_ctrl_c_does_not_claim_the_created_task_failed(
+        monkeypatch, capsys):
+    """The create-and-follow shortcut uses the identical interrupt boundary."""
+    from cli import remote_task
+
+    monkeypatch.setattr(
+        remote_task, "_follow_stream",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    assert remote_task._follow_created(
+        "https://relay.example", "token", "T-created", as_json=True) == 130
+    captured = capsys.readouterr()
+    assert "not cancelled" in captured.err
+    assert "still running" not in captured.err
 
 
 def test_task_follow_survives_a_tree_event_with_nothing_in_it(monkeypatch, tmp_path, capsys):
@@ -27153,6 +27560,20 @@ def test_publisher_says_whether_an_event_was_actually_accepted(monkeypatch):
     assert pub.publish("task.output", text="b") is False
 
 
+def test_publisher_reports_a_failed_forced_flush(monkeypatch):
+    """Tool actions use this as a durability fence rather than disposable progress."""
+    from remote import relay, task_events
+
+    def unavailable(_batch):
+        raise relay.RelayError("connection refused")
+
+    _capture_publishes(monkeypatch, unavailable)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    assert pub.publish("goal.act.request", tool="reply", _flush=True) is False
+    assert pub.publish("task.output", text="later") is True
+
+
 def test_publisher_can_decline_to_wait_for_a_channel_that_is_busy(monkeypatch):
     """The lease heartbeat publishes through this object, and waiting here costs the LEASE.
 
@@ -27514,7 +27935,12 @@ def _task_loop_state(claims):
         token=lambda: "AT",
         refresh=lambda stale_token=None: False,
     )
-    queue = list(claims)
+    # Every native Goal returned by the matching relay carries an opaque generation. Individual
+    # malformed-payload tests bypass this helper so they can exercise the fail-closed boundary.
+    queue = [({**item, "claim_id": "claim-generation-test"}
+              if isinstance(item, dict) and isinstance(item.get("goal"), dict)
+              and "claim_id" not in item else item)
+             for item in claims]
 
     def fake_claim(_state):
         if queue:
@@ -27993,6 +28419,9 @@ def test_a_spent_subscription_stops_the_provider_claiming_until_the_window_reset
     state.tasks_stop = _RecordingTaskStop()
     log = []
     reported = []
+    # This is specifically a Claude-only worker. A Codex-capable worker has independent task
+    # capacity and is covered by the next test.
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude")
 
     def claim(inner_state):
         log.append("claim")
@@ -28009,6 +28438,105 @@ def test_a_spent_subscription_stops_the_provider_claiming_until_the_window_reset
     assert log[:3] == ["gate:1800.0", "gate:0.0", "claim"]
     assert 1800.0 in state.tasks_stop.waits
     assert reported == ["T1"]              # and it resumed on its own once the window reset
+
+
+def test_spent_claude_capacity_does_not_withdraw_an_available_codex_worker(monkeypatch):
+    """A Claude subscription verdict cannot park Codex Goals that use Grid model inference."""
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=_RecordingTaskStop(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    profiles = (
+        {"kind": "claude", "capabilities": ["native_goal"]},
+        {"kind": "codex", "capabilities": ["native_goal"]},
+    )
+    log = []
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude,codex")
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: log.append("profiles") or profiles)
+
+    def claim(_state, *, excluded_agent_kinds=()):
+        log.append(("claim", excluded_agent_kinds))
+        state.tasks_stop.set()
+        return None
+
+    monkeypatch.setattr(tasks, "claim_once", claim)
+
+    tasks.task_loop(state, capacity=_scripted_gate([1800.0], log))
+
+    assert log[:3] == ["gate:1800.0", "profiles", ("claim", ("claude",))]
+    assert 1800.0 not in state.tasks_stop.waits
+    assert not state.stop.is_set()
+
+
+def test_codex_installed_during_a_claude_pause_rejoins_without_waiting_for_the_window(
+        monkeypatch):
+    """A missing mixed-policy Codex binary gets a short local recheck, not Claude's long reset."""
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=_RecordingTaskStop(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    ready = ({"kind": "codex", "capabilities": ["native_goal"]},)
+    profiles = iter([
+        (),     # Codex is configured but not installed on the first capacity check.
+        ready,  # It appears while Claude's subscription is still paused.
+        ready,  # A 204 recheck confirms the harness remains runnable.
+    ])
+    log = []
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude,codex")
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: next(profiles))
+
+    def claim(_state, *, excluded_agent_kinds=()):
+        log.append(("claim", excluded_agent_kinds))
+        state.tasks_stop.set()
+        return None
+
+    monkeypatch.setattr(tasks, "claim_once", claim)
+
+    tasks.task_loop(state, capacity=_scripted_gate([1800.0, 1795.0], log))
+
+    assert state.tasks_stop.waits == [tasks._CLAIM_BACKOFF_SECONDS]
+    assert log == ["gate:1800.0", "gate:1795.0", ("claim", ("claude",))]
+    assert not state.stop.is_set()
+
+
+def test_capacity_exclusion_is_reapplied_after_claim_token_refresh(monkeypatch):
+    """Credential refresh must not accidentally advertise the spent Claude harness again."""
+    from remote import relay, tasks
+
+    profiles = (
+        {"kind": "claude", "capabilities": ["native_goal"]},
+        {"kind": "codex", "capabilities": ["native_goal"]},
+    )
+    profile_reads = []
+    calls = []
+    token = {"value": "old"}
+    state = SimpleNamespace(
+        signaling_url="https://relay.example", token=lambda: token["value"],
+        refresh=lambda stale_token=None: (
+            token.update(value="new") or stale_token == "old"),
+    )
+    monkeypatch.setattr(
+        tasks, "_agent_profiles", lambda: profile_reads.append(True) or profiles)
+
+    def claim(_url, bearer, **fields):
+        calls.append((bearer, fields))
+        if bearer == "old":
+            raise relay.RelayUnauthorized()
+        return None
+
+    monkeypatch.setattr(tasks.relay, "claim_task", claim)
+
+    assert tasks.claim_once(state, excluded_agent_kinds=("claude",)) is None
+
+    assert len(profile_reads) == 2
+    assert [call[0] for call in calls] == ["old", "new"]
+    assert [call[1]["agent_kinds"] for call in calls] == [("codex",), ("codex",)]
 
 
 def test_a_capacity_pause_never_stops_inference(monkeypatch):
@@ -28119,6 +28647,523 @@ def test_task_loop_reports_a_failed_run_without_raising(monkeypatch):
     assert reported == [
         {"state": "failed", "output": None, "error": "exit 127", "session_id": None,
          "result_commit": None, "session_reset_reason": None}]
+
+
+def test_task_attempt_start_announces_the_claimed_native_harness(monkeypatch):
+    """Provider-first rollout retains harness attribution even before the relay stamps it."""
+    from remote import task_events, tasks
+
+    announced = []
+
+    class Publisher:
+        def __init__(self, state, task_id):
+            assert state == "serve-state" and task_id == "T1"
+
+        def publish(self, event, **fields):
+            announced.append((event, fields))
+
+    monkeypatch.setattr(task_events, "TaskEventPublisher", Publisher)
+    publisher = tasks._publisher_for("serve-state", "T1", {
+        "attempt": 2, "provider_id": "node-B", "agent_kind": "claude",
+    })
+
+    assert isinstance(publisher, Publisher)
+    assert announced == [("task.attempt_started", {
+        "_flush": False,
+        "attempt": 2, "provider_id": "node-B", "agent_kind": "claude",
+    })]
+
+    announced.clear()
+    goal_publisher = tasks._publisher_for("serve-state", "T1", {
+        "attempt": 3, "provider_id": "node-C", "agent_kind": "codex", "goal": {},
+    })
+    assert goal_publisher._goal_attempt_recorded is False  # fake publisher returns None
+    assert announced == 2 * [("task.attempt_started", {
+        "_flush": True,
+        "attempt": 3, "provider_id": "node-C", "agent_kind": "codex",
+    })]
+
+
+def test_unrecorded_goal_attempt_never_starts_native_work(monkeypatch, capsys):
+    """An evidence outage cannot create invisible file changes or business side effects."""
+    from remote import tasks
+
+    closed = []
+
+    class Publisher:
+        _goal_attempt_recorded = False
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *_args: Publisher())
+    monkeypatch.setattr(
+        tasks, "run_task",
+        lambda *_args, **_kwargs: pytest.fail("an unrecorded Goal attempt started the harness"))
+
+    tasks._supervise_one_task("serve-state", {
+        "task_id": "T1", "goal": {"objective": "act safely"},
+    }, "T1", None)
+
+    assert closed == [True]
+    assert "not starting the native harness" in capsys.readouterr().err
+
+
+def test_post_spawn_goal_harness_failure_is_left_for_another_machine(monkeypatch, capsys):
+    """A local native-process crash is not allowed to terminally fail a durable Grid Goal."""
+    tasks, state, fake_claim = _task_loop_state([{
+        "task_id": "T1", "project_id": "P1", "member_key": "M1",
+        "conversation_id": "G1", "agent_kind": "codex", "prompt": "continue",
+        "goal": {"objective": "build", "done_when": "tests pass", "model": "grid-model"},
+    }])
+    events = []
+    reports = []
+    handoffs = []
+    attached = []
+    closed = []
+
+    class Publisher:
+        def publish(self, event, **fields):
+            events.append((event, fields))
+            return True
+
+        def close(self):
+            closed.append("publisher")
+
+        def flush(self):
+            return True
+
+    class Renewer:
+        lost = False
+        cancelled = False
+
+        def start(self):
+            pass
+
+        def attach(self, proc):
+            attached.append(proc)
+
+        def close(self):
+            closed.append("renewer")
+
+    def run(_job, *_args, on_spawn=None, **_kwargs):
+        on_spawn(SimpleNamespace(pid=1234))
+        return tasks.TaskOutcome(
+            "failed", None, "app-server protocol disconnected", retryable=True)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: ({
+        "kind": "codex", "capabilities": ["native_goal"],
+    },))
+    monkeypatch.setattr(tasks, "run_task", run)
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *_args: Publisher())
+    monkeypatch.setattr(tasks, "_lease_renewer", lambda *_args, **_kwargs: Renewer())
+    monkeypatch.setattr(tasks, "_tree_beat", lambda *_args: None)
+    monkeypatch.setattr(tasks.relay, "checkpoint_task_retry", lambda *_args, **kwargs: (
+        handoffs.append(kwargs), {"state": "queued"})[-1])
+    monkeypatch.setattr(tasks, "report_once", lambda *_args, **kwargs: reports.append(kwargs))
+
+    tasks.task_loop(state)
+
+    assert attached and reports == []
+    assert handoffs == [{
+        "claim_id": "claim-generation-test",
+        "reason": "app-server protocol disconnected", "result_commit": None,
+        "transcript_result_commit": None, "session_id": None,
+        "session_reset_reason": None,
+    }]
+    assert events == [("task.retrying", {"reason": "app-server protocol disconnected"})]
+    assert closed == ["renewer", "publisher"]
+    assert "queued immediately" in capsys.readouterr().err
+
+
+def test_old_relay_without_checkpoint_route_falls_back_to_lease_recovery(
+        monkeypatch, capsys):
+    """Provider-first rollout must not terminally fail a Goal when `/retry` is still 404."""
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([{
+        "task_id": "T1", "project_id": "P1", "member_key": "M1",
+        "conversation_id": "G1", "agent_kind": "codex", "prompt": "continue",
+        "goal": {"objective": "build", "done_when": "tests pass", "model": "grid-model"},
+    }])
+    reports = []
+    flushes = []
+
+    class Publisher:
+        def publish(self, *_args, **_kwargs):
+            return True
+
+        def flush(self):
+            flushes.append("before-handoff")
+
+        def close(self):
+            flushes.append("close")
+
+    class Renewer:
+        lost = False
+        cancelled = False
+
+        def start(self):
+            pass
+
+        def attach(self, _proc):
+            pass
+
+        def close(self):
+            pass
+
+    def run(_job, *_args, on_spawn=None, **_kwargs):
+        on_spawn(SimpleNamespace(pid=1234))
+        return tasks.TaskOutcome(
+            "failed", None, "native process disconnected", retryable=True,
+            result_commit="a" * 40, transcript_result_commit="b" * 40)
+
+    def old_relay(*_args, **_kwargs):
+        raise relay.RelayError("checkpoint_task_retry failed (404)", status=404)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: ({
+        "kind": "codex", "capabilities": ["native_goal"],
+    },))
+    monkeypatch.setattr(tasks, "run_task", run)
+    monkeypatch.setattr(
+        tasks, "_push_result", lambda _job, outcome, *_args: (outcome, True))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *_args: Publisher())
+    monkeypatch.setattr(tasks, "_lease_renewer", lambda *_args, **_kwargs: Renewer())
+    monkeypatch.setattr(tasks, "_tree_beat", lambda *_args: None)
+    monkeypatch.setattr(tasks.relay, "checkpoint_task_retry", old_relay)
+    monkeypatch.setattr(tasks, "report_once", lambda *_args, **kwargs: reports.append(kwargs))
+
+    tasks.task_loop(state)
+
+    assert reports == []
+    assert flushes == ["before-handoff", "close"]
+    stderr = capsys.readouterr().err
+    assert "falling back to lease-expiry recovery" in stderr
+    assert "left `running` so its lease can lapse" in stderr
+
+
+def test_goal_checkpoint_handoff_refreshes_an_expired_token_exactly_once(monkeypatch):
+    """A long native Goal slice must not lose its accepted partial state at token rollover."""
+    from remote import relay, tasks
+
+    current = {"token": "expired"}
+    refreshes = []
+    calls = []
+    state = SimpleNamespace(
+        signaling_url="https://relay.example",
+        token=lambda: current["token"],
+        refresh=lambda stale_token=None: (
+            refreshes.append(stale_token), current.update(token="fresh"), True)[-1],
+    )
+
+    def handoff(_url, token, task_id, **checkpoint):
+        calls.append((token, task_id, checkpoint))
+        if token == "expired":
+            raise relay.RelayUnauthorized()
+        return {"state": "queued", "checkpoint_commit": "a" * 40}
+
+    monkeypatch.setattr(tasks.relay, "checkpoint_task_retry", handoff)
+    answer = tasks.checkpoint_retry_once(
+        state, "T1", reason="native process exited", result_commit="a" * 40)
+
+    assert answer["state"] == "queued"
+    assert refreshes == ["expired"]
+    assert [call[0] for call in calls] == ["expired", "fresh"]
+    assert calls[1][2] == {"reason": "native process exited", "result_commit": "a" * 40}
+
+
+def test_invalid_harness_policy_retires_only_task_serving_without_claiming(monkeypatch, capsys):
+    """An invalid fail-closed policy must not hot-loop on relay 422 responses."""
+    from remote import tasks
+
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "unsupported")
+    claims = []
+    monkeypatch.setattr(tasks.relay, "claim_task", lambda *_a, **_k: claims.append(True))
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=threading.Event(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+
+    assert tasks.claim_once(state) is None
+    tasks.task_loop(state)
+
+    assert claims == []
+    assert state.tasks_stop.is_set() and not state.stop.is_set()
+    assert "enables no supported harness" in capsys.readouterr().err
+
+
+def test_generic_capabilities_cannot_spoof_a_business_tool_origin(monkeypatch, capsys):
+    """Only the parsed node allowlist may advertise the opaque origin scheduling capability."""
+    import hashlib
+    from remote import tasks
+
+    allowed = "https://support.example"
+    real_capability = "tool_origin." + hashlib.sha256(allowed.encode()).hexdigest()[:32]
+    fake_capability = "tool_origin." + "f" * 32
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setenv("GRID_GOAL_TOOL_ORIGINS", allowed)
+    monkeypatch.setenv(
+        "GRID_CODEX_GOAL_CAPABILITIES", f"image_generation,{fake_capability}")
+    monkeypatch.setattr(tasks, "_agent_kinds", lambda: ("codex",))
+    monkeypatch.setattr(tasks.task_codex, "distributed_goal_version", lambda: "codex-test")
+
+    profile = tasks._agent_profiles()[0]
+
+    assert profile["kind"] == "codex"
+    assert "image_generation" in profile["capabilities"]
+    assert real_capability in profile["capabilities"]
+    assert fake_capability not in profile["capabilities"]
+    warning = capsys.readouterr().err
+    assert fake_capability in warning
+    assert "GRID_GOAL_TOOL_ORIGINS" in warning
+
+
+def test_runtime_harness_quarantine_backs_off_and_recovers_without_hot_spinning(
+        monkeypatch, capsys):
+    """A repaired Codex binary should rejoin without restarting the inference provider."""
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=threading.Event(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    ready = ({"kind": "codex", "capabilities": ["native_goal"]},)
+    profiles = iter([
+        ready,  # first claim
+        (),  # runtime quarantine discovered after the long poll
+        ready,  # executable was replaced during backoff; second claim advertises it
+        ready,  # post-204 recheck
+    ])
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: next(profiles))
+    claims = []
+
+    def claim(*_args, **_kwargs):
+        claims.append(True)
+        if len(claims) == 2:
+            state.stop.set()
+        return None
+
+    monkeypatch.setattr(tasks.relay, "claim_task", claim)
+    monkeypatch.setattr(tasks, "_CLAIM_BACKOFF_SECONDS", 0.001)
+
+    tasks.task_loop(state)
+
+    assert claims == [True, True]
+    assert state.stop.is_set() and not state.tasks_stop.is_set()
+    assert "task claims suspended" in capsys.readouterr().err
+
+
+def test_configured_harness_missing_at_start_rejoins_without_worker_restart(
+        monkeypatch, capsys):
+    """Installing Codex after provider startup should activate task serving automatically."""
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=threading.Event(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    ready = ({"kind": "codex", "capabilities": ["native_goal"]},)
+    profiles = iter([
+        (),  # first claim stays local because no harness is executable yet
+        (),  # post-claim recheck enters the paced suspension path
+        ready,  # Codex appeared; the next claim advertises it
+        ready,  # post-204 recheck confirms that serving remains enabled
+    ])
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "codex")
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: next(profiles))
+    claims = []
+
+    def claim(*_args, **_kwargs):
+        claims.append(True)
+        state.stop.set()
+        return None
+
+    monkeypatch.setattr(tasks.relay, "claim_task", claim)
+    monkeypatch.setattr(tasks, "_CLAIM_BACKOFF_SECONDS", 0.001)
+
+    tasks.task_loop(state)
+
+    assert claims == [True]
+    assert state.stop.is_set() and not state.tasks_stop.is_set()
+    assert "task claims suspended" in capsys.readouterr().err
+
+
+def test_task_loop_declines_stale_goal_claim_before_attempt_start(monkeypatch, capsys):
+    """A second parked worker must not spend retry budget on a just-quarantined executable."""
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=threading.Event(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    job = {
+        "task_id": "T1", "attempt": 2,
+        "claim_id": "claim-generation-2",
+        "agent_kind": "codex", "goal": {
+            "objective": "continue", "required_capabilities": ["image_generation"],
+        },
+    }
+    claims = iter([job])
+    monkeypatch.setattr(tasks, "claim_once", lambda _state: next(claims))
+    profiles = iter([
+        ({"kind": "codex", "capabilities": ["native_goal"]},),  # stale at delivery
+    ])
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: next(profiles))
+    declined = []
+
+    def decline(_state, task_id, **identity):
+        declined.append((task_id, identity))
+        state.tasks_stop.set()
+        return {"state": "queued", "attempt": 1}
+
+    monkeypatch.setattr(tasks, "decline_claim_once", decline)
+    monkeypatch.setattr(
+        tasks, "_run_and_report",
+        lambda *_args: pytest.fail("stale native Goal harness was allowed to start"))
+
+    tasks.task_loop(state)
+
+    assert declined == [("T1", {
+        "attempt": 2, "claim_id": "claim-generation-2",
+    })]
+    assert "without spending retry budget" in capsys.readouterr().err
+
+
+def test_goal_claim_revalidation_is_backward_compatible_with_missing_requirements(monkeypatch):
+    """An older relay omits the additive list; native_goal remains the minimum safe contract."""
+    from remote import tasks
+
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: ({
+        "kind": "claude", "capabilities": ["native_goal"],
+    },))
+    assert tasks._claim_supported_now({
+        "agent_kind": "claude", "goal": {"objective": "continue"},
+    }) is True
+    assert tasks._claim_supported_now({
+        "agent_kind": "codex", "goal": {"objective": "continue"},
+    }) is False
+
+
+@pytest.mark.parametrize("claim_id", [None, "", 7, "x" * 201, "é" * 101])
+def test_unfenced_goal_claim_never_starts_checkout_or_native_agent(
+        monkeypatch, capsys, claim_id):
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(), tasks_stop=threading.Event(),
+        signaling_url="https://relay.example", token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    job = {
+        "task_id": "T1", "attempt": 1, "claim_id": claim_id,
+        "agent_kind": "codex", "goal": {"objective": "continue"},
+    }
+    claims = iter([job, None])
+
+    def next_claim(_state):
+        value = next(claims)
+        if value is None:
+            state.tasks_stop.set()
+        return value
+
+    monkeypatch.setattr(tasks, "claim_once", next_claim)
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: ({
+        "kind": "codex", "capabilities": ["native_goal"],
+    },))
+    monkeypatch.setattr(
+        tasks, "_run_and_report",
+        lambda *_args: pytest.fail("an unfenced Goal reached checkout/native execution"))
+    monkeypatch.setattr(
+        tasks, "_decline_stale_goal_claim",
+        lambda *_args: pytest.fail("a malformed generation was sent back as a valid decline"))
+
+    tasks.task_loop(state)
+
+    assert "missing or malformed claim generation" in capsys.readouterr().err
+
+
+def test_goal_claim_decline_refreshes_an_expired_token_exactly_once(monkeypatch):
+    from remote import relay, tasks
+
+    current = {"token": "expired"}
+    refreshes = []
+    calls = []
+    state = SimpleNamespace(
+        signaling_url="https://relay.example", token=lambda: current["token"],
+        refresh=lambda stale_token=None: (
+            refreshes.append(stale_token), current.update(token="fresh"), True)[-1],
+    )
+
+    def decline(_url, token, task_id, **claim):
+        calls.append((token, task_id, claim))
+        if token == "expired":
+            raise relay.RelayUnauthorized()
+        return {"state": "queued", "attempt": 0}
+
+    monkeypatch.setattr(tasks.relay, "decline_task_claim", decline)
+    answer = tasks.decline_claim_once(
+        state, "T1", attempt=1, claim_id="claim-generation-1")
+
+    assert answer == {"state": "queued", "attempt": 0}
+    assert refreshes == ["expired"]
+    assert [call[0] for call in calls] == ["expired", "fresh"]
+
+
+def test_native_goal_impossible_checkpoint_is_reported_not_retried(monkeypatch):
+    """A harness crash and the native Goal's own terminal verdict are intentionally different."""
+    tasks, state, fake_claim = _task_loop_state([{
+        "task_id": "T1", "project_id": "P1", "member_key": "M1",
+        "conversation_id": "G1", "agent_kind": "codex", "prompt": "continue",
+        "goal": {"objective": "build", "done_when": "tests pass", "model": "grid-model"},
+    }])
+    reports = []
+
+    class Publisher:
+        def publish(self, *_args, **_kwargs):
+            return True
+
+        def close(self):
+            pass
+
+    class Renewer:
+        lost = False
+        cancelled = False
+
+        def start(self):
+            pass
+
+        def attach(self, _proc):
+            pass
+
+        def close(self):
+            pass
+
+    def run(_job, *_args, on_spawn=None, **_kwargs):
+        on_spawn(SimpleNamespace(pid=1234))
+        return tasks.TaskOutcome("completed", "impossible", None, goal_status="failed",
+                                 goal_turns_completed=1, goal_tokens_used=10,
+                                 goal_time_used_seconds=1)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "_agent_profiles", lambda: ({
+        "kind": "codex", "capabilities": ["native_goal"],
+    },))
+    monkeypatch.setattr(tasks, "run_task", run)
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *_args: Publisher())
+    monkeypatch.setattr(tasks, "_lease_renewer", lambda *_args, **_kwargs: Renewer())
+    monkeypatch.setattr(tasks, "_tree_beat", lambda *_args: None)
+    monkeypatch.setattr(tasks, "report_once", lambda *_args, **kwargs: reports.append(kwargs))
+
+    tasks.task_loop(state)
+
+    assert len(reports) == 1
+    assert reports[0]["state"] == "completed" and reports[0]["goal_status"] == "failed"
 
 
 def test_task_loop_survives_a_failure_to_report(monkeypatch):
@@ -36126,6 +37171,10 @@ _BOTH_SPELLINGS: list[tuple[list[str], list[str]]] = [
     (["task", "create", "P1", "--prompt", "hi"],
      ["task", "create", "--project", "P1", "--prompt", "hi"]),
     (["task", "list", "P1"], ["task", "list", "--project", "P1"]),
+    (["goal", "run", "P1", "--objective", "build", "--done-when", "checks pass",
+      "--model", "grid-model"],
+     ["goal", "run", "--project", "P1", "--objective", "build", "--done-when",
+      "checks pass", "--model", "grid-model"]),
 ]
 
 
@@ -38527,6 +39576,10 @@ def test_the_join_runs_the_REAL_check_not_a_stand_in(monkeypatch, tmp_path, caps
     _seed_running_remote_grid(monkeypatch, tmp_path)
     spawned = _mock_remote_spawn(monkeypatch)
     monkeypatch.setenv("GRID_TASKS", "1")
+    # This test proves the real Claude preflight chain. With both harnesses enabled, a valid Codex
+    # installation is intentionally allowed to keep task serving on after Claude's configuration is
+    # refused; whether its protocol probe is already cached must not change this test's meaning.
+    monkeypatch.setenv("GRID_TASK_AGENT_KINDS", "claude")
     monkeypatch.delenv(task_sandbox.SANDBOX_ENV, raising=False)  # sandbox on: the mode is refused
     monkeypatch.setenv("GRID_TASK_PERMISSION_MODE", "bypassPermissions")
 
@@ -38564,7 +39617,66 @@ def test_join_help_says_this_provider_can_serve_tasks(capsys):
     text = joins[0][1].format_help()
 
     assert "--tasks" in text, "`grid join --help` still says nothing about task serving"
+    assert "--tasks-only" in text, "agent-only nodes are not discoverable from `grid join --help`"
     assert "--tasks-root" in text and "--max-tasks" in text
+    assert "installed agent harnesses" in text
+    assert "spending this box's own Claude subscription" not in text
+
+
+def test_tasks_only_joins_agent_capacity_without_detecting_or_advertising_a_model(
+        monkeypatch, tmp_path, capsys):
+    """Agent execution is a Grid resource of its own, not an accidental side effect of hosting a
+    model. A company laptop may run Codex while inference lands on a different company machine."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.delenv("GRID_TASKS", raising=False)
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+    monkeypatch.setattr(
+        cli.provider, "_detect",
+        lambda *_args, **_kwargs: pytest.fail("task-only join tried to detect an inference engine"))
+    root = tmp_path / "agent-work"
+
+    assert cli.main(["join", "--tasks-only", "--tasks-root", str(root),
+                     "--name", "agent-a"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == [] and record["engines"] == [] and not record["media"]
+    assert record["tasks"] is True
+    assert _the_child_would_claim_tasks(spawned)
+    out = capsys.readouterr().out
+    assert "task-only agent worker" in out and "models=" not in out
+
+
+def test_tasks_only_preflight_failure_starts_no_useless_empty_provider(
+        monkeypatch, tmp_path):
+    """Inference joins fail task preflight open; task-only has nothing useful left and fails closed."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(
+        task_agent, "preflight_before_serving", _raise(RuntimeError("Codex is unavailable")))
+
+    with pytest.raises(SystemExit, match="task-only.*Codex is unavailable"):
+        cli.main(["join", "--tasks-only", "--tasks-root", str(tmp_path / "agent-work")])
+
+    assert "cmd" not in spawned
+    assert cli.provider._read_records("n1") == {}
+
+
+@pytest.mark.parametrize("engine_args", [
+    ["--serve", "m"],
+    ["--at", "http://engine.test/v1", "-m", "m"],
+    ["--api", "codex-cli"],
+    ["--media"],
+])
+def test_tasks_only_refuses_inference_selectors(monkeypatch, tmp_path, engine_args):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit, match="does not advertise inference"):
+        cli.main(["join", "--tasks-only", *engine_args])
 
 
 def test_tasks_flag_alone_starts_a_provider_that_claims_tasks(monkeypatch, tmp_path):
@@ -38705,6 +39817,7 @@ def test_tasks_flag_runs_the_preflight(monkeypatch, tmp_path, capsys):
 
 @pytest.mark.parametrize("flag, extra", [
     ("--tasks", []),
+    ("--tasks-only", []),
     ("--max-tasks", ["4"]),
     ("--tasks-root", ["/Users/Shared/x"]),
 ])

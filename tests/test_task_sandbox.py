@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -583,7 +584,8 @@ def test_preflight_refuses_a_temp_base_with_no_room_for_a_socket(monkeypatch):
     try:
         assert task_sandbox._SOCKET_PATH_MAX - len(str(base)) < task_sandbox._SOCKET_HEADROOM
         # ...and the probe socket WOULD have bound here, which is what isolates the reserve.
-        assert len(str(base / f"grid-sandbox-{os.getpid()}.sock")) < task_sandbox._SOCKET_PATH_MAX
+        probe = base / f".g{os.getpid():x}{threading.get_ident():x}"
+        assert len(str(probe)) < task_sandbox._SOCKET_PATH_MAX
 
         monkeypatch.setenv("TMPDIR", str(base))
 
@@ -639,6 +641,61 @@ def test_preflight_passes_on_an_ordinary_provider_and_leaves_nothing_behind(monk
         task_sandbox.preflight()
 
         assert list(base.iterdir()) == [], "the probe socket must not be left behind"
+    finally:
+        for leftover in base.iterdir():
+            leftover.unlink()
+        base.rmdir()
+
+
+def test_concurrent_task_workers_use_distinct_sandbox_socket_probes(monkeypatch):
+    """Two healthy workers must not turn one PID-local preflight into EADDRINUSE."""
+    import concurrent.futures
+    import socket
+    import tempfile
+    from remote import task_sandbox
+
+    workers = 4
+    before_bind = threading.Barrier(workers)
+    after_bind = threading.Barrier(workers)
+    original_socket = socket.socket
+    paths = []
+    paths_lock = threading.Lock()
+
+    class SynchronizedSocket:
+        def __init__(self, *args, **kwargs):
+            self.raw = original_socket(*args, **kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.raw.close()
+
+        def bind(self, path):
+            with paths_lock:
+                paths.append(path)
+            before_bind.wait(timeout=5)
+            error = None
+            try:
+                self.raw.bind(path)
+            except OSError as exc:
+                error = exc
+            # Keep every successful pathname bound until all competing binds have happened. With
+            # the old PID-only name this deterministically produces EADDRINUSE in three workers.
+            after_bind.wait(timeout=5)
+            if error is not None:
+                raise error
+
+    base = Path(tempfile.mkdtemp())
+    try:
+        monkeypatch.setenv("TMPDIR", str(base))
+        monkeypatch.setattr(task_sandbox.socket, "socket", SynchronizedSocket)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(lambda _index: task_sandbox.preflight(), range(workers)))
+
+        assert results == [None] * workers
+        assert len(set(paths)) == workers
+        assert list(base.iterdir()) == []
     finally:
         for leftover in base.iterdir():
             leftover.unlink()

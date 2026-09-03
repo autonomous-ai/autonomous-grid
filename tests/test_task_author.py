@@ -266,6 +266,23 @@ class TestTheIsolationIsUnchanged:
         assert env["GIT_CONFIG_VALUE_0"] == "Authorization: Bearer SEKRIT"
         assert env["GIT_CONFIG_VALUE_1"] == "false"
 
+    def test_the_goal_claim_generation_travels_as_a_second_git_header(self):
+        """Every fetch and push must be fenced beyond a reusable node credential."""
+        from remote import task_repo
+
+        env = task_repo._env(
+            "SEKRIT", task_repo.GitIdentity("Alice", "alice@example.com"),
+            claim_id="claim-generation-7")
+
+        assert env["GIT_CONFIG_COUNT"] == "4"
+        assert [(env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"])
+                for index in range(4)] == [
+            ("http.extraHeader", "Authorization: Bearer SEKRIT"),
+            ("http.extraHeader", "X-Grid-Task-Claim: claim-generation-7"),
+            ("http.followRedirects", "false"),
+            ("http.postBuffer", str(task_repo._GIT_HTTP_POST_BUFFER_BYTES)),
+        ]
+
     def test_the_committer_is_never_the_member(self):
         """The kill-test for a later "just set all four" (ADR 0033 D-m)."""
         from remote import task_repo

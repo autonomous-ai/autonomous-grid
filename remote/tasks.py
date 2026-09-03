@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import os
 import queue
+import re
+import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -30,7 +33,9 @@ from collections import deque
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
-from . import relay, task_agent, task_capacity, task_evict, task_repo, task_stream
+from . import (relay, task_agent, task_capacity, task_codex, task_codex_proxy, task_evict,
+               task_repo, task_stream)
+from shared.runtime_identity import grid_runtime_identity
 
 # Queue sentinels. Plain `object()`s rather than None or "" — a task's output legitimately contains
 # blank lines, and both would be indistinguishable from one. `_EOF` is posted once per pipe.
@@ -130,6 +135,9 @@ _REPORT_BACKOFF_SECONDS = 2.0
 # is a 422 that refuses the entire terminal report — so an auxiliary diagnostic could cost a task
 # every one of its attempts. Same reasoning as `task_events.MAX_EVENT_BYTES`.
 _MAX_SESSION_RESET_REASON_CHARS = 2_000
+# LOCKSTEP with grid-src's private_server/task_claim.py. This is a credential-sized opaque
+# generation, not unbounded task metadata.
+_MAX_CLAIM_ID_BYTES = 200
 
 # How many unresolved paths the failure SENTENCE names before it stops listing them. A merge across
 # a large rename conflicts in hundreds of files, and this string travels into the task's `error`
@@ -156,11 +164,25 @@ class TaskOutcome:
     #: The commit the pushed task branch ended on. Set for EVERY terminal outcome, success and
     #: failure alike (ADR 0032 D-e) — only the relay decides whether `main` follows it.
     result_commit: str | None = None
+    #: The exact tip published to this conversation's transcript side ref. Unlike
+    #: ``result_commit``, this preserves the agent's resumable history rather than its files.
+    transcript_result_commit: str | None = None
     #: Why this run started a FRESH conversation instead of continuing the project's (issue 07).
     #: Reported to the relay so it lands on the task row and in the durable log: the matching
     #: `task.session_reset` progress event travels through a publisher that latches off permanently
     #: on a 403/404, so it is the one disclosure that could not be relied on to arrive.
     session_reset_reason: str | None = None
+    #: Native Codex Goal checkpoint. Present only on a successfully completed Goal slice.
+    goal_status: str | None = None
+    goal_turns_completed: int | None = None
+    goal_tokens_used: int | None = None
+    goal_time_used_seconds: int | None = None
+    #: True only when this outcome describes the local/native harness rather than the Goal's
+    #: verdict. A durable Goal must not become terminal because one machine's Codex app-server or
+    #: Claude process crashed after spawn; the supervisor preserves what it can and lets the lease
+    #: reaper hand the same turn to another capable node. Kept last so every historical positional
+    #: construction of ``TaskOutcome`` retains its meaning.
+    retryable: bool = False
 
 
 def task_timeout() -> float:
@@ -184,42 +206,302 @@ def task_timeout() -> float:
     return seconds
 
 
-def claim_once(state: Any) -> dict[str, Any] | None:
+def claim_once(state: Any, *,
+               excluded_agent_kinds: tuple[str, ...] = ()) -> dict[str, Any] | None:
     """One claim long-poll; on 401 refresh the token and retry exactly once.
 
     Mirrors `serve.poll_once` — the same credential, the same single-retry rule, a different queue.
+
+    ``excluded_agent_kinds`` is local capacity, not relay policy. In particular, Claude's own
+    subscription can be spent while Codex remains able to run against Grid inference. Reapply the
+    exclusion after credential refresh so a long refresh cannot accidentally re-advertise the
+    harness this process already knows is unavailable.
     """
+    excluded = frozenset(excluded_agent_kinds)
+
+    def available_profiles() -> tuple[dict[str, Any], ...]:
+        return tuple(profile for profile in _agent_profiles()
+                     if profile.get("kind") not in excluded)
+
+    profiles = available_profiles()
+    # The relay intentionally rejects an empty profile list. Empty here means this node can execute
+    # no configured harness, so a claim could only produce a permanent 422 and a noisy retry loop.
+    # Fail closed without spending an attempt or learning anything about the queue.
+    if not profiles:
+        return None
     token = state.token()
     try:
-        return relay.claim_task(state.signaling_url, token)
+        return relay.claim_task(
+            state.signaling_url, token,
+            agent_kinds=tuple(profile["kind"] for profile in profiles),
+            agent_profiles=profiles)
     except relay.RelayUnauthorized:
         if state.refresh(stale_token=token):
-            return relay.claim_task(state.signaling_url, state.token())
+            # Capabilities are scheduling authority. Re-read them rather than replaying a stale
+            # advertisement after a potentially long credential refresh.
+            profiles = available_profiles()
+            if not profiles:
+                return None
+            return relay.claim_task(
+                state.signaling_url, state.token(),
+                agent_kinds=tuple(profile["kind"] for profile in profiles),
+                agent_profiles=profiles)
         raise
 
 
 def report_once(serve_state: Any, task_id: str, *, state: str, output: str | None,
                 error: str | None, session_id: str | None = None,
                 result_commit: str | None = None,
-                session_reset_reason: str | None = None) -> None:
+                transcript_result_commit: str | None = None,
+                session_reset_reason: str | None = None,
+                goal_status: str | None = None,
+                goal_turns_completed: int | None = None,
+                goal_tokens_used: int | None = None,
+                goal_time_used_seconds: int | None = None,
+                claim_id: str | None = None) -> None:
     """Report a terminal result; on 401 refresh the token and retry exactly once.
 
     The serve state is named `serve_state` here only because `state` is the wire's name for the
     task's terminal state, and the wire vocabulary wins on a function whose whole job is to send it.
     """
     token = serve_state.token()
+    claim = ({"claim_id": claim_id} if claim_id else {})
     try:
         relay.report_task_result(
             serve_state.signaling_url, token, task_id,
             state=state, output=output, error=error, session_id=session_id,
-            result_commit=result_commit, session_reset_reason=session_reset_reason)
+            result_commit=result_commit, session_reset_reason=session_reset_reason,
+            transcript_result_commit=transcript_result_commit,
+            goal_status=goal_status, goal_turns_completed=goal_turns_completed,
+            goal_tokens_used=goal_tokens_used,
+            goal_time_used_seconds=goal_time_used_seconds, **claim)
     except relay.RelayUnauthorized:
         if not serve_state.refresh(stale_token=token):
             raise
         relay.report_task_result(
             serve_state.signaling_url, serve_state.token(), task_id,
             state=state, output=output, error=error, session_id=session_id,
-            result_commit=result_commit, session_reset_reason=session_reset_reason)
+            result_commit=result_commit, session_reset_reason=session_reset_reason,
+            transcript_result_commit=transcript_result_commit,
+            goal_status=goal_status, goal_turns_completed=goal_turns_completed,
+            goal_tokens_used=goal_tokens_used,
+            goal_time_used_seconds=goal_time_used_seconds, **claim)
+
+
+def checkpoint_retry_once(serve_state: Any, task_id: str, *,
+                          claim_id: str | None = None,
+                          **checkpoint: Any) -> dict[str, Any]:
+    """Hand off a native Goal checkpoint; refresh an expired provider token exactly once.
+
+    Goal slices can outlive an access token. Losing coherent partial work merely because the token
+    expired between the last lease beat and this request would turn an immediate handoff into a
+    lease-expiry rollback. Claims, events, lease renewal, and terminal reports already use this
+    one-refresh rule; checkpoint settlement must not be the lone stale-token gap.
+    """
+    token = serve_state.token()
+    claim = ({"claim_id": claim_id} if claim_id else {})
+    try:
+        return relay.checkpoint_task_retry(
+            serve_state.signaling_url, token, task_id, **claim, **checkpoint)
+    except relay.RelayUnauthorized:
+        if not serve_state.refresh(stale_token=token):
+            raise
+        return relay.checkpoint_task_retry(
+            serve_state.signaling_url, serve_state.token(), task_id,
+            **claim, **checkpoint)
+
+
+def decline_claim_once(serve_state: Any, task_id: str, *, attempt: int,
+                       claim_id: str) -> dict[str, Any]:
+    """Return one unstarted stale Goal claim; refresh a rotated credential exactly once."""
+    token = serve_state.token()
+    try:
+        return relay.decline_task_claim(
+            serve_state.signaling_url, token, task_id,
+            attempt=attempt, claim_id=claim_id)
+    except relay.RelayUnauthorized:
+        if not serve_state.refresh(stale_token=token):
+            raise
+        return relay.decline_task_claim(
+            serve_state.signaling_url, serve_state.token(), task_id,
+            attempt=attempt, claim_id=claim_id)
+
+
+def _configured_agent_kinds() -> tuple[str, ...]:
+    """Supported harnesses the operator enabled, independent of temporary binary availability."""
+    configured = (os.getenv("GRID_TASK_AGENT_KINDS") or "claude,codex").replace(",", " ").split()
+    allowed = {kind for kind in configured if kind in ("claude", "codex")}
+    invalid = [kind for kind in configured if kind not in ("claude", "codex")]
+    for kind in invalid:
+        _warn(f"ignoring unsupported harness {kind!r} in GRID_TASK_AGENT_KINDS")
+    # Empty or wholly invalid is fail closed: this provider claims no tasks instead of running a
+    # harness its operator meant to disable.
+    return tuple(kind for kind in ("claude", "codex") if kind in allowed)
+
+
+def _agent_kinds() -> tuple[str, ...]:
+    """Harnesses this process can really execute; never advertise either one optimistically."""
+    configured = _configured_agent_kinds()
+    kinds = ["claude"] if "claude" in configured and task_agent.claude_available() else []
+    if "codex" in configured and task_codex.available():
+        kinds.append("codex")
+    return tuple(kinds)
+
+
+_CAPABILITY = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
+_CODEX_ONLY_GOAL_CAPABILITIES = frozenset({
+    "dynamic_tools", "subgoals", "image_generation",
+})
+
+
+def _declared_capabilities(env_name: str) -> set[str]:
+    """Operator-declared harness features, excluding capabilities derived from live config.
+
+    ``tool_origin.*`` is scheduling authority for an exact parsed origin in
+    ``GRID_GOAL_TOOL_ORIGINS``. Accepting the opaque hash through a generic feature variable would
+    let a typo or copied profile route a business Goal to a node whose supervisor then refuses the
+    API call. Keep that namespace derived by :func:`goal_tool_origin_capabilities` only.
+    """
+    answer: set[str] = set()
+    for value in (os.getenv(env_name) or "").replace(",", " ").split():
+        if value.startswith("tool_origin."):
+            _warn(
+                f"ignoring derived Goal capability {value!r} in {env_name}; configure the exact "
+                "origin with GRID_GOAL_TOOL_ORIGINS")
+        elif _CAPABILITY.fullmatch(value):
+            answer.add(value)
+        else:
+            _warn(f"ignoring invalid Goal capability {value!r} in {env_name}")
+    return answer
+
+
+def _agent_profiles() -> tuple[dict[str, Any], ...]:
+    """Capabilities are harness-scoped; a binary alone proves no privileged integration."""
+    kinds = _agent_kinds()
+    profiles: list[dict[str, Any]] = []
+    if "claude" in kinds:
+        claude_capabilities = _declared_capabilities("GRID_CLAUDE_TASK_CAPABILITIES")
+        # These names describe concrete Grid runner wiring, not an operator assertion. Claude has
+        # native `/goal`, but this provider does not inject arbitrary Goal HTTP tools or the built-in
+        # child-spawn action into Claude Code. Letting an env var advertise either would schedule a
+        # Goal onto a harness that cannot perform its required actions and strand it mid-run.
+        claude_capabilities.difference_update({
+            "native_goal", *_CODEX_ONLY_GOAL_CAPABILITIES,
+        })
+        if task_agent.distributed_goal_available():
+            claude_capabilities.add("native_goal")
+        profile: dict[str, Any] = {
+            "kind": "claude", "capabilities": sorted(claude_capabilities)}
+        if "native_goal" in claude_capabilities:
+            # Runtime provenance rides beside capability scheduling. Older relays ignore this
+            # additive key; a Goal-aware relay snapshots the authenticated node's copy onto the
+            # attempt boundary for audit/training attribution.
+            profile["version"] = task_agent.distributed_goal_version()
+        profiles.append(profile)
+    if "codex" in kinds:
+        profiles.append({
+            "kind": "codex",
+            "capabilities": sorted({"native_goal", "dynamic_tools", "subgoals"}
+                                   | task_codex.goal_tool_origin_capabilities()
+                                   | _declared_capabilities("GRID_CODEX_GOAL_CAPABILITIES")),
+            "version": task_codex.distributed_goal_version(),
+        })
+    return tuple(profiles)
+
+
+def goal_worker_metadata() -> dict[str, Any]:
+    """Bounded Goal runtime metadata for registration and heartbeat snapshots.
+
+    Agent versions come from the same live, revision-keyed probes that authorize claims. An empty
+    ``agents`` object deliberately clears stale metadata after both native harnesses disappear.
+    """
+    agents = {
+        str(profile["kind"]): {"version": str(profile["version"])}
+        for profile in _agent_profiles()
+        if profile.get("kind") in ("codex", "claude") and profile.get("version")
+    }
+    return {
+        "goal_runtime": {
+            "schema_version": 1,
+            "grid": grid_runtime_identity(),
+            "agents": agents,
+        }
+    }
+
+
+def has_non_claude_claim_capacity() -> bool:
+    """Whether this process can keep claiming while Claude's subscription is paused.
+
+    Kept beside the actual profile builder so heartbeat telemetry cannot invent a second admission
+    rule. Today Codex is the independent harness; future harnesses can extend this predicate when
+    they have their own capacity signal.
+    """
+    return any(profile.get("kind") == "codex" for profile in _agent_profiles())
+
+
+def _claim_supported_now(job: dict[str, Any]) -> bool:
+    """Revalidate a delivered Goal against the live harness profile before attempt-start.
+
+    A claim long-poll advertises once and can wait while another worker quarantines the exact Codex
+    or Claude executable revision. The relay correctly selected against the request it received,
+    but that answer can be obsolete by delivery. Ordinary tasks preserve their established
+    behavior; only native Goals have a capability policy and the decline protocol.
+    """
+    goal = job.get("goal")
+    if not isinstance(goal, dict):
+        return True
+    kind = job.get("agent_kind")
+    if kind not in ("claude", "codex"):
+        return False
+    required = goal.get("required_capabilities", [])
+    if (not isinstance(required, list)
+            or any(not isinstance(value, str) or not _CAPABILITY.fullmatch(value)
+                   for value in required)):
+        return False
+    needed = {"native_goal", *required}
+    for profile in _agent_profiles():
+        if profile.get("kind") != kind:
+            continue
+        capabilities = profile.get("capabilities")
+        return isinstance(capabilities, list) and needed <= set(capabilities)
+    return False
+
+
+def _goal_claim_is_fenced(job: dict[str, Any]) -> bool:
+    """Whether a delivered native Goal has the exact generation needed on every mutation plane."""
+    if not isinstance(job.get("goal"), dict):
+        return True
+    claim_id = job.get("claim_id")
+    return (isinstance(claim_id, str) and bool(claim_id)
+            and len(claim_id.encode("utf-8")) <= _MAX_CLAIM_ID_BYTES)
+
+
+def _decline_stale_goal_claim(state: Any, job: dict[str, Any]) -> None:
+    """Best-effort safe release of a claim that must never reach its native harness."""
+    task_id = job.get("task_id")
+    attempt = job.get("attempt")
+    claim_id = job.get("claim_id")
+    if (not isinstance(task_id, str) or not task_id
+            or not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1
+            or not isinstance(claim_id, str) or not claim_id):
+        _warn(
+            "a delivered Goal claim no longer matches this node's live harness capabilities, but "
+            "its relay payload lacks the claim identity needed for an immediate safe decline; no "
+            "agent will start and the lease will expire for bounded recovery")
+        return
+    try:
+        decline_claim_once(
+            state, task_id, attempt=attempt, claim_id=claim_id)
+        _warn(
+            f"declined stale Goal claim {task_id} attempt {attempt} before attempt-start; the "
+            "relay returned it to the distributed queue without spending retry budget")
+    except (Exception, SystemExit) as exc:
+        # Safety does not depend on this endpoint being present during a rolling upgrade: the
+        # provider still refuses to start. An older relay reclaims the untouched lease through its
+        # existing bounded reaper path, at the cost of that old relay counting the delivery.
+        _warn(
+            f"could not immediately decline stale Goal claim {task_id} attempt {attempt} "
+            f"({exc!r}); no agent will start and lease-expiry recovery remains active")
 
 
 class _Collected:
@@ -397,7 +679,8 @@ def _drain(stream, sink: _Tail, queued: "queue.Queue | None" = None) -> None:
 def _run_child(argv: list[str], *, timeout: float, publish: Callable[..., None],
                cwd: str | None = None, env: dict[str, str] | None = None,
                translator: Any = None,
-               on_spawn: Callable[[subprocess.Popen], None] | None = None) -> tuple[int, str]:
+               on_spawn: Callable[[subprocess.Popen], None] | None = None,
+               stop_when: Callable[[], bool] | None = None) -> tuple[int, str]:
     """Run `argv`, publishing each stdout line as it arrives. Returns `(returncode, stdout)`.
 
     Raises `subprocess.TimeoutExpired` when the wall-clock budget is spent, so the caller's existing
@@ -459,6 +742,7 @@ def _run_child(argv: list[str], *, timeout: float, publish: Callable[..., None],
     # is exactly the run whose last lines matter most. Both reach EOF when the child exits, and the
     # deadline still governs a child that closes one and holds the other open.
     open_pipes = 2
+    intentionally_stopped = False
     try:
         while open_pipes:
             remaining = deadline - time.monotonic()
@@ -482,6 +766,13 @@ def _run_child(argv: list[str], *, timeout: float, publish: Callable[..., None],
             if channel is _STDOUT:
                 lines.add(line)
                 reporter.stdout(line)
+                if (not intentionally_stopped and stop_when is not None and stop_when()
+                        and proc.poll() is None):
+                    # Claude Code documents Ctrl-C as the way to stop a non-interactive `/goal`
+                    # while preserving an active Goal for `--resume`. We send it only AFTER its
+                    # evaluator attachment was translated and durably published.
+                    intentionally_stopped = True
+                    proc.send_signal(signal.SIGINT)
             else:
                 reporter.stderr(line)
 
@@ -495,7 +786,7 @@ def _run_child(argv: list[str], *, timeout: float, publish: Callable[..., None],
             except (Exception, SystemExit):
                 pass
 
-    if proc.returncode != 0:
+    if proc.returncode != 0 and not intentionally_stopped:
         # `!= 0`, never `> 0`: a killed child carries a NEGATIVE code (`-9` for SIGKILL), and `> 0`
         # would report the one outcome this seam exists to catch — a task whose agent was killed —
         # as a success (ADR 0032 D-e).
@@ -516,6 +807,7 @@ def run_task(job: dict[str, Any],
              publish: Callable[..., None] | None = None,
              on_spawn: Callable[[subprocess.Popen], None] | None = None,
              remote: task_repo.GitRemote | None = None,
+             inference: task_codex.GridInference | None = None,
              capacity: Any = None) -> TaskOutcome:
     """Run one task's agent and return how it went.
 
@@ -549,13 +841,25 @@ def run_task(job: dict[str, Any],
     # carries it without having to remember — the same property `_failed` gives the scrub.
     reset_reason: str | None = None
 
-    def failed(error: str) -> TaskOutcome:
-        return _failed(translator, error, session_reset_reason=reset_reason)
+    def failed(error: str, *, retryable: bool = False) -> TaskOutcome:
+        return replace(
+            _failed(translator, error, session_reset_reason=reset_reason),
+            retryable=retryable,
+        )
 
     prompt = job.get("prompt")
     if not isinstance(prompt, str):
         # The job dict came off the wire; a missing or mistyped prompt is bad input, not a crash.
         return failed(f"task has no usable prompt (got {type(prompt).__name__})")
+
+    agent_kind = str(job.get("agent_kind") or "claude")
+    if agent_kind not in ("claude", "codex"):
+        return failed(f"the relay requested unsupported agent kind {agent_kind!r}")
+    goal = job.get("goal")
+    is_claude_goal = agent_kind == "claude" and isinstance(goal, dict)
+    if is_claude_goal:
+        translator = task_stream.GoalStreamTranslator(
+            on_rate_limit=capacity.observe if capacity is not None else None)
 
     # WHOSE workspace this task runs in (ADR 0033 D-g). Refused rather than defaulted, and this is
     # the one wire field on this path that gets that treatment: a missing key would put the agent in
@@ -614,13 +918,20 @@ def run_task(job: dict[str, Any],
         task_evict.touch(workspace)
         # Resolved HERE rather than with the argv below, which is now built after the checkout: a
         # provider with no Claude Code installed must fail before it fetches anything, not after.
-        binary = task_agent.resolve_binary()
+        binary = (task_codex.resolve_binary() if agent_kind == "codex"
+                  else task_agent.resolve_binary())
+        if is_claude_goal:
+            # Recheck after the claim as well as in the advertised profile. A binary can be
+            # downgraded, replaced or runtime-quarantined while another worker's long poll is open;
+            # stale scheduling authority must not start a native Goal it cannot resume.
+            task_agent.require_distributed_goal(binary)
         # And the rest of what the argv and the child's environment need, for the same reason: they
         # are built AFTER the checkout and outside these guards, so a provider misconfiguration
         # would arrive as "task runner raised" having already fetched the repository. Here it is an
         # ordinary "could not start the agent: …" naming the variable to change, on a task that cost
         # nothing.
-        task_agent.preflight()
+        if agent_kind == "claude":
+            task_agent.preflight()
     except (Exception, SystemExit) as exc:
         # Nothing was spawned, so there is no session id and no output — only a reason, and it is
         # one an operator can act on ("Claude Code isn't installed", "/var/grid is not writable").
@@ -659,8 +970,9 @@ def run_task(job: dict[str, Any],
             return failed(
                 f"the task names input commit {input_commit} but no git remote was wired")
         try:
+            claim = ({"claim_id": remote.claim_id} if remote.claim_id else {})
             task_repo.materialize(
-                workspace, url=remote.url, token=remote.token,
+                workspace, url=remote.url, token=remote.live_token(),
                 branch=str(job.get("branch") or ""), input_commit=str(input_commit),
                 # A MERGE TASK's second ref (ADR 0033 D-e, issue 15), fetched here rather than by
                 # the agent — which has no grid credential and must not get one. Empty on every
@@ -678,7 +990,11 @@ def run_task(job: dict[str, Any],
                 # keeps "the relay has a transcript and I could not get it" from becoming a silent
                 # fresh start.
                 transcript_ref=task_repo.transcript_ref(conversation_id),
-                transcript_commit=str(job.get("transcript_commit") or ""))
+                transcript_commit=str(job.get("transcript_commit") or ""),
+                # A first Goal turn has no pin, but its retry must still discard any Codex DB/WAL
+                # files left by a dead attempt on this provider. Ordinary Claude tasks retain the
+                # old no-pin compatibility behaviour in `materialize`.
+                reset_agent_state=(agent_kind == "codex"), **claim)
         except task_repo.InputFetchError as exc:
             # BEFORE the blanket handler below, and that order is the whole change (ADR 0033 issue
             # 16a, criterion 4). The fetch is the one step whose failure is about this attempt
@@ -708,16 +1024,48 @@ def run_task(job: dict[str, Any],
         except (Exception, SystemExit) as exc:
             return failed(f"could not prepare the task's workspace: {exc}")
 
+    if agent_kind == "codex":
+        if inference is None:
+            return failed("the Codex Goal task has no Grid inference endpoint")
+        try:
+            result = task_codex.run_slice(
+                job, workspace, inference=inference, executable=binary, timeout=timeout,
+                publish=sink, on_spawn=on_spawn)
+            return TaskOutcome(
+                "completed", result.output, None,
+                goal_status=result.status,
+                goal_turns_completed=result.turns_completed,
+                goal_tokens_used=result.tokens_used,
+                goal_time_used_seconds=result.time_used_seconds,
+            )
+        except (task_codex.CodexGoalError, OSError) as exc:
+            # Once the native process exists, an app-server exit, protocol fault or local timeout
+            # is evidence about this attempt/node, not a terminal verdict about a durable Goal.
+            # `_supervise_one_task` knows whether `on_spawn` fired and retries only that case.
+            return failed(f"could not run Codex Goal slice: {exc}", retryable=True)
+
     # AFTER the checkout, for two reasons that both bite: the link's target has to survive
     # `reset --hard`/`clean`, and the transcript this task may resume only exists once the input
     # commit has been materialized. Fatal if it fails — an agent spawned without the link writes its
     # transcript outside the repository, so the conversation is silently lost from that task on.
     try:
-        task_agent.link_transcript(workspace, member_key)
+        transcript_directory = task_agent.link_transcript(workspace, member_key)
     except (Exception, SystemExit) as exc:
         return failed(f"could not prepare the agent's transcript directory: {exc}")
 
     resume = task_agent.resumable_session(workspace, job.get("resume_session_id"), member_key)
+    transcript_start_bytes = 0
+    if resume.session_id:
+        try:
+            resumed_transcript = task_agent.session_transcript_path(
+                transcript_directory, resume.session_id)
+            info = resumed_transcript.stat(follow_symlinks=False)
+            if stat.S_ISREG(info.st_mode):
+                transcript_start_bytes = info.st_size
+        except (OSError, ValueError):
+            # ``resumable_session`` already made the start/no-start decision. Recovery below will
+            # fail closed if the transcript changes between that check and the child exit.
+            transcript_start_bytes = 0
     if resume.session_id:
         _publish_safely(sink, "task.session_resumed", session_id=resume.session_id)
     elif resume.reason:
@@ -747,6 +1095,159 @@ def run_task(job: dict[str, Any],
         # attempt on a task whose agent succeeded every time, and the durable log would blame
         # `lease_expired`. One truncation is worth more than that whole failure mode.
         reset_reason = task_stream.redact(resume.reason)[:_MAX_SESSION_RESET_REASON_CHARS]
+
+    if is_claude_goal:
+        assert isinstance(translator, task_stream.GoalStreamTranslator)
+        if inference is None:
+            return failed("the Claude Goal task has no Grid inference endpoint")
+        objective = goal.get("objective")
+        done_when = goal.get("done_when")
+        model = goal.get("model")
+        if any(not isinstance(value, str) or not value.strip()
+               for value in (objective, done_when, model)):
+            return failed("the Claude Goal metadata is missing objective, done_when, or model")
+        native_objective = f"{objective.strip()}\n\nDone when: {done_when.strip()}"
+        first_prompt = f"/goal {native_objective}"
+        # A Claude harness may join a Goal after Codex (or after an earlier Claude transcript was
+        # lost with a dead worker). There is no native Claude session to resume in that case, but
+        # the turn prompt still carries Grid's relay-authored handoff: prior work, failed evals and
+        # child results. Dropping it here gives the replacement the shared files while hiding the
+        # reason this turn exists. The first turn's prompt is exactly the native objective, so do
+        # not duplicate it; every continuation gets its handoff inside the newly-created /goal.
+        if prompt.strip() != native_objective:
+            first_prompt += f"\n\nGrid handoff for this distributed turn:\n{prompt.strip()}"
+        argv = task_agent.agent_argv(
+            binary, prompt if resume.session_id else first_prompt,
+            workspace=workspace, resume=resume.session_id)
+        child_env = task_agent.goal_child_env(
+            author=task_repo.identity_or_default(
+                job.get("author_name"), job.get("author_email")),
+            workspace=workspace)
+        claim = ({"claim_id": inference.claim_id} if inference.claim_id else {})
+        proxy = task_codex_proxy.InferenceProxy(
+            inference.relay_base_url, inference.current_token,
+            refresh_token=inference.refresh_token,
+            turn_id=str(job.get("task_id") or "") or None,
+            conversation_id=str(job.get("conversation_id") or "") or None,
+            upstream_model=model.strip(),
+            **claim)
+        # Claude rejects arbitrary company-local model ids before making an HTTP request. Keep its
+        # selectors on one current native id; the credential proxy above rewrites every Messages
+        # body to the exact immutable Grid model, including /goal's small/fast evaluator
+        # attachment. Do not pin a dated id here: Claude Code rejects retired ids locally before
+        # the request can reach that rewrite boundary.
+        child_env.update({
+            "ANTHROPIC_BASE_URL": proxy.anthropic_base_url,
+            "ANTHROPIC_AUTH_TOKEN": proxy.child_token,
+            # The SDK environment path does not expand CLI aliases such as ``sonnet``. All four
+            # selectors deliberately use the same current accepted id because no Anthropic model
+            # is actually called; the loopback proxy replaces it with the Goal's Grid model.
+            "ANTHROPIC_MODEL": "claude-fable-5",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-fable-5",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-fable-5",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-fable-5",
+        })
+        child_env.pop("ANTHROPIC_API_KEY", None)
+        started = time.monotonic()
+        try:
+            proxy.start()
+            _returncode, _raw = _run_child(
+                argv, timeout=timeout, publish=sink, cwd=str(workspace), env=child_env,
+                translator=translator, on_spawn=on_spawn,
+                # A terminal verdict makes Claude exit itself. An unmet verdict would immediately
+                # start another native turn, so Ctrl-C at this exact attachment is Grid's slice.
+                stop_when=lambda: (translator.goal_evaluated
+                                   and not translator.goal_met
+                                   and not translator.goal_impossible))
+        except subprocess.TimeoutExpired:
+            return failed(f"Claude Goal slice timed out after {timeout:.0f}s", retryable=True)
+        except _ChildFailed as exc:
+            proxy_detail = f" ({proxy.last_failure})" if proxy.last_failure else ""
+            return failed(
+                f"Claude Goal exited {exc.returncode}: {exc.stderr[-500:].strip()}"
+                f"{proxy_detail}",
+                retryable=True,
+            )
+        except (Exception, SystemExit) as exc:
+            return failed(f"could not run Claude Goal slice: {exc}", retryable=True)
+        finally:
+            try:
+                proxy.stop()
+            except (Exception, SystemExit):
+                pass
+        if not translator.goal_evaluated and translator.session_id:
+            try:
+                transcript_path = task_agent.session_transcript_path(
+                    transcript_directory, translator.session_id)
+                for event, fields in translator.recover_goal_status(
+                        transcript_path, after_bytes=transcript_start_bytes):
+                    _publish_safely(sink, event, **fields)
+            except (OSError, ValueError):
+                # Preserve the established protocol-drift verdict below. The native transcript is
+                # agent-writable and may vanish or become unsafe; it is never a reason to trust a
+                # completion Grid did not actually read.
+                pass
+        if translator.goal_protocol_error:
+            reason = translator.goal_protocol_error
+            task_agent.remember_distributed_goal_failure(binary, reason)
+            return failed(reason, retryable=True)
+
+        def goal_counter(name: str) -> int:
+            value = goal.get(name)
+            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+        slice_tokens = max(translator.observed_tokens, translator.goal_tokens or 0)
+        if not translator.goal_evaluated:
+            reason = "Claude Goal exited without a native evaluator checkpoint"
+            evals = goal.get("evals")
+            if isinstance(evals, list) and evals:
+                # Third-party/local models can complete Claude's ordinary tool loop yet fail the
+                # undocumented small evaluator response shape that makes Claude Code persist a
+                # terminal goal_status attachment. The exact failure was measured with Claude Code
+                # 2.1.252 + Qwen3.6-27B: the transcript held the sentinel, two successful tools and
+                # the final answer, while the fourth Grid inference request completed and no
+                # evaluator attachment existed.
+                #
+                # This is safe only because an independent relay eval is present. A clean native
+                # exit nominates the exact result commit; it does not grade itself. The relay checks
+                # every configured eval against that commit and either accepts it or creates the
+                # ordinary eval-repair turn. With no eval definition we retain the fail-closed
+                # protocol-drift path below, because process exit is not a measurable Goal verdict.
+                _publish_safely(
+                    sink, "goal.claude.evaluator_missing", reason=reason,
+                    fallback="independent_grid_eval")
+                output = translator.last_output or translator.result_text
+                return TaskOutcome(
+                    "completed", output[:_TASK_OUTPUT_MAX_CHARS] if output else None, None,
+                    session_id=translator.session_id, session_reset_reason=reset_reason,
+                    goal_status="complete",
+                    goal_turns_completed=goal_counter("turns_completed") + 1,
+                    goal_tokens_used=goal_counter("tokens_used") + slice_tokens,
+                    goal_time_used_seconds=(goal_counter("time_used_seconds")
+                                            + max(1, int(time.monotonic() - started))),
+                )
+            # Exit zero with no goal_status attachment is deterministic protocol drift: model/API
+            # failures take the nonzero/timeout paths above. Stop this exact revision advertising
+            # native_goal so another harness/machine receives the retry instead of burning the cap.
+            task_agent.remember_distributed_goal_failure(binary, reason)
+            return failed(reason, retryable=True)
+        status = ("failed" if translator.goal_impossible else
+                  "complete" if translator.goal_met else "active")
+        total_tokens = goal_counter("tokens_used") + slice_tokens
+        token_budget = goal.get("token_budget")
+        if (status == "active" and isinstance(token_budget, int)
+                and not isinstance(token_budget, bool) and total_tokens >= token_budget):
+            status = "budget_limited"
+        output = translator.last_output or translator.result_text or translator.goal_reason
+        return TaskOutcome(
+            "completed", output[:_TASK_OUTPUT_MAX_CHARS] if output else None, None,
+            session_id=translator.session_id, session_reset_reason=reset_reason,
+            goal_status=status,
+            goal_turns_completed=goal_counter("turns_completed") + 1,
+            goal_tokens_used=total_tokens,
+            goal_time_used_seconds=(goal_counter("time_used_seconds")
+                                    + max(1, int(time.monotonic() - started))),
+        )
 
     # The workspace goes in because the confinement policy is built around it: it is the one
     # directory the agent must be able to read and write while `$HOME` around it is denied.
@@ -835,26 +1336,49 @@ def task_loop(state: Any, capacity: Any = None) -> None:
     below leaves inference serving. `state.stop` is only ever read here, never written.
 
     `capacity` is this provider's reading of its own Claude subscription (issue 09), consulted before
-    every claim. It defaults to the PROCESS-wide gate, which is what makes several task workers
-    throttle on one reading of the one subscription they all spend. Withdrawing is simply not asking:
-    a task is claimed from a durable queue at poll time (D-a), so a provider that does not claim is
-    not given one, and the task waits for a provider that can run it.
+    every claim. It defaults to the PROCESS-wide gate, which is what makes several Claude workers
+    throttle on one reading of the one subscription they all spend. A mixed worker continues to
+    advertise Codex-only capacity because Codex uses Grid inference rather than that Claude window.
+    Withdrawing a harness is simply not advertising it at claim time: the queue waits for a provider
+    that can run it.
     """
     capacity = capacity if capacity is not None else task_capacity.shared()
+    if not _configured_agent_kinds():
+        # An empty/invalid policy cannot repair itself when a binary changes. Do not send the relay
+        # an invalid empty profile list or hot-spin locally; retire only task serving. A supported
+        # configured harness whose binary is temporarily unavailable takes the recoverable suspend
+        # path below instead, so installing/replacing it does not require an inference restart.
+        _warn("task serving retired because GRID_TASK_AGENT_KINDS enables no supported harness; "
+              "choose codex, claude, or both (inference is unaffected)")
+        state.tasks_stop.set()
+        return
     # Two counters, not one: a provider alternating between a missing plane and a refusal would
     # otherwise retire on a pair of unrelated blips neither of which was persistent.
     consecutive_404s = 0
     consecutive_403s = 0
+    agent_claims_suspended = False
     while not (state.stop.is_set() or state.tasks_stop.is_set()):
         pause = _capacity_pause(capacity)
+        excluded_agent_kinds: tuple[str, ...] = ()
         if pause > 0:
-            # Waiting on `tasks_stop` rather than sleeping, so teardown does not have to sit out a
-            # five-hour window. `continue` re-reads the gate: a task still running elsewhere in this
-            # process can lift the block early by observing a healthy reading.
-            state.tasks_stop.wait(pause)
-            continue
+            # This signal belongs to Claude's subscription, not to the provider process and not to
+            # Codex. A mixed worker keeps offering its independent Codex harness instead of turning
+            # a vendor-specific refusal into fleet-wide Goal withdrawal.
+            codex_configured = "codex" in _configured_agent_kinds()
+            codex_available = codex_configured and any(
+                profile.get("kind") == "codex" for profile in _agent_profiles())
+            if not codex_available:
+                # Waiting on `tasks_stop` rather than sleeping, so teardown does not have to sit out
+                # the window. A Claude-only policy can wait for the vendor's exact reset. When Codex
+                # is configured but temporarily absent/quarantined, recheck locally at the ordinary
+                # claim backoff so installing or replacing it does not wait out a five-hour window.
+                wait = min(pause, _CLAIM_BACKOFF_SECONDS) if codex_configured else pause
+                state.tasks_stop.wait(wait)
+                continue
+            excluded_agent_kinds = ("claude",)
         try:
-            job = claim_once(state)
+            job = (claim_once(state, excluded_agent_kinds=excluded_agent_kinds)
+                   if excluded_agent_kinds else claim_once(state))
         except relay.RelayUnauthorized:
             _warn("relay rejected the token and refresh is unavailable — task serving retired "
                   f"(inference is unaffected). {RESUME_HINT}")
@@ -908,9 +1432,45 @@ def task_loop(state: Any, capacity: Any = None) -> None:
             continue
 
         consecutive_404s = consecutive_403s = 0
-        if job is None:  # 204 — nothing queued; claim again
+        if job is None:  # 204 — nothing queued, or the local profile disappeared before the call
+            # Agent availability is deliberately re-read for every claim.  It can also disappear
+            # DURING the life of this loop: Codex runtime protocol drift quarantines that executable,
+            # an operator can replace/remove a binary, or its permissions can change.  In a
+            # Codex-only process, claim_once then returns None without touching the relay.  Treating
+            # that as an ordinary 204 would hot-spin forever because there is no network long-poll
+            # left to pace the loop.  Suspend and recheck instead: a repaired/replaced executable has
+            # a new stat revision, clears the quarantine naturally, and rejoins without taking down
+            # inference or requiring a process restart.
+            if not _agent_profiles():
+                if not agent_claims_suspended:
+                    _warn("task claims suspended because this node no longer has a runnable "
+                          "configured agent harness; rechecking after backoff (inference is "
+                          "unaffected)")
+                agent_claims_suspended = True
+                state.tasks_stop.wait(_CLAIM_BACKOFF_SECONDS)
+            else:
+                agent_claims_suspended = False
             continue
 
+        agent_claims_suspended = False
+        if not _goal_claim_is_fenced(job):
+            # Grid Goal has no released node-only protocol to preserve. Starting here would run a
+            # native agent whose lease, events, Git, inference, tools, checkpoint and result are all
+            # guaranteed to be refused by the relay. Leave the unannounced delivery for bounded
+            # lease recovery; it has no valid generation with which a safe decline can be fenced.
+            _warn(
+                "refusing a delivered Grid Goal with a missing or malformed claim generation; "
+                "no checkout or native agent will start, and the untouched lease will expire for "
+                "distributed recovery")
+            continue
+        if not _claim_supported_now(job):
+            # The long-poll that returned this job may have been waiting with a capability snapshot
+            # from before another worker quarantined the exact harness revision. Recheck BEFORE
+            # `_publisher_for` records attempt-start and before checkout, process spawn, or any
+            # business action. The relay's decline fence makes this a delivery race rather than a
+            # consumed Goal attempt; on an older relay the untouched lease still expires safely.
+            _decline_stale_goal_claim(state, job)
+            continue
         _run_and_report(state, job, capacity)
 
 
@@ -1039,8 +1599,20 @@ def _release_workspace(project_id: str, member_key: str, conversation_id: str) -
 def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity: Any) -> None:
     """`_run_and_report`'s body, with this member's workspace on this project already reserved."""
     publisher = _publisher_for(state, task_id, job)
+    if (isinstance(job.get("goal"), dict)
+            and getattr(publisher, "_goal_attempt_recorded", True) is not True):
+        # Training/release evidence must be able to prove which machine actually started a native
+        # Goal attempt. Do not run unrecorded work or business actions. The live lease expires and
+        # the relay requeues the untouched turn for another capable node.
+        _warn(
+            f"task {task_id}: the relay did not durably acknowledge the Goal attempt-start "
+            "record; not starting the native harness")
+        publisher.close()
+        return
     remote = _git_remote(state, job)
     landed = True
+    retry_handed_off = False
+    retry_state: str | None = None
     # Which half of the git round trip gave up, for the operator's log. Two things can now leave a
     # task unreported, and they call for opposite reading: a push that did not land means this
     # provider ran the agent and lost the result, while an input that never arrived means it never
@@ -1058,12 +1630,76 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
     # whose own ceiling (`task_repo._GIT_NETWORK_TIMEOUT_SECONDS`) far outruns the 120s lease TTL,
     # and closed in the `finally` below so a supervisor that moved on cannot still be vouching for a
     # child it no longer has.
-    renewer = _lease_renewer(state, task_id, on_beat=_tree_beat(job, publisher))
+    claim_id = str(job.get("claim_id") or "") or None
+    renewer_options: dict[str, Any] = {"on_beat": _tree_beat(job, publisher)}
+    if claim_id:
+        renewer_options["claim_id"] = claim_id
+    renewer = _lease_renewer(state, task_id, **renewer_options)
     try:
-        outcome = run_task(job, publisher.publish, remote=remote,
-                           on_spawn=lambda proc: _spawned(spawned, renewer, proc),
-                           capacity=capacity)
-        outcome, landed = _push_result(job, outcome, spawned["yes"], remote, publisher)
+        run_kwargs: dict[str, Any] = {
+            "remote": remote,
+            "on_spawn": lambda proc: _spawned(spawned, renewer, proc),
+            "capacity": capacity,
+        }
+        # Ordinary Claude tasks keep their established call contract. Native Goal turns of either
+        # harness use a loopback credential boundary and route their model calls through Grid.
+        if str(job.get("agent_kind") or "claude") == "codex" or isinstance(job.get("goal"), dict):
+            inference_options: dict[str, Any] = {}
+            if claim_id:
+                inference_options["claim_id"] = claim_id
+            run_kwargs["inference"] = task_codex.GridInference(
+                state.signaling_url, state.token,
+                lambda stale: state.refresh(stale_token=stale),
+                **inference_options)
+        outcome = run_task(job, publisher.publish, **run_kwargs)
+        is_goal = isinstance(job.get("goal"), dict)
+        retry_goal_failure = (is_goal and outcome.state == "failed"
+                              and (not spawned["yes"] or outcome.retryable))
+        if retry_goal_failure and not spawned["yes"]:
+            # A native Goal is durable and has a bounded attempt budget. Failure before the child
+            # process exists is evidence about THIS NODE (binary vanished after advertisement,
+            # local permissions, socket setup), not about the Goal. Report nothing terminal: the
+            # lease reaper hands the same turn to another capable machine and eventually ends it at
+            # retries_exhausted if the fault is fleet-wide. Ordinary one-shot tasks retain their
+            # established terminal-failure behavior.
+            landed = False
+            abandoned_because = "'s native Goal harness could not start"
+        else:
+            outcome, landed = _push_result(job, outcome, spawned["yes"], remote, publisher)
+            if retry_goal_failure and landed:
+                # The process did start, so `_push_result` publishes its worktree and native
+                # history before we relinquish the lease. This is still NOT a terminal report:
+                # the relay's bounded reaper moves the same logical turn to another machine. The
+                # relay-authenticated event makes the reason and the handoff visible in the Goal's
+                # trajectory without trusting the agent to declare its own verdict.
+                reason = task_stream.redact(outcome.error or "native Goal harness failed")[
+                    :_MAX_SESSION_RESET_REASON_CHARS]
+                publisher.publish("task.retrying", reason=reason)
+                # Flush the entire trajectory tail while this provider still holds the lease.
+                # The retry endpoint below revokes event authority immediately; leaving the normal
+                # close in `finally` as the first flush would make the handoff reliably discard the
+                # last output/tool events—the exact training evidence this path exists to retain.
+                publisher.flush()
+                try:
+                    retry_answer = checkpoint_retry_once(
+                        state, task_id,
+                        claim_id=claim_id,
+                        reason=reason,
+                        result_commit=outcome.result_commit,
+                        transcript_result_commit=outcome.transcript_result_commit,
+                        session_id=outcome.session_id,
+                        session_reset_reason=outcome.session_reset_reason,
+                    )
+                    retry_handed_off = True
+                    retry_state = str(retry_answer.get("state") or "queued")
+                except (Exception, SystemExit) as exc:
+                    # Additive rollout and ambiguous acknowledgements both land here. Do not turn
+                    # a retry-path transport/version fault into a terminal Goal failure: leaving
+                    # the row running preserves the established bounded lease-reaper fallback.
+                    _warn(f"task {task_id}: could not explicitly hand off its native Goal "
+                          f"checkpoint ({exc!r}); falling back to lease-expiry recovery")
+                landed = False
+                abandoned_because = "'s native Goal harness failed retryably"
     except task_repo.InputFetchError:
         # The input never arrived, so this attempt has produced no evidence about the task at all —
         # not even a failed one. Routed to the same silence a failed push takes: report nothing,
@@ -1129,6 +1765,16 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
         return
 
     if not landed:
+        if retry_handed_off:
+            if retry_state == "failed":
+                _warn(f"task {task_id}'s native Goal harness failed on its final allowed attempt; "
+                      "the relay preserved the partial checkpoint for audit and ended the Goal "
+                      "with retries_exhausted.")
+            else:
+                _warn(f"task {task_id}'s native Goal checkpoint was accepted by the relay and the "
+                      "same turn is queued immediately for another capable provider; no terminal "
+                      "state was reported by this worker.")
+            return
         # DELIBERATELY no terminal report. Nothing this attempt produced is in the repository, so
         # reporting one would mark the task terminal with nothing to fetch — and terminal is
         # precisely the state nothing retries. Left `running`, its lease lapses and the relay's
@@ -1144,10 +1790,28 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
 
     for attempt in range(1, _REPORT_ATTEMPTS + 1):
         try:
-            report_once(state, task_id, state=outcome.state, output=outcome.output,
-                        error=outcome.error, session_id=outcome.session_id,
-                        result_commit=outcome.result_commit,
-                        session_reset_reason=outcome.session_reset_reason)
+            report_kwargs: dict[str, Any] = {
+                "state": outcome.state, "output": outcome.output, "error": outcome.error,
+                "session_id": outcome.session_id, "result_commit": outcome.result_commit,
+                "session_reset_reason": outcome.session_reset_reason,
+            }
+            if claim_id:
+                report_kwargs["claim_id"] = claim_id
+            # Additive rolling upgrade: an older relay ignores this key, while a worker that
+            # produced no transcript keeps the exact pre-feature report shape.
+            if outcome.transcript_result_commit:
+                report_kwargs["transcript_result_commit"] = outcome.transcript_result_commit
+            # Preserve the established Claude report shape. Besides compatibility with older
+            # relays, omitting absent Goal fields keeps `goal_status: null` from being mistaken for
+            # an attempted checkpoint by an intermediary that validates keys rather than values.
+            if isinstance(job.get("goal"), dict):
+                report_kwargs.update({
+                    "goal_status": outcome.goal_status,
+                    "goal_turns_completed": outcome.goal_turns_completed,
+                    "goal_tokens_used": outcome.goal_tokens_used,
+                    "goal_time_used_seconds": outcome.goal_time_used_seconds,
+                })
+            report_once(state, task_id, **report_kwargs)
             return
         except (Exception, SystemExit) as exc:
             status = getattr(exc, "status", None)
@@ -1190,6 +1854,7 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
 
 
 def _lease_renewer(state: Any, task_id: str, *,
+                   claim_id: str | None = None,
                    on_beat: Callable[[], None] | None = None) -> Any:
     """This attempt's lease renewer, already started. Never raises.
 
@@ -1201,7 +1866,10 @@ def _lease_renewer(state: Any, task_id: str, *,
     try:
         from . import task_lease
 
-        renewer = task_lease.LeaseRenewer(state, task_id, on_beat=on_beat)
+        options: dict[str, Any] = {"on_beat": on_beat}
+        if claim_id:
+            options["claim_id"] = claim_id
+        renewer = task_lease.LeaseRenewer(state, task_id, **options)
         renewer.start()
         return renewer
     except (Exception, SystemExit) as exc:
@@ -1270,13 +1938,17 @@ def _git_remote(state: Any, job: dict[str, Any]) -> task_repo.GitRemote | None:
     decide whether to refresh would be a guess. It does not need to be one: a git failure routes to
     the push-failure path below, the task's lease lapses, and the next attempt claims with a token
     freshly fetched. **The recovery path already exists**, so a second one keyed on parsing git's
-    English would add a way to be wrong without adding a way to succeed.
+    English would add a way to be wrong without adding a way to succeed. The remote DOES read the
+    live token before every distinct Git phase, however: lease/event/heartbeat traffic may already
+    have refreshed an expired credential during a long agent run, and retaining the claim-time
+    string would knowingly discard that successful refresh.
     """
     project_id = str(job.get("project_id") or "")
     if not job.get("input_commit") or not project_id:
         return None
     return task_repo.GitRemote(
-        url=relay.git_remote_url(state.signaling_url, project_id), token=state.token())
+        url=relay.git_remote_url(state.signaling_url, project_id), token=state.token(),
+        claim_id=str(job.get("claim_id") or "") or None, token_provider=state.token)
 
 
 def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
@@ -1331,11 +2003,12 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         # codebase's word for that is "do not report success and let it be retried", exactly as a
         # failed result push already behaves. A terminal failure would spend the whole turn on a
         # transient network fault.
-        task_repo.push_transcript(
-            workspace, url=remote.url, token=remote.token,
-            ref=task_repo.transcript_ref(conversation_id))
+        claim = ({"claim_id": remote.claim_id} if remote.claim_id else {})
+        transcript_result_commit = task_repo.push_transcript(
+            workspace, url=remote.url, token=remote.live_token(),
+            ref=task_repo.transcript_ref(conversation_id), **claim)
         pushed = task_repo.commit_and_push(
-            workspace, url=remote.url, token=remote.token,
+            workspace, url=remote.url, token=remote.live_token(),
             branch=str(job.get("branch") or ""),
             message=f"task {job.get('task_id')} ({outcome.state})",
             # No `transcript=` any more (ADR 0034 D-j, issue 39). The conversation does not travel
@@ -1346,7 +2019,7 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
             # Neither key present is the pre-0033 `grid <grid@invalid>`, which is exactly what an
             # older relay produces, so this is free to roll out in either direction.
             author=task_repo.identity_or_default(
-                job.get("author_name"), job.get("author_email")))
+                job.get("author_name"), job.get("author_email")), **claim)
     except (Exception, SystemExit) as exc:
         # SCRUBBED like every other message that leaves this process: it is built from git's own
         # stderr, and it travels into the durable event log the requesting user reads back.
@@ -1414,9 +2087,11 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         # out what the agent was doing when it stopped, and the session id is what the next attempt
         # resumes. Only the verdict changes.
         return replace(outcome, state="failed", error=reason,
-                       result_commit=pushed.commit), True
+                       result_commit=pushed.commit,
+                       transcript_result_commit=transcript_result_commit), True
 
-    return replace(outcome, result_commit=pushed.commit), True
+    return replace(outcome, result_commit=pushed.commit,
+                   transcript_result_commit=transcript_result_commit), True
 
 
 def _publisher_for(state: Any, task_id: str, job: dict[str, Any]) -> Any:
@@ -1431,15 +2106,36 @@ def _publisher_for(state: Any, task_id: str, job: dict[str, Any]) -> Any:
     """
     from .task_events import TaskEventPublisher
 
-    publisher = TaskEventPublisher(state, task_id)
+    claim_id = str(job.get("claim_id") or "") or None
+    publisher = (TaskEventPublisher(state, task_id, claim_id=claim_id)
+                 if claim_id else TaskEventPublisher(state, task_id))
     try:
-        publisher.publish(
-            "task.attempt_started",
-            attempt=job.get("attempt"),
-            provider_id=job.get("provider_id"),
-        )
+        is_goal = isinstance(job.get("goal"), dict)
+        accepted = False
+        for _attempt in range(2 if is_goal else 1):
+            accepted = publisher.publish(
+                "task.attempt_started",
+                # Ordinary task narration stays buffered. Goal attempt identity is a
+                # release/training boundary and must be durably acknowledged before the native
+                # harness can execute. The relay deduplicates this bounded ambiguity retry.
+                _flush=is_goal,
+                attempt=job.get("attempt"),
+                provider_id=job.get("provider_id"),
+                # The relay overwrites this from the claim row, so the durable trajectory does not
+                # trust the worker. Sending it keeps provider-first rolling upgrades informative
+                # when an older relay stores the event opaquely.
+                agent_kind=job.get("agent_kind"),
+            )
+            if accepted:
+                break
+        if is_goal:
+            publisher._goal_attempt_recorded = accepted is True
     except (Exception, SystemExit) as exc:
-        _warn(f"could not announce the start of task {task_id} ({exc!r}); running it anyway")
+        is_goal = isinstance(job.get("goal"), dict)
+        action = "the Goal will not start" if is_goal else "running it anyway"
+        _warn(f"could not announce the start of task {task_id} ({exc!r}); {action}")
+        if is_goal:
+            publisher._goal_attempt_recorded = False
     return publisher
 
 

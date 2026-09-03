@@ -133,10 +133,12 @@ class LeaseRenewer:
 
     def __init__(self, state: Any, task_id: str, *,
                  interval: float = RENEW_INTERVAL_SECONDS,
+                 claim_id: str | None = None,
                  on_beat: Callable[[], None] | None = None) -> None:
         self._state = state
         self._task_id = task_id
         self._interval = interval
+        self._claim_id = claim_id
         # The one passenger this beat carries (ADR 0032 D-f, issue 08). Its contract is stated in the
         # module docstring: called after a renewal, only while a child is attached, and never allowed
         # to cost anything.
@@ -281,14 +283,18 @@ class LeaseRenewer:
         land either.
         """
         token = self._state.token()
+        claim = ({"claim_id": self._claim_id} if self._claim_id else {})
         try:
             try:
-                relay.renew_task_lease(self._state.signaling_url, token, self._task_id)
+                relay.renew_task_lease(
+                    self._state.signaling_url, token, self._task_id,
+                    **claim)
             except relay.RelayUnauthorized:
                 if not self._state.refresh(stale_token=token):
                     raise
                 relay.renew_task_lease(
-                    self._state.signaling_url, self._state.token(), self._task_id)
+                    self._state.signaling_url, self._state.token(), self._task_id,
+                    **claim)
         except relay.RelayUnauthorized:
             # No credential is available, so no later renewal can land. NOT a statement about
             # who holds the lease — we simply cannot ask any more — so the agent is left to

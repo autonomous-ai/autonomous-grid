@@ -21,7 +21,9 @@ to lose the run. Everything unrecognised is ignored rather than guessed at, whic
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -37,6 +39,7 @@ Event = tuple[str, dict[str, Any]]
 # not merely 4 for UTF-8.
 MAX_TEXT_CHARS = MAX_EVENT_BYTES // 6 - 200
 TRUNCATION_MARKER = "… [truncated]"
+_GOAL_TRANSCRIPT_RECOVERY_BYTES = 2 * 1024 * 1024
 
 
 # Credential shapes that must never survive into a published event. The provider's own credential is
@@ -282,6 +285,132 @@ class StreamTranslator:
             return False
         self.session_id = session_id
         return True
+
+
+class GoalStreamTranslator(StreamTranslator):
+    """Claude Code stream plus the native `/goal` attachment that ends one Grid slice."""
+
+    def __init__(self, on_rate_limit: Callable[[Any], None] | None = None) -> None:
+        super().__init__(on_rate_limit=on_rate_limit)
+        self.goal_condition: str | None = None
+        self.goal_evaluated = False
+        self.goal_met = False
+        self.goal_impossible = False
+        self.goal_reason: str | None = None
+        self.goal_iterations: int | None = None
+        self.goal_duration_ms: int | None = None
+        self.goal_tokens: int | None = None
+        self.goal_protocol_error: str | None = None
+        self.observed_tokens = 0
+        self.last_output: str | None = None
+
+    def _translate(self, record: dict[str, Any]) -> list[Event]:
+        if record.get("type") == "attachment":
+            attachment = record.get("attachment")
+            if isinstance(attachment, dict) and attachment.get("type") == "goal_status":
+                return self._goal_status(attachment)
+        events = super()._translate(record)
+        if record.get("type") == "assistant":
+            message = record.get("message")
+            usage = message.get("usage") if isinstance(message, dict) else None
+            if isinstance(usage, dict):
+                for key in ("input_tokens", "output_tokens"):
+                    value = usage.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        self.observed_tokens += value
+            content = message.get("content") if isinstance(message, dict) else None
+            for block in content if isinstance(content, list) else []:
+                text = block.get("text") if isinstance(block, dict) else None
+                if isinstance(text, str) and text and not record.get("is_meta"):
+                    self.last_output = redact(text)
+        return events
+
+    def _goal_status(self, attachment: dict[str, Any]) -> list[Event]:
+        condition = attachment.get("condition")
+        if isinstance(condition, str):
+            self.goal_condition = condition
+        # The first attachment only says the slash command installed its session hook. Stopping
+        # here would create a zero-work loop, so only an evaluator reason or terminal flag ends a
+        # Grid slice.
+        if attachment.get("sentinel") is True:
+            return [("goal.claude.set", {"condition": bounded(condition)
+                     if isinstance(condition, str) else None})]
+        reason = attachment.get("reason")
+        impossible = attachment.get("impossible") is True or attachment.get("failed") is True
+        met = attachment.get("met") is True
+        if met and impossible:
+            self.goal_protocol_error = "Claude Goal attachment marked the condition both met and impossible"
+        if not isinstance(reason, str) and not (met or impossible):
+            return []
+        self.goal_evaluated = True
+        self.goal_met = met
+        self.goal_impossible = impossible
+        self.goal_reason = redact(reason) if isinstance(reason, str) else None
+        for field, attr in (("iterations", "goal_iterations"),
+                            ("durationMs", "goal_duration_ms"),
+                            ("tokens", "goal_tokens")):
+            value = attachment.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                setattr(self, attr, value)
+        return [("goal.claude.evaluated", {
+            "met": met,
+            "impossible": impossible,
+            "reason": bounded(self.goal_reason) if self.goal_reason else None,
+            "iterations": self.goal_iterations,
+            "duration_ms": self.goal_duration_ms,
+            "tokens": self.goal_tokens,
+            "protocol_error": self.goal_protocol_error,
+        })]
+
+    def recover_goal_status(self, path: "os.PathLike[str]", *, after_bytes: int = 0) -> list[Event]:
+        """Recover attachments Claude persisted but omitted from ``stream-json`` stdout.
+
+        Claude Code 2.1.251 writes the terminal ``goal_status`` attachment to its native JSONL but
+        does not always emit that record in print-mode stdout. Only bytes appended by this run are
+        eligible on resume, so an older successful attachment can never complete a later slice.
+        The scan is tail-bounded and opens without following symlinks because the transcript lives
+        in an agent-writable worktree.
+        """
+        if self.goal_evaluated:
+            return []
+        try:
+            offset = max(0, int(after_bytes))
+        except (TypeError, ValueError, OverflowError):
+            offset = 0
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("Claude transcript is not a regular file")
+            start = max(offset, info.st_size - _GOAL_TRANSCRIPT_RECOVERY_BYTES)
+            os.lseek(fd, start, os.SEEK_SET)
+            chunks: list[bytes] = []
+            remaining = _GOAL_TRANSCRIPT_RECOVERY_BYTES
+            while remaining:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+        finally:
+            os.close(fd)
+        if start > offset:
+            _partial, _separator, payload = payload.partition(b"\n")
+
+        events: list[Event] = []
+        for raw in payload.splitlines():
+            try:
+                record = json.loads(raw)
+            except (ValueError, RecursionError, UnicodeDecodeError):
+                continue
+            if not isinstance(record, dict) or record.get("type") != "attachment":
+                continue
+            attachment = record.get("attachment")
+            if isinstance(attachment, dict) and attachment.get("type") == "goal_status":
+                events.extend(self._goal_status(attachment))
+        return _redacted(events)
 
 
 # The keys a tool uses to name the thing it is acting on, in the order they are preferred. Only

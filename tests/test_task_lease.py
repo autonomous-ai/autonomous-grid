@@ -109,6 +109,22 @@ def test_it_renews_while_the_child_is_alive(renewals):
     assert {task_id for _token, task_id in renewals} == {"t-1"}
 
 
+def test_a_goal_renews_only_its_exact_claim_generation(monkeypatch):
+    from remote import task_lease
+
+    seen = []
+
+    def renew(_url, _token, _task_id, **kwargs):
+        seen.append(kwargs)
+
+    monkeypatch.setattr(task_lease.relay, "renew_task_lease", renew)
+    renewer = task_lease.LeaseRenewer(
+        _FakeState(), "t-1", interval=60, claim_id="claim-generation-7")
+
+    assert renewer._renew_once() is True
+    assert seen == [{"claim_id": "claim-generation-7"}]
+
+
 def test_it_stops_the_moment_the_child_exits(renewals):
     """The criterion: a task whose agent process dies while the provider stays online loses its
     lease, so the relay can hand the work to someone else.
@@ -1514,6 +1530,66 @@ def test_the_event_ceiling_is_the_one_the_relay_actually_enforces():
         f"the provider builds events up to {task_events.MAX_EVENT_BYTES} bytes for a relay that "
         f"refuses anything over {relay_ceiling} — and a refusal drops the whole batch, so the "
         f"agent's output goes with it")
+
+
+def test_goal_evaluation_finishes_inside_the_terminal_report_timeout():
+    """Evaluation fits inside both the provider wait and relay-owned settlement lease."""
+    import ast
+    import os
+    import pathlib
+
+    from remote import relay
+
+    source_root = os.getenv("GRID_SRC_REPO")
+    if not source_root:
+        pytest.skip("GRID_SRC_REPO is required for the Goal evaluation timeout contract")
+    source = pathlib.Path(source_root) / "grid_cli" / "private_server" / "goal_evals.py"
+    assert source.is_file(), f"GRID_SRC_REPO has no private Goal evaluator at {source}"
+    assignments = [
+        node for node in ast.parse(source.read_text()).body
+        if isinstance(node, ast.Assign) and any(
+            getattr(target, "id", None) == "MAX_EVALUATION_SECONDS"
+            for target in node.targets)
+    ]
+    assert len(assignments) == 1
+    evaluation_ceiling = _numeric(assignments[0].value, "MAX_EVALUATION_SECONDS")
+    assert evaluation_ceiling <= relay._TASK_RESULT_TIMEOUT - 10, (
+        f"the relay can spend {evaluation_ceiling}s evaluating after the Goal agent exits, but "
+        f"the provider stops waiting after {relay._TASK_RESULT_TIMEOUT}s; leave ten seconds for "
+        "Git ref settlement, the fenced terminal transaction and the response")
+
+    tasks_source = pathlib.Path(source_root) / "grid_cli" / "private_server" / "tasks.py"
+    assert tasks_source.is_file(), f"GRID_SRC_REPO has no private Goal task plane at {tasks_source}"
+    settlement_assignments = [
+        node for node in ast.parse(tasks_source.read_text()).body
+        if isinstance(node, ast.Assign) and any(
+            getattr(target, "id", None) == "GOAL_RESULT_SETTLEMENT_LEASE_SECONDS"
+            for target in node.targets)
+    ]
+    assert len(settlement_assignments) == 1
+    settlement_lease = _numeric(
+        settlement_assignments[0].value, "GOAL_RESULT_SETTLEMENT_LEASE_SECONDS")
+    assert settlement_lease >= relay._TASK_RESULT_TIMEOUT + 10, (
+        f"the provider can wait {relay._TASK_RESULT_TIMEOUT}s for terminal settlement, but the "
+        f"relay protects that work for only {settlement_lease}s; a short configured task TTL could "
+        "reclaim a valid Goal result before its response lands")
+
+    work_assignments = [
+        node for node in ast.parse(tasks_source.read_text()).body
+        if isinstance(node, ast.Assign) and any(
+            getattr(target, "id", None) == "GOAL_RESULT_SETTLEMENT_WORK_SECONDS"
+            for target in node.targets)
+    ]
+    assert len(work_assignments) == 1
+    settlement_work = _numeric(
+        work_assignments[0].value, "GOAL_RESULT_SETTLEMENT_WORK_SECONDS")
+    assert evaluation_ceiling <= settlement_work, (
+        f"one evaluation may need {evaluation_ceiling}s but the whole Git/eval settlement budget "
+        f"is only {settlement_work}s")
+    assert settlement_work <= relay._TASK_RESULT_TIMEOUT - 10, (
+        f"the relay can spend {settlement_work}s across result refs, evaluation and branch "
+        f"advancement, but the provider stops waiting after {relay._TASK_RESULT_TIMEOUT}s; leave "
+        "ten seconds for the fenced transaction and response")
 
 
 def test_the_heartbeat_carries_a_tree_snapshot_while_the_agent_works(renewals):

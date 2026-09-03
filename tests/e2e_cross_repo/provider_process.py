@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from pathlib import Path
 
 sys.path.insert(0, os.environ["GRID_REPO"])
 
@@ -57,13 +58,29 @@ def main() -> int:
     renew_seconds = float(os.environ["GRID_RENEW_SECONDS"])
 
     class _ScaledRenewer(task_lease.LeaseRenewer):
-        def __init__(self, state, task_id, *, interval=None, on_beat=None):
-            super().__init__(state, task_id, interval=renew_seconds, on_beat=on_beat)
+        def __init__(self, state, task_id, *, interval=None, claim_id=None, on_beat=None):
+            # Forward the opaque generation as well as scaling time. Dropping it makes every Goal
+            # renewal fail construction after claim fencing was introduced; short scenarios can
+            # still finish inside one lease and produce a dangerously green-looking matrix.
+            super().__init__(
+                state, task_id, interval=renew_seconds, claim_id=claim_id, on_beat=on_beat)
 
     task_lease.LeaseRenewer = _ScaledRenewer
     task_lease.RENEW_INTERVAL_SECONDS = renew_seconds
 
     state = _State()
+    if os.environ.get("GRID_E2E_ONE_TASK") == "1":
+        # Test-only provider lifecycle: finish exactly one claimed turn, then withdraw before it can
+        # race the replacement machine for an immediately requeued retry checkpoint.
+        run_and_report = tasks._run_and_report
+
+        def once(*args, **kwargs):
+            try:
+                return run_and_report(*args, **kwargs)
+            finally:
+                state.tasks_stop.set()
+
+        tasks._run_and_report = once
     # How many turns this provider runs AT ONCE (ADR 0034 D-b, issue 40). **Default 1**, and that
     # default is load-bearing rather than conservative: `test_09` proves a cancel really stopped an
     # agent by observing that a second task becomes claimable, which only means anything while this
@@ -74,11 +91,35 @@ def main() -> int:
     # deliberately does not go through `serve`, so reading it here would name a knob nothing in this
     # process consults.
     workers = int(os.environ.get("GRID_E2E_TASK_WORKERS", "1"))
-    print(f"provider {state.node_id} up ({workers} worker(s))", file=sys.stderr, flush=True)
+    print(f"provider {state.node_id} up ({workers} worker(s), agents={tasks._agent_kinds()})",
+          file=sys.stderr, flush=True)
     if workers == 1:
         tasks.task_loop(state)
         return 0
 
+    # Make the concurrency precondition observable to the driver. Merely starting two threads does
+    # not prove both parked a claim with the old capability snapshot before the Goal was created;
+    # without this marker the protocol-drift race test could pass while exercising one worker.
+    real_claim = tasks.relay.claim_task
+    entered_lock = threading.Lock()
+    entered = 0
+
+    def observed_claim(*args, **kwargs):
+        nonlocal entered
+        with entered_lock:
+            entered += 1
+            ordinal = entered
+        print(f"claim poll entered {ordinal}", file=sys.stderr, flush=True)
+        marker = os.environ.get("GRID_E2E_CLAIM_MARKER")
+        if marker:
+            # Append one record per entry so a native fixture can wait for N distinct fresh polls,
+            # not only learn that at least one happened. This write is inside the same lock as the
+            # ordinal, making each line one worker entry even on filesystems without append atomicity.
+            with Path(marker).open("a", encoding="utf-8") as handle:
+                handle.write(f"{ordinal}\n")
+        return real_claim(*args, **kwargs)
+
+    tasks.relay.claim_task = observed_claim
     threads = [threading.Thread(target=tasks.task_loop, args=(state,), daemon=True)
                for _ in range(workers)]
     for thread in threads:

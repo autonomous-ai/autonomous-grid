@@ -31,6 +31,7 @@ from .remote_request import (
     cmd_remote_video,
 )
 from .remote_router import cmd_remote_router
+from .remote_relay import cmd_remote_relay
 from .agent import (
     cmd_agent_install,
     cmd_agent_status,
@@ -53,6 +54,7 @@ from .grid import (
 )
 from .device import cmd_device_info
 from .launch import cmd_launch
+from .goal import cmd_goal
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_pull, cmd_rm
 from .parser import build_parser
@@ -94,6 +96,7 @@ __all__ = [
     "cmd_remote_project",
     "cmd_remote_task",
     "cmd_remote_router",
+    "cmd_remote_relay",
     "cmd_remote_chat",
     "cmd_remote_image",
     "cmd_remote_edit",
@@ -103,6 +106,7 @@ __all__ = [
     "cmd_edit",
     "cmd_video",
     "cmd_launch",
+    "cmd_goal",
     "cmd_agent_install",
     "cmd_agent_status",
     "cmd_engine_install",

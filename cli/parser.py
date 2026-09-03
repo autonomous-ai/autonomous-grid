@@ -6,6 +6,7 @@ module this imports from. The surface mirrors docs/cli.md.
 from __future__ import annotations
 
 import argparse
+import re
 
 from local import runtime
 from shared._version import __version__
@@ -36,12 +37,14 @@ from .grid import (
     cmd_version,
 )
 from .credential import cmd_credential
+from .goal import cmd_goal
 from .launch import cmd_launch
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from . import project_arg
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .remote_grid import cmd_remote_members
+from .remote_relay import cmd_remote_relay
 from .remote_price import cmd_remote_price
 from .remote_project import cmd_remote_project
 from .remote_task import cmd_remote_task
@@ -71,6 +74,43 @@ def _positive_task_count(raw: str) -> int:
     if count < 1:
         raise argparse.ArgumentTypeError(f"{raw!r} must be at least 1 task")
     return count
+
+
+def _positive_token_budget(raw: str) -> int:
+    """A finite Goal budget must be a positive whole number."""
+    try:
+        budget = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError("token budget must be a positive whole number") from None
+    if budget <= 0:
+        raise argparse.ArgumentTypeError("token budget must be a positive whole number")
+    return budget
+
+
+def _positive_node_count(raw: str) -> int:
+    try:
+        count = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a whole number of nodes") from None
+    if count < 1:
+        raise argparse.ArgumentTypeError(f"{raw!r} must be at least 1 node")
+    return count
+
+
+def _worker_revision(raw: str) -> str:
+    revision = raw.strip().lower()
+    if re.fullmatch(r"[0-9a-f]{7,64}", revision) is None:
+        raise argparse.ArgumentTypeError(
+            "worker revision must be a 7-64 character hexadecimal Git revision")
+    return revision
+
+
+def _agent_sequence(raw: str) -> tuple[str, ...]:
+    agents = tuple(part.strip().lower() for part in raw.split(","))
+    if not agents or len(agents) > 16 or any(agent not in ("codex", "claude") for agent in agents):
+        raise argparse.ArgumentTypeError(
+            "agent sequence must be 1-16 comma-separated 'codex' or 'claude' entries")
+    return agents
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -106,9 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_state(sub)
     _add_auth(sub)
     _add_members(sub)
+    _add_relay(sub)
     _add_price(sub)
     _add_project(sub)
     _add_task(sub)
+    _add_goal(sub)
     _add_router(sub)
     _add_engine_setup(sub)
     _add_launch(sub)
@@ -344,8 +386,12 @@ def _add_engines(sub) -> None:
     # the group's comment above — `--tasks` in particular, because a `store_true` defaulting to
     # False would make `_reject_remote_only_flags` refuse every LOCAL join.
     remote_only.add_argument("--tasks", action="store_true", default=None,
-                             help="Also claim distributed tasks for this grid, spending this box's "
-                                  "own Claude subscription (remote only). Off unless you ask.")
+                             help="Also claim distributed tasks and Goals with this box's installed "
+                                  "agent harnesses (remote only). Off unless you ask.")
+    remote_only.add_argument(
+        "--tasks-only", action="store_true", default=None,
+        help="Join this box as an agent worker without advertising an inference model (remote "
+             "only). Implies --tasks; model inference comes from other Grid nodes.")
     remote_only.add_argument("--max-tasks", type=_positive_task_count, default=None, metavar="N",
                              help="How many tasks this provider runs at once (default 1). "
                                   "Wins over GRID_MAX_TASKS.")
@@ -506,6 +552,27 @@ def _add_state(sub) -> None:
     use.add_argument("--none", action="store_true", help="Clear the active grid for the current mode.")
     use.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     use.set_defaults(handler=cmd_use)
+
+
+def _add_relay(sub) -> None:
+    relay = sub.add_parser(
+        "relay",
+        help="Show a relay and the Grids that use it (remote)",
+    )
+    actions = relay.add_subparsers(dest="subcommand", required=True)
+    info = actions.add_parser(
+        "info",
+        help="Show one relay and every Grid configured to use it",
+    )
+    info.add_argument(
+        "relay",
+        nargs="?",
+        default=None,
+        help=("Relay id or URL. A Grid name/id also selects that Grid's relay; omit for the "
+              "active Grid's relay or the sole configured relay."),
+    )
+    info.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    info.set_defaults(handler=cmd_remote_relay)
 
 
 def _add_auth(sub) -> None:
@@ -1046,6 +1113,92 @@ def _add_project(sub) -> None:
         refresher, help="The clone to refresh (default: the current directory).")
     refresher.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     refresher.set_defaults(handler=cmd_remote_project)
+
+
+def _add_goal(sub) -> None:
+    """A measurable native-agent Goal whose turns are ordinary distributed Grid tasks."""
+    goal = sub.add_parser("goal", help="Run measurable agent Goals across Grid nodes (remote)")
+    actions = goal.add_subparsers(dest="goal_action", required=True)
+
+    run = actions.add_parser("run", help="Start a Goal and let Grid continue it until done")
+    project_arg.add_project(run, help="Project id whose files the Goal may read and change.")
+    run.add_argument("--objective", required=True, help="The outcome Codex should achieve.")
+    run.add_argument("--done-when", required=True, help="One measurable completion condition.")
+    run.add_argument("--model", required=True, help="Grid model used by Codex.")
+    run.add_argument("--token-budget", type=_positive_token_budget, default=100_000,
+                     help="Maximum cumulative tokens (default 100000).")
+    run.add_argument("--tools", default=None, metavar="FILE",
+                     help="JSON file containing the observe/act HTTP capability manifest.")
+    run.add_argument("--evals", default=None, metavar="FILE",
+                     help=("JSON file containing independent artifact or authenticated verify "
+                           "evals."))
+    run.add_argument("--agent", choices=("codex", "claude", "auto"), default="codex",
+                     help="Allowed native Goal harness (default: codex; auto allows both).")
+    run.add_argument("--require", action="append", default=[], metavar="CAPABILITY",
+                     help="Required harness capability; repeat for multiple requirements.")
+    run.add_argument("--allow-subgoals", action="store_true",
+                     help="Allow the parent agent to create bounded distributed child Goals.")
+    run.add_argument(
+        "--idempotency-key", default=None, metavar="KEY",
+        help="Reuse after an uncertain create response to recover the same Goal.")
+    run.add_argument("--name", default=None, help="Optional short Goal name.")
+    run.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    run.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    run.set_defaults(handler=cmd_goal)
+
+    listing = actions.add_parser("list", help="List active Goals")
+    listing.add_argument("--all", action="store_true", help="Include completed Goal history.")
+    listing.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    listing.set_defaults(handler=cmd_goal)
+
+    status = actions.add_parser("status", help="Show one Goal")
+    status.add_argument("goal_id")
+    status.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    status.set_defaults(handler=cmd_goal)
+
+    evidence = actions.add_parser(
+        "evidence", help="Export turn, machine, model, commit and evaluation evidence")
+    evidence.add_argument("goal_id")
+    evidence.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    evidence.add_argument(
+        "--json", action="store_true",
+        help="Accepted for consistency; Goal evidence is always machine-readable JSON.")
+    evidence.add_argument(
+        "--verify", action="store_true",
+        help="Fail unless turns, transcript handoffs and final independent evals are complete.")
+    evidence.add_argument(
+        "--min-execution-nodes", type=_positive_node_count, default=1, metavar="N",
+        help="With --verify, require at least N distinct task execution nodes (default: 1).")
+    evidence.add_argument(
+        "--require-inference", action="store_true",
+        help="With --verify, require every turn to have model usage attributed to a Grid node.")
+    evidence.add_argument(
+        "--require-worker-revision", type=_worker_revision, default=None, metavar="REV",
+        help=("With --verify, require every execution attempt to come from a clean Grid worker "
+              "whose relay-stamped Git revision starts with REV."))
+    evidence.add_argument(
+        "--require-agent-sequence", type=_agent_sequence, default=None,
+        metavar="AGENT,...",
+        help=("With --verify, require this ordered subsequence of relay-stamped execution "
+              "attempts, for example codex,claude,codex."))
+    evidence.set_defaults(handler=cmd_goal)
+
+    for action, help_text in (("pause", "Stop scheduling new turns"),
+                              ("resume", "Resume scheduling turns"),
+                              ("cancel", "End a Goal")):
+        parser = actions.add_parser(action, help=help_text)
+        parser.add_argument("goal_id")
+        if action == "resume":
+            parser.add_argument(
+                "--token-budget", type=_positive_token_budget, default=None, metavar="TOKENS",
+                help=("Raise the cumulative token budget while resuming; required to continue a "
+                      "budget-limited Goal."))
+        parser.add_argument("--grid", default=None,
+                            help="Grid to act on (default: active grid).")
+        parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+        parser.set_defaults(handler=cmd_goal)
 
 
 def _add_task(sub) -> None:

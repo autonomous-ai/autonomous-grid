@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import httpx
 
 from local import config
-from shared import logging_setup, paths, run_records
+from shared import logging_setup, paths, process_home, run_records
 from shared.handlers import HANDLERS
 from shared.models import api_catalog
 from local import runtime
@@ -47,6 +47,7 @@ _REMOTE_ONLY_JOIN_FLAGS = (
     # `None`, `--tasks` included: the predicate below is `is not None`, so a `store_true` flag
     # defaulting to False would refuse every LOCAL join.
     ("tasks", "--tasks"),
+    ("tasks_only", "--tasks-only"),
     ("max_tasks", "--max-tasks"),
     ("tasks_root", "--tasks-root"),
 )
@@ -456,7 +457,8 @@ def _spawn_engine(
     if api_key:
         child_env["GRID_API_MEDIA_KEY"] = api_key
     proc = subprocess.Popen(
-        runtime.cli_command() + ["__engine", grid_id, engine_id],
+        runtime.cli_command()
+        + [process_home.own_tag_arg(), run_records.LOCAL_ENGINE_MARKER, grid_id, engine_id],
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -1236,5 +1238,3 @@ def _record_alive(grid_id: str, engine_id: str) -> bool:
     reaper — made this refuse a re-join of an engine that had already died."""
     record = run_records.read_records(grid_id).get(engine_id)
     return bool(record and run_records.record_alive(record))
-
-

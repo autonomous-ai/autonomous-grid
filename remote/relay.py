@@ -19,7 +19,9 @@ module is the stateless wire boundary.
 """
 from __future__ import annotations
 
+import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 from urllib.parse import quote
@@ -42,6 +44,8 @@ _REGISTER_TIMEOUT = 15.0
 # (`task_claim_timeout_seconds`, 30s) or the client gives up first and every idle cycle looks like a
 # transport error — the same 30-vs-35 relationship `POLL_TIMEOUT` has with `poll_timeout_seconds`.
 TASK_CLAIM_TIMEOUT = 35.0
+# Opaque generation returned with every claim and required on every native Goal mutation.
+TASK_CLAIM_HEADER = "X-Grid-Task-Claim"
 # Reporting a terminal result is small and bounded, but it is the LAST word on work that has already
 # been done: losing it means the task is retried from scratch. Generous on purpose.
 _TASK_RESULT_TIMEOUT = 60.0
@@ -314,6 +318,8 @@ def claim_task(
     signaling_url: str,
     access_token: str,
     *,
+    agent_kinds: tuple[str, ...] = ("claude",),
+    agent_profiles: tuple[dict[str, Any], ...] | None = None,
     timeout: float = TASK_CLAIM_TIMEOUT,
 ) -> dict[str, Any] | None:
     """Long-poll for one task and claim it (``POST /relay/v1/tasks/claim``).
@@ -343,7 +349,13 @@ def claim_task(
     """
     try:
         with _client(signaling_url, access_token, timeout=timeout) as client:
-            resp = client.post("/relay/v1/tasks/claim")
+            body: dict[str, Any] = {}
+            if agent_kinds != ("claude",) or agent_profiles is not None:
+                body["agent_kinds"] = list(agent_kinds)
+            if agent_profiles is not None:
+                body["agent_profiles"] = list(agent_profiles)
+            kwargs = {"json": body} if body else {}
+            resp = client.post("/relay/v1/tasks/claim", **kwargs)
     except httpx.HTTPError as exc:
         raise RelayError(f"claim_task transport error: {exc}") from None
     if resp.status_code == 204:
@@ -367,7 +379,13 @@ def report_task_result(
     error: str | None,
     session_id: str | None = None,
     result_commit: str | None = None,
+    transcript_result_commit: str | None = None,
     session_reset_reason: str | None = None,
+    goal_status: str | None = None,
+    goal_turns_completed: int | None = None,
+    goal_tokens_used: int | None = None,
+    goal_time_used_seconds: int | None = None,
+    claim_id: str | None = None,
 ) -> None:
     """Report a task's terminal outcome (``POST /relay/v1/tasks/{id}/result``).
 
@@ -396,18 +414,104 @@ def report_task_result(
         body["session_id"] = session_id
     if result_commit:
         body["result_commit"] = result_commit
+    if transcript_result_commit:
+        body["transcript_result_commit"] = transcript_result_commit
     if session_reset_reason:
         body["session_reset_reason"] = session_reset_reason
+    if goal_status is not None:
+        body.update({
+            "goal_status": goal_status,
+            "goal_turns_completed": goal_turns_completed,
+            "goal_tokens_used": goal_tokens_used,
+            "goal_time_used_seconds": goal_time_used_seconds,
+        })
     try:
         with _client(signaling_url, access_token, timeout=_TASK_RESULT_TIMEOUT) as client:
             resp = client.post(
                 # The id came off the wire and is being interpolated into a path.
                 f"/relay/v1/tasks/{quote(task_id, safe='')}/result",
                 json=body,
+                headers=({TASK_CLAIM_HEADER: claim_id} if claim_id else None),
             )
     except httpx.HTTPError as exc:
         raise RelayError(f"report_task_result transport error: {exc}") from None
     _guard(resp, "report_task_result")
+
+
+def checkpoint_task_retry(
+    signaling_url: str,
+    access_token: str,
+    task_id: str,
+    *,
+    reason: str,
+    result_commit: str | None = None,
+    transcript_result_commit: str | None = None,
+    session_id: str | None = None,
+    session_reset_reason: str | None = None,
+    claim_id: str | None = None,
+) -> dict[str, Any]:
+    """Relinquish a failed native Goal attempt after publishing a coherent checkpoint.
+
+    Unlike silence + lease expiry, this explicitly authorizes the relay to hand the SAME turn's
+    partial worktree and native history to another machine immediately. The relay independently
+    resolves both Git refs and accepts the call only from the current lease holder.
+    """
+    body: dict[str, Any] = {"reason": reason}
+    if result_commit:
+        body["result_commit"] = result_commit
+    if transcript_result_commit:
+        body["transcript_result_commit"] = transcript_result_commit
+    if session_id:
+        body["session_id"] = session_id
+    if session_reset_reason:
+        body["session_reset_reason"] = session_reset_reason
+    try:
+        with _client(signaling_url, access_token, timeout=_TASK_RESULT_TIMEOUT) as client:
+            resp = client.post(
+                f"/relay/v1/tasks/{quote(task_id, safe='')}/retry",
+                json=body,
+                headers=({TASK_CLAIM_HEADER: claim_id} if claim_id else None),
+            )
+    except httpx.HTTPError as exc:
+        raise RelayError(f"checkpoint_task_retry transport error: {exc}") from None
+    _guard(resp, "checkpoint_task_retry")
+    try:
+        value = resp.json() if resp.content else {}
+    except ValueError as exc:
+        raise RelayError(f"checkpoint_task_retry returned a malformed body: {exc}") from None
+    return value if isinstance(value, dict) else {}
+
+
+def decline_task_claim(
+    signaling_url: str,
+    access_token: str,
+    task_id: str,
+    *,
+    attempt: int,
+    claim_id: str,
+) -> dict[str, Any]:
+    """Return a delivered-but-unstarted Goal claim without spending an attempt.
+
+    ``claim_id`` identifies the exact random claim generation. Attempts can be reused after a
+    successful decline, and a wall-clock lease expiry is not guaranteed unique, so neither can
+    safely fence a delayed duplicate from revoking a newer claim by the same node. The relay accepts
+    this only before its durable
+    ``task.attempt_started`` fence; after that, native harness failures use ``/retry`` instead.
+    """
+    try:
+        with _client(signaling_url, access_token, timeout=_TASK_EVENT_TIMEOUT) as client:
+            resp = client.post(
+                f"/relay/v1/tasks/{quote(task_id, safe='')}/decline",
+                json={"attempt": attempt, "claim_id": claim_id},
+            )
+    except httpx.HTTPError as exc:
+        raise RelayError(f"decline_task_claim transport error: {exc}") from None
+    _guard(resp, "decline_task_claim")
+    try:
+        value = resp.json() if resp.content else {}
+    except ValueError as exc:
+        raise RelayError(f"decline_task_claim returned a malformed body: {exc}") from None
+    return value if isinstance(value, dict) else {}
 
 
 def git_remote_url(signaling_url: str, project_id: str) -> str:
@@ -424,7 +528,8 @@ def git_remote_url(signaling_url: str, project_id: str) -> str:
     return f"{signaling_url.rstrip('/')}/relay/v1/git/{quote(project_id, safe='')}"
 
 
-def renew_task_lease(signaling_url: str, access_token: str, task_id: str) -> None:
+def renew_task_lease(signaling_url: str, access_token: str, task_id: str, *,
+                     claim_id: str | None = None) -> None:
     """Push this task's lease out (``POST /relay/v1/tasks/{id}/lease``).
 
     The relay renews on the LEASE alone — `state='running'` and this node recorded as the holder —
@@ -448,7 +553,8 @@ def renew_task_lease(signaling_url: str, access_token: str, task_id: str) -> Non
         with _client(signaling_url, access_token, timeout=_TASK_EVENT_TIMEOUT) as client:
             resp = client.post(
                 # The id came off the wire and is being interpolated into a path.
-                f"/relay/v1/tasks/{quote(task_id, safe='')}/lease")
+                f"/relay/v1/tasks/{quote(task_id, safe='')}/lease",
+                headers=({TASK_CLAIM_HEADER: claim_id} if claim_id else None))
     except httpx.HTTPError as exc:
         raise RelayError(f"renew_task_lease transport error: {exc}") from None
     # The body carries the new expiry, and nothing here reads it: this side already knows its own
@@ -467,6 +573,8 @@ def publish_task_events(
     access_token: str,
     task_id: str,
     events: list[dict[str, Any]],
+    *,
+    claim_id: str | None = None,
 ) -> dict[str, Any]:
     """Append a BATCH of progress events to a task's log (``POST /relay/v1/tasks/{id}/events``).
 
@@ -487,6 +595,7 @@ def publish_task_events(
                 # The id came off the wire and is being interpolated into a path.
                 f"/relay/v1/tasks/{quote(task_id, safe='')}/events",
                 json={"events": events},
+                headers=({TASK_CLAIM_HEADER: claim_id} if claim_id else None),
             )
     except httpx.HTTPError as exc:
         raise RelayError(f"publish_task_events transport error: {exc}") from None
@@ -782,6 +891,15 @@ class TaskRefusal(SystemExit):
         self.status = status
 
 
+class TaskTransportError(SystemExit):
+    """A one-shot task request received no HTTP answer.
+
+    It remains a ``SystemExit`` for every existing CLI caller. The narrower type exists so the one
+    POST that is safe to replay can distinguish transport ambiguity from authoritative responses
+    such as the old-relay missing-route hint, which is also intentionally rendered as SystemExit.
+    """
+
+
 def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str, *,
                   missing_route_hint: str | None = None, timeout: float = _REGISTER_TIMEOUT,
                   **kwargs: Any) -> Any:
@@ -806,7 +924,8 @@ def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str,
         # it is raised by the `httpx.Client(base_url=...)` construction inside this very `try`. These
         # are CLI one-shots whose CALLER classifies the exception (the contract is "any failure is a
         # clean SystemExit"), which is exactly the condition that makes the mapping load-bearing.
-        raise SystemExit(f"Cannot reach the relay ({method} {path}): {exc}") from None
+        raise TaskTransportError(
+            f"Cannot reach the relay ({method} {path}): {exc}") from None
     if resp.status_code >= 400:
         message = _task_error_message(resp)
         if (missing_route_hint
@@ -959,6 +1078,184 @@ def create_task(
             "ignored the project — ask its operator to update it before using shared projects."
         )
     return task
+
+
+# Every Goal endpoint arrived as one relay feature. A CLI ahead of its relay therefore gets
+# FastAPI's bare framework 404 from any of them. "Not Found" is especially misleading for status,
+# evidence and control: it sounds as if the Goal id is wrong, when the server has never heard of a
+# Goal. Keep the one diagnosis on every route, while preserving a Goal-aware relay's own specific
+# 404 (the hint is substituted only for the exact bare framework body in `_task_oneshot`).
+_OLD_RELAY_NO_GOALS = "This grid's relay does not support Grid Goal yet."
+
+
+def create_goal(signaling_url: str, access_token: str, *, project_id: str, objective: str,
+                done_when: str, model: str, token_budget: int | None,
+                tools: list[dict[str, Any]] | None = None, name: str | None = None,
+                agents: list[str] | None = None,
+                required_capabilities: list[str] | None = None,
+                evals: list[dict[str, Any]] | None = None,
+                allow_subgoals: bool = False,
+                idempotency_key: str | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "project_id": project_id, "objective": objective, "done_when": done_when,
+        "model": model, "token_budget": token_budget, "tools": tools or [],
+        "agents": agents or ["codex"],
+        "required_capabilities": required_capabilities or [],
+        "evals": evals or [],
+        "allow_subgoals": allow_subgoals,
+    }
+    if name:
+        body["name"] = name
+    # One identity for all transport attempts. A timeout says nothing about whether the relay
+    # committed the Goal; changing this key on retry would start a second autonomous tree.
+    key = idempotency_key or str(uuid.uuid4())
+    for attempt in range(2):
+        try:
+            return _task_oneshot(
+                signaling_url, access_token, "POST", "/relay/v1/goals", json=body,
+                headers={"Idempotency-Key": key},
+                missing_route_hint=_OLD_RELAY_NO_GOALS)
+        except TaskTransportError as exc:
+            if attempt == 0:
+                continue
+            raise SystemExit(
+                f"{exc}\nGoal creation may already have succeeded. Retry the exact command with "
+                f"--idempotency-key {key}") from None
+    raise AssertionError("unreachable")
+
+
+def list_goals(signaling_url: str, access_token: str, *, all: bool = False) -> list[dict[str, Any]]:
+    answer = _task_oneshot(signaling_url, access_token, "GET", "/relay/v1/goals",
+                           params={"all": "true"} if all else {},
+                           missing_route_hint=_OLD_RELAY_NO_GOALS)
+    if not isinstance(answer, list):
+        raise RelayError("list_goals returned a malformed body")
+    return answer
+
+
+def get_goal(signaling_url: str, access_token: str, goal_id: str) -> dict[str, Any]:
+    return _task_oneshot(signaling_url, access_token, "GET",
+                         f"/relay/v1/goals/{quote(goal_id, safe='')}",
+                         missing_route_hint=_OLD_RELAY_NO_GOALS)
+
+
+def get_goal_evidence(signaling_url: str, access_token: str, goal_id: str) -> dict[str, Any]:
+    """Fetch and assemble bounded turn pages from a Goal-aware relay.
+
+    Older relays ignore the pagination query and return the legacy whole record; absence of the
+    pagination object is therefore the compatibility signal, not an extra version probe.
+    """
+    path = f"/relay/v1/goals/{quote(goal_id, safe='')}/evidence"
+
+    def fetch(cursor: int) -> dict[str, Any]:
+        answer = _task_oneshot(
+            signaling_url, access_token, "GET", path, timeout=60.0,
+            params={"limit": "20", "cursor": str(cursor)},
+            missing_route_hint=_OLD_RELAY_NO_GOALS)
+        if not isinstance(answer, dict):
+            raise RelayError("get_goal_evidence returned a malformed body")
+        return answer
+
+    record = fetch(0)
+    paging = record.get("pagination")
+    if not isinstance(paging, dict):
+        return record
+
+    total = paging.get("total_turns")
+    snapshot = paging.get("snapshot")
+    if snapshot is not None and (
+            not isinstance(snapshot, str)
+            or re.fullmatch(r"[0-9a-f]{64}", snapshot) is None):
+        raise RelayError("Goal evidence pagination snapshot is malformed")
+    expected_cursor = 0
+    pages = 0
+    baseline_goal = record.get("goal")
+    baseline_relationships = record.get("relationships")
+    combined = record
+    page = record
+    combined_trajectory = (combined.get("trajectory")
+                           if isinstance(combined.get("trajectory"), dict) else {})
+    for key in ("turns", "attempt_events", "inference", "eval_runs"):
+        if not isinstance(combined.get(key), list):
+            raise RelayError(f"Goal evidence page has malformed {key}")
+    for key in ("pruned_turn_branches", "worktree_chain", "retry_checkpoint_chain"):
+        if not isinstance(combined_trajectory.get(key), list):
+            raise RelayError(f"Goal evidence page has malformed trajectory.{key}")
+
+    while True:
+        paging = page.get("pagination")
+        page_cursor = paging.get("cursor") if isinstance(paging, dict) else None
+        page_limit = paging.get("limit") if isinstance(paging, dict) else None
+        if (not isinstance(paging, dict)
+                or not isinstance(page_cursor, int) or isinstance(page_cursor, bool)
+                or page_cursor != expected_cursor
+                or not isinstance(page_limit, int) or isinstance(page_limit, bool)
+                or paging["limit"] < 1
+                or not isinstance(total, int) or isinstance(total, bool)
+                or total < 0
+                or paging.get("total_turns") != total
+                or (snapshot is not None and paging.get("snapshot") != snapshot)):
+            raise RelayError("Goal evidence pagination metadata is inconsistent")
+        page_turns = page["turns"]
+        if len(page_turns) > paging["limit"]:
+            raise RelayError("Goal evidence page exceeds its declared turn limit")
+        consumed = expected_cursor + len(page_turns)
+        expected_next = consumed if consumed < total else None
+        next_cursor = paging.get("next_cursor")
+        next_cursor_valid = (
+            next_cursor is None if expected_next is None
+            else (isinstance(next_cursor, int) and not isinstance(next_cursor, bool)
+                  and next_cursor == expected_next)
+        )
+        if (not next_cursor_valid
+                or paging.get("complete") is not (expected_next is None)):
+            raise RelayError("Goal evidence pagination cursor is not contiguous")
+        pages += 1
+        if expected_next is None:
+            break
+        expected_cursor = expected_next
+        page = fetch(expected_cursor)
+        paging = page.get("pagination")
+        if (page.get("schema_version") != combined.get("schema_version")
+                or page.get("goal") != baseline_goal
+                or page.get("relationships") != baseline_relationships):
+            raise RelayError("Goal changed while its evidence pages were being exported")
+        page_trajectory = (page.get("trajectory")
+                           if isinstance(page.get("trajectory"), dict) else {})
+        for key in ("turns", "attempt_events", "inference", "eval_runs"):
+            values = page.get(key)
+            if not isinstance(values, list):
+                raise RelayError(f"Goal evidence page has malformed {key}")
+            combined[key].extend(values)
+        for key in ("pruned_turn_branches", "worktree_chain", "retry_checkpoint_chain"):
+            values = page_trajectory.get(key)
+            if not isinstance(values, list):
+                raise RelayError(f"Goal evidence page has malformed trajectory.{key}")
+            combined_trajectory[key].extend(values)
+
+    if len(combined["turns"]) != total:
+        raise RelayError("Goal evidence pagination ended before every turn was exported")
+    turn_ids = [turn.get("id") for turn in combined["turns"] if isinstance(turn, dict)]
+    if len(turn_ids) != total or len(set(turn_ids)) != total:
+        raise RelayError("Goal evidence pagination returned duplicate or malformed turns")
+    combined.pop("pagination", None)
+    combined["export"] = {
+        "paginated": True, "pages": pages, "total_turns": total,
+        **({"snapshot": snapshot} if snapshot is not None else {}),
+    }
+    return combined
+
+
+def control_goal(signaling_url: str, access_token: str, goal_id: str,
+                 action: str, *, token_budget: int | None = None) -> dict[str, Any]:
+    body = ({"token_budget": token_budget}
+            if action == "resume" and token_budget is not None else None)
+    kwargs: dict[str, Any] = {"missing_route_hint": _OLD_RELAY_NO_GOALS}
+    if body is not None:
+        kwargs["json"] = body
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/goals/{quote(goal_id, safe='')}/{quote(action, safe='')}", **kwargs)
 
 
 # Every project endpoint arrived together (ADR 0033 issue 10), so a relay missing one is missing
