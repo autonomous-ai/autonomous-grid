@@ -248,8 +248,9 @@ def test_vllm_environment_activates_wheel_packaged_cuda_compiler(
     monkeypatch.delenv("CUDA_HOME", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin")
 
-    env = _vllm_process_env(binary)
+    env = _vllm_process_env(binary, use_flashinfer_sampler=False)
 
     assert env["CUDA_HOME"] == str(cuda_bin.parent)
     assert env["PATH"].split(":", 1)[0] == str(cuda_bin)
     assert str(binary.parent) in env["PATH"].split(":")
+    assert env["VLLM_USE_FLASHINFER_SAMPLER"] == "0"

@@ -48,6 +48,12 @@ grid --local allocator qualify vllm Qwen/example \
   --tensor-parallel-size 2 --timeout 1800
 ```
 
+On a shared GPU, bound the canary and shorten its compilation window with
+`--gpu-memory-utilization`, `--max-model-len`, and `--enforce-eager`. If the installed vLLM and
+FlashInfer wheels have incompatible JIT toolchains, `--disable-flashinfer-sampler` selects vLLM's
+native sampler. Grid activates sibling vLLM build tools and a wheel-packaged CUDA compiler when the
+host has only an NVIDIA driver; a source-build path still requires Python development headers.
+
 The command downloads into Grid's isolated qualification cache, starts a Grid-owned vLLM child,
 proves it through `/v1/models`, runs an OpenAI-compatible chat completion, and reaps the child.
 
@@ -63,6 +69,13 @@ The same run found a model-specific failure for the pre-existing `gpt-oss:20b`: 
 and did not attempt inference or delete the artifact. That is a failed artifact/runtime
 qualification, not evidence that the Ollama lifecycle adapter is healthy for that model.
 
-ComfyUI and vLLM must be run on a host where those engines and canary assets are installed. A report
-is not transferable between machines: the engine version, accelerator, driver, and artifacts are
-part of what the physical run is testing.
+Machine D physically passed vLLM 0.28 with Qwen2.5-Coder-0.5B-Instruct at an immutable commit. The
+run used 35% GPU utilization, a 2,048-token context, eager mode, and the native sampler. It fetched
+the bounded snapshot, proved process ownership and `/v1/models` readiness, returned `GRID` through
+the OpenAI-compatible chat API, observed zero active requests, stopped the child, and cleaned the
+canary artifact. The run also established that fresh Ubuntu needs Python development headers for
+Triton.
+
+ComfyUI must be run on a host where its canary assets are installed. A report is not transferable
+between machines: the engine version, accelerator, driver, and artifacts are part of what the
+physical run is testing.

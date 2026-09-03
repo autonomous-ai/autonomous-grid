@@ -74,6 +74,7 @@ def _backend(args: argparse.Namespace) -> Any:
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
         enforce_eager=args.enforce_eager,
+        use_flashinfer_sampler=(False if args.disable_flashinfer_sampler else None),
         readiness_timeout=args.timeout,
     )
 

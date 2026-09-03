@@ -812,6 +812,11 @@ def _add_allocator(sub) -> None:
         action="store_true",
         help="Disable CUDA graph compilation for a lower-impact shared-node qualification.",
     )
+    qualify.add_argument(
+        "--disable-flashinfer-sampler",
+        action="store_true",
+        help="Use vLLM's native sampler when FlashInfer JIT is unavailable or incompatible.",
+    )
     qualify.add_argument("--cache-dir", default=None)
     qualify.add_argument("--prompt", default="Reply with exactly GRID.")
     qualify.add_argument("--max-tokens", type=int, default=32)

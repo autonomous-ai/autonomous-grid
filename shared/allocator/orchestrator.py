@@ -464,6 +464,7 @@ class VllmBackend:
         gpu_memory_utilization: float = 0.90,
         max_model_len: int = 0,
         enforce_eager: bool = False,
+        use_flashinfer_sampler: bool | None = None,
         readiness_timeout: float = 600.0,
         bind_host: str = "127.0.0.1",
         endpoint_host: str | None = None,
@@ -479,6 +480,7 @@ class VllmBackend:
             raise ValueError("max_model_len must be non-negative")
         self.max_model_len = int(max_model_len)
         self.enforce_eager = bool(enforce_eager)
+        self.use_flashinfer_sampler = use_flashinfer_sampler
         self.readiness_timeout = readiness_timeout
         self.bind_host = bind_host
         self.endpoint_host = endpoint_host or bind_host
@@ -571,7 +573,9 @@ class VllmBackend:
             command,
             stdout=log,
             stderr=subprocess.STDOUT,
-            env=_vllm_process_env(Path(binary)),
+            env=_vllm_process_env(
+                Path(binary), use_flashinfer_sampler=self.use_flashinfer_sampler
+            ),
             start_new_session=True,
             )
         finally:
@@ -664,12 +668,16 @@ class VllmBackend:
         return int(total) if found and total.is_integer() else None
 
 
-def _vllm_process_env(binary: Path) -> dict[str, str]:
+def _vllm_process_env(
+    binary: Path, *, use_flashinfer_sampler: bool | None = None
+) -> dict[str, str]:
     """Activate a wheel-packaged CUDA compiler when the host has drivers only."""
 
     env = os.environ.copy()
     binary_dir = binary.resolve().parent
     env["PATH"] = f"{binary_dir}{os.pathsep}{env.get('PATH', '')}"
+    if use_flashinfer_sampler is not None:
+        env["VLLM_USE_FLASHINFER_SAMPLER"] = "1" if use_flashinfer_sampler else "0"
     if env.get("CUDA_HOME") or shutil.which("nvcc", path=env.get("PATH")):
         return env
     venv_root = binary_dir.parent
