@@ -16,7 +16,10 @@ token — it is what stops a second read appearing somewhere else.
 ⚠️ **This is not `host.platform_kind()`, and the two must not be merged.** That one answers *"which
 binaries run here"* and splits macOS by CPU generation (``macos-arm64`` / ``macos-x86_64``); reusing it
 would put Apple Silicon and Intel Mac users in two different communities. Two questions, two
-vocabularies, even where today's values overlap (ADR 0039 D-c).
+vocabularies, even where today's values overlap (ADR 0039 D-c). ``platform_kind()`` still carries
+``windows``; **this module deliberately does not**, and that divergence is the clearest illustration of
+why they are two vocabularies rather than one — *which binaries run here* and *which community does
+this person join* are different questions, and dropping a community does not drop a build target.
 
 ⚠️ **The taxonomy is CLOSED, and that is what makes auto-provisioning safe.** An unrecognised system
 resolves to ``None`` and no grid is provisioned for it; on an open value space every unrecognised
@@ -51,18 +54,23 @@ import platform
 from pathlib import Path
 
 OS_MACOS = "macos"
-OS_WINDOWS = "windows"
 OS_LINUX = "linux"
 OS_OMARCHY = "omarchy"
 
 #: Every token this CLI can emit. Closed by decision (ADR 0039 D-c) — see the module docstring.
-OS_TOKENS: tuple[str, ...] = (OS_MACOS, OS_WINDOWS, OS_LINUX, OS_OMARCHY)
+OS_TOKENS: tuple[str, ...] = (OS_MACOS, OS_LINUX, OS_OMARCHY)
 
-# `platform.system()` → OS token. Only the systems that HAVE a grid appear; everything else — a BSD, a
-# Java runtime, the empty string a frozen build can report — is absent and resolves to None.
+# `platform.system()` → OS token. Only the systems that HAVE a grid appear; everything else — Windows,
+# a BSD, a Java runtime, the empty string a frozen build can report — is absent and resolves to None.
+#
+# ⚠️ **Windows is absent BY DECISION, not by oversight** (ADR 0039 D-c, amended). It is the one system
+# in this map's history that was removed rather than never added, so it is the one an editor is most
+# likely to "restore" on the grounds that `platform.system()` obviously knows about it. A Windows
+# machine takes exactly the branch a BSD takes: no token, no `os=` on the wire, and the sentence that
+# names the set it is outside of — which is a different and more actionable answer than being told a
+# control plane is not serving its grid today.
 _BY_SYSTEM = {
     "Darwin": OS_MACOS,
-    "Windows": OS_WINDOWS,
     "Linux": OS_LINUX,
 }
 
