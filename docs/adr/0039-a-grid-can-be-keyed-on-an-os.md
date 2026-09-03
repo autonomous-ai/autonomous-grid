@@ -306,9 +306,110 @@ the machine's OS is outside D-c's set. The CLI reports the third itself (it know
 set of tokens it can emit, so no round trip is needed), and `GET /tokens` carries an `os_served` key
 for the other two.
 
+⚠️ **Two clauses of that paragraph are superseded by the amendment below and are kept only because
+this is what was decided at the time.** "The control plane has the feature off" names
+`GRID_OS_GRID_ENABLED`, which governs creation and not admission — read literally it produces a flag
+that contradicts this decision's own fourth rule. And the symptom is not only an empty `grid ls`: the
+common case is a grid list with several grids in it and no OS grid among them, which is why the CLI
+says the line whatever else the list contains.
+
 `os_served` is a new key on an existing endpoint and therefore degrades **silently** against an old
 control plane — the key is absent and the CLI prints nothing, which is exactly the previous behaviour,
 so the degrade is clean.
+
+⚠️ **AMENDED 2026-09-03 (issue 07): `os_served` reports what the ANSWER contains, never what the
+deployment is configured to do** — and the sentence above, read literally, gets it wrong. "The control
+plane has the feature off" names `GRID_OS_GRID_ENABLED`, but that switch governs **creation and not
+admission**, which is the whole point of the long ⚠️ on `os_networks.os_grids_enabled`: switching it
+off during an incident stops any new OS grid being claimed and deliberately does not cut the providers
+already serving a live one off from it. So a deployment with the switch off still hands a machine a
+credential for an OS grid that already exists — and a flag derived from the switch would read `false`
+for a caller holding that grid in the very same body, putting *"no OS grid for macOS"* on the screen
+over the top of one. That would break this decision's own first rule (somebody who has an OS grid sees
+nothing new) using this decision's own key.
+
+So the control plane computes it as *"is an `os-community` grid among the bundles this call is
+returning"* — keyed by equality against the type literal, never on "did anything come back", since a
+flag that went true the moment the caller had any grid at all would be true for nearly everybody and
+say nothing. ⚠️ **And against `os-community` alone, never the `AUTO_PROVISIONED_NETWORK_TYPES` family
+one identifier away** — that set also holds `private-domain`, which this same route provisions for the
+caller on this same call, so the sibling predicate reads `true` for nearly every signed-in account and
+switches the feature off in silence for exactly the corporate population. Found in review, and the
+negative control that catches it has to seed a `private-domain` grid specifically: a
+`permissioned-public` one is outside that family and cannot separate the two predicates.
+
+Consequences worth writing down:
+
+- **It is not derivable by the CLI**, which is why it has to be sent. This repository deliberately
+  holds no `os-community` constant of its own (see the note in `tests/test_os_grid_type_lockstep.py`)
+  — it *prints* the `network_type` it is handed and never compares it — so the flag is the only thing
+  on the wire that can tell "you were served an OS grid" from "you were not".
+- **The three causes do NOT all become separable, and this decision's opening sentence must not be
+  read as promising they do.** What ships separates cause 3, locally, from *everything else*;
+  `os_served` separates "you were served one" from "you were not". Causes 1 and 2 stay one line —
+  which is all the acceptance asked for, and from inside a CLI new enough to have this code cause 1
+  cannot happen anyway. It stays separable by whoever reads the raw response, which is where it was
+  always going to be answered.
+- **`false` therefore collapses at least four deployment states**, and saying so is worth more than a
+  flag that pretends otherwise: the feature switched off with nothing provisioned; this OS absent from
+  `GRID_OS_GRID_TOKENS`; a provision that failed and left the row `pending`; and no platform account
+  configured to own one. All four are one fact to the person in front of them — *this service is not
+  giving me one* — which is what the line says. Naming them apart would mean publishing a
+  deployment's configuration to every stranger who signs in.
+
+**The alternative that would have kept this decision's original promise, and why it lost.** A reason
+**string** — `served` / `os_not_served` / `not_configured` — instead of a bool would have separated the
+four states above and delivered the "three causes" sentence literally. It was rejected on three
+counts, none of which is that it is harder to build. It **publishes a deployment's configuration to
+every stranger who signs in**, on the one grid type whose whole premise is that its members are
+strangers. It adds a **parsed wire enum**, against the standing rule that exactly three refusal codes
+are read anywhere in these repositories and that keeping the count that low IS the contract — a fourth
+reader is a fourth thing a reworded far end can break, and everything else is displayed verbatim. And
+it buys **nothing the acceptance asked for**: the CLI prints one line for every not-served value, so
+the extra states reach a person as the same sentence and reach a script as a field nothing acts on. A
+support conversation that needs them apart reads the deployment's own configuration, which is where
+that fact lives.
+
+⚠️ **The `--json` payload gained a key, and that IS a compatibility event** — the one part of this an
+older client can see. `grid login --json` and `grid sync --json` now always carry `os_grid` (an object,
+or `null`). Always-present rather than emitted only when there is something to say, because a key that
+comes and goes is one every script has to guard; the cost is that "behaves exactly as it did before" is
+true of the prose and not of the payload shape. Nothing known consumes it — the desktop app drives both
+commands in human mode and reads only the device-login lines and the exit code — but it is recorded
+here rather than discovered later.
+
+⚠️ **`os_served` answers for the ANSWER, not for the claim, and those differ on two rows.**
+`list_visible_networks` admits a grid six ways and only the `access_os` arm consults the claim — so a
+caller admitted by `owner_google_sub` (which, by D-d, is the platform account on *every* OS grid) or
+by an active member row reads `True` whatever it claimed. Tightening the computation to
+`access_os == os_token` was considered and not done: "were you handed one" is the honest question for
+a boolean, the platform account is not a population this feature serves, and tightening adds a second
+place that has to agree about the claim. Pinned by
+`test_os_served_answers_for_the_ANSWER_and_not_for_the_claim`, because the two readings are one `and`
+apart, the CLI prints nothing on a `True`, and the wrong one is therefore invisible from outside.
+
+⚠️ **`grid ls` gained nothing, deliberately — and it is where a person actually looks.** This
+decision's opening names an empty `grid ls` as the symptom, and `cli/remote_grid.cmd_remote_ls` still
+prints its empty-list line with no way to say why. The local cause (cause 3) could be answered there
+for free — it needs no round trip and no stored state — but the control-plane cause could not, because
+nothing persists `os_served`, and a `grid ls` that explains one of the two causes and stays silent on
+the other is a worse answer than one that explains neither. The line lives on the two commands that
+actually talk to the control plane, and it is those two a person runs when a grid is missing. Revisit
+this together, if at all: persisting the flag beside the grid list is the change that would make
+`grid ls` able to answer both.
+
+⚠️ **The line is NOT printed when the command itself fails.** `grid sync` against an expired session
+raises before the fetch returns, so a machine outside the token set is told its session expired and
+nothing about OS grids. Deliberate: a failed command should report its failure, and burying the
+actionable sentence under a side fact serves nobody — the line arrives on the next command that
+succeeds. "Without a control-plane round trip being required to produce it" is about why the CLI *can*
+answer cause 3 independently of the far end, not a requirement that it speak over a failure.
+
+The tri-state is load-bearing on the CLI side: `True` served, `False` refused, **`None` the control
+plane did not say**. Collapsing `None` into `False` — the obvious tidy-up — is what would put "this
+control plane isn't serving one" in front of every user of every deployment that has not shipped this
+key yet, which is the one direction this decision exists to keep quiet. So the CLI compares by
+identity against the two booleans and reads anything else (a string, a number, a null) as `None`.
 
 ## D-l — The member-usage panel is refused on this type
 

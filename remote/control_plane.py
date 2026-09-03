@@ -11,6 +11,7 @@ is reached in local mode (dispatch gates the remote commands to remote mode).
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
@@ -19,7 +20,6 @@ import httpx
 from shared.system import os_grid
 
 from . import credentials
-
 
 # Control-plane HTTP timeout (seconds). The default suits every fast call; managed-network *create* is
 # synchronous and can exceed it while the backend boots the master, so it is overridable via
@@ -66,7 +66,38 @@ def poll_device_login(device_code: str, api_url: str | None = None) -> dict[str,
         return _send(client, "POST", "/v1/grid/auth/device/poll", json={"device_code": device_code}).json()
 
 
-def fetch_tokens(session_token: str, device_id: str, api_url: str | None = None) -> list[dict[str, Any]]:
+#: The key on the token-fetch reply that says whether this machine was handed an OS grid (ADR 0039
+#: D-k). Named once, because the pin comparing it to grid-apis' own spelling reads it from here —
+#: `tests/test_os_grid_type_lockstep.py`.
+OS_SERVED_KEY = "os_served"
+
+
+@dataclass(frozen=True)
+class TokenFetch:
+    """What ``GET /v1/grid/tokens`` answered: the grids, and why an OS grid may not be among them.
+
+    ``os_served`` is a *tri-state* and every one of the three means something different (ADR 0039
+    D-k):
+
+    - ``True`` — this call was handed a credential for an OS grid. Nothing to report.
+    - ``False`` — this call was handed none. ⚠️ **Not "none for the OS this machine claimed"** — the
+      far end answers for what is IN the body, and the visibility query admits a row six ways of
+      which only one consults the claim (ownership does not), so the platform account that owns every
+      OS grid reads ``True`` whatever it claims. The difference reaches no ordinary user and reaches
+      no printed line, but the sentence has to stay honest about what the flag measures.
+    - ``None`` — the control plane did not say. A new key on an existing endpoint degrades silently,
+      so this is what an older control plane produces, and it must print exactly nothing.
+
+    ⚠️ **`False` and `None` are not interchangeable.** Collapsing them would put "this control plane
+    isn't serving one" in front of everybody who has not upgraded their control plane yet — the one
+    direction ADR 0039 D-k exists to keep quiet.
+    """
+
+    networks: list[dict[str, Any]]
+    os_served: bool | None
+
+
+def fetch_tokens(session_token: str, device_id: str, api_url: str | None = None) -> TokenFetch:
     """Every grid this account may reach from THIS machine, each with a fresh credential.
 
     Carries the machine's **OS token** as ``os=`` beside ``device_id`` when it has one (ADR 0039 D-e),
@@ -79,6 +110,9 @@ def fetch_tokens(session_token: str, device_id: str, api_url: str | None = None)
     spelling of "no claim" for it to recognise. It is also new on an existing endpoint, so an older
     control plane simply ignores it and this call behaves exactly as it did before (ADR 0039 D-j — the
     public CLI has no rollout ordering in either direction).
+
+    Answers the ``os_served`` key alongside them (ADR 0039 D-k) — see :class:`TokenFetch`, which is
+    what turns an empty grid list into one that can say WHY it is empty.
     """
     params = {"device_id": device_id}
     machine_os = os_grid.os_token()
@@ -86,8 +120,20 @@ def fetch_tokens(session_token: str, device_id: str, api_url: str | None = None)
         params["os"] = machine_os
     with _client(api_url, session_token) as client:
         resp = _send(client, "GET", "/v1/grid/tokens", params=params)
+    payload = resp.json()
+    if not isinstance(payload, dict):
+        payload = {}  # a body that is not an object carries neither networks nor a flag
+    served = payload.get(OS_SERVED_KEY)
+    return TokenFetch(
         # `or []` coerces both a missing key and an explicit null to an empty list.
-        return list(resp.json().get("networks") or [])
+        networks=list(payload.get("networks") or []),
+        # Compared by IDENTITY against the two booleans, never for truthiness. `"false"` is the value
+        # that makes this matter: it is truthy in Python, so a truthiness test would read a control
+        # plane refusing to serve an OS grid as serving one. Anything that is not a real `bool` — a
+        # string, a number, a null — is read as "did not say" and prints nothing, which is the same
+        # clean degrade an older control plane already gets.
+        os_served=served if served is True or served is False else None,
+    )
 
 
 def refresh_network_token(

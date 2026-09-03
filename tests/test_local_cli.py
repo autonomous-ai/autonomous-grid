@@ -11644,7 +11644,7 @@ def test_control_plane_fetch_tokens_attaches_bearer_and_query(monkeypatch, tmp_p
 
     _mock_control_plane(monkeypatch, handler)
     nets = control_plane.fetch_tokens("sess-tok", "dev-1")
-    assert nets == [{"network_id": "n1", "name": "team"}]
+    assert nets.networks == [{"network_id": "n1", "name": "team"}]
     assert seen["auth"] == "Bearer sess-tok"
     assert seen["device_id"] == "dev-1"
 
@@ -11654,7 +11654,7 @@ def test_control_plane_fetch_tokens_defaults_missing_networks_to_empty(monkeypat
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, json={"networks": None}))
-    assert control_plane.fetch_tokens("sess", "dev-1") == []
+    assert control_plane.fetch_tokens("sess", "dev-1").networks == []
 
 
 # --- the OS token on the token fetch (ADR 0039 D-b, D-c, D-e) --------------------------------------
@@ -11678,7 +11678,7 @@ def _fetch_tokens_query(monkeypatch, system):
         return httpx.Response(200, json={"networks": []})
 
     _mock_control_plane(monkeypatch, handler)
-    assert control_plane.fetch_tokens("sess-tok", "dev-1") == []
+    assert control_plane.fetch_tokens("sess-tok", "dev-1").networks == []
     return seen["params"]
 
 
@@ -11709,6 +11709,67 @@ def test_fetch_tokens_sends_no_os_parameter_when_the_system_resolves_to_nothing(
     params = _fetch_tokens_query(monkeypatch, system)
     assert "os" not in params
     assert params["device_id"] == "dev-1"
+
+
+# --- `os_served`, the answer to "why is there no OS grid in my list" (ADR 0039 D-k) ---------------
+# Read off the RESPONSE rather than inferred from the grid list, and deliberately so: this repository
+# holds no `os-community` constant of its own (see `tests/test_os_grid_type_lockstep.py`), so the
+# network types in the bundle are strings it prints and never compares. The key is the only thing
+# here that can tell "you were served an OS grid" from "you were not".
+
+
+def _fetch_tokens_answer(monkeypatch, tmp_path, payload):
+    """What `fetch_tokens` makes of a control plane that answered ``payload``."""
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, json=payload))
+    return control_plane.fetch_tokens("sess-tok", "dev-1")
+
+
+def test_fetch_tokens_carries_the_os_served_flag_beside_the_networks(monkeypatch, tmp_path):
+    answer = _fetch_tokens_answer(
+        monkeypatch, tmp_path,
+        {"networks": [{"network_id": "n1", "name": "macOS"}], "os_served": True})
+    assert answer.os_served is True
+    assert answer.networks == [{"network_id": "n1", "name": "macOS"}]  # the networks are untouched
+
+
+def test_fetch_tokens_reports_an_explicit_false_as_false(monkeypatch, tmp_path):
+    """The whole point of the key: an empty list that says WHY it is empty."""
+    answer = _fetch_tokens_answer(monkeypatch, tmp_path, {"networks": [], "os_served": False})
+    assert answer.os_served is False
+    assert answer.networks == []
+
+
+def test_fetch_tokens_reports_a_missing_os_served_as_unknown(monkeypatch, tmp_path):
+    """An older control plane does not send the key, and that must not read as ``False``.
+
+    ADR 0039 D-k: a new key on an existing endpoint degrades silently. ``None`` is what makes the CLI
+    print nothing and behave exactly as it did before — a ``False`` here would put "this control plane
+    isn't serving one" in front of everybody who has not upgraded their control plane yet.
+    """
+    answer = _fetch_tokens_answer(monkeypatch, tmp_path, {"networks": []})
+    assert answer.os_served is None
+
+
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, "", None, [], {}])
+def test_fetch_tokens_reads_a_non_boolean_os_served_as_unknown(monkeypatch, tmp_path, value):
+    """Anything that is not a real ``bool`` degrades to "the control plane did not say".
+
+    Compared by identity against ``True``/``False``, never for truthiness — the standing rule for
+    every wire enum in these repositories. ``"false"`` is the one that matters most: truthy in Python,
+    so a truthiness test would read a control plane REFUSING to serve an OS grid as serving one.
+    """
+    answer = _fetch_tokens_answer(monkeypatch, tmp_path, {"networks": [], "os_served": value})
+    assert answer.os_served is None
+
+
+def test_fetch_tokens_survives_a_body_that_is_not_an_object(monkeypatch, tmp_path):
+    """A list, or anything else that is not a JSON object, is no networks and no flag — never a crash
+    inside `grid login`. The bundle is the trust boundary; `_validated` is what refuses bad rows."""
+    answer = _fetch_tokens_answer(monkeypatch, tmp_path, [{"network_id": "n1"}])
+    assert (answer.networks, answer.os_served) == ([], None)
 
 
 def test_control_plane_raises_on_error_status(monkeypatch, tmp_path):
@@ -19209,8 +19270,13 @@ def test_live_identities_reports_an_unreadable_table_as_unscanned(monkeypatch, t
 # grid login / grid logout (cli/auth.py + dispatch gate)
 # ---------------------------------------------------------------------------
 
-def _device_flow(monkeypatch, *, poll_statuses, networks, started=None):
-    """Wire control_plane + webbrowser + sleep for a cmd_login run; return a calls record."""
+def _device_flow(monkeypatch, *, poll_statuses, networks, started=None, os_served=None):
+    """Wire control_plane + webbrowser + sleep for a cmd_login run; return a calls record.
+
+    ``os_served`` is the control plane's answer to "were you handed an OS grid" (ADR 0039 D-k) and
+    defaults to ``None`` — a control plane too old to send the key, which is what every test that
+    predates it was really exercising and the one value that makes `grid login` say nothing new.
+    """
     from cli import auth
     from remote import control_plane
 
@@ -19224,7 +19290,7 @@ def _device_flow(monkeypatch, *, poll_statuses, networks, started=None):
 
     def fetch(session_token, device_id, api_url=None):
         calls["fetch_device_id"], calls["fetch_session"] = device_id, session_token
-        return networks
+        return control_plane.TokenFetch(networks=networks, os_served=os_served)
 
     monkeypatch.setattr(control_plane, "fetch_tokens", fetch)
 
@@ -19426,7 +19492,14 @@ def test_relogin_reuses_device_id_and_overwrites_tokens(monkeypatch, tmp_path):
 
 
 def test_login_json_emits_names_only_and_no_tokens(monkeypatch, tmp_path, capsys):
+    import platform
+
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # ⚠️ Pinned, because the `os_grid` field below is otherwise MACHINE-DEPENDENT (ADR 0039 D-k):
+    # on a system outside the closed OS-token set this payload would carry an absence and the
+    # exact-equality assertion would fail on who ran it. `None` — nothing to report — is what a Mac,
+    # a Linux box or a Windows box all produce against a control plane that sent no `os_served`.
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
     _device_flow(
         monkeypatch,
         poll_statuses=[_APPROVED],
@@ -19439,6 +19512,7 @@ def test_login_json_emits_names_only_and_no_tokens(monkeypatch, tmp_path, capsys
     assert json.loads(captured.out) == {
         "signed_in": True, "email": "a@b.com",
         "grids": [{"name": "team", "type": "permissioned-public"}], "active": None,
+        "os_grid": None,
     }
     for secret in ("SESS-secret", "AT-secret", "RT-secret"):
         assert secret not in captured.out
@@ -20168,8 +20242,13 @@ def _sync_seed(networks: list[dict[str, Any]] | None = None, *, session_token: s
 
 
 def _sync_patch_fetch(monkeypatch: pytest.MonkeyPatch, networks: list[dict[str, Any]],
-                      calls: list[dict[str, Any]] | None = None) -> None:
+                      calls: list[dict[str, Any]] | None = None,
+                      os_served: bool | None = None) -> None:
     """Patch control_plane.fetch_tokens to return `networks` (no live control plane).
+
+    ``os_served`` is the control plane's answer to "were you handed an OS grid" (ADR 0039 D-k);
+    ``None`` — the default — is a control plane too old to send the key, so `grid sync` prints
+    nothing new and every test written before it keeps asserting the same output.
 
     Note for anyone adding a sync test: `grid sync` overwrites `[[networks]]` authoritatively, so it
     asks `signout.warn_stranded` which grids still have a live serve child — which reads the real host
@@ -20182,7 +20261,7 @@ def _sync_patch_fetch(monkeypatch: pytest.MonkeyPatch, networks: list[dict[str, 
     def fake_fetch_tokens(session_token, device_id, api_url=None):
         if calls is not None:
             calls.append({"session_token": session_token, "device_id": device_id, "api_url": api_url})
-        return [dict(n) for n in networks]
+        return control_plane.TokenFetch(networks=[dict(n) for n in networks], os_served=os_served)
 
     monkeypatch.setattr(control_plane, "fetch_tokens", fake_fetch_tokens)
 
@@ -20210,7 +20289,8 @@ def test_sync_gated_in_local_mode(monkeypatch, tmp_path):
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
     called = []
-    monkeypatch.setattr(control_plane, "fetch_tokens", lambda *a, **k: called.append(1) or [])
+    monkeypatch.setattr(control_plane, "fetch_tokens",
+                        lambda *a, **k: called.append(1) or control_plane.TokenFetch([], None))
     with pytest.raises(SystemExit) as exc:
         cli.main(["sync"])
     assert "remote" in str(exc.value).lower()
@@ -20223,7 +20303,8 @@ def test_sync_requires_login(monkeypatch, tmp_path):
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # not signed in
     called = []
-    monkeypatch.setattr(control_plane, "fetch_tokens", lambda *a, **k: called.append(1) or [])
+    monkeypatch.setattr(control_plane, "fetch_tokens",
+                        lambda *a, **k: called.append(1) or control_plane.TokenFetch([], None))
     with pytest.raises(SystemExit) as exc:
         _run_sync()
     assert "signed in" in str(exc.value).lower()  # require_session message
@@ -20439,9 +20520,16 @@ def test_sync_treats_a_renamed_grid_as_the_same_grid(monkeypatch, tmp_path, caps
 def test_sync_json_keeps_stdout_clean_while_warning_about_a_stranded_child(monkeypatch, tmp_path, capsys):
     """The warning is a human line on stderr; `--json` stdout stays parseable, as it already does for
     the 0-grids wipe warning beside it."""
+    import platform
+
     from shared import run_records
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # ⚠️ Pinned, because the `os_grid` field below is otherwise MACHINE-DEPENDENT (ADR 0039 D-k):
+    # on a system outside the closed OS-token set this payload would carry an absence and the
+    # exact-equality assertion would fail on who ran it. `None` — nothing to report — is what a Mac,
+    # a Linux box or a Windows box all produce against a control plane that sent no `os_served`.
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
     _sync_seed([_sync_bundle("net-b")])
     run_records.write_record("net-b", "remote", {
         "engine_id": "remote", "grid_id": "net-b", "pid": 4242,
@@ -20452,7 +20540,7 @@ def test_sync_json_keeps_stdout_clean_while_warning_about_a_stranded_child(monke
 
     assert _run_sync(["sync", "--json"]) == 0
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"synced": True, "grids": []}
+    assert json.loads(captured.out) == {"synced": True, "grids": [], "os_grid": None}
     assert "grid leave net-b" in captured.err
 
 
@@ -20467,7 +20555,7 @@ def test_sync_concurrent_logout_does_not_strand_partial_file(monkeypatch, tmp_pa
 
     def logout_then_return(session_token, device_id, api_url=None):
         credentials.clear_credentials()  # concurrent `grid logout` deletes the file mid-call
-        return [dict(_sync_bundle("net-a"))]
+        return control_plane.TokenFetch(networks=[dict(_sync_bundle("net-a"))], os_served=None)
 
     monkeypatch.setattr(control_plane, "fetch_tokens", logout_then_return)
     assert _run_sync() == 0
@@ -20531,7 +20619,14 @@ def test_sync_other_error_propagates_unchanged(monkeypatch, tmp_path):
 
 
 def test_sync_json_emits_names_only_and_no_tokens(monkeypatch, tmp_path, capsys):
+    import platform
+
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # ⚠️ Pinned, because the `os_grid` field below is otherwise MACHINE-DEPENDENT (ADR 0039 D-k):
+    # on a system outside the closed OS-token set this payload would carry an absence and the
+    # exact-equality assertion would fail on who ran it. `None` — nothing to report — is what a Mac,
+    # a Linux box or a Windows box all produce against a control plane that sent no `os_served`.
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
     _sync_seed([_sync_bundle("net-a", name="team", access_token="AT-secret",
                              refresh_token="RT-secret")], session_token="SESS-secret")
     _sync_patch_fetch(monkeypatch, [_sync_bundle("net-a", name="team", access_token="AT-secret",
@@ -20541,13 +20636,21 @@ def test_sync_json_emits_names_only_and_no_tokens(monkeypatch, tmp_path, capsys)
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {
         "synced": True, "grids": [{"name": "team", "type": "permissioned-public"}],
+        "os_grid": None,
     }
     for secret in ("SESS-secret", "AT-secret", "RT-secret"):
         assert secret not in captured.out
 
 
 def test_sync_json_survives_empty_list_warning(monkeypatch, tmp_path, capsys):
+    import platform
+
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # ⚠️ Pinned, because the `os_grid` field below is otherwise MACHINE-DEPENDENT (ADR 0039 D-k):
+    # on a system outside the closed OS-token set this payload would carry an absence and the
+    # exact-equality assertion would fail on who ran it. `None` — nothing to report — is what a Mac,
+    # a Linux box or a Windows box all produce against a control plane that sent no `os_served`.
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
     _sync_seed([_sync_bundle("net-a")])
     _disable_orphan_sweep(monkeypatch)
     _sync_patch_fetch(monkeypatch, [])
@@ -20555,9 +20658,284 @@ def test_sync_json_survives_empty_list_warning(monkeypatch, tmp_path, capsys):
     assert _run_sync(["sync", "--json"]) == 0
     captured = capsys.readouterr()
     # stdout stays clean, parseable JSON; the human warning is confined to stderr
-    assert json.loads(captured.out) == {"synced": True, "grids": []}
+    assert json.loads(captured.out) == {"synced": True, "grids": [], "os_grid": None}
     assert "Warning" not in captured.out
     assert "cleared locally" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# A missing OS grid says why (ADR 0039 D-k) — `cli/os_grid_notice.py`
+# ---------------------------------------------------------------------------
+# Three different things leave somebody with no OS grid in their list, and today they share one
+# symptom. The CLI answers one of them on its own — it knows its own operating system and the closed
+# set of tokens it can emit — and the control plane's `os_served` answers the other two.
+#
+# The bar the whole section is written against: nothing here may turn an absent OS grid into a failed
+# command, and somebody who HAS an OS grid must see no new output at all. A line on every ordinary
+# sign-in is a line people learn to scroll past.
+
+
+def _absence(monkeypatch, system, os_served):
+    """The notice a machine running ``system`` produces for that ``os_served`` answer."""
+    import platform
+
+    from cli import os_grid_notice
+
+    monkeypatch.setattr(platform, "system", lambda: system)
+    return os_grid_notice.absence(os_served)
+
+
+@pytest.mark.parametrize("os_served", [True, False, None])
+def test_a_system_with_no_os_token_is_answered_without_the_control_plane(monkeypatch, os_served):
+    """The CLI's own answer, and it does not consult the round trip AT ALL — including the `True`.
+
+    ADR 0039 D-k gives this cause to the CLI precisely because no round trip is needed for it: the
+    machine knows its own system and the closed set of tokens it can emit. Parametrised over every
+    answer the control plane can give so the independence is pinned rather than assumed — a later
+    refactor that folded this into the `os_served` branch would still pass on `False` alone.
+    """
+    from cli import os_grid_notice
+
+    absent = _absence(monkeypatch, "FreeBSD", os_served)
+    assert absent is not None
+    assert absent.reason == os_grid_notice.UNSUPPORTED_SYSTEM
+    assert absent.system == "FreeBSD"
+    assert absent.os_token is None  # there is no token — that IS the reason
+    assert "FreeBSD" in absent.line()
+
+
+def test_a_control_plane_that_serves_no_grid_for_this_os_is_a_different_answer(monkeypatch):
+    from cli import os_grid_notice
+
+    absent = _absence(monkeypatch, "Darwin", False)
+    assert absent is not None
+    assert absent.reason == os_grid_notice.NOT_SERVED
+    assert (absent.system, absent.os_token) == ("Darwin", "macos")
+
+
+def _cause_clause(absent):
+    """Everything after ``absent``'s sentence names the machine — that is, the CAUSE, on its own.
+
+    ⚠️ **The two cases can never share a machine** — one has an OS token and the other by definition
+    has none — so their raw sentences ALWAYS differ by that name, and comparing whole lines is
+    satisfied by the name even when both branches give the same cause. Measured, not guessed:
+    collapsing `line()`'s two cause clauses into one left this file green, including the test named
+    for the distinction.
+
+    ⚠️ **The subject is removed by its known PREFIX, never by `str.replace`.** The first version of
+    this helper blanked every occurrence of the name — which on the unsupported branch also blanks it
+    inside the list of tokens that branch names, so two identical clauses came out different and the
+    mirror of that mutation survived anyway. Over-blanking is the same failure as no blanking: the
+    comparison stops looking at the cause.
+    """
+    named = absent.os_token or absent.system
+    assert named, "the fixtures below name their system; a blank one would blank nothing"
+    prefix = f"No OS grid for {named}: "
+    line = absent.line()
+    assert line.startswith(prefix), (prefix, line)  # the shape this helper is cutting on
+    clause = line[len(prefix):]
+    assert clause.strip(), line  # never vacuous — an empty clause would compare equal to anything
+    return clause
+
+
+def test_the_two_reasons_do_not_read_as_the_same_sentence(monkeypatch):
+    """ADR 0039 D-k's whole purpose — a support conversation must be able to tell them apart."""
+    unsupported = _absence(monkeypatch, "FreeBSD", False)
+    not_served = _absence(monkeypatch, "Darwin", False)
+
+    # Both directions of the same mistake. Collapsing EITHER branch onto the other's clause must
+    # fail here: fixing one direction and leaving the mirror alive is what a whole-line comparison
+    # did, and what an over-blanking helper did after it.
+    assert _cause_clause(unsupported) != _cause_clause(not_served)
+    # And the name really is in the line a person reads — blanked above, never absent.
+    assert "FreeBSD" in unsupported.line() and "FreeBSD" not in not_served.line()
+
+
+@pytest.mark.parametrize("os_served", [True, None])
+def test_nothing_is_said_when_the_machine_has_a_token_and_no_refusal(monkeypatch, os_served):
+    """`True` is somebody who HAS an OS grid; `None` is a control plane too old to have said.
+
+    Both must be silent, and for different reasons: the first has nothing to report, and the second
+    is the clean silent degrade — the key is absent, so the CLI behaves exactly as it did before.
+    """
+    assert _absence(monkeypatch, "Darwin", os_served) is None
+
+
+@pytest.mark.parametrize("system", ["Linux", "Windows", "Darwin"])
+def test_every_system_the_cli_has_a_token_for_stays_quiet_when_served(monkeypatch, system):
+    assert _absence(monkeypatch, system, True) is None
+
+
+def test_a_system_that_does_not_even_name_itself_still_produces_a_sentence(monkeypatch):
+    """`platform.system()` answers the empty string on some frozen builds — already in the closed
+    set's list of things that resolve to no token. The line must still say something."""
+    absent = _absence(monkeypatch, "", False)
+    assert absent is not None and absent.line().strip()
+    assert "for :" not in absent.line()  # never a sentence with the subject missing
+
+
+def test_the_unsupported_line_names_every_token_this_cli_could_have_claimed(monkeypatch):
+    """The cause clause has to carry a FACT, not restate its own subject (ADR 0039 D-k).
+
+    ⚠️ **Derived from `OS_TOKENS`, so it cannot drift from what this CLI can actually ask for.**
+    Written out by hand it would keep naming three systems after `omarchy` lands (issue 04) — a line
+    telling somebody on the Omarchy grid that no grid exists for them. Asserted against the constant
+    rather than against the three of today, or this test would be the thing that has to be remembered.
+    """
+    from shared.system import os_grid
+
+    line = _absence(monkeypatch, "FreeBSD", False).line()
+    for token in os_grid.OS_TOKENS:
+        assert token in line, (token, line)
+    assert "FreeBSD" in line
+
+
+def test_the_absence_carries_the_same_fact_to_a_script_as_to_a_person(monkeypatch):
+    """ADR 0039 D-k / issue 07: `--json` must not lose what the human line says.
+
+    `os_token` is `None` exactly when the reason is `unsupported_system` — the two are one fact seen
+    twice, and a script may key on either.
+    """
+    from cli import os_grid_notice
+
+    assert _absence(monkeypatch, "FreeBSD", False).as_json() == {
+        "reason": os_grid_notice.UNSUPPORTED_SYSTEM, "system": "FreeBSD", "os_token": None}
+    assert _absence(monkeypatch, "Darwin", False).as_json() == {
+        "reason": os_grid_notice.NOT_SERVED, "system": "Darwin", "os_token": "macos"}
+
+
+# --- and the same fact, where a person actually meets it: `grid login` and `grid sync` -------------
+
+
+def _login_output(monkeypatch, tmp_path, capsys, *, system, os_served, args=("login", "--no-browser")):
+    import platform
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(platform, "system", lambda: system)
+    _device_flow(monkeypatch, poll_statuses=[_APPROVED], networks=[], os_served=os_served)
+    code = cli.cmd_login(cli.build_parser().parse_args(list(args)))
+    return code, capsys.readouterr()
+
+
+def _sync_output(monkeypatch, tmp_path, capsys, *, system, os_served, args=("sync",)):
+    import platform
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _sync_seed([], session_token="sess-1")
+    _disable_orphan_sweep(monkeypatch)
+    monkeypatch.setattr(platform, "system", lambda: system)
+    _sync_patch_fetch(monkeypatch, [], os_served=os_served)
+    code = _run_sync(args)
+    return code, capsys.readouterr()
+
+
+# Each command paired with the LAST thing it prints of its own accord, which is what the absence line
+# is appended after. Pairing them is what lets every case below assert on that command's own report
+# instead of on a phrase from the new sentence: keying on `"OS grid" not in out` would go vacuous the
+# moment `line()` is reworded to drop those two words, with nothing to notice. It also retires an `or`
+# across the two helpers that could not say which half had fired.
+_COMMAND_OUTPUTS = [
+    pytest.param(_login_output, "Signed in as a@b.com. You don't belong to any grids yet.\n",
+                 id="login"),
+    pytest.param(_sync_output, "Synced 0 grids.\n", id="sync"),
+]
+
+
+@pytest.mark.parametrize("output,reported", _COMMAND_OUTPUTS)
+def test_a_machine_outside_the_token_set_is_told_so_on_sign_in_and_on_sync(
+    monkeypatch, tmp_path, capsys, output, reported
+):
+    code, captured = output(monkeypatch, tmp_path, capsys, system="FreeBSD", os_served=None)
+    assert code == 0  # an absent OS grid is not a failure
+    assert "FreeBSD" in captured.out
+    assert reported in captured.out  # said as well as, never instead of
+
+
+@pytest.mark.parametrize("output,reported", _COMMAND_OUTPUTS)
+def test_a_control_plane_serving_no_os_grid_says_so_on_sign_in_and_on_sync(
+    monkeypatch, tmp_path, capsys, output, reported
+):
+    code, captured = output(monkeypatch, tmp_path, capsys, system="Darwin", os_served=False)
+    assert code == 0
+    assert "macos" in captured.out
+    assert "FreeBSD" not in captured.out
+    assert reported in captured.out
+
+
+@pytest.mark.parametrize("output,reported", _COMMAND_OUTPUTS)
+@pytest.mark.parametrize("os_served", [True, None])
+def test_nothing_extra_is_printed_when_there_is_nothing_to_report(
+    monkeypatch, tmp_path, capsys, output, os_served, reported
+):
+    """`None` is the pin on ADR 0039 D-k's silent degrade: against a control plane that does not send
+    the key, this prints nothing extra and behaves exactly as it did before.
+
+    ⚠️ Asserted as *the command's own report is the last thing on stdout*, never as "the new
+    sentence's words are absent". A phrase test passes for free the day somebody rewords `line()`,
+    and this is the criterion that keeps the feature quiet for everybody who has an OS grid — the one
+    least likely to be noticed if it silently stopped being checked.
+    """
+    code, captured = output(monkeypatch, tmp_path, capsys, system="Darwin", os_served=os_served)
+    assert code == 0
+    assert captured.out.endswith(reported), captured.out
+
+
+@pytest.mark.parametrize("output,reported", _COMMAND_OUTPUTS)
+def test_the_line_never_displaces_what_the_command_already_said(
+    monkeypatch, tmp_path, capsys, output, reported
+):
+    """It is an extra line, not a replacement — `grid sync` still reports its count, `grid login`
+    still reports the account, and something follows it.
+
+    ⚠️ **The `code == 0` here is a regression guard, not evidence.** Nothing in `absence()` or
+    `_print_os_grid_absence` raises or returns, so no mutation of today's code can fail it; it is
+    here so that an implementation which later grows a raise cannot land quietly. Do not read the
+    green as the suite defending the criterion — it defends it against the future, not the present.
+    """
+    code, captured = output(monkeypatch, tmp_path, capsys, system="FreeBSD", os_served=False)
+    assert code == 0
+    assert reported in captured.out            # the command's own report survived...
+    assert not captured.out.endswith(reported)  # ...and the line was appended after it
+
+
+def test_login_json_carries_the_absence_as_a_field(monkeypatch, tmp_path, capsys):
+    from cli import os_grid_notice
+
+    _, captured = _login_output(monkeypatch, tmp_path, capsys, system="FreeBSD", os_served=False,
+                                args=("login", "--no-browser", "--json"))
+    payload = json.loads(captured.out)
+    assert payload["os_grid"] == {
+        "reason": os_grid_notice.UNSUPPORTED_SYSTEM, "system": "FreeBSD", "os_token": None}
+    assert payload["signed_in"] is True  # the rest of the answer is unchanged
+
+
+def test_sync_json_carries_the_absence_as_a_field(monkeypatch, tmp_path, capsys):
+    from cli import os_grid_notice
+
+    _, captured = _sync_output(monkeypatch, tmp_path, capsys, system="Darwin", os_served=False,
+                               args=("sync", "--json"))
+    payload = json.loads(captured.out)
+    assert payload["os_grid"] == {
+        "reason": os_grid_notice.NOT_SERVED, "system": "Darwin", "os_token": "macos"}
+    assert payload["synced"] is True
+
+
+@pytest.mark.parametrize("os_served", [True, None])
+def test_the_json_field_is_null_rather_than_absent_when_there_is_nothing_to_say(
+    monkeypatch, tmp_path, capsys, os_served
+):
+    """A key that comes and goes is a key every script has to guard; `null` is one shape to read."""
+    _, login = _login_output(monkeypatch, tmp_path, capsys, system="Darwin", os_served=os_served,
+                             args=("login", "--no-browser", "--json"))
+    assert json.loads(login.out)["os_grid"] is None
+
+
+def test_the_json_line_is_not_also_printed_as_prose(monkeypatch, tmp_path, capsys):
+    """`--json` keeps stdout parseable — the fact rides the field, never a sentence beside it."""
+    _, captured = _sync_output(monkeypatch, tmp_path, capsys, system="FreeBSD", os_served=False,
+                               args=("sync", "--json"))
+    assert json.loads(captured.out)["os_grid"]["system"] == "FreeBSD"
+    assert "FreeBSD" not in captured.err
 
 
 # ---------------------------------------------------------------------------

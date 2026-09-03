@@ -630,3 +630,132 @@ def test_the_fetch_and_the_renewal_agree_with_each_other(monkeypatch, tmp_path):
     assert fetch == refresh, (
         f"this CLI announces the OS claim as {fetch!r} when signing in and {refresh!r} when renewing; "
         f"a machine would be admitted to an OS grid and then silently unable to renew on it")
+
+
+# --- the ANSWER's key, this slice's FOURTH cross-repo value ----------------------------------------
+# Everything above pins what the CLI SAYS. `os_served` is the one value on this seam that travels the
+# other way: `GET /v1/grid/tokens` reports whether this call was handed an OS grid, so the three
+# causes of "my grid list has no OS grid in it" stop sharing one symptom (ADR 0039 D-k). It is
+# written independently on both sides with no import between them — a key in the dict grid-apis'
+# `get_tokens` returns, and `OS_SERVED_KEY` in this repository's `remote/control_plane.py`.
+#
+# ⚠️ **It degrades SILENTLY in BOTH directions, which is what makes it the quietest value here.** An
+# unknown key in a JSON body is not an error to anybody: renamed on the control plane, this CLI reads
+# it as absent and says nothing, which is by design indistinguishable from an older control plane —
+# the exact behaviour D-k specifies for that case. So a rename leaves both repositories green, every
+# request succeeding, and the feature that exists to explain an absent OS grid silently explaining
+# nothing. There is no symptom to notice, which is why this needs a pin rather than an argument.
+#
+# ⚠️ **The rollout order is NONE, in either direction**, and for the same reason the `os=` parameter
+# has none: a new key on an existing endpoint. An old control plane sends nothing and the CLI prints
+# nothing (the previous behaviour exactly); an old CLI ignores what a new control plane sends.
+
+#: The key that has been in this answer since long before OS grids — the positive control on the
+#: grid-apis side, and the proof the reader below is looking at the right dict.
+_TOKENS_CONTROL_KEY = "networks"
+
+
+def _apis_answer_keys(function):
+    """Every constant string key grid-apis puts in a dict it RETURNS from this handler.
+
+    Read off the `return` statements rather than a response model, because this route declares none —
+    it returns a plain dict, so the literal is the contract. Anything this cannot read raises instead
+    of narrowing the set in silence: a lockstep helper that returns a plausible subset guards nothing,
+    and what it fails to guard fails silently too.
+    """
+    keys = set()
+    returns = [node for node in ast.walk(function) if isinstance(node, ast.Return)]
+    assert returns, (
+        f"grid-apis' {function.name} has no `return` at all — this pin cannot read what the route "
+        f"answers, so teach it the new shape rather than letting it compare an empty set")
+    for node in returns:
+        assert isinstance(node.value, ast.Dict), (
+            f"grid-apis' {function.name} returns a {type(node.value).__name__} rather than a dict "
+            f"literal; teach this pin the new shape instead of letting it read nothing")
+        for key in node.value.keys:
+            assert isinstance(key, ast.Constant) and isinstance(key.value, str), (
+                f"grid-apis' {function.name} builds a response key this pin cannot read "
+                f"({ast.dump(key) if key is not None else '**spread'}); teach it the new shape")
+            keys.add(key.value)
+    return keys
+
+
+def _os_served_keys_the_cli_reads(monkeypatch, tmp_path, candidates):
+    """Which of ``candidates`` this CLI actually reads as "you were handed an OS grid".
+
+    Measured by ANSWERING with each key in turn and asking what `fetch_tokens` made of it, rather
+    than by reading this repository's source: what has to keep agreeing is the string that arrives,
+    and a constant is one refactor away from not being the string the parser looks up.
+
+    ``False`` is the probe value on purpose. It is the answer that must produce a *line* — "the
+    control plane isn't serving one" — and it is truthy nowhere, so a key that flips the CLI's answer
+    to `False` is unambiguously the one being read.
+    """
+    import httpx
+
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    real_client = httpx.Client
+
+    def answering(payload):
+        monkeypatch.setattr(
+            control_plane.httpx,
+            "Client",
+            lambda *a, **k: real_client(*a, **{
+                **k, "transport": httpx.MockTransport(lambda r: httpx.Response(200, json=payload))}),
+        )
+        return control_plane.fetch_tokens("sess-tok", "dev-1")
+
+    # Positive control FIRST: prove the transport patch reaches the real parser at all. Without it a
+    # helper that answered nobody would report "no key is read" and read as drift that has not
+    # happened — the failure mode every other pin in this file guards against explicitly.
+    control = answering({_TOKENS_CONTROL_KEY: [{"network_id": "n1", "name": "team"}]})
+    assert control.networks == [{"network_id": "n1", "name": "team"}], (
+        f"positive control: `fetch_tokens` made {control!r} of an ordinary answer, so its verdict "
+        f"about {_TOKENS_CONTROL_KEY} means nothing — fix the harness before believing it")
+    assert control.os_served is None, (
+        "positive control: `fetch_tokens` reported an os_served with no such key in the answer, so "
+        "the probe below cannot tell which key set it — fix the harness")
+
+    return {key for key in candidates
+            if answering({_TOKENS_CONTROL_KEY: [], key: False}).os_served is False}
+
+
+def test_the_key_that_says_why_there_is_no_os_grid_is_spelled_the_same_on_both_sides(monkeypatch,
+                                                                                     tmp_path):
+    """What grid-apis answers and what this CLI reads, compared against each other.
+
+    Neither repository can catch this alone. grid-apis' own suite asserts the key it emits, this
+    repository's `test_fetch_tokens_carries_the_os_served_flag_beside_the_networks` asserts the key it
+    reads, and a developer renaming it updates the test on their side along with the code. Both
+    suites stay green and the absent OS grid stops saying why — with no error anywhere, because an
+    unrecognised key in a JSON body is simply dropped.
+    """
+    answered = _apis_answer_keys(_apis_route(_TOKENS_METHOD, _TOKENS_PATH))
+    assert _TOKENS_CONTROL_KEY in answered, (
+        f"positive control: grid-apis' {_TOKENS_METHOD.upper()} {_TOKENS_PATH} does not appear to "
+        f"answer {_TOKENS_CONTROL_KEY} either, so this check is reading the wrong function — fix the "
+        f"harness before believing its verdict")
+
+    read = _os_served_keys_the_cli_reads(monkeypatch, tmp_path, answered)
+    assert len(read) == 1, (
+        f"grid-apis answers {sorted(answered)} on {_TOKENS_METHOD.upper()} {_TOKENS_PATH}, and this "
+        f"CLI reads {sorted(read) or 'none of them'} as the OS-grid flag — the key is dropped in "
+        f"silence, so an absent OS grid stops saying why and NOTHING goes red (ADR 0039 D-k); edit "
+        f"BOTH sides, or teach this pin the new spelling")
+
+
+def test_the_flag_this_cli_names_is_the_one_it_actually_reads(monkeypatch, tmp_path):
+    """`OS_SERVED_KEY` is what the pin above compares; nothing yet says the parser uses it.
+
+    A constant that has drifted from the code beside it is worse than no constant: the cross-repo
+    check would go on comparing grid-apis to a name this CLI no longer looks up, and would keep
+    reporting agreement while the seam was broken.
+    """
+    from remote import control_plane
+
+    read = _os_served_keys_the_cli_reads(monkeypatch, tmp_path, {control_plane.OS_SERVED_KEY})
+    assert read == {control_plane.OS_SERVED_KEY}, (
+        f"`control_plane.OS_SERVED_KEY` is {control_plane.OS_SERVED_KEY!r} but `fetch_tokens` does "
+        f"not read that key out of the answer — the constant and the parser have drifted apart")

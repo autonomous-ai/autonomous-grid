@@ -168,6 +168,20 @@ commands exit with guidance to switch — sign-in is a remote concept. See
 [ADR 0002](./adr/0002-remote-sign-in.md) and
 [ADR 0023](./adr/0023-signing-out-with-live-serve-children.md).
 
+Both commands say one line when there is no **OS grid** for this machine — the grid that exists for
+everyone running one operating system, provisioned for you rather than created by you. It names
+either the system this CLI has no OS grid for, listing the ones it does have (a BSD, say), or the
+fact that the control plane is serving none for yours — so the two do not have to be told apart by
+guesswork. It is never an error and it never changes an exit code. Somebody who has an OS grid sees
+nothing extra, and so does anyone whose control plane is too old to answer the question. See
+[ADR 0039](./adr/0039-a-grid-can-be-keyed-on-an-os.md).
+
+⚠️ `--json` carries the same fact under a **new `os_grid` key, present on every `grid login --json`
+and `grid sync --json`** — an object with `reason`, `system` and `os_token`, or `null` when there is
+nothing to say. It is `null` rather than absent on purpose: a key that comes and goes is one every
+script has to guard. It is the one part of this that is not invisible to a client written before it,
+so a consumer comparing the whole payload shape sees one more key.
+
 ## Grid Lifecycle
 
 ```
