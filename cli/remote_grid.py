@@ -1,4 +1,4 @@
-"""Remote-mode grid lifecycle: `grid up` / `down` / `ls` / `info` against the hosted
+"""Remote-mode grid lifecycle: `grid start` / `stop` / `ls` / `info` against the hosted
 managed-networks API.
 
 Remote-only — `cli.dispatch` routes these here in remote mode, so the handlers assume remote and
@@ -22,7 +22,7 @@ from typing import Any
 from shared import shell, state
 
 
-# Default network type for `grid up` on create (DECISIONS D11; the other choice is
+# Default network type for `grid start` on create (DECISIONS D11; the other choice is
 # permissioned-providers). `--type` parses with default None so a value passed on a *start* can
 # be told apart from this create default.
 DEFAULT_NETWORK_TYPE = "permissioned-public"
@@ -51,7 +51,7 @@ def _resolve_default() -> dict[str, Any] | None:
     """The grid to act on when none is named: the active selection, else the sole grid, else
     ``None``. No ``home`` fallback — remote never auto-creates one. Mirrors the default branch of
     ``local/config.select_grid``; a stale active (its grid was removed) falls through to the sole grid.
-    The single home of the active>sole precedence, shared by ``up`` (no name) and ``_select``.
+    The single home of the active>sole precedence, shared by ``start`` (no name) and ``_select``.
     """
     nets = _networks()
     active = state.get_active("remote")
@@ -63,7 +63,7 @@ def _resolve_default() -> dict[str, Any] | None:
 
 
 def _select(name: str | None) -> dict[str, Any]:
-    """The grid a name-taking command (``down``/``info``) acts on. An explicit name must exist;
+    """The grid a name-taking command (``stop``/``info``) acts on. An explicit name must exist;
     otherwise fall back to ``_resolve_default`` (active>sole). Clear ``SystemExit`` either way."""
     if name:
         rec = _by_name(name)
@@ -207,7 +207,7 @@ def cmd_remote_up(args: argparse.Namespace) -> int:
         credentials.add_network(record)
     except OSError as exc:
         # The grid exists server-side now; tell the user rather than leaving a bare traceback and a
-        # next `grid up <name>` that would create a duplicate.
+        # next `grid start <name>` that would create a duplicate.
         raise SystemExit(
             f"Grid {name!r} was created in remote mode but couldn't be saved locally ({exc}). "
             "Run `grid login` to re-sync your grids before retrying."

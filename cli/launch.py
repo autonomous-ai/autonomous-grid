@@ -82,7 +82,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
     # failure, and a network round-trip cannot improve on it.
     token = remote_grid.require_access_token(rec, label)
     # The relay base comes from live status for the creator, or the login bundle for a member — the
-    # same helper (and the same "isn't up; run `grid up`" error) `grid info --env` uses.
+    # same helper (and the same "isn't up; run `grid start`" error) `grid info --env` uses.
     base, _status = remote_grid.resolve_relay_base(
         session_token, rec, remote_grid._network_id(rec), label
     )

@@ -1,7 +1,7 @@
 # ADR 0011 — CLI vocabulary & UX for `join` / `leave` / `engine`
 
 Status: accepted (2026-07-06). Scope: the public `grid` CLI surface (v0.1.6 shipped). All changes are
-additive / alias-preserving except Decision D-f (`grid up` no longer auto-creates an id-shaped arg).
+additive / alias-preserving except Decision D-f (`grid start` no longer auto-creates an id-shaped arg).
 
 ## Context
 
@@ -21,7 +21,7 @@ The released CLI accumulated avoidable friction, each verified against the tree 
 - **`leave --engine` help lies.** It says "endpoint URL (or unique label)" (`cli/parser.py:163-165`) but
   the remote matcher already accepts URL / label / served-model / URL-fragment (`_drop_spec`,
   `cli/remote_provider.py:569-596`); the *local* handler accepts only the exact engine-id.
-- **`grid up <unknown>` silently creates.** Any unknown positional becomes a brand-new grid named after
+- **`grid start <unknown>` silently creates.** Any unknown positional becomes a brand-new grid named after
   the string (`cli/grid.py:23`). Paste a grid *id* you haven't synced locally and you get a junk grid
   named after the id, not an error.
 
@@ -68,7 +68,7 @@ reworded from "Set up the built-in engines" to "Set up built-in engines and list
 namespace coherently covers setup **and** listing. Chosen over a new top-level `grid ps` (which would
 cost a `dispatch.py` bucket + a `REMOTE_HANDLERS` entry + a third spelling for "list engines").
 
-**D-f (`grid up` id guard).** `grid up <arg>` no longer auto-creates a junk local grid when `<arg>` is
+**D-f (`grid start` id guard).** `grid start <arg>` no longer auto-creates a junk local grid when `<arg>` is
 really an existing grid the user hasn't synced here — instead of making a grid named after the string, it
 exits with guidance. Two signals, both run before any create/start: **(a)** an exact match against the
 user's known remote grids (`grid login`'s `credentials.toml` networks, by name or network_id) — a
@@ -76,7 +76,7 @@ zero-false-positive signal that works for the opaque remote ids a shape check ca
 the local grid-id shape `ag-<slug>-<hex8>` (anchored `fullmatch`). An ordinary, unknown name still creates
 as before. This is the one non-additive change. Accepted trade-off: signal (b) also refuses a chosen grid
 *name* shaped like an id (`ag-…-<8 hex-valid chars>`, including an all-digit suffix such as
-`ag-nightly-20260706`), since that collides with the reserved local-id form. Remote `grid up` keeps
+`ag-nightly-20260706`), since that collides with the reserved local-id form. Remote `grid start` keeps
 create-on-unknown-name (an explicit `--create` would be the lever there, out of scope).
 
 **D-g (`leave --all` stays required for multi-engine).** Local bare `grid leave` on a grid with several
@@ -89,6 +89,6 @@ correcting the handoff's assumption that bare-leave already meant "all".
 
 - Back-compat: `grid join --engine ollama`, `grid engines`, and `-m x --advertise-as y` all keep working.
 - No new top-level command → the dispatch classification test is untouched by every decision here.
-- The only behavior a v0.1.6 user could notice as *removed* is `grid up <arg>` auto-creating a junk local
+- The only behavior a v0.1.6 user could notice as *removed* is `grid start <arg>` auto-creating a junk local
   grid when `<arg>` is a grid id, or a known remote grid's name, that isn't a local grid — now a clean
   error (D-f).
