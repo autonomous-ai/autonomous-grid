@@ -32,7 +32,8 @@ def test_resilience_soak_exercises_every_fault_and_lifecycle(tmp_path):
         "relay_outage",
         "controller_failover",
     }
-    assert report.final_controller_term >= 3
+    # Only the two injected takeovers advance the term. Ordinary lease renewals remain in term 1.
+    assert report.final_controller_term == 3
     assert report.checks["old_leader_fenced"] >= 2
     assert report.checks["relay_outage_preserved_state"] >= 2
     assert report.checks["no_partitioned_assignment"] > 0
