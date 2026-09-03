@@ -138,7 +138,10 @@ def _run(command: list[str], timeout: float = 5.0) -> str:
 
 
 def _nvidia_inventory(gpus: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    fields = "index,uuid,pci.bus_id,mig.mode.current,pcie.link.gen.current,pcie.link.width.current"
+    # PCIe generation downshifts while an idle GPU is in a low-power state. Using the current
+    # generation made a Gen4 x16 host look like Gen1 during scheduling. Width remains the negotiated
+    # physical lane constraint, so combine maximum generation with current width.
+    fields = "index,uuid,pci.bus_id,mig.mode.current,pcie.link.gen.max,pcie.link.width.current"
     output = _run(["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"])
     by_index = {int(item.get("index") or 0): item for item in gpus if isinstance(item, Mapping)}
     inventory: list[dict[str, Any]] = []

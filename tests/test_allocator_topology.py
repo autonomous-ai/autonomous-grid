@@ -134,6 +134,8 @@ def test_nvidia_probe_reports_nvlink_numa_and_pcie_capacity(monkeypatch):
         del timeout
         joined = " ".join(command)
         if "--query-gpu" in joined:
+            assert "pcie.link.gen.max" in joined
+            assert "pcie.link.gen.current" not in joined
             return (
                 "0, GPU-a, 0000:01:00.0, Disabled, 4, 16\n"
                 "1, GPU-b, 0000:02:00.0, Disabled, 4, 16"
