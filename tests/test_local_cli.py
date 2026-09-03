@@ -11745,7 +11745,7 @@ def _fetch_tokens_query(monkeypatch, tmp_path, system, os_release=None):
 
 @pytest.mark.parametrize(
     "system,expected",
-    [("Darwin", "macos"), ("Linux", "linux"), ("Windows", "windows")])
+    [("Darwin", "macos"), ("Linux", "linux")])
 def test_fetch_tokens_sends_the_os_token_of_the_machine_it_runs_on(
     monkeypatch, tmp_path, system, expected
 ):
@@ -11755,7 +11755,7 @@ def test_fetch_tokens_sends_the_os_token_of_the_machine_it_runs_on(
     assert params["device_id"] == "dev-1"  # the OS rides ALONGSIDE the device id, never instead of it
 
 
-@pytest.mark.parametrize("system", ["FreeBSD", "Java", ""])
+@pytest.mark.parametrize("system", ["Windows", "FreeBSD", "Java", ""])
 def test_fetch_tokens_sends_no_os_parameter_when_the_system_resolves_to_nothing(
     monkeypatch, tmp_path, system
 ):
@@ -11865,20 +11865,23 @@ def test_the_id_is_read_the_way_os_release_is_actually_written(monkeypatch, tmp_
     assert params["os"] == "omarchy", label
 
 
-@pytest.mark.parametrize("system,expected", [("Darwin", "macos"), ("Windows", "windows")])
+@pytest.mark.parametrize("system,expected", [("Darwin", "macos"), ("Windows", None)])
 def test_a_machine_that_is_not_linux_never_consults_os_release(
     monkeypatch, tmp_path, system, expected
 ):
-    """A Mac with a stray `/etc/os-release` is still a Mac.
+    """A Mac with a stray `/etc/os-release` is still a Mac — and a Windows box is still outside the set.
 
     The distro read hangs off the `linux` answer and nothing else. Written down because the file is
-    not Linux's alone — a container image, a Homebrew package or a hand-rolled script can leave one
-    on macOS — and a lookup done before the system is known would move that machine's grid.
+    not Linux's alone — a container image, a Homebrew package, WSL or a hand-rolled script can leave
+    one on either system — and a lookup done before the system is known would move that machine's
+    grid, or invent one for a machine this CLI serves no grid to at all.
+
+    ``expected`` is ``None`` for the system with no token: the parameter is ABSENT, not empty.
     """
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     params = _fetch_tokens_query(
         monkeypatch, tmp_path, system, os_release=_OMARCHY_OS_RELEASE)
-    assert params["os"] == expected
+    assert params.get("os") == expected
 
 
 @pytest.mark.parametrize(
@@ -11927,6 +11930,36 @@ def test_a_gigantic_os_release_is_not_read_into_memory(monkeypatch, tmp_path):
 
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     assert os_grid.os_token() == "linux"
+
+
+def test_windows_is_not_a_system_this_cli_has_a_grid_for(monkeypatch, tmp_path):
+    """Windows is deliberately OUTSIDE the closed set — the OS grids are macOS, Linux and Omarchy.
+
+    ⚠️ **A Windows machine is not a machine with a broken claim; it is a machine with no OS grid**,
+    and it takes the same branch a BSD does. The distinction matters because it decides which sentence
+    the person reads: `UNSUPPORTED_SYSTEM` names the set they are outside of, which is actionable,
+    while `NOT_SERVED` would tell them to wait for a deployment that is never coming.
+
+    ⚠️ It is also the one entry in this file that removes a system rather than adding one, so the pin
+    is on the ABSENCE. Re-adding `windows` to `_BY_SYSTEM` would leave every other test in this file
+    green — the matrices simply would not exercise it — which is why this asserts on the token and on
+    the wire rather than trusting a parametrize to notice.
+    """
+    from cli import os_grid_notice
+    from shared.system import os_grid
+
+    assert "windows" not in os_grid.OS_TOKENS
+    assert not hasattr(os_grid, "OS_WINDOWS")
+
+    params = _fetch_tokens_query(monkeypatch, tmp_path, "Windows")
+    assert "os" not in params, "a Windows machine must claim nothing at all, not an unserved token"
+
+    absent = _absence(monkeypatch, "Windows", None, tmp_path)
+    assert absent is not None
+    assert absent.reason == os_grid_notice.UNSUPPORTED_SYSTEM
+    assert absent.os_token is None
+    # The sentence names the machine's own system and the set it is outside of.
+    assert "Windows" in absent.line() and "windows" not in absent.line().split(":", 1)[1]
 
 
 def test_omarchy_is_one_of_the_tokens_this_cli_can_emit():
@@ -21204,13 +21237,19 @@ def test_sync_json_survives_empty_list_warning(monkeypatch, tmp_path, capsys):
 # sign-in is a line people learn to scroll past.
 
 
-def _absence(monkeypatch, system, os_served):
-    """The notice a machine running ``system`` produces for that ``os_served`` answer."""
+def _absence(monkeypatch, system, os_served, tmp_path=None):
+    """The notice a machine running ``system`` produces for that ``os_served`` answer.
+
+    ``/etc/os-release`` is pointed at a path that does not exist unless a caller supplies one, so a
+    ``Linux`` case here means *an ordinary Linux machine* rather than *whatever this developer runs*.
+    """
     import platform
 
     from cli import os_grid_notice
+    from shared.system import os_grid
 
     monkeypatch.setattr(platform, "system", lambda: system)
+    monkeypatch.setattr(os_grid, "_OS_RELEASE", (tmp_path or Path("/nonexistent")) / "none")
     return os_grid_notice.absence(os_served)
 
 
@@ -21242,7 +21281,7 @@ def test_a_control_plane_that_serves_no_grid_for_this_os_is_a_different_answer(m
     assert (absent.system, absent.os_token) == ("Darwin", "macos")
 
 
-@pytest.mark.parametrize("system", ["Darwin", "Linux", "Windows"])
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
 def test_a_deployment_serving_no_os_grid_at_all_still_says_so(monkeypatch, system):
     """The state a reviewer will read as a bug, pinned as the decision it is (ADR 0039 D-k).
 
@@ -21321,7 +21360,7 @@ def test_nothing_is_said_when_the_machine_has_a_token_and_no_refusal(monkeypatch
     assert _absence(monkeypatch, "Darwin", os_served) is None
 
 
-@pytest.mark.parametrize("system", ["Linux", "Windows", "Darwin"])
+@pytest.mark.parametrize("system", ["Linux", "Darwin"])
 def test_every_system_the_cli_has_a_token_for_stays_quiet_when_served(monkeypatch, system):
     assert _absence(monkeypatch, system, True) is None
 
@@ -39980,14 +40019,25 @@ def test_a_root_the_operator_NAMED_is_not_judged_by_the_defaults_rules(
     assert not (tmp_path / "never-made").exists(), "the default root was made despite a named one"
 
 
-def _refresh_body(monkeypatch, system):
-    """The JSON body `refresh_network_token` builds on a machine whose ``platform.system()`` is that."""
+def _refresh_body(monkeypatch, tmp_path, system, os_release=None):
+    """The JSON body `refresh_network_token` builds on a machine whose ``platform.system()`` is that.
+
+    ``/etc/os-release`` is stubbed here for the same reason `_fetch_tokens_query` stubs it: since
+    `omarchy` landed, a Linux machine's token is read off that file, and leaving the real one in place
+    would make a `("Linux", "linux")` case a statement about the host running the suite rather than
+    about the code.
+    """
     import json as _json
     import platform
 
     from remote import control_plane
+    from shared.system import os_grid
 
     monkeypatch.setattr(platform, "system", lambda: system)
+    os_release_path = tmp_path / "os-release"
+    if os_release is not None:
+        os_release_path.write_text(os_release, encoding="utf-8")
+    monkeypatch.setattr(os_grid, "_OS_RELEASE", os_release_path)
     seen = {}
 
     def handler(request):
@@ -40001,7 +40051,7 @@ def _refresh_body(monkeypatch, system):
 
 @pytest.mark.parametrize(
     "system,expected",
-    [("Darwin", "macos"), ("Linux", "linux"), ("Windows", "windows")])
+    [("Darwin", "macos"), ("Linux", "linux")])
 def test_the_refresh_exchange_carries_the_os_token_too(monkeypatch, tmp_path, system, expected):
     """ADR 0039 D-e, issue 10 — the claim rides the RENEWAL, not only the first fetch.
 
@@ -40015,12 +40065,12 @@ def test_the_refresh_exchange_carries_the_os_token_too(monkeypatch, tmp_path, sy
     refresh credential already travels in the body, so the claim goes with it.
     """
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    body = _refresh_body(monkeypatch, system)
+    body = _refresh_body(monkeypatch, tmp_path, system)
     assert body["os"] == expected
     assert body["refresh_token"] == "rt-1"  # the claim rides ALONGSIDE the credential, never instead
 
 
-@pytest.mark.parametrize("system", ["FreeBSD", "Java", ""])
+@pytest.mark.parametrize("system", ["Windows", "FreeBSD", "Java", ""])
 def test_the_refresh_exchange_omits_the_os_key_when_there_is_no_token(monkeypatch, tmp_path, system):
     """Omitted entirely, never an empty string — the same discipline as the fetch, for the same reason.
 
@@ -40029,7 +40079,7 @@ def test_the_refresh_exchange_omits_the_os_key_when_there_is_no_token(monkeypatc
     every OTHER grid it belongs to: this call is not about OS grids, it merely also serves them.
     """
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    body = _refresh_body(monkeypatch, system)
+    body = _refresh_body(monkeypatch, tmp_path, system)
     assert "os" not in body
     assert body["refresh_token"] == "rt-1"
 

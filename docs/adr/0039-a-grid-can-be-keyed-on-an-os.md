@@ -35,8 +35,32 @@ Written down because the gate looks like an access control and is not one: it st
 
 ## D-c — The taxonomy is closed, and `other` never becomes a grid
 
-Exactly four tokens: `macos`, `windows`, `linux`, `omarchy`. An unrecognised Linux resolves to
-`linux`; anything else resolves to **nothing**, and no grid is provisioned.
+Exactly three tokens: `macos`, `linux`, `omarchy`. An unrecognised Linux resolves to `linux`;
+anything else — **Windows included** — resolves to **nothing**, and no grid is provisioned.
+
+**AMENDED 2026-09-03: `windows` is REMOVED. Windows is not an OS grid this product serves.** It was
+in the original taxonomy and shipped in `v0.3.29`; the decision is to drop it, not to defer it.
+
+⚠️ **This is the one token the set has ever LOST rather than never had, and that asymmetry is the
+whole risk.** Every other absence in this ADR is an absence nobody has to remember — `other`,
+FreeBSD, a frozen build naming no system. `windows` is different: `platform.system()` obviously knows
+about it, `host.platform_kind()` still carries it (a build target is not a community), and every map
+in this feature looks incomplete without it. So the removal is written down in three places that a
+person editing the map will actually read — `os_grid._BY_SYSTEM`, `os_networks
+.DEFAULT_SERVED_OS_TOKENS` and `_OS_LABELS` — and pinned by a test that asserts the ABSENCE, because
+no matrix can fail for a row that is simply no longer there.
+
+⚠️ **Removing the token does NOT stop an existing Windows grid serving.** The served list governs
+CREATION only; admission is `store.os_gate_for`, which compares a request's claim against the row's
+own `access_os` and never consults it. So a CLI old enough to still claim `windows` — `v0.3.29` and
+anything before this change — keeps being admitted to a `windows` grid that is still `active`.
+Retiring the OS therefore has an operational half that the code cannot do: **take the existing
+Windows grids out of service**, which is exactly what D-c's neighbour `os_grids_enabled` already says
+("to stop serving one OS in particular, drop its token … *and stop the grid*").
+
+A Windows machine now takes the branch a BSD takes: no token, no `os=` on the wire, and D-k's
+`unsupported_system` sentence naming the set it is outside of — which is more actionable than
+`not_served`, since the latter invites waiting for a deployment that is never coming.
 
 The closed set is forced by D-d: auto-provisioning on an open value space means every unrecognised
 string becomes a permanent empty grid. `shared/system/host.platform_kind()` already carries an `other`
@@ -615,7 +639,9 @@ asked for their own `GET /grid/overview`: 11 nodes answered, and one is named
 `MacBooks-MacBook-Pro-7.local` verbatim. ⚠️ **Not a prevalence estimate** — no `os-community` grid
 exists in prod yet, so none of those 11 is the population at issue, and 10 of them are hand-named.
 
-**The other three tokens of D-c's taxonomy, read the same day.** ⚠️ These are **source reads of the
+**The other tokens of D-c's taxonomy, read the same day.** (Taken while `windows` was still one of
+them; it has since been removed from the taxonomy, and its bullet is kept as the record of what was
+and was not measured.) ⚠️ These are **source reads of the
 installers**, not measurements on installed machines, and are held to that lower standard — they
 bound this decision's reach, they are not what it rests on.
 
@@ -627,11 +653,12 @@ bound this decision's reach, they are not what it rests on.
   grid for. `basecamp/omarchy` contains **zero** hostname references — `boot.sh` layers onto an
   existing Arch install — so the name comes from `archinstall`, whose default is the constant
   `hostname: str = 'archlinux'`.
-- **`windows` is unmeasured**, and was never in issue 15's scope.
+- **`windows` was unmeasured**, and was never in issue 15's scope. It is no longer a token at all
+  (D-c, amended 2026-09-03), so the gap it left is now moot.
 - **The fleet as deployed carries no person's name**: the dev VM is `grid-dev` from cloud-init, and
   every Linux node in the prod sweep is provisioner-named.
 
-So the residue is a **desktop-consumer** phenomenon and, among the four tokens, confirmed on `macos`
+So the residue is a **desktop-consumer** phenomenon and, among the tokens then in the set, confirmed on `macos`
 and indicated on `linux`. None of that changes the decision — a residue observed on a live row is not
 overturned by the count of platforms sharing it — but it does say who D-n protects.
 
