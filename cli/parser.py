@@ -37,6 +37,7 @@ from .allocator_scout import (
     cmd_allocator_scout_watch,
 )
 from .allocator_qualification import cmd_allocator_qualify
+from .allocator_ownership import cmd_allocator_audit
 from shared.allocator.scenario import SCENARIO_STRATEGIES
 
 from .allocator_scenario import (
@@ -537,6 +538,21 @@ def _add_allocator(sub) -> None:
     resilience.add_argument("--quiet", action="store_true")
     resilience.add_argument("--json", action="store_true")
     resilience.set_defaults(handler=cmd_allocator_resilience)
+
+    audit = allocator_sub.add_parser(
+        "audit",
+        help="Show per-model lifecycle ownership and enforce migration cutover gates",
+    )
+    _add_allocator_grid(audit)
+    audit.add_argument(
+        "--require-managed",
+        action="append",
+        default=[],
+        metavar="MODEL",
+        help="Fail unless MODEL has managed ready routes and no external ready routes; repeatable.",
+    )
+    audit.add_argument("--json", action="store_true")
+    audit.set_defaults(handler=cmd_allocator_audit)
 
     allocator_join = allocator_sub.add_parser(
         "join",
