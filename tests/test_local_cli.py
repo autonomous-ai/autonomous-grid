@@ -11439,7 +11439,11 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     argvs = {
-        "login": ["login"],
+        # `login` is `dispatch.SELF_SWITCHING`: in plain local mode it no longer meets this gate at
+        # all — it signs in and moves the mode — so only an explicit `--local` still refuses. Driven
+        # without the flag this test runs the REAL device flow against the live control plane: CI
+        # fails it on the sign-in timeout, and on a developer's machine it can actually sign in.
+        "login": ["--local", "login"],
         "logout": ["logout"],
         "sync": ["sync"],
         "members": ["members", "list"],
@@ -11456,6 +11460,12 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
     defaulted = {c for c, reason in dispatch.REMOTE_ONLY.items() if reason is None}
     assert defaulted, "nothing takes the default reason any more: delete this lock, don't let it pass vacuously"
     assert defaulted <= set(argvs), f"no argv here for defaulted command(s): {defaulted - set(argvs)}"
+    # The lock above cannot see the difference between a gate that refused and a handler that ran, so
+    # it is stated separately: a self-switching command reaches its REAL handler without `--local`.
+    unflagged = sorted(c for c in dispatch.SELF_SWITCHING & defaulted if "--local" not in argvs[c])
+    assert not unflagged, (
+        f"self-switching command(s) {unflagged} must be driven with an explicit --local here, or "
+        "this test calls the real handler and reaches the live control plane")
 
     for command in sorted(defaulted):
         with pytest.raises(SystemExit) as exc:
