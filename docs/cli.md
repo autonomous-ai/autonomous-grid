@@ -108,9 +108,11 @@ grid use --none                       # clear the active grid for the current mo
 grid [--local | --remote] <command>      # override the mode for a single command
 ```
 
-The mode is persisted in `~/.grid/state.json` (default `local`); each mode remembers its own
-active grid. Which mode a command runs in is resolved as `--local`/`--remote` (one command) > the
-persisted mode > `local`. `grid use <name>` sets the persistent default grid, so `grid chat` /
+The mode is persisted in `~/.grid/state.json`; each mode remembers its own active grid. Which mode
+a command runs in is resolved as `--local`/`--remote` (one command) > the persisted mode > the
+default. With no state file the default is `remote`, except on a machine that already holds local
+grids (`~/.grid/grids/*/config.json`), which stays `local` until you run `grid mode remote` — so an
+upgrade never takes a running local grid out of sight. `grid use <name>` sets the persistent default grid, so `grid chat` /
 `grid info` / `grid models` target it without naming it — naming a grid explicitly still wins (the
 `[grid]` positional on `info`/`models`/`engines`, `--grid` on `chat`/`image`/`edit`/`video`), and a
 stale selection (its grid was removed) is ignored.
