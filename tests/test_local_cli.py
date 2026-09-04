@@ -11610,7 +11610,8 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
 
     All six commands the gate guards today are gated because they need a signed-in account, so
     "to sign in." is their reason and the message must not move by a byte. A command whose reason
-    is *not* sign-in registers its own and is covered by its own test instead.
+    is *not* sign-in registers its own and is covered by its own test instead, and one that answers
+    local mode by switching rather than refusing (`login`) is driven through `--local` below.
     """
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
     argvs = {
@@ -11633,8 +11634,13 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
     assert defaulted <= set(argvs), f"no argv here for defaulted command(s): {defaulted - set(argvs)}"
 
     for command in sorted(defaulted):
+        # A self-switching command reaches this gate only when someone names the mode: bare
+        # `grid login` in local mode signs in and moves the mode instead of refusing
+        # (dispatch.SELF_SWITCHING), so its sentence is locked through the `--local` spelling that
+        # still does refuse — the same sentence, byte for byte, by the same code path.
+        argv = (["--local"] if command in dispatch.SELF_SWITCHING else []) + argvs[command]
         with pytest.raises(SystemExit) as exc:
-            cli.main(argvs[command])
+            cli.main(argv)
         assert str(exc.value) == (
             f"`grid {command}` is a remote-mode command. "
             "Run `grid mode remote` (or pass --remote) to sign in."
