@@ -167,11 +167,12 @@ hours — and after this change it is not even approximately true.
   `0600`, so the shelled-out `grid` CLI finds a logged-in profile. Nothing prunes it. What used to
   be at rest there for at most a day is now at rest for a year, and the managed-networks PRD says in
   as many words that it was relying on the 24h expiry. Seeding a **freshly minted** short session
-  instead of echoing the caller's would fix it and is exactly the case D-b's default exists for —
-  but it is not free: `reconcile_managed_networks` reuses an already-seeded home at **startup**,
-  outside any request, where the caller's bearer being long-lived is now an accidental improvement.
-  Which of those two the managed-networks path should want is that feature's decision, not this
-  one's; it is recorded here because this change is what made it a question.
+  instead of echoing the caller's bearer would fix it, and is exactly the case D-b's default exists
+  for. Nothing measured objects: `managed_reconcile`'s own docstring records that `grid network
+  start` is purely local and needs **no** session token, so the one reader outside a request never
+  looks at the seeded one, and every other reader of a home sits inside a request that already
+  carries a live bearer. It is still that feature's change to make rather than this one's — it is
+  recorded here because this change is what turned it into a question.
 - **`GRID_SESSION_JWT_SECRET` rotation becomes a heavier hammer, and stays the only one.** It was
   already the documented reset after a `grid_users` wipe. It is now also the only answer to a single
   compromised laptop, and it signs out every account on the platform to get there.
