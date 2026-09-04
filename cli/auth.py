@@ -214,12 +214,9 @@ def _print_next_steps(networks: list[dict[str, Any]]) -> None:
     print_next_steps([
         (f"grid use {example}", "pick the grid to work with"),
         ('grid chat -m <model> "hello"', "start using it"),
-        # The two ways a coding agent reaches a grid, and they are not interchangeable: an
-        # OpenAI-dialect client (opencode, Cursor, anything taking OPENAI_BASE_URL) is pointed at it
-        # with the exports, while Claude Code speaks Anthropic Messages, which is what `grid launch`
-        # is for (dispatch.REMOTE_ONLY says the same thing from the other side).
-        (f"grid info --env {example}", "OPENAI_* exports for coding agents (opencode, Cursor, …)"),
-        (f"grid launch claude {example}", "or run Claude Code on this grid"),
+        # How a coding agent reaches this grid: the exports point any OpenAI-dialect client
+        # (opencode, codex, Cursor) at it. `grid info --env` itself says what to do with them.
+        (f"grid info --env {example}", "point coding agents at it (opencode, codex, …)"),
         (f"grid join {example} --serve <model>", "optional: serve a model to it"),
     ])
 

@@ -21,6 +21,8 @@ from typing import Any
 
 from shared import shell, state
 
+from .next_steps import print_env_hint
+
 
 # Default network type for `grid start` on create (DECISIONS D11; the other choice is
 # permissioned-providers). `--type` parses with default None so a value passed on a *start* can
@@ -270,6 +272,7 @@ def cmd_remote_info(args: argparse.Namespace) -> int:
         # of a double-quoted context and be *executed* by the eval this command invites.
         print(f"export OPENAI_BASE_URL={shell.quote(base_url)}")
         print(f"export OPENAI_API_KEY={shell.quote(token)}")
+        print_env_hint(_env_command(args.grid))
         return 0
     rec = _select(args.grid)
     # Status is creator-only; a member sees `{}` here and just gets a blank run-state (never an error).
@@ -336,3 +339,8 @@ def cmd_remote_members(args: argparse.Namespace) -> int:
         roles = ",".join(member.get("roles") or [])
         print(f"{email}\t{roles}")
     return 0
+
+
+def _env_command(grid: str | None) -> str:
+    """The `info --env` command as this caller typed it, re-quoted so the hint can be pasted back."""
+    return "grid info --env" + (f" {shlex.quote(grid)}" if grid else "")

@@ -17,6 +17,8 @@ from local import runtime
 from shared import paths, run_records, shell, state
 from shared._version import __version__
 
+from .next_steps import print_env_hint
+
 
 def cmd_version(args: argparse.Namespace) -> int:
     print(f"grid {__version__}")
@@ -294,6 +296,7 @@ def cmd_info(args: argparse.Namespace) -> int:
         # different quoting styles is how one of them stays wrong after the other is fixed.
         print(f"export OPENAI_BASE_URL={shell.quote(f'{grid_url}/v1')}")
         print(f"export OPENAI_API_KEY={shell.quote('local-grid')}")
+        print_env_hint("grid info --env" + (f" {shlex.quote(args.grid)}" if args.grid else ""))
         return 0
 
     engines, reachable = _live_engines(grid_url)
