@@ -77,7 +77,7 @@ def _print_use_next_steps(mode: str, name: str) -> None:
     # Set apart from the list above because it is not a fifth thing to choose between: it is the
     # one line to paste when the answer is "a coding agent". `print_next_steps` already ended with a
     # blank line, so this stands on its own.
-    print(f'To point a coding agent at this grid, run:  eval "$(grid info --env)"')
+    print('To point a coding agent at this grid, run:  eval "$(grid info --env)"')
     print("")
 
 
