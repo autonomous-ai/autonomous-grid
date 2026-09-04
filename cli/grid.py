@@ -340,6 +340,9 @@ def _overview_remote(as_json: bool) -> int:
     print(f"active grid: {active}" if active else "active grid: (none)")
     print("\nSign in with `grid login`, then manage your remote grids with `grid start`/`ls`/`info`, "
           "serve models with `grid join`, and use them with `grid chat -m <model> \"…\"`.")
+    # `remote` is the default for a new install (ADR 0001 D-2, amended), so this screen is the first
+    # thing a new user sees — and without this line the local mode has no signpost anywhere.
+    print("Or run a grid on this machine alone, no account needed: `grid mode local`.")
     return 0
 
 
