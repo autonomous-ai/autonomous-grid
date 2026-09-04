@@ -145,5 +145,8 @@ esac
 
 ver="$("$grid_bin" --version 2>&1)" || die "installed but failed to run: $ver"
 ok "$ver"
-info "Next:  grid login   # sign in, then pick from the grids you can use"
-info "  or:  grid start   # create your own grid on this computer"
+info "Next:  grid login       # sign in, then pick from the grids you can use"
+# A new install starts in remote mode (ADR 0001 D-2, amended), where 'grid start' means "start my
+# hosted grid" and asks for a sign-in. So the local path has to name the mode, or this line sends
+# someone who wants no account into 'You are not signed in.'
+info "  or:  grid mode local  # then 'grid start' creates your own grid on this computer"

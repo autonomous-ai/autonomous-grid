@@ -4983,6 +4983,7 @@ def test_engine_ls_accepts_grid_and_json():
 
 def test_engine_ls_local_delegates_to_cmd_engines(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     seen = {}
 
     def fake_engines(args):
@@ -5015,6 +5016,7 @@ def test_looks_like_grid_id_detector():
 
 def test_start_rejects_unknown_grid_id_without_creating(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["start", "ag-home-deadbeef"])
     assert "grid ls" in str(exc.value)
@@ -5024,6 +5026,7 @@ def test_start_rejects_unknown_grid_id_without_creating(monkeypatch, tmp_path):
 
 def test_start_creates_for_human_name(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     monkeypatch.setattr(cli.grid.runtime, "start_grid", lambda cfg: None)
     assert cli.main(["start", "workshop"]) == 0
     from local import config as local_config
@@ -7047,13 +7050,72 @@ def test_scan_engine_children_reports_an_unreadable_table_as_none(monkeypatch):
 # Mode state kernel (shared/state.py)
 # ---------------------------------------------------------------------------
 
-def test_state_defaults_to_local_with_no_active_when_absent(monkeypatch, tmp_path):
+def _write_local_grid(home, grid_id="home"):
+    """The on-disk evidence of an existing local install: one grid's config."""
+    path = home / "grids" / grid_id / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"grid_id": grid_id, "name": grid_id}))
+    return path
+
+
+def test_state_defaults_to_remote_with_no_active_when_absent(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
 
-    assert state.get_mode() == "local"
+    assert state.get_mode() == "remote"
     assert state.get_active("local") is None
     assert state.get_active("remote") is None
     assert not state.state_path().exists()
+
+
+def test_state_defaults_to_local_when_local_grids_already_exist(monkeypatch, tmp_path):
+    """ADR 0001's invariant: an existing local user with no state file is untouched."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _write_local_grid(tmp_path)
+
+    assert state.get_mode() == "local"
+    assert not state.state_path().exists()  # derived, never written behind the user's back
+
+
+def test_state_default_ignores_a_grid_dir_with_no_config(monkeypatch, tmp_path):
+    """A bare directory is not a grid — only a ``config.json`` is the evidence."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    (tmp_path / "grids" / "leftover").mkdir(parents=True)
+
+    assert state.get_mode() == "remote"
+
+
+def test_state_default_keeps_local_when_the_grids_dir_is_unreadable(monkeypatch, tmp_path):
+    """Cannot tell ⇒ local: the reading that never takes a working grid out of sight."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+
+    class _Unreadable:
+        def glob(self, _pattern):
+            raise OSError("permission denied")
+
+    monkeypatch.setattr(state.paths, "grids_dir", lambda: _Unreadable())
+
+    assert state._has_local_grids() is True
+    assert state._default_mode() == "local"
+    assert state.get_mode() == "local"
+
+
+def test_set_active_does_not_flip_an_existing_local_user_to_remote(monkeypatch, tmp_path):
+    """``grid use <name>`` writes state.json; the mode it stamps must be the derived one."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _write_local_grid(tmp_path)
+
+    state.set_active("local", "home")
+
+    assert json.loads(state.state_path().read_text())["mode"] == "local"
+    assert state.get_mode() == "local"
+
+
+def test_set_active_stamps_remote_for_a_new_install(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+
+    state.set_active("remote", "team")
+
+    assert json.loads(state.state_path().read_text())["mode"] == "remote"
 
 
 def test_state_set_mode_persists_and_preserves_active(monkeypatch, tmp_path):
@@ -7107,9 +7169,9 @@ def test_state_recovers_from_malformed_file(monkeypatch, tmp_path):
     state.state_path().parent.mkdir(parents=True, exist_ok=True)
     state.state_path().write_text("{ this is not json")
 
-    assert state.get_mode() == "local"  # lenient: corrupt file => defaults
-    state.set_mode("remote")           # self-heals on next write
-    assert state.get_mode() == "remote"
+    assert state.get_mode() == "remote"  # lenient: corrupt file => defaults
+    state.set_mode("local")             # self-heals on next write
+    assert state.get_mode() == "local"
 
 
 # ---------------------------------------------------------------------------
@@ -7118,6 +7180,7 @@ def test_state_recovers_from_malformed_file(monkeypatch, tmp_path):
 
 def test_grid_mode_reads_and_persists(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _write_local_grid(tmp_path)  # start on the derived `local` so the switch below is a real one
 
     assert cli.cmd_mode(cli.build_parser().parse_args(["mode"])) == 0
     assert capsys.readouterr().out.strip() == "local"
@@ -11334,7 +11397,8 @@ def test_dispatch_runs_agnostic_command_in_remote(monkeypatch, tmp_path, capsys)
 
 
 def test_override_sets_remote_active_without_persisting_mode(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # persisted mode stays local
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # load-bearing: with a `remote` default this assertion could not fail
 
     assert cli.main(["--remote", "use", "team"]) == 0  # G1: --remote reaches cmd_use
     capsys.readouterr()
@@ -11345,6 +11409,7 @@ def test_override_sets_remote_active_without_persisting_mode(monkeypatch, tmp_pa
 
 def test_mode_query_ignores_override(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # load-bearing: with a `remote` default this assertion could not fail
 
     assert cli.main(["--remote", "mode"]) == 0
     assert capsys.readouterr().out.strip() == "local"  # prints persisted mode, not the override
@@ -11371,9 +11436,14 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
     "to sign in." is their reason and the message must not move by a byte. A command whose reason
     is *not* sign-in registers its own and is covered by its own test instead.
     """
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     argvs = {
-        "login": ["login"],
+        # `login` is `dispatch.SELF_SWITCHING`: in plain local mode it no longer meets this gate at
+        # all — it signs in and moves the mode — so only an explicit `--local` still refuses. Driven
+        # without the flag this test runs the REAL device flow against the live control plane: CI
+        # fails it on the sign-in timeout, and on a developer's machine it can actually sign in.
+        "login": ["--local", "login"],
         "logout": ["logout"],
         "sync": ["sync"],
         "members": ["members", "list"],
@@ -11390,6 +11460,12 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
     defaulted = {c for c, reason in dispatch.REMOTE_ONLY.items() if reason is None}
     assert defaulted, "nothing takes the default reason any more: delete this lock, don't let it pass vacuously"
     assert defaulted <= set(argvs), f"no argv here for defaulted command(s): {defaulted - set(argvs)}"
+    # The lock above cannot see the difference between a gate that refused and a handler that ran, so
+    # it is stated separately: a self-switching command reaches its REAL handler without `--local`.
+    unflagged = sorted(c for c in dispatch.SELF_SWITCHING & defaulted if "--local" not in argvs[c])
+    assert not unflagged, (
+        f"self-switching command(s) {unflagged} must be driven with an explicit --local here, or "
+        "this test calls the real handler and reaches the live control plane")
 
     for command in sorted(defaulted):
         with pytest.raises(SystemExit) as exc:
@@ -11408,7 +11484,8 @@ def test_local_gate_prints_a_commands_own_reason_when_it_registers_one(monkeypat
     Messages dialect, is a later slice). The `grid mode remote` signpost lives in the fixed part of
     the sentence, so it must survive a custom reason.
     """
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     monkeypatch.setattr(dispatch, "REMOTE_ONLY", {**dispatch.REMOTE_ONLY, "price": "to reach Mars."})
 
     with pytest.raises(SystemExit) as exc:
@@ -11478,10 +11555,26 @@ def test_overview_remote_is_stub_without_network(monkeypatch, tmp_path, capsys):
     assert "grid login" in out  # accurate remote guidance, still no network call
     assert "grid chat" in out  # consume has shipped — overview points at it
     assert "later release" not in out  # the stale "chatting comes later" line is gone
+    assert "grid mode local" in out  # local mode keeps a signpost now that `remote` is the default
+
+
+def test_bare_grid_on_a_new_install_lands_in_remote_and_names_the_local_way_out(
+        monkeypatch, tmp_path, capsys):
+    """The screen a brand-new user sees. It must not be a dead end for someone who wants no account."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # no state file, no grids: a new install
+    monkeypatch.setattr(cli.grid, "_live_engines",
+                        lambda url: (_ for _ in ()).throw(AssertionError("no network on a bare grid")))
+
+    assert cli.main([]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "mode: remote"
+    assert "grid login" in out
+    assert "grid mode local" in out
 
 
 def test_overview_json_local_no_grids_has_stable_keys(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
 
     assert cli.main(["--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -19940,7 +20033,8 @@ def test_login_logout_classified_remote_only():
 
 
 def test_logout_gated_in_local_mode(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["logout"])
     assert "remote" in str(exc.value).lower()
@@ -19948,9 +20042,14 @@ def test_logout_gated_in_local_mode(monkeypatch, tmp_path):
 
 
 def test_login_in_local_mode_runs_and_switches_the_mode(monkeypatch, tmp_path, capsys):
-    """A fresh install is in local mode, and `grid login` is the first thing the installer suggests:
-    it signs in and moves the mode instead of refusing with a second command to type."""
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    """`grid login` signs in and moves the mode instead of refusing with a second command to type.
+
+    The local mode is set explicitly: since ADR 0001 D-2 was amended a *fresh* install is already
+    `remote`, so this path is now what an existing local user meets. Left implicit, `switched` would
+    be False, no message would print, and the test would exercise no self-switch at all.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")
     _device_flow(monkeypatch, poll_statuses=[_APPROVED],
                  networks=[{"network_id": "n1", "name": "team", "network_type": "permissioned-public",
                             "access_token": "AT", "refresh_token": "RT"}])
@@ -19964,6 +20063,7 @@ def test_login_in_local_mode_runs_and_switches_the_mode(monkeypatch, tmp_path, c
 def test_login_with_explicit_local_override_still_refuses(monkeypatch, tmp_path):
     """`--local login` is someone naming the mode they mean; the self-switch must not overrule it."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["--local", "login"])
     assert "remote" in str(exc.value).lower()
@@ -20872,7 +20972,8 @@ def test_sync_classified_remote_only():
 def test_sync_gated_in_local_mode(monkeypatch, tmp_path):
     from remote import control_plane
 
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     called = []
     monkeypatch.setattr(control_plane, "fetch_tokens",
                         lambda *a, **k: called.append(1) or control_plane.TokenFetch([], None))
@@ -22509,21 +22610,24 @@ def test_remote_info_env_requires_access_token(monkeypatch, tmp_path):
 
 
 def test_local_chat_rejects_remote_only_flags(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default local mode
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["chat", "-m", "m", "hi", "--target-provider", "e1"])
     assert "remote mode" in str(exc.value).lower()
 
 
 def test_local_image_rejects_allow_self_provider(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default local mode
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["image", "a cat", "-m", "comfyui:image_generation", "--allow-self-provider"])
     assert "remote mode" in str(exc.value).lower()
 
 
 def test_local_edit_and_video_reject_remote_only_flags(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default local mode
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     img = tmp_path / "a.png"
     img.write_bytes(b"x")
     with pytest.raises(SystemExit) as exc:  # reject runs before the >3-image check / file reads
@@ -22696,7 +22800,8 @@ def test_remote_members_grid_not_found(monkeypatch, tmp_path):
 
 
 def test_remote_members_gated_in_local_mode(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default local mode
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["members", "list"])
     assert "remote" in str(exc.value).lower()
@@ -23231,7 +23336,8 @@ def test_router_classified_remote_only():
 
 
 def test_router_gated_in_local_mode(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default local mode
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["router", "status"])
     assert "remote" in str(exc.value).lower()
@@ -31242,7 +31348,8 @@ def test_launch_claude_targets_a_named_grid_and_defaults_to_the_active_one(monke
 def test_launch_in_local_mode_refuses_naming_the_dialect_and_the_mode_switch(monkeypatch, tmp_path):
     """A local grid serves chat/completions, never Anthropic Messages — so the refusal must name the
     dialect (or the user files a bug) *and* the command that moves them (or it is a dead end)."""
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     _capture_launch(monkeypatch)  # if the gate leaked, the spawn below would be reached
 
     with pytest.raises(SystemExit) as exc:

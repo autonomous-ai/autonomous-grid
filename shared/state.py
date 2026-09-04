@@ -2,11 +2,13 @@
 
 State lives at ``~/.grid/state.json`` (``GRID_HOME`` overrides the base)::
 
-    {"version": 1, "mode": "local", "active": {"local": <name|null>, "remote": <name|null>}}
+    {"version": 1, "mode": "remote", "active": {"local": <name|null>, "remote": <name|null>}}
 
-A missing file means mode ``local`` with no active selection — so an existing local user
-behaves exactly as before. This module is pure: it imports only ``shared.paths`` and
-``shared.jsonio`` (never ``local``/``remote``), because mode is shared by both modes.
+A missing file means no active selection and the *derived* default mode (``_default_mode``):
+``remote`` for a new install, ``local`` for a machine that already holds local grids — so an
+existing local user who never ran ``grid mode`` still behaves exactly as before (ADR 0001 D-2,
+amended). This module is pure: it imports only ``shared.paths`` and ``shared.jsonio`` (never
+``local``/``remote``), because mode is shared by both modes.
 """
 from __future__ import annotations
 
@@ -18,9 +20,16 @@ from shared import jsonio, paths
 
 
 VALID_MODES = ("local", "remote")
-DEFAULT_MODE = "local"
+DEFAULT_MODE = "remote"
+LEGACY_DEFAULT_MODE = "local"
 STATE_VERSION = 1
 STATE_FILE = "state.json"
+
+# Hand-duplicated from ``local.config.CONFIG_FILE``. It cannot be imported: ``local.config``
+# imports *this* module, so the dependency runs one way only and this module stays pure. Kept in
+# lockstep by editing both sides — renamed there with no edit here, ``_has_local_grids`` sees an
+# empty directory and every existing local user is silently moved onto the remote default.
+GRID_CONFIG_FILE = "config.json"
 
 
 def state_path() -> Path:
@@ -50,9 +59,33 @@ def validate_mode(mode: str) -> str:
     return mode
 
 
+def _has_local_grids() -> bool:
+    """Whether this machine already holds at least one local grid's config on disk.
+
+    The evidence ``_default_mode`` reads. Unreadable ⇒ ``True``: a new install has no ``grids``
+    directory at all and ``glob`` yields nothing *without* raising, so an ``OSError`` means the
+    directory is there and only unreadable — and "cannot tell" must answer the way that leaves an
+    existing local user where they were, never the way that takes their grids out of sight.
+    """
+    try:
+        return any(paths.grids_dir().glob(f"*/{GRID_CONFIG_FILE}"))
+    except OSError:
+        return True
+
+
+def _default_mode() -> str:
+    """The mode for a machine that has never persisted a choice (ADR 0001 D-2, amended).
+
+    ``remote`` is the default the product wants for a new install. A machine that already has
+    local grids keeps ``local`` until its owner opts in with ``grid mode remote`` — ADR 0001's
+    invariant that an existing local user with no state file behaves exactly as before.
+    """
+    return LEGACY_DEFAULT_MODE if _has_local_grids() else DEFAULT_MODE
+
+
 def get_mode() -> str:
     mode = read_state().get("mode")
-    return mode if mode in VALID_MODES else DEFAULT_MODE
+    return mode if mode in VALID_MODES else _default_mode()
 
 
 def resolve_mode(override: str | None) -> str:
@@ -86,6 +119,6 @@ def _normalized(data: dict[str, Any]) -> dict[str, Any]:
     mode = data.get("mode")
     return {
         "version": STATE_VERSION,
-        "mode": mode if mode in VALID_MODES else DEFAULT_MODE,
+        "mode": mode if mode in VALID_MODES else _default_mode(),
         "active": {m: (active.get(m) or None) for m in VALID_MODES},
     }
