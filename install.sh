@@ -145,4 +145,5 @@ esac
 
 ver="$("$grid_bin" --version 2>&1)" || die "installed but failed to run: $ver"
 ok "$ver"
-info "Next:  grid start    # create your grid"
+info "Next:  grid login   # sign in, then pick from the grids you can use"
+info "  or:  grid start   # create your own grid on this computer"

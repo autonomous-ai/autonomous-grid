@@ -20022,14 +20022,43 @@ def test_login_logout_classified_remote_only():
     assert not (set(dispatch.REMOTE_HANDLERS) & set(dispatch.REMOTE_ONLY))
 
 
-def test_login_logout_gated_in_local_mode(monkeypatch, tmp_path):
+def test_logout_gated_in_local_mode(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
-    for command in ("login", "logout"):
-        with pytest.raises(SystemExit) as exc:
-            cli.main([command])
-        assert "remote" in str(exc.value).lower()
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["logout"])
+    assert "remote" in str(exc.value).lower()
     assert not paths.credentials_file().exists()  # gated before any work happens
+
+
+def test_login_in_local_mode_runs_and_switches_the_mode(monkeypatch, tmp_path, capsys):
+    """`grid login` signs in and moves the mode instead of refusing with a second command to type.
+
+    The local mode is set explicitly: since ADR 0001 D-2 was amended a *fresh* install is already
+    `remote`, so this path is now what an existing local user meets. Left implicit, `switched` would
+    be False, no message would print, and the test would exercise no self-switch at all.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")
+    _device_flow(monkeypatch, poll_statuses=[_APPROVED],
+                 networks=[{"network_id": "n1", "name": "team", "network_type": "permissioned-public",
+                            "access_token": "AT", "refresh_token": "RT"}])
+
+    assert cli.main(["login", "--no-browser"]) == 0
+    assert state.get_mode() == "remote"
+    assert "remote mode" in capsys.readouterr().out
+    assert state.get_active("remote") is None  # switching the mode still selects no grid
+
+
+def test_login_with_explicit_local_override_still_refuses(monkeypatch, tmp_path):
+    """`--local login` is someone naming the mode they mean; the self-switch must not overrule it."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--local", "login"])
+    assert "remote" in str(exc.value).lower()
+    assert not paths.credentials_file().exists()
+    assert state.get_mode() == "local"
 
 
 def test_login_happy_path_persists_tokens_and_sets_no_active(monkeypatch, tmp_path, capsys):
@@ -21519,7 +21548,11 @@ def _sync_output(monkeypatch, tmp_path, capsys, *, system, os_served, args=("syn
 # moment `line()` is reworded to drop those two words, with nothing to notice. It also retires an `or`
 # across the two helpers that could not say which half had fired.
 _COMMAND_OUTPUTS = [
-    pytest.param(_login_output, "Signed in as a@b.com. You don't belong to any grids yet.\n",
+    # Login's own report ends with the next-steps block it prints for an account with no grids, so
+    # that block's last line — not the "Signed in as" sentence above it — is what the absence line
+    # must come after.
+    pytest.param(_login_output,
+                 "  grid start <name>   # or create your own, then `grid use <name>`\n\n",
                  id="login"),
     pytest.param(_sync_output, "Synced 0 grids.\n", id="sync"),
 ]

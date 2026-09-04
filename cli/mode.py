@@ -13,6 +13,8 @@ import shlex
 from local import config
 from shared import state
 
+from .next_steps import print_next_steps
+
 
 def cmd_mode(args: argparse.Namespace) -> int:
     target = getattr(args, "target", None)
@@ -54,7 +56,22 @@ def cmd_use(args: argparse.Namespace) -> int:
         _require_local_grid(name)
     state.set_active(mode, name)
     print(f"active grid for {mode} mode: {name}")
+    # Selecting a grid is a middle step, never the goal: say what the grid is now for. Suppressed
+    # under --json, which on this path already prints the plain line above rather than a document.
+    if not getattr(args, "json", False):
+        _print_use_next_steps(mode, name)
     return 0
+
+
+def _print_use_next_steps(mode: str, name: str) -> None:
+    """What to do with the grid you just selected. `grid join` is the one line that differs by mode:
+    remote joins by grid *name* (the relay knows where it is), local needs the grid's URL."""
+    target = shlex.quote(name) if mode == "remote" else "<grid-url>"
+    print_next_steps([
+        ("grid models", "see what this grid serves"),
+        ('grid chat -m <model> "hello"', "talk to a model"),
+        (f"grid join {target} --serve <model>", "optional: serve a model to it"),
+    ])
 
 
 def _require_local_grid(name: str) -> None:
