@@ -148,6 +148,16 @@ REMOTE_ONLY: dict[str, str | None] = {
 }
 
 
+# The one remote-only command that answers a local-mode invocation by *becoming* remote rather than
+# refusing. A fresh install is in local mode, so gating `grid login` made signing in a two-command
+# ritual whose first command ("grid mode remote") means nothing to someone who just wants an
+# account. `login` can do this because it has no local meaning to be mistaken for; `logout` and the
+# rest stay gated. The switch itself happens in ``cmd_login`` **after** the credentials land, so a
+# sign-in that times out or is denied leaves the persisted mode exactly as it found it. An explicit
+# ``--local`` still refuses: that is someone saying which mode they mean.
+SELF_SWITCHING = frozenset({"login"})
+
+
 def local_stub(command: str | None) -> NoReturn:
     # ``or``, not ``is None``: a registered reason that is empty is a coding error, and today's
     # sentence is a better thing to print than a sentence that stops mid-air.
@@ -252,5 +262,6 @@ def dispatch(args: argparse.Namespace, override: str | None) -> int:
         # local mode: a remote-only command can't run here. Must be ``elif`` — ``dispatch`` has
         # no ``else`` after the remote block, so a bare ``if`` would fire in remote mode too and
         # break login/logout there.
-        local_stub(command)
+        if command not in SELF_SWITCHING or override == "local":
+            local_stub(command)
     return args.handler(args) or 0
