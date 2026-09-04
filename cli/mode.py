@@ -70,6 +70,10 @@ def _print_use_next_steps(mode: str, name: str) -> None:
     print_next_steps([
         ("grid models", "see what this grid serves"),
         ('grid chat -m <model> "hello"', "talk to a model"),
+        # Both agent on-ramps, because they are different dialects: the exports serve any
+        # OpenAI-compatible client, `grid launch` serves Claude Code (Anthropic Messages).
+        ("grid info --env", "OPENAI_* exports for coding agents (opencode, Cursor, …)"),
+        ("grid launch claude", "or run Claude Code on this grid"),
         (f"grid join {target} --serve <model>", "optional: serve a model to it"),
     ])
 
