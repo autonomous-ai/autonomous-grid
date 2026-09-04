@@ -99,6 +99,24 @@ def test_no_hint_when_local_bin_already_on_users_path(tmp_path):
     )
 
 
+def test_installer_local_path_names_the_mode(tmp_path):
+    """The installer's two on-ramps must both work on a machine that has just run it.
+
+    A new install is in remote mode (ADR 0001 D-2, amended), where `grid start` is the hosted
+    lifecycle verb and answers `You're not signed in.` — so an installer that offers a bare
+    `grid start` as the "your own grid on this computer" option hands the reader a command that
+    refuses. Driven through the real script rather than grepped, because the banner is what a user
+    actually sees.
+    """
+    res = _run_installer(tmp_path, local_bin_on_path=True)
+    assert res.returncode == 0, f"installer failed:\n{res.stdout}\n{res.stderr}"
+    assert "grid login" in res.stdout, f"the hosted on-ramp must be named:\n{res.stdout}"
+    assert "grid mode local" in res.stdout, (
+        "the local on-ramp must name the mode, or `grid start` refuses on a fresh install; "
+        f"output was:\n{res.stdout}"
+    )
+
+
 def _code_lines(text: str) -> list[tuple[int, str]]:
     """(lineno, code) for each line, with comments stripped.
 
