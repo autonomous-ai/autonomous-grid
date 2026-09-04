@@ -34,8 +34,11 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import pathlib
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -416,3 +419,96 @@ def test_the_harness_still_reads_argparse_s_refusal_as_an_outdated_cli():
     assert int(match.group(1)) == ARGPARSE_USAGE_EXIT, (
         f"autonomous-harness reads exit {match.group(1)} as 'this `grid` is too old', but argparse "
         f"refuses an unknown flag with {ARGPARSE_USAGE_EXIT}")
+
+
+# --- what exit 2 must NOT mean --------------------------------------------------------------------
+#
+# The harness reads 2 off `grid login --harness` as "the installed `grid` predates the flag", and
+# that reading is sound only while 2 has exactly ONE cause on this path.
+#
+# ⚠️ **2 is not a free number in this CLI.** `cli/_main.py` documents it as this CLI's code for *not
+# finished yet, ask again* (issue 32) — a client polling on it retries — and the comment there
+# records that argparse's own `SystemExit(2)` colliding with that meaning was already found once, in
+# review, on this side. The two do not collide on `login` today: `cmd_login` returns 0, or raises a
+# `SystemExit` carrying a sentence, which the interpreter turns into 1. Nothing pinned that, and the
+# cost of it drifting is paid one repository over — the harness would tell somebody to update a
+# `grid` that is perfectly current, and say nothing about the refusal they actually hit.
+
+_LOGIN_MODULE = pathlib.Path(__file__).resolve().parent.parent / "cli" / "auth.py"
+
+
+def _login_exit_status(argv: list[str], *, home: pathlib.Path) -> int:
+    """The exit status a shell would see, MEASURED by running this CLI rather than modelled.
+
+    A `SystemExit` carrying a sentence exits 1 while `.code` holds the string, so reading `.code` in
+    process would be re-deriving the interpreter's own rule and calling it a measurement. The harness
+    reads a real process's status; so does this.
+
+    `--remote` because these are remote-mode commands and the mode is a stored setting: a `GRID_HOME`
+    the test just made has none, and this pin is about exit codes rather than about mode dispatch.
+    """
+    return subprocess.run(
+        [sys.executable, "-c", "import sys; from cli import main; sys.exit(main(sys.argv[1:]))", *argv],
+        cwd=str(pathlib.Path(__file__).resolve().parent.parent),
+        env={**os.environ, "GRID_HOME": str(home)},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,  # a non-zero status IS the measurement here
+    ).returncode
+
+
+def test_an_unknown_flag_on_login_really_reaches_the_harness_as_two(tmp_path):
+    """The positive control for the case below, and the ONE thing 2 is allowed to mean.
+
+    Without it, "no refusal exits 2" is satisfied just as well by a probe that could never observe a
+    2 at all — a wrong `cwd`, an import that fails, a runner that swallows the status. This is also
+    the closest thing there is to a test of what an OLD `grid` does with `--harness`, since an
+    unknown flag is exactly what one would be.
+    """
+    assert _login_exit_status(["--remote", "login", "--a-flag-this-build-does-not-have"],
+                              home=tmp_path) == ARGPARSE_USAGE_EXIT
+
+
+def test_a_refusal_of_the_hand_off_does_not_spend_that_code(tmp_path):
+    """An ordinary refusal must not look like an outdated CLI.
+
+    Empty stdin is the refusal that needs no network and no stubbing — it is decided locally, before
+    anything is sent — which is what lets this run the real binary end to end rather than a double.
+    """
+    status = _login_exit_status(["--remote", "login", "--harness"], home=tmp_path)
+
+    assert status == 1, (
+        f"`grid login --harness` refused with exit {status}. If that is {ARGPARSE_USAGE_EXIT}, every "
+        f"harness hand-off now reports THIS CLI as out of date instead of the refusal the person "
+        f"actually hit")
+
+
+def test_the_login_path_names_no_exit_code_of_its_own():
+    """The guard for a refusal nobody has written yet, which the case above cannot enumerate.
+
+    That one drives the refusals that exist. This one fails on a NEW one that spends a status
+    directly — `SystemExit(2)`, `sys.exit(2)`, or a handler returning 2 — which is how the
+    ask-again meaning would arrive on this path, and it would arrive green.
+    """
+    tree = ast.parse(_LOGIN_MODULE.read_text())
+
+    def is_the_code(node: ast.expr | None) -> bool:
+        """⚠️ `bool` is a subclass of `int` and `True == 1`, so a bare `==` would read `return True`
+        as an exit status the day this constant is a 1 rather than a 2."""
+        return (isinstance(node, ast.Constant) and isinstance(node.value, int)
+                and not isinstance(node.value, bool) and node.value == ARGPARSE_USAGE_EXIT)
+
+    spent = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Return) and is_the_code(node.value):
+            spent.append(f"`return {ARGPARSE_USAGE_EXIT}` at line {node.lineno}")
+        if isinstance(node, ast.Call) and node.args and is_the_code(node.args[0]) \
+                and (getattr(node.func, "id", None) or getattr(node.func, "attr", None)) in {"SystemExit", "exit"}:
+            spent.append(f"`SystemExit`/`exit`({ARGPARSE_USAGE_EXIT}) at line {node.lineno}")
+
+    assert not spent, (
+        f"cli/auth.py now spends exit {ARGPARSE_USAGE_EXIT} itself ({', '.join(spent)}), which is "
+        f"the code `harness grid login` reads as 'this `grid` is too old'. That refusal would be "
+        f"reported to the person as an outdated CLI. Use 1 — this CLI's `SystemExit(<sentence>)` "
+        f"idiom — or change both sides")
