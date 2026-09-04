@@ -19582,13 +19582,36 @@ def test_login_logout_classified_remote_only():
     assert not (set(dispatch.REMOTE_HANDLERS) & set(dispatch.REMOTE_ONLY))
 
 
-def test_login_logout_gated_in_local_mode(monkeypatch, tmp_path):
+def test_logout_gated_in_local_mode(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
-    for command in ("login", "logout"):
-        with pytest.raises(SystemExit) as exc:
-            cli.main([command])
-        assert "remote" in str(exc.value).lower()
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["logout"])
+    assert "remote" in str(exc.value).lower()
     assert not paths.credentials_file().exists()  # gated before any work happens
+
+
+def test_login_in_local_mode_runs_and_switches_the_mode(monkeypatch, tmp_path, capsys):
+    """A fresh install is in local mode, and `grid login` is the first thing the installer suggests:
+    it signs in and moves the mode instead of refusing with a second command to type."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    _device_flow(monkeypatch, poll_statuses=[_APPROVED],
+                 networks=[{"network_id": "n1", "name": "team", "network_type": "permissioned-public",
+                            "access_token": "AT", "refresh_token": "RT"}])
+
+    assert cli.main(["login", "--no-browser"]) == 0
+    assert state.get_mode() == "remote"
+    assert "remote mode" in capsys.readouterr().out
+    assert state.get_active("remote") is None  # switching the mode still selects no grid
+
+
+def test_login_with_explicit_local_override_still_refuses(monkeypatch, tmp_path):
+    """`--local login` is someone naming the mode they mean; the self-switch must not overrule it."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--local", "login"])
+    assert "remote" in str(exc.value).lower()
+    assert not paths.credentials_file().exists()
+    assert state.get_mode() == "local"
 
 
 def test_login_happy_path_persists_tokens_and_sets_no_active(monkeypatch, tmp_path, capsys):
