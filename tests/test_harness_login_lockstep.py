@@ -310,14 +310,18 @@ ARGPARSE_USAGE_EXIT = 2
 
 _HARNESS_HANDOFF = "cli/src/lib/gridHandoff.ts"
 
+#: Where the harness locates the credential store this CLI writes. See the sign-out section at the
+#: foot of this file.
+_HARNESS_CREDENTIALS = "cli/src/lib/gridCredentials.ts"
+
 #: The harness is TypeScript, so its half is read with a regex where grid-apis' is read with `ast`.
-#: Anchored on `export const NAME = '<value>'` — the shape that module actually uses — and a miss
+#: Anchored on `export const NAME = '<value>'` — the shape those modules actually use — and a miss
 #: RAISES rather than skips, for the same reason the grid-apis handler's does.
 _TS_CONST = r"export const {name}\s*=\s*['\"]([^'\"]+)['\"]"
 
 
-def _harness_source() -> str:
-    """The harness module that builds the argv, or a skip when that repository is not beside this one.
+def _harness_source(module: str = _HARNESS_HANDOFF) -> str:
+    """One harness module, or a skip when that repository is not beside this one.
 
     ⚠️ Only "no such repository at all" skips. The resolver has already proved a `cli/src` directory
     exists under that root, so a module absent from it was renamed or moved — which is drift, the
@@ -326,11 +330,11 @@ def _harness_source() -> str:
     """
     root = harness_root()
     if root is None:
-        pytest.skip("the autonomous-harness worktree is not beside this one; the argv cannot be checked here")
-    source = root / _HARNESS_HANDOFF
+        pytest.skip("the autonomous-harness worktree is not beside this one; its half cannot be checked here")
+    source = root / module
     if not source.exists():
         raise AssertionError(
-            f"autonomous-harness is at {root} but has no {_HARNESS_HANDOFF} — the module was renamed "
+            f"autonomous-harness is at {root} but has no {module} — the module was renamed "
             f"or moved, so teach this check where it went rather than letting it skip")
     return source.read_text()
 
@@ -512,3 +516,92 @@ def test_the_login_path_names_no_exit_code_of_its_own():
         f"the code `harness grid login` reads as 'this `grid` is too old'. That refusal would be "
         f"reported to the person as an outdated CLI. Use 1 — this CLI's `SystemExit(<sentence>)` "
         f"idiom — or change both sides")
+
+
+# --- signing out: a FILESYSTEM layout rather than a route or an argv ------------------------------
+#
+# `harness logout` detaches the harness alone. It deliberately does not cascade into the grid — the
+# grid sign-out can refuse over a running serve child, and the store may predate the harness entirely
+# — so all it owes a person is one sentence naming `harness grid logout` when a grid sign-in is still
+# on the machine (PRD `harness-grid-login` D-8). To decide whether to say it, the harness looks for
+# THIS CLI's credential store, and it reaches it by rebuilding the path from three literals of its
+# own: the environment variable, the default directory under `$HOME`, and the file name.
+#
+# ⚠️ **This one degrades in SILENCE, and the silence is the whole failure.** Move the store here —
+# rename `credentials.toml`, change the `~/.grid` default, read a differently-named variable — and
+# the harness finds nothing, which is spelled exactly like a machine that was never signed in to a
+# grid. `harness logout` then stops warning, both suites stay green, and a long-lived credential is
+# left behind without a word. There is no loud direction to fall back on: nothing 404s, nothing
+# exits 2, no postcondition can be checked in a reply, because there is no reply.
+
+#: This CLI's own accessor, exercised rather than restated. A pin that spelled `credentials.toml`
+#: here and compared it to the harness would check the two against a third copy nobody ships.
+def _cli_credentials_file():
+    from shared import paths
+
+    return paths.credentials_file()
+
+
+def test_the_harness_reads_the_environment_variable_that_moves_this_cli_s_store(tmp_path, monkeypatch):
+    """`GRID_HOME` relocates the whole of this CLI's state, and the harness has to follow it.
+
+    Measured through `shared.paths` under an env this test sets, so what is compared is where this
+    CLI actually puts the file — not a second spelling of the path written out here.
+    """
+    source = _harness_source(_HARNESS_CREDENTIALS)
+    variable = _ts_const(source, "GRID_HOME_ENV")
+    filename = _ts_const(source, "GRID_CREDENTIALS_FILE")
+
+    monkeypatch.setenv(variable, str(tmp_path / "elsewhere"))
+
+    assert _cli_credentials_file() == tmp_path / "elsewhere" / filename, (
+        f"autonomous-harness looks for `${{{variable}}}/{filename}`, but this CLI puts its "
+        f"credential store at {_cli_credentials_file()} — `harness logout` would find nothing and "
+        f"silently stop telling anybody their grid sign-in is still on the machine")
+
+
+def test_the_harness_falls_back_where_this_cli_falls_back(tmp_path, monkeypatch):
+    """With no `GRID_HOME`, both sides must land on the same directory under the user's home.
+
+    The ordinary case, and the one a developer never sets an environment variable for — so if only
+    the override above were pinned, the default could move and the pin would stay green.
+    """
+    source = _harness_source(_HARNESS_CREDENTIALS)
+    variable = _ts_const(source, "GRID_HOME_ENV")
+    default_dir = _ts_const(source, "GRID_HOME_DEFAULT")
+    filename = _ts_const(source, "GRID_CREDENTIALS_FILE")
+
+    monkeypatch.delenv(variable, raising=False)
+    # And by this CLI's own name for it, so a developer's shell cannot decide what this measures. Not
+    # a second spelling of the pin — the assertion below still compares the harness's literal against
+    # a measured path, and the case above is what fails if the two names ever diverge.
+    monkeypatch.delenv("GRID_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert _cli_credentials_file() == tmp_path / default_dir / filename, (
+        f"autonomous-harness falls back to `~/{default_dir}/{filename}`, but with no {variable} set "
+        f"this CLI puts its credential store at {_cli_credentials_file()} — `harness logout` would "
+        f"go quiet on every machine that has not moved GRID_HOME, which is most of them")
+
+
+def test_the_harness_expands_a_leading_tilde_because_this_cli_does(tmp_path, monkeypatch):
+    """`grid_home()` runs `expanduser()` over `GRID_HOME`, and the harness now mirrors that.
+
+    A shell expands `~` at the point of assignment, so this only bites where nothing does — a systemd
+    unit, a Docker `ENV`, a `.env` file, a CI variable. Drop the `expanduser()` here and the harness
+    is suddenly the one resolving a value this CLI takes literally, which puts the two in different
+    directories and takes `harness logout`'s warning away in silence.
+
+    Not a test of `pathlib`: what it pins is that this CLI still *calls* it on that value.
+    """
+    source = _harness_source(_HARNESS_CREDENTIALS)
+    variable = _ts_const(source, "GRID_HOME_ENV")
+    filename = _ts_const(source, "GRID_CREDENTIALS_FILE")
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv(variable, "~/grid-state")
+
+    assert _cli_credentials_file() == tmp_path / "grid-state" / filename, (
+        f"a `{variable}` of '~/grid-state' puts this CLI's store at {_cli_credentials_file()}. The "
+        f"harness resolves the leading `~` against $HOME, so the two would look in different places "
+        f"and `harness logout` would go quiet about a credential that is there")
