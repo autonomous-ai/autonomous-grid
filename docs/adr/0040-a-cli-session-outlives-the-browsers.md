@@ -106,6 +106,10 @@ auto-provisioning a grid, purely to hand to a shell-out that happens immediately
 reason to outlive it, and a token minted for a subprocess is precisely the one that should not live
 a year.
 
+*(Both of those mints have since moved down one layer into `managed_shellout.shellout_session`, the
+single mint behind every seeded `GRID_HOME`. The rule is unchanged and now covers more: see the
+Consequences bullet below.)*
+
 The direction matters more than the two callers. A third mint site added later and given no thought
 gets the conservative number. Had the default been the year, the same carelessness would have
 produced an unrevocable year-long token for something that needed thirty seconds.
@@ -173,6 +177,16 @@ hours — and after this change it is not even approximately true.
   looks at the seeded one, and every other reader of a home sits inside a request that already
   carries a live bearer. It is still that feature's change to make rather than this one's — it is
   recorded here because this change is what turned it into a question.
+
+  **Done** (`harness-grid-login` issue 06, grid-apis): `managed_shellout.shellout_session` mints the
+  seeded token — same account, D-b's short default — and `seed_caller_home_env` no longer *takes* a
+  token, so no route can put a request bearer on that disk. One reader turned out to sit outside its
+  seeding request after all, and it was checked rather than assumed: the first provider's home is
+  swept by `grid --remote leave` weeks later and never re-seeded, but that leave stops its child by
+  run-record pid, deregisters with the per-grid `access_token`, and consults the session only to
+  resolve a relay URL the join already wrote — degrading to the ~120s node TTL at exit 0 if it
+  cannot (ADR 0023). `grid network delete` and `restart-server` are local like `start`. What is
+  *not* done is a reaper for stale homes: the credential is short now, the disk still never shrinks.
 - **`GRID_SESSION_JWT_SECRET` rotation becomes a heavier hammer, and stays the only one.** It was
   already the documented reset after a `grid_users` wipe. It is now also the only answer to a single
   compromised laptop, and it signs out every account on the platform to get there.
