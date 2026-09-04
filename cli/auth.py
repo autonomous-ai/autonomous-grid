@@ -1,7 +1,10 @@
 """`grid login` / `grid logout` / `grid sync` — remote-mode sign-in and credential refresh.
 
-Remote-only: dispatch gates these to remote mode, so the handlers assume remote. `cmd_login`
-mirrors grid-src's browser device flow (start → poll → fetch tokens → persist); `cmd_logout`
+Remote-only: dispatch gates these to remote mode, so the handlers assume remote. `cmd_login` has
+two doors and one tail: grid-src's browser device flow (start → poll), or `--harness`, which reads an
+Autonomous account token off stdin and trades it for the same session in one call (ADR 0040). What
+follows either — fetch tokens → validate → persist → warn about stranded grids — is one path, because
+the only thing the flag changes is where the session token came from. `cmd_logout`
 clears the local credential store; `cmd_sync` reuses the saved session to re-fetch the grid list
 + tokens with no browser (ADR 0002 §11), never touching the active pointer. Remote deps import
 lazily inside the handlers (repo convention). Tokens are never printed or logged — not on the human
@@ -34,6 +37,36 @@ _MAX_POLL_INTERVAL_S = 30
 # misclassified as an expired session.
 _SESSION_EXPIRED_RE = re.compile(r"[A-Z]+ \S+ failed \((?:401|403)\):")
 
+# The Autonomous account token arrives on a pipe this process does not control, so the read is
+# bounded. Not a tuning knob — a real token is a couple of kilobytes — but a bound on a wedged or
+# hostile writer, and the same one `cli.credential` puts on git's own request for the same reason.
+_MAX_HARNESS_TOKEN_BYTES = 64 * 1024
+
+# Reaching the bound is its OWN refusal, never a silent truncation. A prefix of a token is still a
+# well-formed request, so sending one answers with a 401 about the person's account — a sentence
+# blaming a credential that is in fact fine, for something this process decided locally.
+_HARNESS_TOKEN_TOO_LONG = (
+    f"grid login --harness: more than {_MAX_HARNESS_TOKEN_BYTES} bytes arrived on standard input "
+    "with no end to the token, so nothing was sent. Check that `harness grid login` is what is "
+    "writing to it."
+)
+
+# Every way the pipe can carry no usable token collapses to this one sentence. It names the command
+# that produces the token because somebody who typed `grid login --harness` by hand has no other way
+# to find out where the input was supposed to come from.
+_NO_HARNESS_TOKEN = (
+    "grid login --harness: no Autonomous account token on standard input. "
+    "Run `harness grid login`, which signs in and hands the token to `grid` for you."
+)
+
+# The one refusal on that route that is not about the caller: the control plane predates it, which
+# the rollout order makes a deployment window rather than a fault (the control plane ships first).
+# The credential the person is holding is fine, so the sentence names the other door instead.
+_OLD_CONTROL_PLANE = (
+    "This control plane cannot sign you in with an Autonomous account token yet, so the hand-off "
+    "from the harness cannot complete. Run `grid login` to sign in with a browser instead."
+)
+
 
 def cmd_login(args: argparse.Namespace) -> int:
     from remote import control_plane, credentials
@@ -45,23 +78,22 @@ def cmd_login(args: argparse.Namespace) -> int:
     device_id = credentials.device_id()
     # Read BEFORE the save below replaces `[[networks]]` wholesale: signing in as a second account
     # drops every prior grid's bundle while its serve child keeps polling, and afterwards there is
-    # nothing left to diff against (ADR 0023).
-    previous_networks = list(credentials.load_credentials().get("networks") or [])
+    # nothing left to diff against (ADR 0023). The email is read from the same snapshot and for a
+    # neighbouring reason — on the `--harness` path nobody types one, so a token from a different
+    # Autonomous account would take this machine's grids away with nothing on screen naming the swap.
+    stored = credentials.load_credentials()
+    previous_networks = list(stored.get("networks") or [])
+    previous_email = str((stored.get("user") or {}).get("email") or "")
 
-    started = control_plane.start_device_login(api_url)
-    url = _device_login_url(started)
-    _print_signin_prompt(url, started.get("user_code", ""), to_stderr=as_json)
-    if not getattr(args, "no_browser", False):
-        try:
-            webbrowser.open(url)
-        except (OSError, webbrowser.Error):
-            pass  # headless box / no browser available — the URL + code are already printed
-
-    approved = _await_approval(started, api_url)
+    if getattr(args, "harness", False):
+        approved = _harness_sign_in(api_url)
+    else:
+        approved = _browser_sign_in(args, api_url, as_json=as_json)
     session_token = approved.get("session_token")
     if not session_token:
-        # The user already approved in the browser; a token-less "approved" is a server
-        # regression — fail clearly rather than KeyError after a successful sign-in.
+        # Reached through either door, and a server regression through both: the browser sign-in was
+        # approved, or the account token was accepted, and a token-less success is not something to
+        # KeyError over after the person has already done their part.
         raise SystemExit("Sign-in was approved but the control plane returned no session token. "
                          "Run `grid login` to try again.")
     user = approved.get("user") or {}
@@ -77,7 +109,111 @@ def cmd_login(args: argparse.Namespace) -> int:
     signout.warn_stranded(previous_networks, networks)
     # Deliberately no `state.set_active("remote", …)` here — login never auto-selects a grid.
     return _report_login(user.get("email", ""), networks,
-                         absence=os_grid_notice.absence(fetched.os_served), as_json=as_json)
+                         absence=os_grid_notice.absence(fetched.os_served),
+                         replaced=previous_email, as_json=as_json)
+
+
+def _browser_sign_in(args: argparse.Namespace, api_url: str, *, as_json: bool) -> dict[str, Any]:
+    """The device-code flow: show the URL and code, open a browser, poll until the person approves."""
+    from remote import control_plane
+
+    started = control_plane.start_device_login(api_url)
+    url = _device_login_url(started)
+    _print_signin_prompt(url, started.get("user_code", ""), to_stderr=as_json)
+    if not getattr(args, "no_browser", False):
+        try:
+            webbrowser.open(url)
+        except (OSError, webbrowser.Error):
+            pass  # headless box / no browser available — the URL + code are already printed
+    return _await_approval(started, api_url)
+
+
+def _harness_sign_in(api_url: str) -> dict[str, Any]:
+    """Trade the Autonomous account token on stdin for a grid session — no URL, no wait (ADR 0040).
+
+    Only the **404** is translated. It is the one refusal on that route that says nothing about the
+    caller: the control plane predates the route, which the rollout order makes an ordinary
+    deployment window, and `POST … failed (404): Not Found` reads as a verdict on a credential that
+    is in fact fine. Every other refusal already carries the control plane's own remedy sentence, so
+    it is re-raised untouched and unparsed — `ControlPlaneError` is a `SystemExit`, so it reaches the
+    person exactly as written, and a fourth machine-read refusal code across these repositories
+    would be a fourth thing a rewording could break in silence.
+    """
+    from remote import control_plane
+
+    token = _read_harness_token()
+    try:
+        return control_plane.sign_in_with_harness_token(token, api_url)
+    except control_plane.ControlPlaneError as exc:
+        if exc.status == 404:
+            raise SystemExit(_OLD_CONTROL_PLANE) from None
+        raise
+
+
+def _read_harness_token() -> str:
+    """The Autonomous account token the harness piped in, or a `SystemExit` saying why there is none.
+
+    **Stdin, never argv and never the environment.** An argument would put a live account credential
+    into the process listing for every user on the machine, where it stays for the life of the call.
+
+    Every unusable input becomes one sentence rather than a traceback, and there are two of them
+    because the two say opposite things: nothing arrived, or too much did. Reaching the bound is
+    **not** silently truncated — a prefix of a token is a well-formed request, and sending one buys a
+    401 about the person's account in place of a local sentence about their pipe.
+
+    Decoded **strictly** on purpose. `errors="replace"` would assemble a token out of U+FFFD and send
+    it, trading a sentence about this machine for a 401 about their account; and the length is checked
+    **before** the decode, so a bound reached mid-UTF-8-sequence is reported as the overrun it is
+    rather than as "nothing arrived", which would be false.
+    """
+    raw = _piped_bytes()
+    if raw is None:
+        raise SystemExit(_NO_HARNESS_TOKEN)
+    if len(raw) >= _MAX_HARNESS_TOKEN_BYTES:
+        raise SystemExit(_HARNESS_TOKEN_TOO_LONG)
+    try:
+        token = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise SystemExit(_NO_HARNESS_TOKEN) from None
+    if not token:
+        raise SystemExit(_NO_HARNESS_TOKEN)
+    return token
+
+
+def _piped_bytes() -> bytes | None:
+    """One bounded LINE off stdin, or `None` when there is nothing there to read. Never raises.
+
+    A line, not the stream. `read()` on a pipe returns only at the cap or at **EOF**, so a writer
+    that sends the token and then waits for this process — `spawn`, `stdin.write(token)`, await exit,
+    which is the obvious shape for the harness half — would deadlock both sides forever, with no
+    output and no timeout on either. `readline` returns on the newline as well, so the hand-off
+    survives a writer that forgets to close, and the bound is unchanged.
+
+    Read through `.buffer` when there is one — the same shape `cli.credential._read_request` reads
+    git's request through, and for the same two reasons: a pipe carries bytes, and a stdin without a
+    `.buffer` is a test double or an unusual embedding rather than an error.
+
+    Three ways there is nothing to read, and all three are the caller's one sentence rather than a
+    hang or a traceback: **no stdin at all** (`None`, which some embeddings hand a process — the
+    fallback branch would otherwise `AttributeError` on it), a **terminal** (nobody is piping
+    anything; a person typed the flag by hand, and the sentence naming `harness grid login` exists
+    for exactly them — reached by a hang they have to guess Ctrl-D out of, it may as well not),
+    and a **severed pipe** (`OSError` — the harness died mid-hand-off). `ValueError` covers
+    `isatty()` on a stdin somebody already closed.
+    """
+    stdin = sys.stdin
+    if stdin is None:
+        return None
+    isatty = getattr(stdin, "isatty", None)
+    try:
+        if isatty is not None and isatty():
+            return None
+        stream = getattr(stdin, "buffer", None)
+        if stream is None:
+            return (stdin.readline(_MAX_HARNESS_TOKEN_BYTES) or "").encode("utf-8", "surrogatepass")
+        return stream.readline(_MAX_HARNESS_TOKEN_BYTES) or b""
+    except (OSError, ValueError):
+        return None
 
 
 def _await_approval(started: dict[str, Any], api_url: str) -> dict[str, Any]:
@@ -144,18 +280,36 @@ def _print_signin_prompt(url: str, user_code: str, *, to_stderr: bool) -> None:
 
 
 def _report_login(email: str, networks: list[dict[str, Any]], *,
-                  absence: os_grid_notice.OsGridAbsence | None = None, as_json: bool) -> int:
+                  absence: os_grid_notice.OsGridAbsence | None = None, replaced: str = "",
+                  as_json: bool) -> int:
+    """Who is signed in, which grids they got, and — when it changed — whose account this replaced.
+
+    The replacement is a line, never a refusal: `grid login` has never compared accounts, and making
+    the hand-off the one door that argues about identity would be a divergence between two ways in
+    that are meant to differ in nothing but where the token came from. The consequence is already
+    carried by `signout.warn_stranded`, which names every grid the swap left a serve child polling.
+
+    Said only when it actually changed — a line on every ordinary re-sign-in is a line people learn
+    to skip past, and then it is not there on the day it matters.
+    """
+    swapped = f"Signed in as {email} (was {replaced})." if replaced and replaced != email else ""
     if as_json:
+        # stdout is the JSON contract and gains no key for this, so the one thing a script cannot
+        # re-derive — that this sign-in swapped the account under it — goes to stderr, beside the
+        # sign-in prompt and the stranded-grid warnings that are already there.
+        if swapped:
+            print(swapped, file=sys.stderr)
         grids = [{"name": n["name"], "type": n.get("network_type")} for n in networks]
         print(json.dumps({"signed_in": True, "email": email, "grids": grids, "active": None,
                           "os_grid": absence.as_json() if absence else None}))
         return 0
+    signed_in = swapped or f"Signed in as {email}."
     if networks:
         listed = ", ".join(n["name"] for n in networks)
-        print(f"Signed in as {email}. {len(networks)} grid(s) available: {listed}.")
+        print(f"{signed_in} {len(networks)} grid(s) available: {listed}.")
         print("Run `grid use <name>` to pick one.")
     else:
-        print(f"Signed in as {email}. You don't belong to any grids yet.")
+        print(f"{signed_in} You don't belong to any grids yet.")
     _print_os_grid_absence(absence)
     return 0
 

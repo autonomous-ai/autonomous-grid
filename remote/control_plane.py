@@ -66,6 +66,60 @@ def poll_device_login(device_code: str, api_url: str | None = None) -> dict[str,
         return _send(client, "POST", "/v1/grid/auth/device/poll", json={"device_code": device_code}).json()
 
 
+#: The hand-off route and the one key its body carries (PRD `harness-grid-login` D-1). Named here
+#: rather than spelled inline because both halves are hand-duplicated across a repository boundary —
+#: grid-apis mounts `APIRouter(prefix="/v1/grid")` and decorates `@router.post("/auth/harness")`, and
+#: this CLI sends the concatenation. A rename on either side is silent: both repositories compile,
+#: both suites stay green, and every hand-off 404s in production. `tests/test_harness_login_lockstep`
+#: is what catches it.
+HARNESS_LOGIN_PATH = "/v1/grid/auth/harness"
+HARNESS_TOKEN_KEY = "harness_token"
+
+
+def sign_in_with_harness_token(harness_token: str, api_url: str | None = None) -> dict[str, Any]:
+    """Trade an Autonomous account token for a grid session — the browser-less way in (ADR 0040).
+
+    The reply is byte-shaped like the approved device poll's, which is the point: `cli.auth` reuses
+    its existing post-sign-in path — validate the bundle, persist, warn about stranded grids — with
+    no second dialect to keep in step.
+
+    **The token goes in the BODY, never in an `Authorization:` header.** It is the credential being
+    traded in rather than one that authenticates this call, so the control plane reads it off the
+    request model; sending it as a bearer would additionally put a live account credential in the
+    one place proxies and access logs habitually keep.
+
+    Refusals arrive as `ControlPlaneError` carrying their status, and the caller reads that status
+    for exactly one thing — a 404, meaning this control plane predates the route. Everything else is
+    the control plane's own sentence and is shown as written, **minus the token** — see below.
+    """
+    with _client(api_url) as client:
+        try:
+            resp = _send(client, "POST", HARNESS_LOGIN_PATH, json={HARNESS_TOKEN_KEY: harness_token})
+        except ControlPlaneError as exc:
+            raise _without_token(exc, harness_token) from None
+    return resp.json()
+
+
+def _without_token(exc: ControlPlaneError, secret: str) -> ControlPlaneError:
+    """The same refusal with the credential taken back out of it (a new one; the original stands).
+
+    ``_raise`` renders up to 400 bytes of the response body into a message ``cli.auth`` shows
+    verbatim on stderr, and this is the one route whose **request body is a live credential**. A
+    validation refusal echoes the field it rejected — FastAPI's default 422 carries the submitted
+    value under ``input`` — so a body that comes back holding the token would print it, in a module
+    whose own contract is that tokens are never printed or logged.
+
+    Not reachable through today's validators, and guarded anyway: it becomes reachable the first time
+    the far end puts a ``max_length`` or a pattern on ``harness_token``, which is a one-line change in
+    another repository that no test on either side would notice. The remedy sentences this seam does
+    show — 401, 403, 409, 502 — never contain the token, so nothing verbatim is lost.
+    """
+    rendered = str(exc)
+    if not secret or secret not in rendered:
+        return exc
+    return ControlPlaneError(rendered.replace(secret, "<redacted>"), status=exc.status)
+
+
 #: The key on the token-fetch reply that says whether this machine was handed an OS grid (ADR 0039
 #: D-k). Named once, because the pin comparing it to grid-apis' own spelling reads it from here —
 #: `tests/test_os_grid_type_lockstep.py`.

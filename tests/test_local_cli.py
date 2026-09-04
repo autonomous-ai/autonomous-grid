@@ -5,6 +5,7 @@ import base64
 import contextlib
 import datetime
 import errno
+import io
 import json
 import os
 import shlex
@@ -11677,6 +11678,97 @@ def test_control_plane_poll_sends_device_code(monkeypatch, tmp_path):
     assert seen["body"] == {"device_code": "dc123"}
 
 
+def test_control_plane_harness_sign_in_posts_the_token_to_the_hand_off_route(monkeypatch, tmp_path):
+    """The hand-off's own request: the route PRD D-1 fixes, and the token in the BODY.
+
+    Not a header. The Autonomous account token is the credential being *traded in*, not one that
+    authenticates this call, and the control plane reads it off `HarnessAuthRequest.harness_token`
+    — `tests/test_harness_login_lockstep.py` pins both spellings against grid-apis' own source.
+    An `Authorization:` header here would additionally put a live account credential somewhere
+    proxies and access logs habitually keep.
+    """
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        seen["auth"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"session_token": "SESS", "user": {"email": "a@b.com"}})
+
+    _mock_control_plane(monkeypatch, handler)
+
+    assert control_plane.sign_in_with_harness_token("HT-secret")["session_token"] == "SESS"
+    assert (seen["method"], seen["path"]) == ("POST", "/v1/grid/auth/harness")
+    assert seen["body"] == {"harness_token": "HT-secret"}
+    assert seen["auth"] is None
+
+
+def test_control_plane_harness_sign_in_carries_the_status_of_a_refusal(monkeypatch, tmp_path):
+    """`cli.auth` decides what to say from `.status`, so the exchange has to carry one.
+
+    The 404 is the only status it branches on — an old control plane, which is a sentence about
+    deployment rather than about the credential — and it can only tell that from a 403 if the
+    status survives the raise.
+    """
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_control_plane(monkeypatch, lambda request: httpx.Response(404, text="Not Found"))
+
+    with pytest.raises(control_plane.ControlPlaneError) as exc:
+        control_plane.sign_in_with_harness_token("HT")
+    assert exc.value.status == 404
+
+
+def test_control_plane_harness_sign_in_takes_the_token_back_out_of_a_refusal(monkeypatch, tmp_path):
+    """This is the one route whose REQUEST BODY is a live credential, and refusals echo bodies.
+
+    `_raise` renders up to 400 bytes of the response into a message `cli.auth` prints verbatim on
+    stderr, and a validation refusal names the value it rejected — FastAPI's default 422 carries the
+    submitted one under `input`. So a token that comes back in a body must not go out on the screen,
+    in a module whose stated contract is that tokens are never printed or logged.
+
+    Not reachable through today's validators; guarded because it becomes reachable the first time
+    the far end puts a `max_length` on `harness_token`, which is a one-line change in another
+    repository that no test on either side would otherwise notice.
+    """
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_control_plane(monkeypatch, lambda request: httpx.Response(
+        422, json={"detail": [{"loc": ["body", "harness_token"], "msg": "too long",
+                               "input": "HT-secret"}]}))
+
+    with pytest.raises(control_plane.ControlPlaneError) as exc:
+        control_plane.sign_in_with_harness_token("HT-secret")
+
+    rendered = str(exc.value)
+    assert "HT-secret" not in rendered
+    assert "<redacted>" in rendered
+    assert exc.value.status == 422  # still classifiable — only the credential was taken out
+
+
+def test_control_plane_harness_sign_in_leaves_a_clean_refusal_alone(monkeypatch, tmp_path):
+    """The remedy sentences this seam really shows carry no token, so nothing verbatim is lost.
+
+    The positive control for the redaction above: without it, a scrubber that rewrote every message
+    — or one that had stopped matching anything at all — would look identical from that test.
+    """
+    from remote import control_plane
+
+    remedy = "Sign in to Autonomous with Google at least once, then try again."
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_control_plane(monkeypatch, lambda request: httpx.Response(403, json={"detail": remedy}))
+
+    with pytest.raises(control_plane.ControlPlaneError) as exc:
+        control_plane.sign_in_with_harness_token("HT-secret")
+
+    assert remedy in str(exc.value) and "<redacted>" not in str(exc.value)
+
+
 def test_control_plane_fetch_tokens_attaches_bearer_and_query(monkeypatch, tmp_path):
     from remote import control_plane
 
@@ -20080,6 +20172,341 @@ def test_login_json_emits_names_only_and_no_tokens(monkeypatch, tmp_path, capsys
         assert secret not in captured.out
         assert secret not in captured.err  # not leaked via the stderr prompt either
     assert "UC" in captured.err  # the prompt goes to stderr so stdout stays clean JSON
+
+
+# ---------------------------------------------------------------------------
+# grid login --harness — the hand-off from the agent harness (PRD D-6)
+# ---------------------------------------------------------------------------
+
+_HARNESS_SESSION = {"session_token": "SESS-secret", "user": {"email": "a@b.com"}}
+
+
+class _SeveredPipe:
+    """A stdin whose read fails the way the real one does when the harness dies mid-hand-off."""
+
+    def readline(self, size: int = -1) -> bytes:
+        raise OSError(errno.EPIPE, "broken pipe")
+
+
+class _WaitsForEof:
+    """A pipe with a whole line on it whose writer has **not** closed: `read()` would still block.
+
+    The real shape of the harness half — `spawn`, write the token, wait for the child to exit — and
+    `read()` on it returns only at the cap or at EOF, so a reader that used one would deadlock both
+    processes forever with no output and no timeout. This double makes that choice a test rather
+    than a comment: `read` is the failure, `readline` is the pass.
+    """
+
+    def __init__(self, payload: bytes) -> None:
+        self._line = io.BytesIO(payload)
+
+    def read(self, size: int = -1) -> bytes:
+        raise AssertionError("`grid login --harness` must not wait for EOF; a writer may still hold "
+                             "the pipe open after sending the token")
+
+    def readline(self, size: int = -1) -> bytes:
+        return self._line.readline(size)
+
+
+def _piped(payload: bytes):
+    """A stdin shaped like the real one: bytes behind `.buffer`, which is what the reader prefers.
+
+    ⚠️ A **factory**, always called inside the test that uses it — never built in a `parametrize`
+    decorator, where one object is constructed at collection time and drained by the first read. A
+    second read of the same row would yield `b""`, which is the *other* refusal's input and asserts
+    the same sentence, so three of the four rows below would pass without reading anything and
+    without a visible symptom.
+    """
+    return SimpleNamespace(buffer=_WaitsForEof(payload))
+
+
+def _harness_flow(monkeypatch, *, stdin, networks=(), session=None, error=None, os_served=None):
+    """Wire stdin + the account-token exchange + the token fetch for a `grid login --harness` run.
+
+    The device flow's two entry points are wired to *raise*: `--harness` reaching either of them is
+    the failure this flag exists to avoid, and a counter checked at the end of one test would leave
+    every other test in this block blind to it.
+    """
+    from cli import auth
+    from remote import control_plane
+
+    calls = {"harness_token": None, "fetch_session": None, "fetch_device_id": None}
+    monkeypatch.setattr(auth.sys, "stdin", stdin)
+
+    def sign_in(token, api_url=None):
+        calls["harness_token"] = token
+        if error is not None:
+            raise error
+        return dict(session if session is not None else _HARNESS_SESSION)
+
+    monkeypatch.setattr(control_plane, "sign_in_with_harness_token", sign_in)
+
+    def fetch(session_token, device_id, api_url=None):
+        calls["fetch_session"], calls["fetch_device_id"] = session_token, device_id
+        return control_plane.TokenFetch(networks=list(networks), os_served=os_served)
+
+    monkeypatch.setattr(control_plane, "fetch_tokens", fetch)
+
+    def no_device_flow(*a, **k):
+        raise AssertionError("`grid login --harness` must never touch the browser device flow")
+
+    monkeypatch.setattr(control_plane, "start_device_login", no_device_flow)
+    monkeypatch.setattr(control_plane, "poll_device_login", no_device_flow)
+    monkeypatch.setattr(auth.webbrowser, "open", no_device_flow)
+    return calls
+
+
+def test_parser_offers_the_harness_hand_off_and_refuses_it_beside_the_browser_flow():
+    """Two ways in, never both at once — and the flag is visible, not a hidden convention.
+
+    Argparse's own refusal is what the issue asks for: exit **2**, which is also what the harness
+    reads as "the installed `grid` predates `--harness`" (PRD D-7). A hand-rolled check would exit
+    1 and the harness would report the wrong thing.
+    """
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["login"]).harness is False
+    assert parser.parse_args(["login", "--harness"]).harness is True
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["login", "--harness", "--no-browser"])
+    assert exc.value.code == 2
+
+    help_text = _subcmd_help("login")
+    assert "--harness" in help_text
+
+
+def test_harness_login_persists_tokens_and_selects_no_grid(monkeypatch, tmp_path, capsys):
+    """The happy path is the existing path: the token on stdin is the ONLY thing that differs.
+
+    So the same postconditions are asserted as the browser flow's — the bundle on disk at 0600, no
+    active grid picked, and no secret in what was printed.
+    """
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("remote")
+    calls = _harness_flow(
+        monkeypatch,
+        stdin=_piped(b"HT-secret\n"),
+        networks=[{"network_id": "n1", "name": "team", "network_type": "permissioned-public",
+                   "access_token": "AT-secret", "refresh_token": "RT-secret"}],
+    )
+
+    assert cli.main(["login", "--harness"]) == 0  # routes through dispatch in remote mode
+    out = capsys.readouterr().out
+
+    assert calls["harness_token"] == "HT-secret"  # stripped of the newline `echo` leaves
+    assert calls["fetch_session"] == "SESS-secret"
+    assert calls["fetch_device_id"] == credentials.device_id()  # this machine speaks for itself
+    saved = credentials.load_credentials()
+    assert saved["session_token"] == "SESS-secret"
+    assert saved["user"]["email"] == "a@b.com"
+    assert [n["name"] for n in saved["networks"]] == ["team"]
+    assert stat.S_IMODE(paths.credentials_file().stat().st_mode) == 0o600
+    assert state.get_active("remote") is None  # the hand-off never auto-selects either
+    assert "Signed in as a@b.com" in out and "team" in out and "grid use" in out
+    for secret in ("HT-secret", "SESS-secret", "AT-secret", "RT-secret"):
+        assert secret not in out
+
+
+def test_harness_login_reads_a_token_from_a_stdin_without_a_buffer(monkeypatch, tmp_path):
+    """A text-only stdin is a test double or an unusual embedding, never an error."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = _harness_flow(monkeypatch, stdin=io.StringIO("HT-text\n"))
+
+    assert cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"])) == 0
+    assert calls["harness_token"] == "HT-text"
+
+
+def test_harness_login_refuses_an_overrun_rather_than_sending_a_prefix(monkeypatch, tmp_path):
+    """The cap bounds a pipe this process does not control — and reaching it is its OWN refusal.
+
+    Truncating silently would send a *prefix* of the token, which is a perfectly well-formed request:
+    the control plane answers 401, and the person is shown a sentence blaming a credential that is
+    fine for something this process decided locally. So nothing is sent at all, and the sentence
+    names the input instead.
+    """
+    from cli import auth
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    oversized = b"x" * (auth._MAX_HARNESS_TOKEN_BYTES * 4)  # no newline: the token never ends
+    calls = _harness_flow(monkeypatch, stdin=_piped(oversized))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"]))
+
+    assert str(auth._MAX_HARNESS_TOKEN_BYTES) in str(exc.value)
+    assert calls["harness_token"] is None  # no prefix went to the control plane
+    assert credentials.load_credentials() == {}
+
+
+def test_harness_login_does_not_wait_for_the_writer_to_close_the_pipe(monkeypatch, tmp_path):
+    """A newline is enough; the harness need not close stdin for the hand-off to complete.
+
+    `_WaitsForEof.read` is an outright failure, so this pins the reader's choice rather than
+    describing it: reading to EOF would hang against the obvious harness shape (write the token,
+    then wait for this process to exit) with neither side ever moving.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = _harness_flow(monkeypatch, stdin=_piped(b"HT-secret\n"))
+
+    assert cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"])) == 0
+    assert calls["harness_token"] == "HT-secret"
+
+
+@pytest.mark.parametrize("make_stdin, why", [
+    (lambda: _piped(b""), "nothing on the pipe at all"),
+    (lambda: _piped(b"   \n\n"), "whitespace is not a token"),
+    (lambda: _piped(b"\xff\xfe not utf-8"), "undecodable bytes are not a token either"),
+    (lambda: SimpleNamespace(buffer=_SeveredPipe()), "the harness died mid-hand-off"),
+    (lambda: SimpleNamespace(isatty=lambda: True), "a person typed the flag; nobody is piping"),
+    (lambda: None, "an embedding handed this process no stdin at all"),
+])
+def test_harness_login_refuses_unusable_input_naming_the_harness_command(
+        monkeypatch, tmp_path, make_stdin, why):
+    """Every way the pipe can carry no token collapses to one sentence, never a traceback or a hang.
+
+    It names `harness grid login` because that is the command that produces the token: somebody who
+    ran `grid login --harness` by hand has no other way to find out where the input was meant to
+    come from — and the terminal row is that person, who would otherwise meet a silent wait they
+    have to guess Ctrl-D out of to reach the sentence written for them.
+    """
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = _harness_flow(monkeypatch, stdin=make_stdin())
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"]))
+
+    assert "harness grid login" in str(exc.value), why
+    assert calls["harness_token"] is None  # refused before anything was sent
+    assert credentials.load_credentials() == {}  # and nothing persisted
+
+
+def test_harness_login_turns_a_404_into_a_sentence_about_the_control_plane(monkeypatch, tmp_path):
+    """The one status this path translates: the route is not deployed yet (PRD D-9).
+
+    A bare `POST … failed (404): Not Found` blames the credential the person is holding, which is
+    fine; there is nothing wrong with it. The remedy is the other door, so the sentence names it.
+    """
+    from remote import control_plane, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _harness_flow(monkeypatch, stdin=_piped(b"HT"), error=control_plane.ControlPlaneError(
+        "POST https://api.example/v1/grid/auth/harness failed (404): Not Found", status=404))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"]))
+
+    message = str(exc.value)
+    assert "grid login" in message and "404" not in message
+    assert credentials.load_credentials() == {}
+
+
+@pytest.mark.parametrize("status, remedy", [
+    (403, "Sign in to Autonomous with Google at least once, then try again."),
+    (502, "Could not reach the Autonomous account API. Try again in a moment."),
+])
+def test_harness_login_shows_a_refusal_verbatim(monkeypatch, tmp_path, status, remedy):
+    """Everything that is not a 404 reaches the person exactly as the control plane wrote it.
+
+    Each of those refusals already names its own way forward, and none of them is parsed for a
+    code: exactly three refusal codes are read anywhere across these repositories, and a fourth
+    reader is a fourth thing a reworded message could silently break.
+    """
+    from remote import control_plane, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    rendered = f"POST https://api.example/v1/grid/auth/harness failed ({status}): {remedy}"
+    _harness_flow(monkeypatch, stdin=_piped(b"HT"),
+                  error=control_plane.ControlPlaneError(rendered, status=status))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"]))
+
+    assert str(exc.value) == rendered  # the remedy sentence, intact and untouched
+    assert credentials.load_credentials() == {}
+
+
+def test_harness_login_names_the_account_it_replaces_and_the_grids_it_strands(
+        monkeypatch, tmp_path, capsys):
+    """Nobody typed an email, so the swap has to be said out loud.
+
+    The browser flow shows whose account was approved; the hand-off shows nothing, so a token from
+    a second Autonomous account would silently take the machine's grids away — and the serve child
+    of the grid it dropped keeps heartbeating on the token it holds in memory. One line names the
+    account, and the existing stranded-grid warning names the consequence. Neither is a refusal.
+    """
+    from remote import credentials
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({
+        "session_token": "old", "api_url": "https://api.example",
+        "user": {"email": "first@b.com"},
+        "networks": [{"network_id": "net-old", "name": "first-account-grid", "access_token": "AT"}],
+    })
+    run_records.write_record("net-old", "remote", {
+        "engine_id": "remote", "grid_id": "net-old", "pid": 4242,
+        "signaling_url": "https://relay.example",
+    })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    _harness_flow(monkeypatch, stdin=_piped(b"HT"),
+                  networks=[{"network_id": "net-new", "name": "second-account-grid"}])
+
+    assert cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"])) == 0
+
+    captured = capsys.readouterr()
+    assert "Signed in as a@b.com (was first@b.com)." in captured.out
+    assert "first-account-grid" in captured.err and "grid leave net-old" in captured.err
+
+
+def test_login_says_nothing_about_a_replacement_when_the_account_is_the_same(
+        monkeypatch, tmp_path, capsys):
+    """A line on every ordinary re-sign-in is a line people learn to skip past."""
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "old", "user": {"email": "a@b.com"},
+                                  "networks": []})
+    _harness_flow(monkeypatch, stdin=_piped(b"HT"))
+
+    assert cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"])) == 0
+    assert "(was " not in capsys.readouterr().out
+
+
+def test_harness_login_json_keeps_stdout_clean_and_says_the_swap_on_stderr(
+        monkeypatch, tmp_path, capsys):
+    """`--json` is what a script drives, which is exactly where a silent account swap would land.
+
+    stdout stays the JSON contract — unchanged, no new key — so the sentence goes to stderr, beside
+    the sign-in prompt and the stranded-grid warnings that are already there.
+    """
+    import platform
+
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")  # pin the machine-dependent os_grid
+    credentials.save_credentials({"session_token": "old", "user": {"email": "first@b.com"},
+                                  "networks": []})
+    _harness_flow(monkeypatch, stdin=_piped(b"HT-secret"),
+                  networks=[{"network_id": "n1", "name": "team",
+                             "network_type": "permissioned-public"}])
+
+    assert cli.cmd_login(cli.build_parser().parse_args(["login", "--harness", "--json"])) == 0
+    captured = capsys.readouterr()
+
+    assert json.loads(captured.out) == {
+        "signed_in": True, "email": "a@b.com",
+        "grids": [{"name": "team", "type": "permissioned-public"}], "active": None,
+        "os_grid": None,
+    }
+    assert "Signed in as a@b.com (was first@b.com)." in captured.err
+    assert "HT-secret" not in captured.out and "HT-secret" not in captured.err
 
 
 def test_logout_clears_credentials_and_active(monkeypatch, tmp_path, capsys):

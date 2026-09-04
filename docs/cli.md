@@ -135,14 +135,17 @@ Notes:
 ## Sign in
 
 ```
-grid login [--no-browser] [--json]    # sign in to remote mode (device-code flow)
+grid login [--no-browser | --harness] [--json]   # sign in to remote mode
 grid logout [--force] [--json]        # stop serving, then clear stored remote credentials
 grid sync [--json]                    # refresh your remote grids without signing in again
 ```
 
 **Remote-only.** `grid login` signs you in to autonomous's hosted relay with a device-code
 flow — it prints the sign-in URL and code, and opens a browser at that URL unless you pass
-`--no-browser` (for headless machines) — and stores your credentials under `~/.grid`. Signing in does
+`--no-browser` (for headless machines) — and stores your credentials under `~/.grid`.
+`--harness` is the browser-less alternative: it reads an Autonomous account token on **standard
+input** and trades it for the same session with nothing to approve, which is how `harness grid login`
+signs `grid` in for you. The two are mutually exclusive. Signing in does
 **not** pick an active grid: run `grid ls` to see the remote grids you can reach, then
 `grid use <name>` (or name one per command).
 
