@@ -71,6 +71,16 @@ def grid_apis_root() -> pathlib.Path | None:
     return _sibling_root(pathlib.Path("grid_networks"), "grid-apis", "GRID_APIS_REPO")
 
 
+def harness_root() -> pathlib.Path | None:
+    """autonomous-harness' checkout — the AGENT HARNESS — or ``None`` when it is not beside this one.
+
+    The fourth repository in the chain, and the only one that is not Python: `harness grid login`
+    spawns THIS CLI as a child, so the seam between them is an **argv**, hand-duplicated exactly the
+    way a wire constant is. `HARNESS_REPO` overrides the derivation.
+    """
+    return _sibling_root(pathlib.Path("cli") / "src", "autonomous-harness", "HARNESS_REPO")
+
+
 def grid_src_root() -> pathlib.Path | None:
     """grid-src's checkout, or ``None`` when this machine does not have one beside this worktree.
 

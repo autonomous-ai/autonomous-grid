@@ -32,12 +32,14 @@ It reads its siblings through `tests/grid_src_repo.py`, like both of the other p
 
 from __future__ import annotations
 
+import argparse
 import ast
 import pathlib
+import re
 
 import pytest
 
-from tests.grid_src_repo import grid_apis_root
+from tests.grid_src_repo import grid_apis_root, harness_root
 
 #: The path, as PRD D-1 fixes it. Written here rather than imported from either side, because a pin
 #: that reads one side's constant and compares it to itself checks nothing.
@@ -279,3 +281,138 @@ def test_the_cli_names_the_route_the_control_plane_serves():
         f"{sorted({place for places in wrong.values() for place in places})}, but the control plane "
         f"serves {CANONICAL_PATH!r} — every hand-off would 404. Edit both sides, and read the "
         f"lockstep register's entry before deciding which spelling is right")
+
+
+# --- the harness's half: an ARGV rather than a route ----------------------------------------------
+#
+# The chain is control plane → this CLI → the harness, and the cases above pin only its first two
+# links. The third is not a path in a request, it is the argv `harness grid login` spawns — and it is
+# hand-duplicated in exactly the same way, with exactly the same silence when it drifts.
+#
+# ⚠️ **A rename of `--harness` is the dangerous edit, and it is silent in a way that BLAMES THE WRONG
+# REPOSITORY.** Rename it here alone and: this suite stays green (nothing else reads the flag), the
+# harness suite stays green (its fake `grid` enforces the harness's own copy of the spelling), and
+# every hand-off in production reaches argparse, is refused as an unknown flag, and exits 2 — which
+# the harness reports, correctly by its own lights, as *your `grid` CLI is too old*. The person then
+# updates a `grid` that was already current.
+
+#: The argv the harness sends, as this CLI's parser must accept it. Written out rather than imported
+#: from either side: a pin that reads one side's constant and compares it to itself checks nothing.
+CANONICAL_HANDOFF_ARGV = ("login", "--harness")
+
+#: What argparse exits on an unknown flag, and therefore what the harness is entitled to read as "the
+#: installed `grid` predates this feature". It fires BEFORE the handler, so it is the loud failure
+#: that makes the rollout order a deployment convenience rather than a correctness requirement.
+ARGPARSE_USAGE_EXIT = 2
+
+_HARNESS_HANDOFF = "cli/src/lib/gridHandoff.ts"
+
+#: The harness is TypeScript, so its half is read with a regex where grid-apis' is read with `ast`.
+#: Anchored on `export const NAME = '<value>'` — the shape that module actually uses — and a miss
+#: RAISES rather than skips, for the same reason the grid-apis handler's does.
+_TS_CONST = r"export const {name}\s*=\s*['\"]([^'\"]+)['\"]"
+
+
+def _harness_source() -> str:
+    """The harness module that builds the argv, or a skip when that repository is not beside this one.
+
+    ⚠️ Only "no such repository at all" skips. The resolver has already proved a `cli/src` directory
+    exists under that root, so a module absent from it was renamed or moved — which is drift, the
+    thing this file is for — and reporting it as "the harness is not beside this one" would turn the
+    pin off with a message blaming the wrong thing.
+    """
+    root = harness_root()
+    if root is None:
+        pytest.skip("the autonomous-harness worktree is not beside this one; the argv cannot be checked here")
+    source = root / _HARNESS_HANDOFF
+    if not source.exists():
+        raise AssertionError(
+            f"autonomous-harness is at {root} but has no {_HARNESS_HANDOFF} — the module was renamed "
+            f"or moved, so teach this check where it went rather than letting it skip")
+    return source.read_text()
+
+
+def _ts_const(source: str, name: str) -> str:
+    """One exported string constant out of the harness's TypeScript."""
+    match = re.search(_TS_CONST.format(name=name), source)
+    if match is None:
+        raise AssertionError(
+            f"autonomous-harness' {_HARNESS_HANDOFF} no longer exports a literal `{name}`, so this "
+            f"check cannot read the argv it sends — teach it the new shape rather than deleting it")
+    return match.group(1)
+
+
+def _login_parser() -> argparse.ArgumentParser:
+    """This CLI's own `grid login` subparser, taken off the real parser rather than rebuilt."""
+    from cli.parser import build_parser
+
+    for action in build_parser()._subparsers._group_actions:  # type: ignore[union-attr]
+        if "login" in getattr(action, "choices", {}):
+            return action.choices["login"]
+    raise AssertionError("this CLI's parser no longer has a `login` subcommand at all")
+
+
+# --- what this CLI offers, which needs no sibling -------------------------------------------------
+
+
+def test_this_cli_accepts_the_argv_the_harness_sends():
+    """The positive control, and half the lockstep: the real parser, not a re-derivation of it.
+
+    Parsed rather than grepped, so a `--harness` that survives only in a docstring — or one moved
+    into a group that makes it conflict with something the harness also sends — fails here.
+    """
+    parsed = _login_parser().parse_args(list(CANONICAL_HANDOFF_ARGV[1:]) + ["--json"])
+
+    assert getattr(parsed, "harness", False) is True, (
+        f"`grid {' '.join(CANONICAL_HANDOFF_ARGV)} --json` no longer sets `harness` on this CLI, so "
+        f"every hand-off from `harness grid login` would sign in the wrong way or not at all")
+
+
+def test_an_unknown_flag_on_login_exits_two():
+    """The meaning the harness reads off the exit code, asserted against the real parser.
+
+    Not a tautology about argparse: it pins that `grid login` still *reaches* argparse for an unknown
+    flag, rather than growing a hand-rolled pre-parse that would exit 1 and take the distinction away.
+    """
+    with pytest.raises(SystemExit) as refused:
+        _login_parser().parse_args(["--a-flag-this-cli-does-not-have"])
+
+    assert refused.value.code == ARGPARSE_USAGE_EXIT, (
+        f"an unknown flag on `grid login` now exits {refused.value.code}, not {ARGPARSE_USAGE_EXIT} "
+        f"— `harness grid login` reads {ARGPARSE_USAGE_EXIT} as 'this `grid` is too old' and would "
+        f"report a plain failure instead")
+
+
+# --- the harness's half, once that worktree is beside this one ------------------------------------
+
+
+def test_the_harness_spawns_the_argv_this_cli_accepts():
+    """The lockstep itself: the flag the harness spells against the flag this CLI declares."""
+    source = _harness_source()
+
+    flag = _ts_const(source, "GRID_HANDOFF_FLAG")
+    binary = _ts_const(source, "GRID_BINARY")
+
+    assert (binary, flag) == ("grid", CANONICAL_HANDOFF_ARGV[1]), (
+        f"autonomous-harness spawns `{binary} … {flag}` but this CLI declares "
+        f"`{CANONICAL_HANDOFF_ARGV[1]}` on `{CANONICAL_HANDOFF_ARGV[0]}` — every hand-off would be "
+        f"refused as an unknown flag, and the harness would report THIS CLI as out of date. Edit "
+        f"both sides")
+
+
+def test_the_harness_still_reads_argparse_s_refusal_as_an_outdated_cli():
+    """The other half of the same seam: the number, not the spelling.
+
+    A harness that stopped reading 2 specially would turn the one loud failure in this chain into a
+    generic one — the person is told the hand-off failed, and nothing tells them their `grid` is the
+    reason.
+    """
+    source = _harness_source()
+
+    match = re.search(r"ARGPARSE_USAGE_EXIT\s*=\s*(\d+)", source)
+    assert match is not None, (
+        f"autonomous-harness' {_HARNESS_HANDOFF} no longer names the argparse exit code it reads as "
+        f"an outdated CLI — teach this check the new shape rather than deleting it")
+    assert int(match.group(1)) == ARGPARSE_USAGE_EXIT, (
+        f"autonomous-harness reads exit {match.group(1)} as 'this `grid` is too old', but argparse "
+        f"refuses an unknown flag with {ARGPARSE_USAGE_EXIT}")
