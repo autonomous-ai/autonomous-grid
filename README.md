@@ -414,20 +414,19 @@ Local mode needs every computer on the same network. Remote mode drops that: eac
 out to Autonomous Relay, so it serves from behind a NAT with no inbound port and no public IP.
 
 ```bash
-# Switch this computer to remote mode — remembered until you switch back
-grid mode remote
-
-# Sign in; opens a browser
+# Sign in; opens a browser. A fresh install is already in remote mode, and signing in
+# switches this computer to it either way — `grid mode remote` first is not needed.
 grid login
 
-# Pick which grid to work with — signing in does not choose one for you.
-# `grid ls` prints a row per grid you can reach (name, id, type); `*` marks the active one.
-grid ls
+# Sign-in lists the grids you can reach and picks none of them, so pick one:
 grid use <grid-name>
 ```
 
 - The mode is remembered. `--local` / `--remote` overrides one command.
 - `grid login` opens a browser. `--no-browser` prints a code to type instead.
+- Signing in prints the grids you can reach (name and type, `*` on the active one) followed by the
+  commands that operate on them — `grid ls` prints the same list any time, and `grid sync` refreshes
+  it without signing in again.
 - Signing in never selects a grid, so `grid use` is the step that makes one active. Until then the
   other commands have nothing to talk to. `grid start <grid-name>` on a new grid still needs it too.
 - Requests pass through our relay, which local mode never does. We forward and keep nothing — no

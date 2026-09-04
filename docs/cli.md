@@ -111,7 +111,8 @@ grid [--local | --remote] <command>      # override the mode for a single comman
 The mode is persisted in `~/.grid/state.json`; each mode remembers its own active grid. Which mode
 a command runs in is resolved as `--local`/`--remote` (one command) > the persisted mode > the
 default. With no state file the default is `remote`, except on a machine that already holds local
-grids (`~/.grid/grids/*/config.json`), which stays `local` until you run `grid mode remote` — so an
+grids (`~/.grid/grids/*/config.json`), which stays `local` until you run `grid mode remote` (or
+`grid login`, which moves the mode itself — see [Sign in](#sign-in)) — so an
 upgrade never takes a running local grid out of sight. `grid use <name>` sets the persistent default grid, so `grid chat` /
 `grid info` / `grid models` target it without naming it — naming a grid explicitly still wins (the
 `[grid]` positional on `info`/`models`/`engines`, `--grid` on `chat`/`image`/`edit`/`video`), and a
@@ -145,8 +146,14 @@ grid sync [--json]                    # refresh your remote grids without signin
 **Remote-only.** `grid login` signs you in to autonomous's hosted relay with a device-code
 flow — it prints the sign-in URL and code, and opens a browser at that URL unless you pass
 `--no-browser` (for headless machines) — and stores your credentials under `~/.grid`. Signing in does
-**not** pick an active grid: run `grid ls` to see the remote grids you can reach, then
-`grid use <name>` (or name one per command).
+**not** pick an active grid: it prints the grids you can reach (the `grid ls` columns, `*` on the
+active one) followed by the commands that act on one — `grid use <name>` to pick it, `grid chat`,
+`grid info --env` to point a coding agent at it, `grid join` to serve a model to it.
+
+`login` is the one remote-only command that answers `local` mode by **switching the mode** instead
+of refusing: it runs, and the persisted mode moves to `remote` once the credentials are stored (a
+sign-in that times out or is denied leaves the mode alone). An explicit `grid --local login` still
+refuses, like every other remote-only command in `local` mode.
 
 `grid logout` **stops serving, then clears the stored credentials and the remote mode's active
 grid** — in that order, because a serve
@@ -165,8 +172,10 @@ created on the website or one you were just added to appears after `grid sync` �
 your active grid, and an expired session tells you to run `grid login`. If its refresh (or a
 `grid login` as a different account) drops a grid this box is still serving, it says so, naming the
 process and the `grid leave <grid-id>` that stops it — neither command kills an engine on your behalf,
-because a control-plane answer is not a decision to stop serving. In `local` mode these
-commands exit with guidance to switch — sign-in is a remote concept. See
+because a control-plane answer is not a decision to stop serving. `grid sync` reports its result the
+way `grid login` does: the same grid table, the same following commands. In `local` mode `logout`
+and `sync` exit with guidance to switch — sign-in is a remote concept — while `login` switches the
+mode itself, as above. See
 [ADR 0002](./adr/0002-remote-sign-in.md) and
 [ADR 0023](./adr/0023-signing-out-with-live-serve-children.md).
 
