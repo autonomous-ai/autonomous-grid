@@ -68,6 +68,28 @@ _OLD_CONTROL_PLANE = (
 )
 
 
+# The refusal when the control plane predates the revoke route — the one status this path reads,
+# and the rollout order (control plane first) makes it a deployment window rather than a fault.
+#
+# ⚠️ The sentence says what is true of the CREDENTIALS and nothing wider. By the time this is
+# raised the serve-child teardown has already run, so "nothing on this machine changed" would be
+# false — somebody who read it that way would retry later and find their grids no longer served.
+_OLD_CONTROL_PLANE_NO_REVOKE = (
+    "This control plane cannot sign your other machines out yet, so nothing was signed out anywhere "
+    "and your credentials on this machine were kept. Anything this box was serving has already been "
+    "stopped; run `grid logout` to finish signing out here."
+)
+
+# The other half of the taxonomy, and the reason it is not a refusal: a 401 means this machine's own
+# session was refused — already signed out from elsewhere, or expired — so it can revoke nothing
+# and never will. Raising would leave `--everywhere` unable to sign this machine out at all, with a
+# credential on disk that no retry can ever spend. The local sign-out is what is left, and it runs.
+_SESSION_ALREADY_GONE = (
+    "Warning: this machine's sign-in was refused, so nothing could be signed out elsewhere — it had "
+    "already been signed out, or it expired. Signing out on this machine anyway."
+)
+
+
 def cmd_login(args: argparse.Namespace) -> int:
     from remote import control_plane, credentials
 
@@ -352,9 +374,52 @@ def cmd_logout(args: argparse.Namespace) -> int:
     _warn_unstoppable(outcomes)
     if blocked and not forcing:
         raise SystemExit(_signout_blocked_message(blocked))
+    # AFTER the teardown and BEFORE the delete, and both halves of that are load-bearing. The
+    # teardown's deregisters are authoritative only while the credentials exist, and the revoke is
+    # authorized by the session token the delete is about to destroy — so this is the one point in
+    # the sequence where both are still true. A failure that could succeed on a retry raises here,
+    # leaving the credentials in place; one that never could does not (see `_revoke_everywhere`).
+    session_token = str(data.get("session_token") or "")
+    revoked = False
+    if getattr(args, "everywhere", False) and session_token:
+        revoked = _revoke_everywhere(session_token)
     existed = credentials.clear_credentials()
     state.set_active("remote", None)  # a cleared session has no active grid
-    return _report_logout(existed, outcomes, as_json=getattr(args, "json", False))
+    return _report_logout(existed, outcomes, as_json=getattr(args, "json", False), revoked=revoked)
+
+
+def _revoke_everywhere(session_token: str) -> bool:
+    """Take back every session this account holds, this machine's included (ADR 0040 D-e).
+
+    Returns whether the revocation actually landed, because the caller has to report what happened
+    rather than what was asked. Two statuses are read and nothing else is:
+
+    - **404** — this control plane predates the route. The one refusal that says nothing about the
+      caller, and the rollout order makes it an ordinary deployment window. It raises: the session
+      is still good, and it is the handle that will work once the control plane catches up.
+    - **401** — this machine's own session was refused: signed out from another machine already, or
+      expired. It does NOT raise. Raising would mean `--everywhere` could never sign this machine
+      out at all — the very credential it kept "so a retry can reach the route" is the one thing
+      that will never be accepted again — so the person would have to guess to drop the flag. The
+      local sign-out is all that is left to do, and it is still worth doing.
+
+    Everything else already carries the control plane's own remedy sentence and is re-raised
+    untouched and unparsed — `ControlPlaneError` is a `SystemExit`, so it reaches the person as
+    written, and a fourth machine-read refusal code across these repositories would be a fourth
+    thing a rewording could break in silence.
+    """
+    from remote import control_plane, credentials
+
+    try:
+        control_plane.revoke_sessions(session_token, credentials.api_url())
+    except control_plane.ControlPlaneError as exc:
+        if exc.status == 404:
+            raise SystemExit(_OLD_CONTROL_PLANE_NO_REVOKE) from None
+        if exc.status == 401:
+            print(_SESSION_ALREADY_GONE, file=sys.stderr)
+            return False
+        raise
+    return True
 
 
 def _signout_blocked_message(blocked: list[signout.SignoutOutcome]) -> str:
@@ -479,11 +544,23 @@ def _warn_unstoppable(outcomes: list[signout.SignoutOutcome]) -> None:
             )
 
 
-def _report_logout(existed: bool, outcomes: list[signout.SignoutOutcome], *, as_json: bool) -> int:
+def _report_logout(
+    existed: bool,
+    outcomes: list[signout.SignoutOutcome],
+    *,
+    as_json: bool,
+    revoked: bool,
+) -> int:
     """The sign-out's own line, plus what it stopped on the way out.
 
     A teardown that could not deregister has already printed its own stderr caveat (the ~120s node TTL
     is the fallback), so this never claims the grid was told — it says what was stopped here.
+
+    ``revoked`` is what `--everywhere` actually achieved rather than what was asked for: a machine
+    that was not signed in has no session to revoke with, and reporting the flag instead of the
+    outcome would tell somebody their other machines were signed out when nothing was sent. It rides
+    the JSON on **every** logout, present and false, for the reason `stopped` does — a stable shape
+    beats a key a reader has to tell "absent" from "false".
     """
     stopped = [outcome for outcome in outcomes if outcome.ok]
     if as_json:
@@ -492,6 +569,7 @@ def _report_logout(existed: bool, outcomes: list[signout.SignoutOutcome], *, as_
             "stopped": [
                 {"grid": outcome.label, "deregistered": outcome.sent} for outcome in stopped
             ],
+            "revoked_everywhere": revoked,
         }))
         return 0
     for outcome in stopped:
@@ -503,6 +581,8 @@ def _report_logout(existed: bool, outcomes: list[signout.SignoutOutcome], *, as_
             print(f"Stopped an untracked serve child for {outcome.label}; "
                   "that grid drops it after the node TTL (~120s).")
     print("Signed out." if existed else "You're not signed in.")
+    if revoked:
+        print("Every other machine signed in to this account was signed out too.")
     return 0
 
 

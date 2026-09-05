@@ -136,7 +136,7 @@ Notes:
 
 ```
 grid login [--no-browser | --harness] [--json]   # sign in to remote mode
-grid logout [--force] [--json]        # stop serving, then clear stored remote credentials
+grid logout [--force] [--everywhere] [--json]   # stop serving, then clear stored credentials
 grid sync [--json]                    # refresh your remote grids without signing in again
 ```
 
@@ -160,6 +160,19 @@ your credentials** and exits non-zero naming the pid — they are the only handl
 has. `--force` signs out anyway (it still tries first, and still tells you what survived). On a box
 that is serving nothing, logout is what it always was: local, offline, instant. `device.toml` and
 `api_keys.toml` are untouched either way.
+
+`grid logout --everywhere` does all of that **and** signs out every other machine signed in to the
+same account — they have to sign in again. It is the answer to a laptop you no longer control, or to
+a sign-in code you approved and should not have: without it the only lever was rotating the
+platform's signing secret, which signs out everybody on it. It moves one number on your account, so
+no other account is touched, and your per-grid tokens are untouched too — those have their own
+lever, on the grid rather than on your account. The revocation runs after the teardown and **before** the local credentials are
+deleted — those credentials are what authorizes it — so if the control plane refuses, nothing is
+signed out anywhere and your credentials stay put (whatever this box was serving has still been
+stopped by then, as it is on any logout). A control plane too old to know the route says so. If your
+sign-in on *this* machine was already signed out from somewhere else, it says that and signs you out
+here anyway — there is nothing left for it to revoke with. Plain `grid logout` never contacts the
+control plane at all.
 
 `grid sync` re-fetches your grids and tokens using your saved sign-in (no browser), so a grid
 created on the website or one you were just added to appears after `grid sync` — it never changes

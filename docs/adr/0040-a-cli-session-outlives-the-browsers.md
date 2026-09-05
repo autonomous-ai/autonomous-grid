@@ -134,6 +134,72 @@ moved onto it and their replies stay byte-identical — the caller owns the enve
 `status` key stays first. The prefactor lands with the split rather than before it because its only
 purpose is to make the split expressible in one place.
 
+### D-e — Revocation, as an account epoch rather than a token registry
+
+*(Amendment. `harness-grid-login` issue 07, grid-apis. The alternative rejected above is taken, in a
+shape the cost it was rejected on does not reach.)*
+
+The rejection stands as written: a `jti`, a table of issued sessions and a per-request lookup would
+put **a database read on every authenticated control-plane request**, and that is a latency and
+availability change to the whole surface. What the rejection did not weigh is that the *other* token
+in this system solves the same problem without any of that. `issue_access_token` mints for a year and
+gets away with it because the relay compares a number in the claims to a number it already holds —
+`member_epoch`, `network_epoch`. Nothing is looked up per token, because the thing being revoked is
+not the token.
+
+So the session token gains a `session_epoch` claim, and `grid_users` gains a `session_epoch` column:
+
+- **One row per account, never one per token.** There is no registry, nothing grows with sign-ins,
+  and nothing needs collecting. Revoking is `session_epoch + 1` on one row, and it invalidates every
+  session that account holds and nothing else. Per-grid access tokens are untouched — they have their
+  own epochs and their own levers.
+- **`verify_session` compares against a CACHED epoch**, 30-second TTL, so the steady-state cost is a
+  dict lookup rather than the per-request read this ADR priced. That bound is the whole justification:
+  if the check ever grows a database read per request it has become the alternative rejected above and
+  needs re-arguing, not merging. What the TTL costs is that a revocation lands within 30 seconds
+  everywhere rather than instantly, and it can only ever be late in the harmless direction — a stale
+  entry is *lower* than the truth, and a lower enforced epoch refuses nothing a higher one would have
+  allowed.
+- **The comparison is `claims["session_epoch"] < current`, never `!=`, and the floor is 0.** Both
+  halves are one decision and both are the difference between shipping this and causing the outage it
+  exists to make unnecessary. Every token minted before this shipped carries **no claim at all**; it
+  is read as the floor, and the floor is what the column defaults to, so `0 < 0` is false and nothing
+  outstanding is refused. Starting the column at 1 — the house convention, which `member_epoch` and
+  `network_epoch` both follow — signs out every signed-in account on the platform on deploy. And a
+  token whose epoch is *ahead* of a worker's cached value is an ordinary sign-in served elsewhere, not
+  a forgery, which is what `!=` would get wrong.
+- **Grandfathered on the deploy, not grandfathered forever.** Because a claim-less token reads as the
+  floor rather than being exempted from the check, the first revocation an account makes takes those
+  tokens with it. The lost laptop this exists for is holding exactly one of them.
+- **`grid logout --everywhere` is the verb**, and `grid logout` is unchanged: still local, still a
+  credential delete, still the per-machine answer (see the Consequences bullet below, which stands).
+  The revoke runs after ADR 0023's serve-child teardown and before the delete — the teardown's
+  deregisters are authoritative only while the credentials exist, and the revoke is authorized by the
+  session token the delete destroys.
+
+⚠️ **`GRID_SESSION_JWT_SECRET` rotation is still the only lever for one case**: a session whose
+`grid_users` row has been deleted. There is nowhere to record the bump, so the route refuses rather
+than answering 200 over a revocation that did not happen — with a **401, deliberately not a 404**.
+On a new route 404 already means something to the caller: the CLI reads it as "this control plane
+predates the route" and says so in those words, and answering 404 here would tell somebody on a
+current control plane that their control plane is out of date, hiding the real cause. 401 is also
+what the state is: the session is intact but names nobody, so it authorizes nothing.
+
+⚠️ **`grid logout --everywhere` on a machine whose session is ALREADY revoked still signs that
+machine out.** The 401 does not refuse the local sign-out, because the credential a refusal would
+keep — "so a retry can reach the route" — is the one credential that will never be accepted again.
+Refusing there would mean the flag could never sign that machine out at all. A 404 keeps the
+credentials, for the opposite reason: there the session is still good and is the handle that works
+the moment the control plane catches up.
+
+⚠️ **The device flow is still unauthenticated by design (D-a), and this changes nothing about that.**
+Anyone who gets a person to approve a code at `/grid/device-login` still walks away with a year — the
+difference is only that it can now be taken back. The remaining control point is the approval page
+itself, which should say what is being approved *and for how long*; it lives on the public website,
+which is in none of these repositories. Making the flow prove its caller is a CLI (a `device_id`,
+say) was considered and refused: a browser can send one just as easily, so it would buy the
+appearance of a barrier rather than a barrier.
+
 ## Rejected alternatives
 
 **Raise both to a year.** One number, one edit, no new variable, and the same daily annoyance gone.
@@ -159,12 +225,20 @@ What is *not* a defence, and should not be written down as one: "the token is sh
 revocation does not matter." That was never true — 24 hours of unrevocable access is already 24
 hours — and after this change it is not even approximately true.
 
+**Taken, later, in a cheaper shape — see D-e.** The rejection above costed one design and was
+right about it. It did not cost the design the access token already uses, and that one carries none
+of the price this paragraph refuses to pay.
+
 ## Consequences
 
 - **The exposure from a stolen `credentials.toml` grows by 365×**, and no mechanism shortens it. The
   account section of that file is now a year-long bearer credential for the control plane. The
   per-grid tokens beside it were already year-long; the difference is that those can be killed by
   removing the member, and this one cannot.
+
+  **The second sentence is now false** (D-e): the session can be killed too, by bumping the account's
+  epoch. The first stands — the *lifetime* is still a year and nothing shortens it. What changed is
+  that the year is no longer unanswerable.
 - ⚠️ **The control plane writes its own copy, and that copy is now a year old too.** Every
   `managed-*` route seeds the caller's raw bearer into a per-admin `credentials.toml` on the
   control-plane VM (`managed_shellout.seed_caller_home_env` → `managed_homes.seed_home_at`), mode
@@ -190,6 +264,11 @@ hours — and after this change it is not even approximately true.
 - **`GRID_SESSION_JWT_SECRET` rotation becomes a heavier hammer, and stays the only one.** It was
   already the documented reset after a `grid_users` wipe. It is now also the only answer to a single
   compromised laptop, and it signs out every account on the platform to get there.
+
+  **No longer true, and D-e above is why** (`harness-grid-login` issue 07): a single compromised
+  laptop is now `grid logout --everywhere`, which moves one account's number and touches nobody
+  else's session. The rotation is back to being what it always was — the reset after a `grid_users`
+  wipe — plus the one case the epoch cannot reach, a session whose account row is already gone.
 - **Nothing is retroactive, in either direction.** Sessions minted before this deploy keep their day;
   sessions minted after keep their year even if the variable is later lowered. Shortening the
   variable strands nobody and rescues nobody already issued.

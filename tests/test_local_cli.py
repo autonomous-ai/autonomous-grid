@@ -20633,6 +20633,7 @@ def test_logout_json_is_unchanged_by_a_foreign_child(monkeypatch, tmp_path, caps
     assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--json"])) == 0
     assert json.loads(capsys.readouterr().out) == {
         "signed_out": True, "stopped": [{"grid": "team", "deregistered": True}],
+        "revoked_everywhere": False,
     }
 
 
@@ -21089,7 +21090,229 @@ def test_logout_json(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     credentials.save_credentials({"session_token": "S"})
     assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--json"])) == 0
-    assert json.loads(capsys.readouterr().out) == {"signed_out": True, "stopped": []}
+    assert json.loads(capsys.readouterr().out) == {
+        "signed_out": True, "stopped": [], "revoked_everywhere": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# grid logout --everywhere (issue 07): the local sign-out, plus the one that takes the
+# account's other sessions back. `grid logout` on its own stays local and unchanged.
+# ---------------------------------------------------------------------------
+
+def _revoke_spy(monkeypatch, *, raises=None):
+    """Stand in for `control_plane.revoke_sessions` and record what it was handed."""
+    from remote import control_plane
+
+    calls = {"tokens": []}
+
+    def _revoke(session_token, api_url=None):
+        calls["tokens"].append(session_token)
+        if raises is not None:
+            raise raises
+
+    monkeypatch.setattr(control_plane, "revoke_sessions", _revoke)
+    return calls
+
+
+def test_parser_accepts_logout_everywhere():
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["logout", "--everywhere"]).everywhere is True
+    assert parser.parse_args(["logout"]).everywhere is False
+
+
+def test_logout_everywhere_revokes_with_the_session_then_clears_it(monkeypatch, tmp_path, capsys):
+    """The order is the contract: the revoke needs the session token, and the delete destroys it.
+
+    Reversed, the local sign-out would take away the one credential that can reach the route — so
+    a person asking for a revocation would get a local delete and no revocation at all, reported
+    as a success.
+    """
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    calls = _revoke_spy(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--everywhere"])) == 0
+
+    assert calls["tokens"] == ["S"]
+    assert not paths.credentials_file().exists()
+    out = capsys.readouterr().out
+    assert "Signed out." in out and "signed out too" in out
+
+
+def test_plain_logout_never_reaches_the_control_plane(monkeypatch, tmp_path, capsys):
+    """ADR 0040: `grid logout` is the per-machine answer and stays a local delete.
+
+    Its own case because the two verbs share every line of `cmd_logout` but one, and a revocation
+    that leaked into the default would sign a person out of every other machine they own for
+    typing the sign-out they have typed for a year.
+    """
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    calls = _revoke_spy(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+
+    assert calls["tokens"] == []
+    assert "signed out too" not in capsys.readouterr().out
+
+
+def test_logout_everywhere_keeps_the_credentials_when_the_revoke_fails(monkeypatch, tmp_path):
+    """A refused revocation leaves the session token where it is, and says so by exiting non-zero.
+
+    Deleting it anyway would be the worst of both: the stolen session stays live and the one
+    credential that could still reach the route is gone from the machine that was trying to. Same
+    reasoning as the refusal that keeps credentials over a live serve child.
+    """
+    from remote import control_plane, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    _revoke_spy(monkeypatch, raises=control_plane.ControlPlaneError("nope", status=500))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.cmd_logout(cli.build_parser().parse_args(["logout", "--everywhere"]))
+
+    assert "nope" in str(excinfo.value)
+    assert paths.credentials_file().exists()
+
+
+def test_logout_everywhere_on_an_older_control_plane_says_so(monkeypatch, tmp_path):
+    """The one refusal that is not about the caller: the control plane predates the route.
+
+    `POST … failed (404): Not Found` reads as a verdict on a credential that is fine, and the
+    rollout order (control plane first) makes this an ordinary deployment window. Every other
+    refusal already carries the control plane's own remedy sentence and is re-raised untouched.
+
+    The credentials are **kept**, which is the opposite call from the 401 above and for the opposite
+    reason: here the session is still good, so it is the handle that works the moment the control
+    plane catches up.
+    """
+    from remote import control_plane, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    _revoke_spy(monkeypatch, raises=control_plane.ControlPlaneError("404!", status=404))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.cmd_logout(cli.build_parser().parse_args(["logout", "--everywhere"]))
+
+    assert "cannot sign your other machines out yet" in str(excinfo.value)
+    assert paths.credentials_file().exists()
+
+
+def test_logout_everywhere_still_signs_out_locally_when_the_session_is_already_gone(
+    monkeypatch, tmp_path, capsys
+):
+    """A 401 does NOT keep the credentials, and this is the case the "keep them" rule gets wrong.
+
+    Sign out everywhere from machine A, then run the same command on machine B: B's stored session
+    is already revoked, so the route refuses it. Keeping B's credentials "so a retry can reach the
+    route" would keep the one credential that will never be accepted again — `grid logout
+    --everywhere` could then never sign B out at all, and the person would have to guess to drop
+    the flag. So the local sign-out runs, and the report says what actually happened.
+    """
+    from remote import control_plane, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    _revoke_spy(monkeypatch, raises=control_plane.ControlPlaneError("revoked", status=401))
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--everywhere", "--json"])) == 0
+
+    captured = capsys.readouterr()
+    assert not paths.credentials_file().exists()
+    assert json.loads(captured.out)["revoked_everywhere"] is False
+    assert "nothing could be signed out elsewhere" in captured.err
+
+
+def test_logout_everywhere_with_no_session_claims_nothing(monkeypatch, tmp_path, capsys):
+    """Nothing to revoke *with*, so nothing is revoked — and the report must not say otherwise."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = _revoke_spy(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--everywhere", "--json"])) == 0
+
+    assert calls["tokens"] == []
+    assert json.loads(capsys.readouterr().out) == {
+        "signed_out": False, "stopped": [], "revoked_everywhere": False,
+    }
+
+
+def test_logout_json_says_whether_the_other_sessions_went(monkeypatch, tmp_path, capsys):
+    """Present on every logout, not only the ones that revoke — a stable shape beats a conditional
+    key, the same rule `stopped` already follows."""
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    _revoke_spy(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--everywhere", "--json"])) == 0
+
+    assert json.loads(capsys.readouterr().out) == {
+        "signed_out": True, "stopped": [], "revoked_everywhere": True,
+    }
+
+
+def test_revoke_sessions_posts_to_the_pinned_path_with_the_session(monkeypatch, tmp_path):
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"revoked": True, "session_epoch": 3})
+
+    _mock_control_plane(monkeypatch, handler)
+    control_plane.revoke_sessions("S", "http://cp")
+
+    assert seen == {
+        "method": "POST",
+        "path": control_plane.SESSIONS_REVOKE_PATH,
+        "auth": "Bearer S",
+    }
+
+
+def test_revoke_sessions_refuses_a_200_that_does_not_confirm(monkeypatch, tmp_path):
+    """The postcondition, because a new route's absence is loud and a mangled reply is not.
+
+    A 404 from an older control plane is a bare one this CLI turns into a sentence. What nothing
+    else would catch is a 200 that revoked nothing — a proxy's own cheerful answer, or a reply key
+    renamed on the far side — and reporting that as a sign-out is the one lie this path must not
+    tell.
+    """
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    for body in ({}, {"revoked": False}, {"revoked": "yes"}, {"ok": True}):
+        _mock_control_plane(monkeypatch, lambda r, b=body: httpx.Response(200, json=b))
+        with pytest.raises(SystemExit) as excinfo:
+            control_plane.revoke_sessions("S", "http://cp")
+        assert "did not confirm" in str(excinfo.value), body
+
+
+def test_revoke_sessions_refuses_a_200_that_is_not_json(monkeypatch, tmp_path):
+    """A captive portal or a proxy's own page answering 2xx. Unconfirmed, like any other reply that
+    does not say so — and a sentence rather than the `JSONDecodeError` traceback it would otherwise
+    be, on a path whose every other failure is a sentence."""
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_control_plane(
+        monkeypatch, lambda r: httpx.Response(200, text="<html>sign in to the wifi</html>"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        control_plane.revoke_sessions("S", "http://cp")
+
+    assert "did not confirm" in str(excinfo.value)
 
 
 def test_logout_json_names_each_grid_it_stopped(monkeypatch, tmp_path, capsys):
@@ -21109,6 +21332,7 @@ def test_logout_json_names_each_grid_it_stopped(monkeypatch, tmp_path, capsys):
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {
         "signed_out": True, "stopped": [{"grid": "team", "deregistered": True}],
+        "revoked_everywhere": False,
     }
     assert "node-jwt" not in captured.out  # the node id is not a secret, but the token it came from is
     assert "AT" not in json.dumps(json.loads(captured.out))

@@ -100,6 +100,52 @@ def sign_in_with_harness_token(harness_token: str, api_url: str | None = None) -
     return resp.json()
 
 
+#: The route that takes an account's grid sessions back, and the key on its reply that says it
+#: happened (`harness-grid-login` issue 07; public-repo ADR 0040, amended). Named here for the same
+#: reason `HARNESS_LOGIN_PATH` is: grid-apis mounts `APIRouter(prefix="/v1/grid")` and decorates
+#: `@router.post("/auth/sessions/revoke")`, this CLI sends the concatenation, and there is no import
+#: path between the two. `tests/test_session_revoke_lockstep.py` is what catches a rename.
+SESSIONS_REVOKE_PATH = "/v1/grid/auth/sessions/revoke"
+SESSIONS_REVOKE_KEY = "revoked"
+
+
+def revoke_sessions(session_token: str, api_url: str | None = None) -> None:
+    """Sign this account out of every machine — **including the one calling**.
+
+    The control plane bumps one number on the account row, and every session token that account
+    holds is stale from that moment. Nothing here names a token: the caller's own bearer is what
+    authorizes the call and is itself one of the sessions that dies.
+
+    ⚠️ **The reply is checked, not just its status.** A new route answers a bare 404 on a control
+    plane that predates it, which is loud and is the caller's one translated refusal. What is not
+    loud is a **200 that revoked nothing** — an intermediary's own answer, or the reply key renamed
+    on the far side — and the whole value of this call is the promise that the other sessions are
+    gone. So `revoked` is compared for **identity with `True`**, never truthiness: `"no"` and `1`
+    are both truthy, and neither is a confirmation.
+
+    Returns nothing. Every failure is a `ControlPlaneError`, which is a `SystemExit` carrying the
+    control plane's own sentence — shown verbatim, so the remedy is whichever one it named.
+    """
+    with _client(api_url, token=session_token) as client:
+        resp = _send(client, "POST", SESSIONS_REVOKE_PATH)
+    try:
+        reply = _json_or_empty(resp)
+    except (ValueError, RecursionError):
+        # A 2xx whose body is not JSON at all — a captive portal, a proxy's own page — or one nested
+        # deeply enough that `json.loads` raises `RecursionError`, which is NOT a `ValueError` (the
+        # pair this module already spells at its other decode). Either way the answer is the same as
+        # a reply that says nothing: unconfirmed. Caught rather than left to escape, because a
+        # traceback here would reach the person as a crash on a path whose every other failure is a
+        # sentence.
+        reply = None
+    if not isinstance(reply, dict) or reply.get(SESSIONS_REVOKE_KEY) is not True:
+        raise ControlPlaneError(
+            "The control plane answered the sign-out but did not confirm it, so your other "
+            "sign-ins may still be live. Nothing was signed out; try again.",
+            status=resp.status_code,
+        )
+
+
 def _without_token(exc: ControlPlaneError, secret: str) -> ControlPlaneError:
     """The same refusal with the credential taken back out of it (a new one; the original stands).
 

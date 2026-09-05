@@ -529,6 +529,15 @@ def _add_auth(sub) -> None:
         help="Sign out even if a serve child on this box could not be stopped (it is still stopped "
              "first; `grid leave <grid-id>` reaps a survivor afterwards).",
     )
+    # Not mutually exclusive with `--force`: the two answer different questions (what to do about a
+    # serve child here, and what to do about sign-ins elsewhere), and somebody signing out a machine
+    # they have lost control of wants both.
+    logout.add_argument(
+        "--everywhere",
+        action="store_true",
+        help="Also sign out every other machine signed in to this account; they have to sign in "
+             "again. Needs a control plane that supports it.",
+    )
     logout.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     logout.set_defaults(handler=cmd_logout)
 
