@@ -670,6 +670,12 @@ grid engines
 
 # Every model, and which computer answers for it
 grid models --verbose
+
+# The grid's uptime, memory pool and answered tokens (--verbose adds a card per computer)
+grid stats
+
+# Who spent them — also --by model / --by engine
+grid usage --by member
 ```
 
 `engines` lists what each computer serves and how many requests it takes at once; `models` lists

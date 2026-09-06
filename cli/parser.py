@@ -44,6 +44,7 @@ from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .remote_grid import cmd_remote_members
 from .remote_price import cmd_remote_price
 from .remote_project import cmd_remote_project
+from .remote_stats import USAGE_DIMENSIONS, cmd_remote_stats, cmd_remote_usage
 from .remote_task import cmd_remote_task
 from .remote_router import (
     MAX_ADVISORS,
@@ -101,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_grid_lifecycle(sub)
     _add_engines(sub)
+    _add_stats(sub)
     _add_models(sub)
     _add_use(sub)
     _add_state(sub)
@@ -369,6 +371,31 @@ def _add_engines(sub) -> None:
                          help="Grid name or id (ag-…). Omit for the active grid.")
     engines.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     engines.set_defaults(handler=cmd_engines)
+
+
+def _add_stats(sub) -> None:
+    """`grid stats` / `grid usage` — the live readouts of a hosted grid (remote-only).
+
+    Both read the relay's own rollup, which is the same source the desktop app's grid panels
+    read, so the two surfaces report one grid identically. A local grid computes no such
+    figures, which is why `cli.dispatch` gates these with a reason of their own rather than
+    the sign-in default.
+    """
+    stats = sub.add_parser("stats", help="A remote grid's live capacity and answered tokens")
+    stats.add_argument("grid", nargs="?", default=None,
+                       help="Grid name or id (ag-…). Omit for the active grid.")
+    stats.add_argument("--verbose", action="store_true",
+                       help="Also print a card per engine: memory, telemetry, storage and its own tokens.")
+    stats.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    stats.set_defaults(handler=cmd_remote_stats)
+
+    usage = sub.add_parser("usage", help="Tokens a remote grid answered, by model, member or engine")
+    usage.add_argument("grid", nargs="?", default=None,
+                       help="Grid name or id (ag-…). Omit for the active grid.")
+    usage.add_argument("--by", choices=USAGE_DIMENSIONS, default="model",
+                       help="What to split the tokens by (default: model).")
+    usage.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    usage.set_defaults(handler=cmd_remote_usage)
 
 
 def _add_models(sub) -> None:
