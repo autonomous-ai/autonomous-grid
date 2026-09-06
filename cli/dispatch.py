@@ -138,6 +138,16 @@ REMOTE_ONLY: dict[str, str | None] = {
     # not the control plane's — and the repository they name is served by the relay's git plane. A
     # local grid has none of it.
     "project": None,
+    # Two more whose reason is not sign-in: uptime, the memory pool, per-engine telemetry and the
+    # answered-token rollup are all computed by the hosted relay. A local grid serves models and
+    # keeps no such books, so there is nothing for a local handler to print — see cli/remote_stats.py.
+    "stats": (
+        "to read a hosted grid's live rollup — uptime, its memory pool and the tokens it has "
+        "answered — which a local grid does not compute."
+    ),
+    "usage": (
+        "to read a hosted grid's token rollup, which a local grid does not compute."
+    ),
     # The one command whose reason is not sign-in (ADR 0028): a local grid serves chat/completions,
     # completions, models and media — never Anthropic Messages, which is the only dialect Claude Code
     # speaks. Naming the dialect is what stops this being filed as a bug.

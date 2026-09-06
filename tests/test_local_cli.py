@@ -22640,6 +22640,618 @@ def test_local_edit_and_video_reject_remote_only_flags(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Remote `grid stats` / `grid usage` (cli/remote_stats.py + cli/_format.py)
+#
+# The terminal form of the desktop app's grid panels, off the same two relay reads. The rules under
+# test are the ones ported from it deliberately — absent is not zero, cached input is a share of
+# input, a subscription seat brings a plan rather than memory — because those are what make the two
+# surfaces agree about one grid, and each is invisible when it breaks (a wrong figure, not an error).
+# ---------------------------------------------------------------------------
+
+# One busy GPU box, one idle Mac, one asleep machine and one subscription seat: between them they
+# exercise every membership and every "the relay didn't say" branch in one payload.
+_OVERVIEW_STATS = {
+    "grid": {"state": "running"},
+    "stats": {"models": 2, "nodes": 3, "concurrent_capacity": 20, "uptime_pct": 99.9},
+    "answered": {"window_seconds": 86400, "tokens_in": 1_200_000, "tokens_cached": 200_000,
+                 "tokens_out": 90_000, "requests": 400},
+    "models": [{"id": "GLM-5.2"}, {"id": "Qwen-3"}],
+    "nodes": [
+        {"name": "gpu-box", "provider_email": "ana@example.com", "device": "NVIDIA RTX 5090 ×2",
+         "platform": "linux", "engine": "vllm", "models": ["glm-5.2"],
+         "model_capabilities": {"glm-5.2": {"context_length": 256000}},
+         "vram_gb": 64.0, "vram_total_mb": 65536.0, "vram_used_mb": 32768.0,
+         "gpu_util_pct": 55.0, "gpu_temp_c": 61.0, "gpu_power_w": 300.0, "gpu_power_limit_w": 600.0,
+         "disk_total_gb": 900.0, "disk_used_gb": 450.0,
+         "throughput_tok_s": 120.0, "max_concurrency": 16, "online": True,
+         "answered": {"window_seconds": 86400, "tokens_in": 1_000_000, "tokens_cached": 200_000,
+                      "tokens_out": 80_000, "requests": 300,
+                      "by_model": [{"model": "glm-5.2", "tokens_in": 1_000_000,
+                                    "tokens_cached": 200_000, "tokens_out": 80_000,
+                                    "requests": 300}]}},
+        {"name": "mac-studio", "provider_email": "bo@example.com", "chip": "Apple M2 Ultra",
+         "platform": "macos-arm64", "engine": "llama.cpp", "models": ["qwen-3"],
+         "vram_gb": 192.0, "vram_total_mb": 196608.0, "vram_used_mb": 49152.0,
+         "throughput_tok_s": 20.0, "max_concurrency": 1, "online": True,
+         "answered": {"window_seconds": 86400, "tokens_in": 0, "tokens_cached": 0,
+                      "tokens_out": 0, "requests": 0, "by_model": []}},
+        {"name": "asleep-box", "vram_gb": 999.0, "throughput_tok_s": 500.0,
+         "max_concurrency": 8, "online": False},
+        {"name": "codex-seat", "plan_type": "pro", "vram_gb": 128.0, "engine": "codex",
+         "models": ["codex:gpt-5.5"], "max_concurrency": 4, "online": True},
+    ],
+}
+
+
+def _mock_member_usage(monkeypatch, payload, *, status=200, seen=None):
+    """Serve both relay reads `grid usage` makes: the overview, then `/grid/members/usage`."""
+    def handler(request):
+        if seen is not None:
+            seen.setdefault("paths", []).append(request.url.path)
+            seen["auth"] = request.headers.get("authorization")
+        if request.url.path.endswith("/members/usage"):
+            return httpx.Response(status, json=payload)
+        return httpx.Response(200, json=_OVERVIEW_STATS)
+
+    _mock_relay(monkeypatch, handler)
+
+
+def _lines(capsys):
+    return [ln for ln in capsys.readouterr().out.splitlines()]
+
+
+def _overview(lines):
+    """The aligned overview block as a dict — what `grid stats` and `grid usage` both open with.
+
+    A pair is identified by its column gap, so the heading (single-spaced prose) is skipped without
+    this having to know what it says, and the block ends at the first line that is not a pair — the
+    blank before the node cards or the breakdown table.
+    """
+    out = {}
+    for line in lines:
+        if "  " in line and not line.startswith(" "):
+            name, _, value = line.partition("  ")
+            out[name.strip()] = value.strip()
+        elif out:
+            break
+    return out
+
+
+def _heading(lines):
+    """The first line `grid stats` prints — the span-qualified title."""
+    return lines[0]
+
+
+# -- `grid stats` ----------------------------------------------------------
+
+def test_stats_and_usage_are_classified_remote_only_with_their_own_reason():
+    """Neither has a local handler to fall back to, and neither is gated for sign-in — so both must
+    carry a reason of their own rather than inheriting "to sign in."."""
+    assert {"stats", "usage"} <= set(dispatch.REMOTE_ONLY)
+    assert not (set(dispatch.AGNOSTIC) & {"stats", "usage"})
+    assert not (set(dispatch.REMOTE_HANDLERS) & {"stats", "usage"})
+    assert all(dispatch.REMOTE_ONLY[command] for command in ("stats", "usage"))
+
+
+def test_stats_in_local_mode_says_a_local_grid_computes_none_of_it(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["stats"])
+    message = str(exc.value)
+    assert message.startswith("`grid stats` is a remote-mode command.")
+    assert "does not compute" in message and "sign in" not in message
+
+
+def test_remote_stats_prints_the_grid_rollup(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    seen = {}
+    _mock_overview(monkeypatch, _OVERVIEW_STATS, seen)
+    assert cli.main(["stats"]) == 0
+    values = _overview(_lines(capsys))
+    assert seen["path"] == "/relay/v1/grid/overview"
+    assert values["grid"] == "team" and values["status"] == "running"
+    assert values["uptime"] == "99.9%"
+    assert values["nodes"] == "3"  # online only — the sleeping box is not serving
+    assert values["models"] == "2"
+    assert values["parallel"] == "20"  # the relay's own capacity wins over the engines' summed 21
+    # Speed is a property of the machine that answers, not of the grid: each engine's figure is its
+    # own decode estimate taken at its own moment, so there is no summed rate here to read.
+    assert "throughput" not in values
+
+
+def test_remote_stats_opens_with_a_span_qualified_heading_over_one_column(monkeypatch, tmp_path, capsys):
+    """The block's shape is the contract here: a heading naming the span, then one column of
+    figures. No `window` row — the heading already qualifies every token figure under it."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats"]) == 0
+    assert capsys.readouterr().out == (
+        "24h Grid Overview:\n"
+        "\n"
+        "grid      team\n"
+        "status    running\n"
+        "uptime    99.9%\n"
+        "nodes     3\n"
+        "models    2\n"
+        "memory    80/256 GB (31%)\n"
+        "parallel  20\n"
+        "input     1M\n"
+        "cached    200K\n"
+        "output    90K\n"
+        "requests  400\n"
+    )
+
+
+def test_remote_stats_heading_names_the_relays_span_not_a_hardcoded_day(monkeypatch, tmp_path, capsys):
+    """The window is an operator knob (`node_answered_window_seconds`). A heading reading "24h"
+    while the master counted six would be wrong in the one way a figure must never be — and with
+    the `window` row gone, this heading is the only thing saying what the figures cover."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    six_hours = {**_OVERVIEW_STATS,
+                 "answered": {**_OVERVIEW_STATS["answered"], "window_seconds": 21600}}
+    _mock_overview(monkeypatch, six_hours)
+    assert cli.main(["stats"]) == 0
+    lines = _lines(capsys)
+    assert _heading(lines) == "6h Grid Overview:"
+    assert "window" not in _overview(lines)
+
+
+def test_remote_stats_heading_drops_the_span_when_nothing_measured_one(monkeypatch, tmp_path, capsys):
+    """A grid whose relay computes no rollup names no span — the bare noun, not an empty one, and
+    certainly not a day it never counted."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"grid": {"state": "running"}, "stats": {}, "nodes": []})
+    assert cli.main(["stats"]) == 0
+    assert _heading(_lines(capsys)) == "Grid Overview:"
+
+
+def test_remote_usage_opens_with_the_shared_block_under_its_own_title(monkeypatch, tmp_path, capsys):
+    """One shape from one place — but each command names it for itself. Here the block is a header
+    over a breakdown, so it stays light; in `grid stats` it *is* the answer and says so."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["usage"]) == 0
+    assert _lines(capsys)[:7] == [
+        "24h overview:",
+        "",
+        "input     1M",
+        "cached    200K",
+        "output    90K",
+        "requests  400",
+        "",
+    ]
+
+
+def test_remote_usage_heading_names_the_relays_span(monkeypatch, tmp_path, capsys):
+    """Same rule as `grid stats`: with no `window` row under it, this heading is the only thing
+    saying what the figures cover, so it cannot be a hardcoded day."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {**_OVERVIEW_STATS,
+                                 "answered": {**_OVERVIEW_STATS["answered"], "window_seconds": 21600}})
+    assert cli.main(["usage"]) == 0
+    lines = _lines(capsys)
+    assert _heading(lines) == "6h overview:"
+    assert "window" not in _overview(lines)
+
+
+def test_remote_stats_memory_pool_excludes_offline_boxes_and_subscription_seats(
+    monkeypatch, tmp_path, capsys
+):
+    """64 + 192 GB of hardware, not 999 (asleep — it can run nothing now) and not 128 (a seat, which
+    relays to a hosted model, so its host's memory never runs anything for the grid)."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats"]) == 0
+    # 32 GB used of 256 GB pooled. Used is summed over exactly the machines the total is.
+    assert _overview(_lines(capsys))["memory"] == "80/256 GB (31%)"
+
+
+def test_remote_stats_prints_the_fresh_input_leg_not_the_raw_one(monkeypatch, tmp_path, capsys):
+    """Cached prefill is a share OF input, never additional to it — so the three legs printed here
+    add up to what passed through. Raw `tokens_in` would show 1.2M and a total larger than the grid."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats"]) == 0
+    lines = _lines(capsys)
+    values = _overview(lines)
+    assert _heading(lines) == "24h Grid Overview:"  # the span is stated once, above the figures
+    assert values["input"] == "1M"  # 1_200_000 read − 200_000 from cache
+    assert values["cached"] == "200K" and values["output"] == "90K" and values["requests"] == "400"
+
+
+def test_remote_stats_marks_an_unmeasured_field_rather_than_printing_zero(monkeypatch, tmp_path, capsys):
+    """A relay too old to compute a rollup sends none, and a `0` there would report a busy fleet as
+    dead. The name still prints — the block is the same shape either way — with a dash where the
+    figure would be, which in a column is what keeps it from reading as a rendering failure."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"grid": {"state": "running"}, "stats": {}, "nodes": [
+        {"name": "quiet-box", "online": True},
+    ]})
+    assert cli.main(["stats"]) == 0
+    lines = _lines(capsys)
+    values = _overview(lines)
+    assert _heading(lines) == "Grid Overview:"  # no span to name
+    assert values["uptime"] == "—" and values["memory"] == "—" and values["parallel"] == "—"
+    assert [values[key] for key in ("input", "cached", "output", "requests")] == ["—"] * 4
+
+
+def test_remote_stats_prefers_the_grids_own_rollup_over_summing_engines(monkeypatch, tmp_path, capsys):
+    """An engine is listed only while its heartbeat is live, and the relay's per-node rollup drops
+    rows it cannot attribute — so a summed total is quietly low by an amount that moves as machines
+    come and go. The grid's own figure is authoritative wherever it sends one."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats"]) == 0
+    # The one engine that answered reports 80K out; the grid says 90K. The grid's figure wins.
+    assert _overview(_lines(capsys))["output"] == "90K"
+
+
+def test_remote_stats_falls_back_to_the_engine_sum_when_the_grid_sends_no_rollup(
+    monkeypatch, tmp_path, capsys
+):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {k: v for k, v in _OVERVIEW_STATS.items() if k != "answered"})
+    assert cli.main(["stats"]) == 0
+    lines = _lines(capsys)
+    assert _overview(lines)["output"] == "80K" and _overview(lines)["requests"] == "300"
+    assert _heading(lines) == "24h Grid Overview:"  # span taken from the engines, not assumed
+
+
+def test_remote_stats_verbose_prints_a_card_per_engine(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats", "--verbose"]) == 0
+    out = capsys.readouterr().out
+    card = out.split("gpu-box\n", 1)[1]
+    assert "owner        ana@example.com" in card
+    assert "NVIDIA RTX 5090 ×2 · Linux" in card
+    assert "vllm · 16 parallel" in card
+    # The catalog's case, not the lowercased id the node advertises — a name copied off a card has
+    # to be one `grid chat -m` will answer to.
+    assert "models       GLM-5.2 (256K ctx)" in card
+    assert "VRAM         32/64 GB (50%) · 32 GB free" in card
+    assert "temperature  61°C" in card and "usage        55%" in card
+    assert "power        300W/600W" in card and "storage      450/900 GB (50%)" in card
+    assert "throughput   ~120 tok/s" in card
+    assert "tokens 24h   800K input · 200K cached · 80K output · 300 requests" in card
+    assert "asleep-box  (offline)" in out  # listed, and marked, rather than dropped
+    # The heading stands off the rollup on both sides — a `key=value` block running straight into a
+    # prose heading read as a fourteenth key rather than as the start of a new section.
+    assert "\nrequests  400\n\nTop 20 nodes:\n\n" in out
+
+
+def test_remote_stats_verbose_caps_the_node_list_and_keeps_the_strongest(monkeypatch, tmp_path, capsys):
+    """A card is eleven lines, so an uncapped list would scroll the rollup — the part every run is
+    read for — off the screen. Sorted strongest-first, the cap drops the tail rather than an
+    arbitrary slice, and the `nodes=` line still states how many there really are."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"grid": {"state": "running"}, "stats": {}, "nodes": [
+        {"name": f"box-{i:02d}", "vram_gb": float(i), "online": True} for i in range(1, 26)
+    ]})
+    assert cli.main(["stats", "--verbose"]) == 0
+    out = capsys.readouterr().out
+    headers = [ln for ln in out.splitlines() if ln.startswith("box-")]
+    assert _overview(out.splitlines())["nodes"] == "25"  # the real count is never hidden
+    assert "Top 20 nodes:" in out
+    assert len(headers) == 20
+    assert headers[0] == "box-25" and headers[-1] == "box-06"  # biggest kept, smallest dropped
+    assert "box-05" not in out and "box-01" not in out
+
+
+def test_remote_stats_json_is_never_capped(monkeypatch, tmp_path, capsys):
+    """The cap is a reading aid, not a filter. A script asking for the fleet must get the fleet."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"grid": {"state": "running"}, "stats": {}, "nodes": [
+        {"name": f"box-{i:02d}", "vram_gb": float(i), "online": True} for i in range(1, 26)
+    ]})
+    assert cli.main(["stats", "--verbose", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["engines"]) == 25 and payload["engines_online"] == 25
+
+
+def test_remote_stats_verbose_keeps_a_measured_zero_apart_from_an_unmeasured_reading(
+    monkeypatch, tmp_path, capsys
+):
+    """The Mac reports memory and speed but no temperature or power — macOS exposes neither outside a
+    root `powermetrics` — while its token figures are real zeros the relay did measure. A `0` in the
+    first pair would libel a working machine; a `—` in the second would hide a true fact."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats", "--verbose"]) == 0
+    card = capsys.readouterr().out.split("mac-studio\n", 1)[1].split("\n\n", 1)[0]
+    assert "temperature  —" in card and "power        —" in card and "usage        —" in card
+    assert "tokens 24h   0 input · 0 cached · 0 output · 0 requests" in card
+    assert "RAM          48/192 GB (25%)" in card  # unified memory is RAM, not VRAM
+
+
+def test_remote_stats_json_carries_the_engines_whether_verbose_or_not(monkeypatch, tmp_path, capsys):
+    """`--verbose` must not change the machine-readable shape, or every script would depend on how
+    it was invoked."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats", "--json"]) == 0
+    plain = json.loads(capsys.readouterr().out)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats", "--verbose", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == plain
+
+    assert plain["grid"] == "team" and plain["engines_online"] == 3 and plain["engines_total"] == 4
+    assert plain["memory_gb"] == 256.0 and plain["memory_used_gb"] == 80.0
+    assert plain["memory_used_pct"] == 31.2 and "throughput_tok_s" not in plain
+    assert next(e for e in plain["engines"] if e["engine"] == "gpu-box")["throughput_tok_s"] == 120.0
+    assert plain["answered"]["tokens_in"] == 1_200_000  # the relay's own name keeps its own meaning
+    assert plain["answered"]["tokens_in_fresh"] == 1_000_000
+    seat = next(e for e in plain["engines"] if e["engine"] == "codex-seat")
+    assert seat["plan_type"] == "pro" and seat["memory_gb"] is None  # a plan, not memory
+
+
+# -- `grid usage` ----------------------------------------------------------
+
+def test_remote_usage_by_model_ranks_by_output_and_counts_serving_engines(
+    monkeypatch, tmp_path, capsys
+):
+    """Ordered by what each model did, not by catalog order — the position itself carries
+    information. A model the grid lists but nothing answered on keeps its row, unmeasured."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["usage"]) == 0
+    lines = _lines(capsys)
+    header = next(ln for ln in lines if ln.startswith("MODEL"))
+    rows = [ln for ln in lines[lines.index(header) + 1:] if ln.strip()]
+    assert header.split() == ["MODEL", "INPUT", "CACHED", "OUTPUT", "REQUESTS", "SHARE", "ENGINES"]
+    # Catalog casing is what prints, though the node advertises `glm-5.2` — matched case-insensitively.
+    assert rows[0].split() == ["GLM-5.2", "800K", "200K", "80K", "300", "89%", "1"]
+    # A real zero, not a dash: the grid's rollup landed, so "nobody used this model today" is a
+    # measured fact — see the third branch in `model_rows`.
+    assert rows[1].split() == ["Qwen-3", "0", "0", "0", "0", "0%", "1"]
+
+
+def test_remote_usage_by_model_stays_unmeasured_when_nothing_measured_the_grid(
+    monkeypatch, tmp_path, capsys
+):
+    """The other side of the same rule. An older master computes no rollup at all, and printing
+    `0 requests` against every model on such a grid would report a busy fleet as dead — so with
+    nothing measured anywhere the rows stay silent rather than claiming an idle day."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {
+        "models": [{"id": "GLM-5.2"}],
+        "nodes": [{"name": "old-box", "models": ["glm-5.2"], "online": True}],
+    })
+    assert cli.main(["usage"]) == 0
+    lines = _lines(capsys)
+    row = next(ln for ln in lines if ln.startswith("GLM-5.2"))
+    assert row.split() == ["GLM-5.2", "—", "—", "—", "—", "—", "1"]
+
+
+def test_remote_usage_by_model_keeps_a_model_the_catalog_no_longer_lists(monkeypatch, tmp_path, capsys):
+    """Work that happened is printed whatever the catalog says now — dropping it would leave the
+    column adding up to less than its own header with nothing to show why."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {**_OVERVIEW_STATS, "models": []})
+    assert cli.main(["usage"]) == 0
+    assert any(ln.startswith("glm-5.2 ") for ln in _lines(capsys))
+
+
+def test_remote_usage_by_engine_lists_every_engine_busiest_first(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["usage", "--by", "engine"]) == 0
+    lines = _lines(capsys)
+    rows = [ln.split() for ln in lines[lines.index(next(ln for ln in lines if ln.startswith("ENGINE"))) + 1:]
+            if ln.strip()]
+    assert rows[0] == ["gpu-box", "800K", "200K", "80K", "300"]
+    assert ["mac-studio", "0", "0", "0", "0"] in rows       # measured, and idle
+    assert ["codex-seat", "—", "—", "—", "—"] in rows       # never measured
+
+
+def test_remote_usage_by_member_merges_the_roster_and_ranks_by_fresh_input(
+    monkeypatch, tmp_path, capsys
+):
+    """The roster decides who is listed, the usage decides the order. Someone who has never sent a
+    request is still a member and keeps a row; someone the relay counted but the roster has since
+    dropped is not one any more and must not reappear."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    seen = {}
+    _mock_member_usage(monkeypatch, {"window_seconds": 86400, "members": [
+        {"email": "Ana@example.com", "requests": 12, "tokens_in": 900_000,
+         "tokens_cached": 400_000, "tokens_out": 5_000},
+        {"email": "bo@example.com", "requests": 3, "tokens_in": 100_000,
+         "tokens_cached": 10_000, "tokens_out": 900},
+    ]}, seen=seen)
+    _mock_members(monkeypatch, members=[
+        {"email": "ana@example.com", "roles": ["admin"]},
+        {"email": "bo@example.com", "roles": ["both"]},
+        {"email": "cy@example.com", "roles": ["consumer"]},
+    ])
+    assert cli.main(["usage", "--by", "member"]) == 0
+    lines = _lines(capsys)
+    rows = [ln.split() for ln in lines[lines.index(next(ln for ln in lines if ln.startswith("MEMBER"))) + 1:]
+            if ln.strip()]
+    assert "/relay/v1/grid/members/usage" in seen["paths"]
+    assert seen["auth"] == "Bearer AT"  # this one names people, so it is authenticated
+    # 500K fresh (900K read − 400K cached) beats 90K; the member with no figure sorts last. The
+    # roster is what puts `cy` on the list at all — what each of them may *do* is `grid members list`.
+    assert rows[0] == ["Ana@example.com", "500K", "400K", "5K", "12"]
+    assert rows[1] == ["bo@example.com", "90K", "10K", "900", "3"]
+    assert rows[2] == ["cy@example.com", "—", "—", "—", "—"]
+
+
+def test_remote_usage_by_member_matches_the_roster_case_insensitively(monkeypatch, tmp_path, capsys):
+    """The control plane stores what the user typed and the relay what the token carried, so an
+    address differing only in case would list one person twice — once busy, once as never having
+    sent a request."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_member_usage(monkeypatch, {"window_seconds": 86400, "members": [
+        {"email": "Ana@Example.com", "requests": 1, "tokens_in": 10, "tokens_out": 2},
+    ]})
+    _mock_members(monkeypatch, members=[{"email": "ana@example.com", "roles": ["both"]}])
+    assert cli.main(["usage", "--by", "member"]) == 0
+    assert len([ln for ln in _lines(capsys) if "ana@example.com" in ln.lower()]) == 1
+
+
+def test_remote_usage_by_member_degrades_when_the_roster_is_owner_only(
+    monkeypatch, tmp_path, capsys
+):
+    """A member gets a 403 from the owner-only roster. Usage the relay *did* report is still worth
+    printing, so the table stands and the caveat goes to stderr — stdout stays a clean table."""
+    from remote import control_plane
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_member_usage(monkeypatch, {"window_seconds": 86400, "members": [
+        {"email": "ana@example.com", "requests": 12, "tokens_in": 900_000, "tokens_out": 5_000},
+    ]})
+
+    def _refuse(session_token, network_id, api_url=None):
+        raise control_plane.ControlPlaneError("forbidden", status=403)
+
+    monkeypatch.setattr(control_plane, "list_members", _refuse)
+    assert cli.main(["usage", "--by", "member"]) == 0
+    captured = capsys.readouterr()
+    assert "ana@example.com" in captured.out
+    assert "only the grid owner can list members" in captured.err.lower()
+
+
+def test_remote_usage_by_member_reports_no_rollup_rather_than_zeros(monkeypatch, tmp_path, capsys):
+    """404 is a master that predates the endpoint — the common case mid-rollout — and 401/403 is a
+    caller who may not ask. Neither is a fact about how much anyone used, so neither may print as a
+    figure; the roster still gets its rows, unmeasured."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_member_usage(monkeypatch, {"detail": "not found"}, status=404)
+    _mock_members(monkeypatch, members=[{"email": "ana@example.com", "roles": ["both"]}])
+    assert cli.main(["usage", "--by", "member"]) == 0
+    captured = capsys.readouterr()
+    assert "ana@example.com" in captured.out and "—" in captured.out
+    assert "reports no member usage" in captured.err
+
+
+def test_remote_usage_totals_are_the_grids_own_in_every_dimension(monkeypatch, tmp_path, capsys):
+    """One grid, one window, one set of totals — whichever way the rows are split. Summing the rows
+    instead would make `--by member` and `grid stats` print two different figures for one grid."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    totals = {}
+    for dimension in ("model", "engine"):
+        _mock_overview(monkeypatch, _OVERVIEW_STATS)
+        assert cli.main(["usage", "--by", dimension]) == 0
+        totals[dimension] = _overview(_lines(capsys))
+    _mock_member_usage(monkeypatch, {"window_seconds": 86400, "members": []})
+    _mock_members(monkeypatch, members=[])
+    assert cli.main(["usage", "--by", "member"]) == 0
+    totals["member"] = _overview(_lines(capsys))
+    assert len({tuple(sorted(v.items())) for v in totals.values()}) == 1
+    assert totals["model"]["input"] == "1M" and totals["model"]["output"] == "90K"
+
+
+def test_remote_usage_json_carries_the_raw_and_the_fresh_input(monkeypatch, tmp_path, capsys):
+    """`tokens_in` keeps the relay's own meaning (cached included) so nothing on the wire is
+    redefined; `tokens_in_fresh` is the leg the human table prints."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["usage", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["by"] == "model" and payload["window_seconds"] == 86400
+    assert payload["totals"] == {
+        "tokens_in": 1_200_000, "tokens_in_fresh": 1_000_000, "tokens_cached": 200_000,
+        "tokens_out": 90_000, "requests": 400,
+    }
+    served, idle = payload["rows"][0], payload["rows"][1]
+    assert served["model"] == "GLM-5.2" and served["engines"] == 1 and served["measured"] is True
+    assert idle["model"] == "Qwen-3" and idle["measured"] is True and idle["tokens_out"] == 0
+
+
+def test_remote_usage_rejects_an_unknown_dimension(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit):
+        cli.main(["usage", "--by", "planet"])
+
+
+def test_remote_stats_requires_a_started_grid(monkeypatch, tmp_path):
+    """A stopped grid has no relay to read, and the message points at the lifecycle verb that fixes
+    it — `grid start`, which replaced `grid up`."""
+    _seed_remote(monkeypatch, tmp_path,
+                networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
+    _mock_lifecycle(monkeypatch, status={"state": "stopped"})
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["stats"])
+    assert "grid start" in str(exc.value).lower()
+
+
+def test_remote_stats_works_without_an_access_token(monkeypatch, tmp_path, capsys):
+    """The overview route is public, so the rollup must read before `grid sync` stores a token."""
+    _seed_remote(monkeypatch, tmp_path,
+                networks=[{"network_id": "n1", "name": "team"}], active="team")  # no access_token
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats"]) == 0
+    assert _overview(_lines(capsys))["nodes"] == "3"
+
+
+def test_remote_usage_by_member_needs_the_grids_own_token(monkeypatch, tmp_path):
+    """Unlike the overview beside it, this endpoint names people — so a grid whose token has not
+    been synced gets the familiar `grid login` guidance rather than an opaque 401."""
+    _seed_remote(monkeypatch, tmp_path,
+                networks=[{"network_id": "n1", "name": "team"}], active="team")  # no access_token
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["usage", "--by", "member"])
+    assert "grid login" in str(exc.value)
+
+
+def test_relay_client_omits_the_bearer_when_there_is_no_token():
+    """`Bearer ` with nothing after it is not a legal header value: h11 refuses to write it, so a
+    public read on a tokenless grid died as `Illegal header value` before leaving the machine. The
+    header is omitted instead — which MockTransport cannot catch, hence this direct check."""
+    from remote import relay
+
+    with relay.open_consumer_client("https://relay.example", "", timeout=1.0) as client:
+        assert "authorization" not in client.headers
+    with relay.open_consumer_client("https://relay.example", "AT", timeout=1.0) as client:
+        assert client.headers["authorization"] == "Bearer AT"
+
+
+# -- the shared formatters (cli/_format.py) --------------------------------
+
+def test_format_count_steps_units_before_a_four_digit_figure_appears():
+    """`1000K` and `1285M` are the same numbers as `1M` and `1.3B` but read as a unit that was never
+    carried — the one thing a shortened figure must not do. The step is at 999.5, before the
+    rounding below it could expose one."""
+    from cli import _format
+
+    assert [_format.count(n) for n in (0, 940, 999, 1000, 12_345)] == ["0", "940", "999", "1K", "12.3K"]
+    assert [_format.count(n) for n in (999_499, 999_500)] == ["999K", "1M"]
+    assert [_format.count(n) for n in (1_000_000, 1_285_402_913)] == ["1M", "1.3B"]
+
+
+def test_format_memory_share_writes_one_unit_chosen_from_the_total():
+    """Two figures either side of a slash are being compared, and a comparison written in two units
+    is a puzzle — so the unit is the total's, written once."""
+    from cli import _format
+
+    assert _format.memory_share(950.6, 1404.3) == "0.9/1.4 TB"   # a terabyte grid, both halves in TB
+    assert _format.memory_share(276.9, 382.4) == "277/382 GB"    # three digits: the tenth is noise
+    assert _format.memory_share(31.8, 63.7) == "31.8/63.7 GB"    # under 100 the decimal is a 20th
+
+
+def test_format_share_never_rounds_a_working_model_to_nothing():
+    """A model at 0.4% of the grid rounding to `0%` reads as "did nothing" against a row plainly
+    showing tokens."""
+    from cli import _format
+
+    assert [_format.share(f) for f in (0.98, 0.0145, 0.004, 0.0004, 0.0)] == \
+        ["98%", "1.5%", "0.4%", "<0.1%", "0%"]
+
+
+def test_format_window_says_the_span_the_relay_actually_reported():
+    """The window is an operator knob; a label hardcoded to 24h would go quietly wrong the moment
+    someone retuned it. A day stays "24h" — that is how people talk about what a machine did today."""
+    from cli import _format
+
+    assert [_format.window(s) for s in (86400, 172800, 604800, 21600, 1800, 45, 0)] == \
+        ["24h", "2d", "7d", "6h", "30m", "45s", ""]
+
+
+# ---------------------------------------------------------------------------
 # Remote membership — `grid members add|remove|list` (cli/remote_grid.py + control_plane)
 # ---------------------------------------------------------------------------
 
