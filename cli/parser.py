@@ -413,6 +413,8 @@ def _add_models(sub) -> None:
         metavar="KIND",
         help="Show the API-engine whitelist for a service kind (e.g. openai, codex).",
     )
+    # No pagination flags on purpose: one fetch, one scrolling list. Paging was a
+    # terminal problem the moment ↑↓ could scroll through the rows.
     catalog.set_defaults(handler=cmd_catalog)
 
     pull = sub.add_parser(

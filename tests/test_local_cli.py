@@ -33,6 +33,7 @@ from local import config
 from shared import paths
 from shared import state
 from local import runtime
+from remote import credentials
 from shared.agent import codex_installer
 from shared.agent import installer as agent_installer
 from shared.engine import comfyui, installer, launcher
@@ -912,6 +913,154 @@ def test_catalog_without_api_unchanged(monkeypatch, tmp_path, capsys):
     assert rc == 0
     assert "Grid can pull:" in out
     assert "openai:" not in out
+
+
+def _install_fake_catalog_http(monkeypatch, payload, status=200, token="tok-123"):
+    """Stubs the catalog round-trip: httpx.post, the control-plane URL, the saved session
+    token, and the device probe. Returns the dict capturing the single call's kwargs."""
+    calls: dict = {}
+
+    class _Response:
+        status_code = status
+        text = json.dumps(payload) if status < 400 else "boom"
+
+        def __init__(self, served):
+            self._served = served
+
+        def json(self):
+            return self._served
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.update(url=url, json=json, headers=headers)
+        return _Response(payload)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(credentials, "api_url", lambda explicit=None: "https://api.test")
+    monkeypatch.setattr(
+        credentials,
+        "load_credentials",
+        lambda: ({"session_token": token} if token else {}),
+    )
+    monkeypatch.setattr(
+        "shared.system.device_info.collect_device_info",
+        lambda: {"device_class": "apple-silicon", "usable_bytes": 12 << 30, "backend": "metal"},
+    )
+    return calls
+
+
+_BROWSE_PAYLOAD = {
+    "mode": "browse",
+    "models": [
+        {
+            "repo_id": "unsloth/Big-9B-GGUF",
+            "params_b": 9.0,
+            "task": "text-generation",
+            "runnable": True,
+            "fit": {"version": "Q4_K_XL", "size": 5_966_000_000, "est_tok_s": 28.4},
+            "versions": [
+                {"version": "BF16", "size_bytes": 17_920_000_000,
+                 "pull_spec": "unsloth/Big-9B-GGUF:Qwen-BF16.gguf"},
+                {"version": "Q4_K_XL", "size_bytes": 5_966_000_000,
+                 "pull_spec": "unsloth/Big-9B-GGUF:Qwen-Q4_K_XL.gguf"},
+            ],
+        },
+        {
+            "repo_id": "bigorg/Huge-70B-GGUF",
+            "params_b": 70.0,
+            "task": "text-generation",
+            "runnable": False,
+            "versions": [
+                {"version": "Q4_K_M", "size_bytes": 40_000_000_000,
+                 "pull_spec": "bigorg/Huge-70B-GGUF:Huge-Q4_K_M.gguf"}
+            ],
+        },
+    ],
+    "pagination": {"page": 1, "page_size": 10, "total": 299, "total_pages": 30},
+    "runnable_total": 50,
+}
+
+
+def _catalog_ns(**over):
+    ns = dict(api=None, json=False)
+    ns.update(over)
+    return argparse.Namespace(**ns)
+
+
+def test_catalog_sends_device_and_prints_every_quant_version(monkeypatch, capsys):
+    calls = _install_fake_catalog_http(monkeypatch, _BROWSE_PAYLOAD)
+
+    rc = cli.cmd_catalog(_catalog_ns())
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    # Both quantized versions print, each with the exact pull spec the service named.
+    assert "unsloth/Big-9B-GGUF:Qwen-BF16.gguf" in out
+    assert "unsloth/Big-9B-GGUF:Qwen-Q4_K_XL.gguf" in out
+    assert "suggested" in out and "tok/s" not in out  # no speed estimate on our screens
+    assert "MODEL" in out and "SIZE" in out and "FIT" in out  # the column header
+    # Runnable-only: the oversized model is neither listed nor mentioned.
+    assert "Huge-70B" not in out and "too large" not in out
+    # A plain heading: no total count, no paging vocabulary anywhere.
+    assert "Popular models on the Grid:" in out
+    assert "50" not in out and "page" not in out.lower()
+    # The request: browse mode, the service's own device-gate fields, auth'd.
+    assert calls["url"] == "https://api.test/v1/grid/catalog"
+    assert calls["headers"]["Authorization"] == "Bearer tok-123"
+    body = calls["json"]
+    assert body["browse"] is True
+    assert body["device"] == {"device_class": "apple-silicon",
+                              "usable_bytes": 12 << 30, "backend": "metal"}
+    assert body["page_size"] == 50 and "page" not in body  # one fetch, no paging
+
+
+def test_catalog_json_is_the_service_payload_verbatim(monkeypatch, capsys):
+    _install_fake_catalog_http(monkeypatch, _BROWSE_PAYLOAD)
+
+    rc = cli.cmd_catalog(_catalog_ns(json=True))
+
+    assert rc == 0
+    # One contract with the app: every field, same names, no additions.
+    assert json.loads(capsys.readouterr().out) == _BROWSE_PAYLOAD
+
+
+
+def test_catalog_falls_back_to_shipped_table_when_service_fails(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _install_fake_catalog_http(monkeypatch, {"detail": "expired"}, status=401)
+
+    rc = cli.cmd_catalog(_catalog_ns())
+
+    captured = capsys.readouterr()
+    assert rc == 0  # a dead catalog service must leave the command usable
+    assert "HTTP 401" in captured.err and "shipped table" in captured.err
+    assert "Grid can pull:" in captured.out  # the old offline table, unchanged
+
+
+def test_catalog_offline_without_session(monkeypatch):
+    calls = _install_fake_catalog_http(monkeypatch, _BROWSE_PAYLOAD, token=None)
+
+    rc = cli.cmd_catalog(_catalog_ns())
+
+    assert rc == 0
+    assert calls == {}  # not even signed in: no network call at all
+
+
+def test_catalog_api_kind_never_touches_the_service(monkeypatch):
+    calls = _install_fake_catalog_http(monkeypatch, _BROWSE_PAYLOAD)
+
+    rc = cli.cmd_catalog(_catalog_ns(api="openai"))
+
+    assert rc == 0
+    assert calls == {}  # --api stays the shipped whitelist read
+
+
+def test_catalog_parser_flags():
+    args = cli.build_parser().parse_args(["catalog"])
+    assert args.handler is cli.cmd_catalog
+    assert args.api is None and args.json is False
+    for gone in ("--online", "--page", "--page-size"):
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(["catalog", gone])
 
 
 def test_api_whitelist_integrity():
