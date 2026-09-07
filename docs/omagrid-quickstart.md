@@ -1,6 +1,4 @@
-# Omagrid quickstart
-
-Omagrid is a peer-to-peer AI grid for Omarchy machines.
+# Omagrid: An Omarchy-to-Omarchy AI Grid
 
 ## 1. Join Omagrid
 
