@@ -6,9 +6,8 @@ by hand. opencode does the rest.
 
 ## What you need
 
-- An Omarchy machine (any Linux or macOS box with the `grid` CLI works the same way).
-- Early access to Omagrid. Not on it yet? DM [@dee_hw](https://x.com/dee_hw).
-- [opencode](https://opencode.ai) installed.
+- An Omarchy machine. It ships with opencode. Any Linux or macOS box with the `grid` CLI and
+  [opencode](https://opencode.ai) works the same way.
 
 Check the CLI is there with `grid --version`. If it isn't:
 
@@ -23,8 +22,6 @@ grid login --no-browser
 ```
 
 It prints a URL and a code. Open the URL on any device, approve with Google, type the code.
-Sign-in lists the grids you can reach. `Omagrid` should be one of them; if it isn't, you're not on
-the early-access list yet.
 
 ## 2. Pick the grid
 
