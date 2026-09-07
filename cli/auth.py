@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import sys
 import time
 import webbrowser
@@ -23,6 +24,8 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
 from shared import run_records
+
+from .next_steps import print_next_steps
 
 if TYPE_CHECKING:  # annotations only (PEP 563) — the runtime import stays lazy, in the handlers
     from . import os_grid_notice, signout
@@ -92,6 +95,7 @@ _SESSION_ALREADY_GONE = (
 
 def cmd_login(args: argparse.Namespace) -> int:
     from remote import control_plane, credentials
+    from shared import state
 
     from . import os_grid_notice, signout
 
@@ -129,10 +133,16 @@ def cmd_login(args: argparse.Namespace) -> int:
         "networks": networks,
     })
     signout.warn_stranded(previous_networks, networks)
+    # Signing in is what "I want the hosted grids" looks like, so the mode follows the credentials
+    # rather than being demanded up front (dispatch.SELF_SWITCHING). Done here, after the save: a
+    # sign-in that times out or is denied never reaches this line and leaves the mode alone.
+    switched = state.get_mode() != "remote"
+    if switched:
+        state.set_mode("remote")
     # Deliberately no `state.set_active("remote", …)` here — login never auto-selects a grid.
     return _report_login(user.get("email", ""), networks,
                          absence=os_grid_notice.absence(fetched.os_served),
-                         replaced=previous_email, as_json=as_json)
+                         replaced=previous_email, as_json=as_json, switched=switched)
 
 
 def _browser_sign_in(args: argparse.Namespace, api_url: str, *, as_json: bool) -> dict[str, Any]:
@@ -303,7 +313,7 @@ def _print_signin_prompt(url: str, user_code: str, *, to_stderr: bool) -> None:
 
 def _report_login(email: str, networks: list[dict[str, Any]], *,
                   absence: os_grid_notice.OsGridAbsence | None = None, replaced: str = "",
-                  as_json: bool) -> int:
+                  as_json: bool, switched: bool = False) -> int:
     """Who is signed in, which grids they got, and — when it changed — whose account this replaced.
 
     The replacement is a line, never a refusal: `grid login` has never compared accounts, and making
@@ -326,14 +336,63 @@ def _report_login(email: str, networks: list[dict[str, Any]], *,
                           "os_grid": absence.as_json() if absence else None}))
         return 0
     signed_in = swapped or f"Signed in as {email}."
+    if switched:
+        # Named, never silent: the mode is persisted state that changes what every later command
+        # talks to, so a reader who did not ask for it is told it happened and how to undo it.
+        print("This computer is now in remote mode (`grid mode local` switches back).")
     if networks:
-        listed = ", ".join(n["name"] for n in networks)
-        print(f"{signed_in} {len(networks)} grid(s) available: {listed}.")
-        print("Run `grid use <name>` to pick one.")
+        print(f"{signed_in} {len(networks)} grid(s) available:")
+        _print_grid_list(networks)
+        # Login deliberately selects nothing (see cmd_login), so the next steps are spelled out:
+        # pick a grid, optionally contribute this computer to it, then use it.
+        _print_next_steps(networks)
+        print("Missing a grid you were just added to? Run `grid sync` to refresh the list.")
     else:
         print(f"{signed_in} You don't belong to any grids yet.")
+        print_next_steps([
+            ("grid sync", "refresh after someone adds you to a grid"),
+            ("grid start <name>", "or create your own, then `grid use <name>`"),
+        ])
     _print_os_grid_absence(absence)
     return 0
+
+
+def _print_grid_list(networks: list[dict[str, Any]]) -> None:
+    """The grids this account can reach, one per line — `grid ls` columns, aligned and marked the
+    same way (``*`` on the active grid) so the list you get for free after login/sync reads like the
+    list you get on demand."""
+    from shared import state
+
+    active = state.get_active("remote")
+    names = [str(n.get("name") or "") for n in networks]
+    width = max(len("GRID"), *(len(n) for n in names))
+    print("")
+    print(f"    {'GRID'.ljust(width)}   TYPE")
+    marked = False
+    for net, name in zip(networks, names):
+        is_active = bool(active) and active in {net.get("network_id"), name}
+        marked = marked or is_active
+        print(f"  {'*' if is_active else ' '} {name.ljust(width)}   {net.get('network_type') or ''}")
+    if marked:
+        print("  * = active grid")
+
+
+def _print_next_steps(networks: list[dict[str, Any]]) -> None:
+    """The verbs that follow a grid list. The examples name a real grid — the active one when the
+    pointer still resolves, else the first — so they can be pasted as printed."""
+    from shared import state
+
+    active = state.get_active("remote")
+    names = [str(n.get("name") or "") for n in networks]
+    example = shlex.quote(active if active in names else names[0])
+    print_next_steps([
+        (f"grid use {example}", "pick the grid to work with"),
+        ('grid chat -m <model> "hello"', "start using it"),
+        # How a coding agent reaches this grid: the exports point any OpenAI-dialect client
+        # (opencode, codex, Cursor) at it. `grid info --env` itself says what to do with them.
+        (f"grid info --env {example}", "point coding agents at it (opencode, codex, …)"),
+        (f"grid join {example} --serve <model>", "optional: serve a model to it"),
+    ])
 
 
 def cmd_logout(args: argparse.Namespace) -> int:
@@ -654,8 +713,9 @@ def _report_sync(networks: list[dict[str, Any]], *,
                           "os_grid": absence.as_json() if absence else None}))
         return 0
     if networks:
-        listed = ", ".join(n["name"] for n in networks)
-        print(f"Synced {len(networks)} grid(s): {listed}.")
+        print(f"Synced {len(networks)} grid(s):")
+        _print_grid_list(networks)
+        _print_next_steps(networks)
     else:
         print("Synced 0 grids.")
     _print_os_grid_absence(absence)

@@ -17,6 +17,8 @@ from local import runtime
 from shared import paths, run_records, shell, state
 from shared._version import __version__
 
+from .next_steps import print_env_hint
+
 
 def cmd_version(args: argparse.Namespace) -> int:
     print(f"grid {__version__}")
@@ -294,6 +296,7 @@ def cmd_info(args: argparse.Namespace) -> int:
         # different quoting styles is how one of them stays wrong after the other is fixed.
         print(f"export OPENAI_BASE_URL={shell.quote(f'{grid_url}/v1')}")
         print(f"export OPENAI_API_KEY={shell.quote('local-grid')}")
+        print_env_hint("grid info --env" + (f" {shlex.quote(args.grid)}" if args.grid else ""))
         return 0
 
     engines, reachable = _live_engines(grid_url)
@@ -340,6 +343,9 @@ def _overview_remote(as_json: bool) -> int:
     print(f"active grid: {active}" if active else "active grid: (none)")
     print("\nSign in with `grid login`, then manage your remote grids with `grid start`/`ls`/`info`, "
           "serve models with `grid join`, and use them with `grid chat -m <model> \"…\"`.")
+    # `remote` is the default for a new install (ADR 0001 D-2, amended), so this screen is the first
+    # thing a new user sees — and without this line the local mode has no signpost anywhere.
+    print("Or run a grid on this machine alone, no account needed: `grid mode local`.")
     return 0
 
 

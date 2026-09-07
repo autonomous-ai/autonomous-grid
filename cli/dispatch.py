@@ -138,6 +138,16 @@ REMOTE_ONLY: dict[str, str | None] = {
     # not the control plane's — and the repository they name is served by the relay's git plane. A
     # local grid has none of it.
     "project": None,
+    # Two more whose reason is not sign-in: uptime, the memory pool, per-engine telemetry and the
+    # answered-token rollup are all computed by the hosted relay. A local grid serves models and
+    # keeps no such books, so there is nothing for a local handler to print — see cli/remote_stats.py.
+    "stats": (
+        "to read a hosted grid's live rollup — uptime, its memory pool and the tokens it has "
+        "answered — which a local grid does not compute."
+    ),
+    "usage": (
+        "to read a hosted grid's token rollup, which a local grid does not compute."
+    ),
     # The one command whose reason is not sign-in (ADR 0028): a local grid serves chat/completions,
     # completions, models and media — never Anthropic Messages, which is the only dialect Claude Code
     # speaks. Naming the dialect is what stops this being filed as a bug.
@@ -146,6 +156,16 @@ REMOTE_ONLY: dict[str, str | None] = {
         "does not serve."
     ),
 }
+
+
+# The one remote-only command that answers a local-mode invocation by *becoming* remote rather than
+# refusing. A fresh install is in local mode, so gating `grid login` made signing in a two-command
+# ritual whose first command ("grid mode remote") means nothing to someone who just wants an
+# account. `login` can do this because it has no local meaning to be mistaken for; `logout` and the
+# rest stay gated. The switch itself happens in ``cmd_login`` **after** the credentials land, so a
+# sign-in that times out or is denied leaves the persisted mode exactly as it found it. An explicit
+# ``--local`` still refuses: that is someone saying which mode they mean.
+SELF_SWITCHING = frozenset({"login"})
 
 
 def local_stub(command: str | None) -> NoReturn:
@@ -252,5 +272,6 @@ def dispatch(args: argparse.Namespace, override: str | None) -> int:
         # local mode: a remote-only command can't run here. Must be ``elif`` — ``dispatch`` has
         # no ``else`` after the remote block, so a bare ``if`` would fire in remote mode too and
         # break login/logout there.
-        local_stub(command)
+        if command not in SELF_SWITCHING or override == "local":
+            local_stub(command)
     return args.handler(args) or 0

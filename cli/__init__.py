@@ -23,6 +23,7 @@ from .remote_grid import (
 )
 from .remote_price import cmd_remote_price
 from .remote_project import cmd_remote_project
+from .remote_stats import cmd_remote_stats, cmd_remote_usage
 from .remote_task import cmd_remote_task
 from .remote_request import (
     cmd_remote_chat,
@@ -92,7 +93,9 @@ __all__ = [
     "cmd_remote_members",
     "cmd_remote_price",
     "cmd_remote_project",
+    "cmd_remote_stats",
     "cmd_remote_task",
+    "cmd_remote_usage",
     "cmd_remote_router",
     "cmd_remote_chat",
     "cmd_remote_image",

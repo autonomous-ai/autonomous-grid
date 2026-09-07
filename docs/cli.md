@@ -108,9 +108,12 @@ grid use --none                       # clear the active grid for the current mo
 grid [--local | --remote] <command>      # override the mode for a single command
 ```
 
-The mode is persisted in `~/.grid/state.json` (default `local`); each mode remembers its own
-active grid. Which mode a command runs in is resolved as `--local`/`--remote` (one command) > the
-persisted mode > `local`. `grid use <name>` sets the persistent default grid, so `grid chat` /
+The mode is persisted in `~/.grid/state.json`; each mode remembers its own active grid. Which mode
+a command runs in is resolved as `--local`/`--remote` (one command) > the persisted mode > the
+default. With no state file the default is `remote`, except on a machine that already holds local
+grids (`~/.grid/grids/*/config.json`), which stays `local` until you run `grid mode remote` (or
+`grid login`, which moves the mode itself — see [Sign in](#sign-in)) — so an
+upgrade never takes a running local grid out of sight. `grid use <name>` sets the persistent default grid, so `grid chat` /
 `grid info` / `grid models` target it without naming it — naming a grid explicitly still wins (the
 `[grid]` positional on `info`/`models`/`engines`, `--grid` on `chat`/`image`/`edit`/`video`), and a
 stale selection (its grid was removed) is ignored.
@@ -146,8 +149,14 @@ flow — it prints the sign-in URL and code, and opens a browser at that URL unl
 `--harness` is the browser-less alternative: it reads an Autonomous account token on **standard
 input** and trades it for the same session with nothing to approve, which is how `harness grid login`
 signs `grid` in for you. The two are mutually exclusive. Signing in does
-**not** pick an active grid: run `grid ls` to see the remote grids you can reach, then
-`grid use <name>` (or name one per command).
+**not** pick an active grid: it prints the grids you can reach (the `grid ls` columns, `*` on the
+active one) followed by the commands that act on one — `grid use <name>` to pick it, `grid chat`,
+`grid info --env` to point a coding agent at it, `grid join` to serve a model to it.
+
+`login` is the one remote-only command that answers `local` mode by **switching the mode** instead
+of refusing: it runs, and the persisted mode moves to `remote` once the credentials are stored (a
+sign-in that times out or is denied leaves the mode alone). An explicit `grid --local login` still
+refuses, like every other remote-only command in `local` mode.
 
 `grid logout` **stops serving, then clears the stored credentials and the remote mode's active
 grid** — in that order, because a serve
@@ -179,8 +188,10 @@ created on the website or one you were just added to appears after `grid sync` �
 your active grid, and an expired session tells you to run `grid login`. If its refresh (or a
 `grid login` as a different account) drops a grid this box is still serving, it says so, naming the
 process and the `grid leave <grid-id>` that stops it — neither command kills an engine on your behalf,
-because a control-plane answer is not a decision to stop serving. In `local` mode these
-commands exit with guidance to switch — sign-in is a remote concept. See
+because a control-plane answer is not a decision to stop serving. `grid sync` reports its result the
+way `grid login` does: the same grid table, the same following commands. In `local` mode `logout`
+and `sync` exit with guidance to switch — sign-in is a remote concept — while `login` switches the
+mode itself, as above. See
 [ADR 0002](./adr/0002-remote-sign-in.md) and
 [ADR 0023](./adr/0023-signing-out-with-live-serve-children.md).
 
@@ -544,6 +555,150 @@ flat `models` list.
 
 See [ADR 0012](./adr/0012-api-engines.md) for the decisions behind the CLI-shipped whitelist,
 the `openai:*` namespacing, and the key-store lifecycle.
+
+## Stats
+
+```
+grid stats [grid] [--verbose] [--json]                       # what the grid brings, and what it answered
+grid usage [grid] [--by model|member|engine] [--json]        # who and what spent the tokens
+```
+
+**Remote-only.** These are the terminal form of the desktop app's grid panels, and they read the
+same two relay endpoints the app reads — the public `grid/overview` and the token-authenticated
+`grid/members/usage` — so a grid cannot report one thing in the app and another in a shell. A local
+grid computes none of these figures (no uptime, no memory pool, no answered-token books), which is
+what the local-mode gate says rather than "sign in".
+
+`grid stats` is the grid at a glance:
+
+```text
+24h Grid Overview:
+
+grid      autonomous.ai
+status    running
+uptime    99.9%
+nodes     6
+models    6
+memory    0.9/1.4 TB (68%)
+parallel  59
+input     36.2M
+cached    518M
+output    6.2M
+requests  8.1K
+```
+
+**The span in the heading is the relay's, never the literal string `24h`.** The window is an
+operator knob, so a hardcoded label would go quietly wrong the moment someone retuned it — a grid
+counting six hours reads `6h Grid Overview:`, and one whose relay computes no rollup reads
+`Grid Overview:` with no span at all. It sits in the heading rather than in a row because it
+qualifies every token figure beneath it.
+
+`nodes` counts the machines currently serving. It is the one place this CLI says *node* rather
+than *engine* (the [Output Contract](#output-contract) mandates `engines` elsewhere, and `grid info`
+still prints it): here a machine is a node while `engine` is the software running on it, which each
+card states on its own `engine` line, and one word could not carry both. `--json` keeps
+`engines_online` / `engines_total` / `engines` for the same reason a wire name is never redefined.
+
+`memory` is the GPU-memory pool summed across **online** engines — a machine that is asleep
+contributes nothing, and a subscription seat contributes a plan rather than memory, so neither is
+counted. `parallel` is how many requests the grid will take at once (the relay's own capacity when
+it reports one, else the engines' summed concurrency). Every value is **empty when the grid did not
+report it**, printed as `—` like the readings on the cards below: a `0` standing in for "not
+measured" would libel a working fleet as an idle one.
+
+`grid usage` opens with the same block, built by the same code, under a lighter title — here it is
+a header over a breakdown rather than the answer itself. The grid's totals, then whichever
+breakdown was asked for. Two renderings of one set of figures would drift, and these two are read
+minutes apart against the same grid.
+
+There is deliberately **no grid-level speed**. Each engine's tok/s is its own decode estimate, taken
+whenever it last answered something, so adding them up gives a rate no request ever sees and no two
+engines were measured at the same moment. Speed belongs to the machine that answers you, and is
+reported per engine by `--verbose`.
+
+`--verbose` adds a card per engine — its owner, hardware, the models it serves and their context
+windows, memory and free headroom, temperature, utilisation, power, disk, speed, and its own share
+of the window's tokens. A reading the machine never sent prints `—`, which is what keeps it apart
+from a measured zero (an online, idle GPU). Apple Silicon reports no temperature or power at all, so
+those rows are routinely `—` on a Mac, and its memory is labelled `RAM` rather than `VRAM` because a
+unified pool is not a graphics card's own.
+
+**The list stops at 20 machines**, strongest first, however many the grid has. A card is eleven
+lines, so an uncapped list scrolls the rollup — the part every run is read for — off the screen;
+capping a sorted list drops the tail rather than an arbitrary slice. Nothing is concealed by it:
+`nodes=` above states the real count, and `--json` is never capped, so a script always sees the
+whole fleet. Sleeping machines are listed too, marked `(offline)`, which is why the number of cards
+can exceed `nodes=`.
+
+```text
+Top 20 nodes:
+
+scholes-60001
+  owner        scholes@autonomous.ai
+  hardware     NVIDIA RTX PRO 6000 Blackwell Workstation Edition ×4 · Linux
+  engine       external · 16 parallel
+  models       deepseek-v4-flash-0731 (256K ctx)
+  VRAM         277.2/382.4 GB (72%) · 105.2 GB free
+  temperature  36°C
+  usage        0%
+  power        198.7W/2400W
+  storage      796.1/914.8 GB (87%)
+  throughput   ~162 tok/s
+  tokens 24h   4.2M input · 5.2M cached · 91.5K output · 185 requests
+```
+
+`grid usage` splits the same window three ways — by `model` (the default), by `member`, or by
+`engine`:
+
+```text
+24h overview:
+
+input     35.3M
+cached    520M
+output    6.2M
+requests  8.1K
+
+MODEL                   INPUT  CACHED  OUTPUT  REQUESTS  SHARE  ENGINES
+Qwen3.8-Flash-Next      31M    515M    6.1M    7.9K      98%    1
+DeepSeek-V4-Flash-0731  4.2M   5.2M    91.5K   185       1.5%   1
+Qwen/Qwen3.8-27B        85.4K  0       5.8K    30        0.1%   1
+gemma-4-31B-it          0      0       0       0         0%     2
+```
+
+A `0` and a `—` are different answers and are never interchangeable. A model that answered
+nothing on a grid whose rollup landed reads `0` — nobody used it today, which is a fact worth
+seeing. A `—` means nothing measured it at all: an engine whose master predates the rollup, a
+reading the machine never reported, or a member the grid has no figures for.
+
+**`input` is the fresh leg, not the raw figure.** Cached input is a share *of* input, never
+additional to it — billing settles `(in − cached)·input + cached·cache + out·output` — so `input`,
+`cached` and `output` are three non-overlapping legs that add up to what actually passed through.
+`--json` carries the relay's raw `tokens_in` beside `tokens_in_fresh`, so nothing on the wire is
+redefined.
+
+The header totals are the **grid's own** rollup in every dimension, never the sum of the rows below
+them, so `grid stats` and `grid usage` can never print two different figures for one grid. The rows
+can therefore add up to slightly less: work the relay could not attribute to a machine, or to a
+named person, is counted once at the top and nowhere else.
+
+`--by member` names people, so it rides the authenticated endpoint (the grid's own access token)
+and additionally merges the roster `grid members list` reads — a member who has never sent a
+request still gets a row, printed as unmeasured. That roster is owner-only, so a non-owner sees the
+people the relay has usage for and a note on stderr saying so; stdout stays a clean table either
+way.
+
+```text
+MEMBER                      INPUT  CACHED  OUTPUT  REQUESTS
+scholes@autonomous.ai       26.8M  344M    5.1M    6.3K
+dev@autonomous.ai           4M     3.8M    72.2K   131
+tuan.dev@autonomous.ai      3.9M   171M    972K    1.6K
+accounting@autonomous.ai    —      —       —       —
+```
+
+Ordered by what each person actually read, with everyone the grid has no figure for after them,
+alphabetically — so the list answers "who is using this grid" before it answers "who is on it".
+What each of them is *allowed* to do is a different question, and `grid members list` is where it
+is asked; `--json` still carries their roles for a script that wants both in one call.
 
 ## Use
 
