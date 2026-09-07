@@ -12,8 +12,6 @@ grid use Omagrid
 
 Sign-in prints a URL and a code. Open the URL, sign in, and type the code.
 
-That is the last command you run by hand. Everything after this, OpenCode runs for you.
-
 ## 2. Let OpenCode connect itself
 
 Start OpenCode from any directory:
