@@ -69,8 +69,33 @@ network status, `member.status`, the owner-without-an-active-row arm, permission
 domain-restricted admission, and the denylist with the correct per-type cohort. `None` means refuse.
 
 So the check is: verify the signature → `member_for_access` → compare `member_epoch` and
-`network_epoch`, `<` and never `!=`. Nothing about it is a copy, and it can never be stricter or
-looser than the rule that minted the token, because it *is* that rule.
+`network_epoch`, `<` and never `!=`. Nothing about it is a copy.
+
+⚠️ **`member_for_access` alone is NOT equivalent to the rule that minted the token, and this
+decision originally said it was.** That sentence was wrong, and it was wrong in production: the
+function takes an `os_token` — the operating system a CLI claimed at sign-in — and on an
+`os-community` grid that argument is *the only thing* that admits anybody (ADR 0039 D-e).
+Membership there is not row-backed. Nothing stores the OS, no claim carries it, and an MCP caller
+is a harness that never had one, so the call answers `None` for **every OS grid** — which is the
+commonest kind, and includes the grid this was first tried on. Web tools were dead for all of them
+while every test passed.
+
+Where `member_for_access` answers `None`, the fallback is the control plane's own half of the
+cohort rule, `store.denylist_governs` — whose docstring already names grid-src's
+`_is_open_consumer` as the other half and says the two must agree. For a cohort the denylist
+governs, *being un-denied is the membership test*, which is exactly what the relay does with these
+tokens. Nothing is relaxed elsewhere: on every other type `member_for_access` returns `None` only
+when it means to refuse, and the denial check refuses those again. A member with no row also has no
+`member_epoch` to compare, so the network epoch is that cohort's only revocation lever — the same
+division grid-src makes.
+
+⚠️ Two things made this escape. The obvious one: no test used `os-community`. The subtler one, and
+the reason the first fix's tests *also* proved nothing — a test grid created through the API is
+**owned** by its member, and `member_for_access` has an owner arm that admits from the network row
+alone. A precondition asserting `member_for_access(..., google_sub=None) is None` passed while the
+gate, which passes the real `google_sub`, took the owner arm. The fixture must hold a token for
+somebody who is **not** the owner, and its precondition must be asserted with the argument the gate
+actually uses.
 
 Without it, somebody removed from every grid keeps a working credential for **365 days**. The harm
 is bounded — a web search is free to the member and the allowance is keyed on the account, so they
