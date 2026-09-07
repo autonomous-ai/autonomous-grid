@@ -476,7 +476,7 @@ control plane isn't serving one" in front of every user of every deployment that
 key yet, which is the one direction this decision exists to keep quiet. So the CLI compares by
 identity against the two booleans and reads anything else (a string, a number, a null) as `None`.
 
-## D-l — The member-usage panel is refused on this type
+## D-l — The member-usage panel was refused on this type, and that is REVERSED
 
 `GET /relay/v1/grid/members/usage` (grid-src `relay.py`) returns one row per consumer: the person's
 email alongside their `requests` / `tokens_in` / `tokens_cached` / `tokens_out`. Its gate is
@@ -536,6 +536,61 @@ type, and the app is unchanged because D-e keeps an OS grid out of its reach ent
 ever brought into scope, this refusal is one more thing to revisit alongside D-e, not a thing that will
 already be right.
 
+### REVERSED 2026-09-07 — the panel serves every type, `os-community` included
+
+Everything above is kept in the present tense it was written in, because the *concern* it states is
+unchanged and correct. What is overturned is the answer. `member_usage_published` and
+`refuse_unless_member_usage_published` are **deleted** rather than inverted — a predicate left behind
+and no longer called is a gate a later reader wires back in believing it was dropped by accident —
+and `tests/test_os_grid_member_identity.py` asserts both names are gone.
+
+**What the refusal cost, measured rather than argued.** On prod grid `grid-989ced893a2443f9`
+(name `macOS`, the only `os-community` grid in the fleet), `grid usage --by member` printed
+*"(no member usage — this grid reported none)"* to the grid's own operator. Three facts settle it:
+
+- The grid had **3 accounts and 2 consumers**, not ten thousand strangers. The exposure the refusal
+  was sized for does not exist yet on the only grid subject to it.
+- The relay **had the rows the whole time**. `node_answered_query.grid_total()` is *folded from the
+  same `member_snapshot()`* the route was refusing (that is D-l's sibling decision, so a total and
+  its breakdown can never disagree) — so the header totals `grid usage` already prints to the same
+  caller, `19.4K / 11.1K / 744 / 9`, were the **sum of the withheld rows**, reconciled exactly
+  against the database. The refusal withheld the split, never the magnitude.
+- The client reports the refusal as something else entirely. `cli/remote_stats.fetch_member_usage`
+  collapses 401/403/404 into one `None` and notes *"its relay may predate the endpoint, or no rollup
+  has landed yet"* — two sentences that were both false here, about a fleet the reader operates,
+  while the relay's own carefully written 403 (which names the cause and points at `grid ls`) was
+  discarded on the way. ⚠️ **That defect is NOT fixed by this reversal and is still live**: any
+  other 403 on this route still reads as "your relay is too old". It is named here so a later reader
+  does not conclude the reversal covered it.
+
+**Which alternative this is.** The third one listed above — *"decide the exposure is acceptable and
+say so"* — taken deliberately and with its stated cost accepted: on a large `os-community` grid, any
+token holder can list every other member's address and spend. The two shapes that would have kept
+some of the protection were re-examined and still rejected for their original reasons: *caller's own
+row only* varies the response **shape** by network type, and *totals without emails* answers a
+question ("how busy is this grid") that the header totals already answer, while failing the one
+actually asked ("**who**").
+
+⚠️ **This reverses D-l and NOTHING else. D-m and D-n stand.** The public overview still sends
+`provider_email: null` and still withholds a machine name nobody chose on this type. The difference
+is the gate, and it is the whole argument: this panel is behind `_extract_auth(..., "inference:models")`,
+that overview is behind **nothing at all**. Reopening an authenticated surface says nothing about an
+unauthenticated one.
+
+⚠️ **The reversal is the evidence for the structural rule in `member_identity_access`.** Three
+predicates stood side by side, agreeing with each other, with a docstring on each saying the
+agreement was "a fact about ADR 0039, not a structure to build on". That day arrived: one of the
+three changed and two did not. Had they been one shared predicate under a broader name — the
+tidier-looking shape, proposed more than once — reopening an authenticated panel would have
+silently published every provider's address on the public overview. The two survivors keep their
+`is not` assertions against each other for the same reason.
+
+**Still no rollout ordering, and now for the opposite reason.** The refusal was relay-side only, and
+both possible answers were already handled by every client: the CLI renders a `None` as "reported
+none", and the app's `member_usage_provider.dart` renders a 403 as "this grid can't tell us".
+Deploying the relay alone restores the panel; a client that has not been touched shows the rows the
+moment they arrive. Nothing in this repo and nothing in the app needs a half.
+
 ## D-m — The public overview names no provider on this type
 
 `GET /relay/v1/grid/overview` is **public and unauthenticated** — its own docstring says so, and it
@@ -550,8 +605,10 @@ everybody serving on it, with no credential at all.
 
 ⚠️ **This is the THIRD mechanism onto one exposure, and each of the first two was closed by an
 argument that does not reach it.** D-e empties the roster *by construction* — no OS membership is
-persisted, so `list_grid_members` has no row to return. D-l refuses `/grid/members/usage`, whose
-emails come from observed traffic rather than the allowlist. This one reads `NodeRow` joined to
+persisted, so `list_grid_members` has no row to return. D-l refused `/grid/members/usage`, whose
+emails come from observed traffic rather than the allowlist (⚠️ **that refusal was reversed on
+2026-09-07 — see D-l's own note. This one was not, and the gate is the reason: that route is behind
+a token and this one is behind nothing**). This one reads `NodeRow` joined to
 `UserRow`: rows a provider writes by the act of serving, on a route with **no gate whatsoever**. So
 the door left open was the *weakest*-gated of the three, which is not a decision anybody made — it is
 the shape of finding the mechanisms one at a time.
@@ -584,6 +641,13 @@ Three alternatives were on the table, and each was rejected for a stated reason:
   converts an unauthenticated leak into an authenticated one, which is precisely what D-l refused to
   accept for `/grid/members/usage`. It would also take the public dashboard away from the one grid
   type whose whole point is that strangers can find it.
+  ⚠️ **Half of that objection has since been overturned and the rejection still stands.** D-l's
+  reversal (2026-09-07) accepted exactly the authenticated exposure this bullet cites it as refusing,
+  so *"D-l would not accept it"* is no longer an argument anybody can lean on here. What survives is
+  the second sentence, which never depended on D-l: authenticating this route takes the public
+  dashboard away from the one grid type built to be found by strangers. A later reader re-opening
+  this bullet should re-derive it rather than inherit it — that inheritance is the exact failure this
+  ADR has now recorded four times.
 - **Accept the exposure and say so.** Defensible on its face — somebody serving on a public pool
   arguably publishes themselves by serving. Rejected because they do not: a person runs `grid join`
   on a machine, and nothing in that act says their email address becomes readable by anyone on the
