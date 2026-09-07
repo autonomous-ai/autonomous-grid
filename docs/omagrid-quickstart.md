@@ -8,7 +8,7 @@ grid login --no-browser
 grid use Omagrid
 ```
 
-Sign-in prints a URL and a code. Open the URL, sign in, and type the code.
+Login prints a URL and a code. Open the URL, log in, and type the code.
 
 ## 2. Let OpenCode connect itself
 
