@@ -16,6 +16,8 @@ import time
 
 import pytest
 
+from tests.grid_src_repo import grid_src_private_server
+
 
 class _FakeProc:
     """A child whose liveness the test controls.
@@ -1773,20 +1775,23 @@ def test_a_beat_is_never_started_after_close_was_called(monkeypatch):
 
 
 def _relay_module(name):
-    """One of grid-src's private_server modules, as a path. Three helpers below read constants out
-    of that package, and the worktree location was written out at each of them — so a moved
-    checkout meant three edits, and a missed one is a lockstep check that skips instead of failing.
+    """One of grid-src's private_server modules, as a path. The helpers below read constants out of
+    that package, and finding it is the part that quietly decides whether they run at all.
 
-    Machine-specific on purpose, like the value it replaces: the two repositories are separate
-    installs with no import path between them, and every caller here skips rather than fails when it
-    is absent (`GRID_SRC_REPO` is the cross-repo E2E's override; this side has deliberately never
-    needed one, because a developer without the worktree simply cannot check the duplicates).
+    Resolved by `tests/grid_src_repo.py` — the one path derivation this repo has — rather than
+    written out here. The absolute path that used to sit here named ONE worktree, and the failure
+    that costs is not the one it was written for: measured 2026-09-04 from a second worktree, the
+    named path still existed and sat on a DIFFERENT branch, so nothing skipped and every pin below
+    asserted against the wrong checkout. Absent is loud; present-but-wrong is silent.
+
+    `GRID_SRC_REPO` still overrides, and is validated there rather than skipped past. Skipping here
+    stays the rule for a machine that simply has no grid-src beside this worktree: a developer
+    without it cannot check the duplicates.
     """
-    import pathlib
-
-    return pathlib.Path(
-        "/Users/macbookpro/Projects/grid-src-feats/distributed-tasks"
-        "/grid_cli/private_server") / name
+    package = grid_src_private_server()
+    if package is None:
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    return package / name
 
 
 def _relay_config_constant(name):

@@ -66,6 +66,106 @@ def poll_device_login(device_code: str, api_url: str | None = None) -> dict[str,
         return _send(client, "POST", "/v1/grid/auth/device/poll", json={"device_code": device_code}).json()
 
 
+#: The hand-off route and the one key its body carries (PRD `harness-grid-login` D-1). Named here
+#: rather than spelled inline because both halves are hand-duplicated across a repository boundary —
+#: grid-apis mounts `APIRouter(prefix="/v1/grid")` and decorates `@router.post("/auth/harness")`, and
+#: this CLI sends the concatenation. A rename on either side is silent: both repositories compile,
+#: both suites stay green, and every hand-off 404s in production. `tests/test_harness_login_lockstep`
+#: is what catches it.
+HARNESS_LOGIN_PATH = "/v1/grid/auth/harness"
+HARNESS_TOKEN_KEY = "harness_token"
+
+
+def sign_in_with_harness_token(harness_token: str, api_url: str | None = None) -> dict[str, Any]:
+    """Trade an Autonomous account token for a grid session — the browser-less way in (ADR 0040).
+
+    The reply is byte-shaped like the approved device poll's, which is the point: `cli.auth` reuses
+    its existing post-sign-in path — validate the bundle, persist, warn about stranded grids — with
+    no second dialect to keep in step.
+
+    **The token goes in the BODY, never in an `Authorization:` header.** It is the credential being
+    traded in rather than one that authenticates this call, so the control plane reads it off the
+    request model; sending it as a bearer would additionally put a live account credential in the
+    one place proxies and access logs habitually keep.
+
+    Refusals arrive as `ControlPlaneError` carrying their status, and the caller reads that status
+    for exactly one thing — a 404, meaning this control plane predates the route. Everything else is
+    the control plane's own sentence and is shown as written, **minus the token** — see below.
+    """
+    with _client(api_url) as client:
+        try:
+            resp = _send(client, "POST", HARNESS_LOGIN_PATH, json={HARNESS_TOKEN_KEY: harness_token})
+        except ControlPlaneError as exc:
+            raise _without_token(exc, harness_token) from None
+    return resp.json()
+
+
+#: The route that takes an account's grid sessions back, and the key on its reply that says it
+#: happened (`harness-grid-login` issue 07; public-repo ADR 0040, amended). Named here for the same
+#: reason `HARNESS_LOGIN_PATH` is: grid-apis mounts `APIRouter(prefix="/v1/grid")` and decorates
+#: `@router.post("/auth/sessions/revoke")`, this CLI sends the concatenation, and there is no import
+#: path between the two. `tests/test_session_revoke_lockstep.py` is what catches a rename.
+SESSIONS_REVOKE_PATH = "/v1/grid/auth/sessions/revoke"
+SESSIONS_REVOKE_KEY = "revoked"
+
+
+def revoke_sessions(session_token: str, api_url: str | None = None) -> None:
+    """Sign this account out of every machine — **including the one calling**.
+
+    The control plane bumps one number on the account row, and every session token that account
+    holds is stale from that moment. Nothing here names a token: the caller's own bearer is what
+    authorizes the call and is itself one of the sessions that dies.
+
+    ⚠️ **The reply is checked, not just its status.** A new route answers a bare 404 on a control
+    plane that predates it, which is loud and is the caller's one translated refusal. What is not
+    loud is a **200 that revoked nothing** — an intermediary's own answer, or the reply key renamed
+    on the far side — and the whole value of this call is the promise that the other sessions are
+    gone. So `revoked` is compared for **identity with `True`**, never truthiness: `"no"` and `1`
+    are both truthy, and neither is a confirmation.
+
+    Returns nothing. Every failure is a `ControlPlaneError`, which is a `SystemExit` carrying the
+    control plane's own sentence — shown verbatim, so the remedy is whichever one it named.
+    """
+    with _client(api_url, token=session_token) as client:
+        resp = _send(client, "POST", SESSIONS_REVOKE_PATH)
+    try:
+        reply = _json_or_empty(resp)
+    except (ValueError, RecursionError):
+        # A 2xx whose body is not JSON at all — a captive portal, a proxy's own page — or one nested
+        # deeply enough that `json.loads` raises `RecursionError`, which is NOT a `ValueError` (the
+        # pair this module already spells at its other decode). Either way the answer is the same as
+        # a reply that says nothing: unconfirmed. Caught rather than left to escape, because a
+        # traceback here would reach the person as a crash on a path whose every other failure is a
+        # sentence.
+        reply = None
+    if not isinstance(reply, dict) or reply.get(SESSIONS_REVOKE_KEY) is not True:
+        raise ControlPlaneError(
+            "The control plane answered the sign-out but did not confirm it, so your other "
+            "sign-ins may still be live. Nothing was signed out; try again.",
+            status=resp.status_code,
+        )
+
+
+def _without_token(exc: ControlPlaneError, secret: str) -> ControlPlaneError:
+    """The same refusal with the credential taken back out of it (a new one; the original stands).
+
+    ``_raise`` renders up to 400 bytes of the response body into a message ``cli.auth`` shows
+    verbatim on stderr, and this is the one route whose **request body is a live credential**. A
+    validation refusal echoes the field it rejected — FastAPI's default 422 carries the submitted
+    value under ``input`` — so a body that comes back holding the token would print it, in a module
+    whose own contract is that tokens are never printed or logged.
+
+    Not reachable through today's validators, and guarded anyway: it becomes reachable the first time
+    the far end puts a ``max_length`` or a pattern on ``harness_token``, which is a one-line change in
+    another repository that no test on either side would notice. The remedy sentences this seam does
+    show — 401, 403, 409, 502 — never contain the token, so nothing verbatim is lost.
+    """
+    rendered = str(exc)
+    if not secret or secret not in rendered:
+        return exc
+    return ControlPlaneError(rendered.replace(secret, "<redacted>"), status=exc.status)
+
+
 #: The key on the token-fetch reply that says whether this machine was handed an OS grid (ADR 0039
 #: D-k). Named once, because the pin comparing it to grid-apis' own spelling reads it from here —
 #: `tests/test_os_grid_type_lockstep.py`.

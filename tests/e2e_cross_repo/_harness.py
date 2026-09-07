@@ -21,14 +21,19 @@ from pathlib import Path
 
 import pytest
 
+from tests.grid_src_repo import grid_src_root
+
 # This repository, derived rather than written down: `tests/e2e_cross_repo/_harness.py`.
 GRID_REPO = Path(__file__).resolve().parents[2]
 
-# grid-src's matching worktree. Hardcoded with an env override and a skip, exactly as
-# `tests/test_task_lease.py` does for the lockstep constants it parses: the two repositories share no
-# code and are not installed together, so there is no import path to discover this by.
-RELAY_REPO = Path(os.environ.get(
-    "GRID_SRC_REPO", "/Users/macbookpro/Projects/grid-src-feats/distributed-tasks"))
+# grid-src's matching worktree, resolved by `tests/grid_src_repo.py` — the one path derivation this
+# repo has, shared with the lockstep suites so the two cannot drift. It reads `GRID_SRC_REPO`
+# (validated: a bad one raises rather than skips) and otherwise looks for `grid-src-feats/<slug>`
+# beside this worktree, falling back to the main `grid-src` checkout. The absolute path that used to
+# be this default named ONE worktree, so from every other worktree on the machine this harness ran
+# against that worktree's relay — a different branch — instead of skipping.
+_RELAY_ROOT = grid_src_root()
+RELAY_REPO = _RELAY_ROOT if _RELAY_ROOT is not None else GRID_REPO.parent / "grid-src"
 RELAY_SERVER_DIR = RELAY_REPO / "grid_cli" / "private_server"
 RELAY_PYTHON = RELAY_REPO / ".venv" / "bin" / "python"
 

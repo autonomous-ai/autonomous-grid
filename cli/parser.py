@@ -529,10 +529,22 @@ def _add_state(sub) -> None:
 
 def _add_auth(sub) -> None:
     login = sub.add_parser("login", help="Sign in to remote mode")
-    login.add_argument(
+    # Two ways in, never both at once. `--harness` is an alternative to the browser device flow
+    # rather than a modifier of it, so argparse refuses the pair — and its exit 2 is also what the
+    # harness reads as "the installed `grid` predates `--harness`", which a hand-rolled check
+    # exiting 1 would take away. `--no-browser` is the device flow's own option, so it is what
+    # stands for that flow here. Neither is hidden: this CLI has no suppressed-command convention.
+    how = login.add_mutually_exclusive_group()
+    how.add_argument(
         "--no-browser",
         action="store_true",
         help="Print the sign-in URL and code instead of opening a browser (for headless machines).",
+    )
+    how.add_argument(
+        "--harness",
+        action="store_true",
+        help="Sign in with an Autonomous account token read from standard input, with no browser "
+             "and no approval to wait for. `harness grid login` runs this for you.",
     )
     login.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     login.set_defaults(handler=cmd_login)
@@ -543,6 +555,15 @@ def _add_auth(sub) -> None:
         action="store_true",
         help="Sign out even if a serve child on this box could not be stopped (it is still stopped "
              "first; `grid leave <grid-id>` reaps a survivor afterwards).",
+    )
+    # Not mutually exclusive with `--force`: the two answer different questions (what to do about a
+    # serve child here, and what to do about sign-ins elsewhere), and somebody signing out a machine
+    # they have lost control of wants both.
+    logout.add_argument(
+        "--everywhere",
+        action="store_true",
+        help="Also sign out every other machine signed in to this account; they have to sign in "
+             "again. Needs a control plane that supports it.",
     )
     logout.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     logout.set_defaults(handler=cmd_logout)
