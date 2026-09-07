@@ -138,6 +138,9 @@ REMOTE_ONLY: dict[str, str | None] = {
     # not the control plane's — and the repository they name is served by the relay's git plane. A
     # local grid has none of it.
     "project": None,
+    # The web-tools MCP server is the CONTROL PLANE's (ADR 0041), so this command needs an account
+    # and a per-grid token. A local grid has neither, and there is no local server to point at.
+    "mcp": None,
     # Two more whose reason is not sign-in: uptime, the memory pool, per-engine telemetry and the
     # answered-token rollup are all computed by the hosted relay. A local grid serves models and
     # keeps no such books, so there is nothing for a local handler to print — see cli/remote_stats.py.

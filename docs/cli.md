@@ -865,6 +865,45 @@ Step by step: [Claude Code quickstart](./claude-code-quickstart.md) ·
 [ADR 0028](./adr/0028-launch-hands-an-app-the-grid.md) ·
 [ADR 0029](./adr/0029-the-credential-is-checked-before-it-is-handed-over.md).
 
+## Web tools over MCP
+
+```
+grid mcp config [grid]     # print the config each harness needs (prints your access token)
+grid mcp token  [grid]     # print just the access token, for a script that builds its own config
+```
+
+`grid mcp config` points a **coding agent's harness** — Claude Code, Codex, opencode — at your grid's
+web search and page reading. It prints a configuration; it changes nothing on your machine and makes
+no network call.
+
+The server itself runs on the control plane, not on your grid's relay, so it keeps answering whether
+or not the grid is up (ADR 0041). What the harness gets is two tools:
+
+- **`web_search(query, num_results)`** → `{title, url, excerpt}` per result.
+- **`web_read(urls, max_chars)`** → the main text of up to five pages, each truncated at
+  `max_chars` (default 6000). `status` says whether a page could be fetched at all — "the page
+  refused us" is not the same as "the page is empty".
+
+Both are free to you and bounded by your **account's** daily allowance, not the grid's — so being on
+several grids does not give you several allowances, and it is spent by whichever of your machines
+uses it.
+
+Each harness spells the credential differently, so the command prints all three:
+
+- **Claude Code** takes a command with `--header`.
+- **Codex** takes a config block. It has **no `--header` flag** on `codex mcp add`, so the block goes
+  into `~/.codex/config.toml` by hand; `http_headers` is what it honours.
+- **opencode** takes a `headers` object in `opencode.json`.
+
+> `grid mcp config` prints a live credential that lasts a year. Anyone who has it can search the web
+> on your account's allowance. Treat the output like a password, and re-run the command after
+> `grid login` if a harness starts reporting that the server refuses it.
+
+Web tools need a hosted grid: in local mode the command refuses, because the server it points at is
+the control plane's and a local grid has no account behind it.
+
+See [ADR 0041](./adr/0041-a-coding-agent-reaches-the-web-through-the-control-plane.md).
+
 ## Training
 
 ```
