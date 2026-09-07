@@ -18,21 +18,25 @@ Start OpenCode from any directory:
 opencode
 ```
 
-Then paste these two prompts, one at a time:
+Paste these two prompts, one at a time:
 
-> read https://autonomous.ai/grid/opencode.txt and create a skill for it
+```text
+read https://autonomous.ai/grid/opencode.txt and create a skill for it
+```
 
-> connect opencode to the grid
+```text
+connect opencode to the grid
+```
 
-The first gives OpenCode the operating manual for the `grid` CLI. The second has it read the
-grid's model list and write the Omagrid provider into your global OpenCode config
-(`~/.config/opencode/opencode.json`).
+The first teaches OpenCode the `grid` CLI. The second reads the grid's model list and writes an
+Omagrid provider into your global OpenCode config at `~/.config/opencode/opencode.json`. Nothing
+is written to the project you're in.
 
 Restart OpenCode.
 
 ## 3. Pick a model
 
-Type `/models`, search `Omagrid`, and pick Qwen 3.8 27B or any model served by Omagrid.
+Type `/models`, search `Omagrid`, and pick `Qwen3.8-27B` or any other model Omagrid serves.
 
 Start chatting. Every request now runs on Omagrid machines.
 
@@ -50,6 +54,8 @@ You can run them yourself any time.
 
 ## Where to go next
 
+- **Using another client?** Omagrid is an OpenAI-compatible endpoint. `grid info --env` prints
+  the `OPENAI_BASE_URL` and `OPENAI_API_KEY` for it.
 - [CLI reference](./cli.md) for every command OpenCode is running on your behalf.
 - [Claude Code quickstart](./claude-code-quickstart.md) and [Codex quickstart](./codex-quickstart.md)
   to point other agents at the same grid.
