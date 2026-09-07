@@ -10,10 +10,11 @@ endpoints, through the same rules, so the two surfaces cannot disagree about one
 * ``GET /relay/v1/grid/members/usage`` (per-grid token) — what each person on the grid ran in
   the same window. The app's ``member_usage_provider.dart``.
 
-``grid usage --by member`` additionally merges the control-plane roster
-(``cli.remote_grid``'s member list) so someone who has *not* used the grid still gets a row,
-exactly as the app's members panel does. That call is owner-only, so it degrades to
-usage-only rows with a note on stderr rather than failing the command.
+``grid usage --by member`` reads **only** the second of those. It used to also merge the
+control-plane roster so somebody who had *not* used the grid still got an unmeasured row; that
+call is refused to anyone who is not the grid's owner or an active member, and on a grid whose
+membership is not a stored row it has nothing to contribute even when it answers. So the command
+now reports what was measured and nothing else — who is merely a member is ``grid members list``.
 
 Three rules are ported deliberately and are the reason this is not a thinner wrapper:
 
@@ -124,21 +125,6 @@ def fetch_member_usage(base: str, token: str, label: str) -> dict[str, Any] | No
     if not isinstance(data.get("members"), list):
         raise SystemExit(f"Grid {label} returned an unexpected member usage shape.")
     return data
-
-
-def _try_roster(session: str, network_id: str) -> tuple[list[dict[str, Any]], str | None]:
-    """``(members, None)`` from the control plane, or ``([], reason)`` when this caller may not ask.
-
-    The roster is owner-only, so a member running this gets a 403 — which must not fail the
-    command: usage the relay *did* report is still worth printing. Mirrors
-    ``remote_grid._try_status``: for a display path that should degrade, never fail.
-    """
-    from remote import control_plane
-
-    try:
-        return list(control_plane.list_members(session, network_id)), None
-    except SystemExit as exc:
-        return [], str(exc) or "the control plane refused"
 
 
 # ---------------------------------------------------------------------------
@@ -539,63 +525,24 @@ def engine_usage_rows(overview: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def member_rows(
-    members: list[Any] | None, roster: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Who used the grid, biggest reader first, with everyone the roster names but the relay has
-    no figure for listed after them, alphabetically.
+def member_rows(members: list[Any] | None) -> list[dict[str, Any]]:
+    """Who used the grid, biggest reader first.
 
-    **The roster only adds rows; the usage decides the order.** A member who has never sent a
-    request is still a member and keeps a row (unmeasured, so it prints as such); a consumer the
-    relay counted but could not name is still counted, which is why a row with no email survives
-    rather than being dropped — usage nobody can name is still usage.
-
-    Matched case-insensitively: the control plane stores what the user typed and the relay stores
-    what the token carried, so an address differing only in case would show a busy person as
-    having done nothing.
+    **Everyone here was measured.** The control-plane roster used to add an unmeasured row for a
+    member who had never sent a request; `_usage_rows` explains why it no longer does. What survives
+    of that merge is the one case it was also protecting: a consumer the relay counted but could not
+    name keeps its row rather than being dropped — usage nobody can name is still usage.
     """
     rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
     for raw in members or []:
         if not isinstance(raw, dict):
             continue
-        email = _text(raw.get("email"))
         answered = read_answered(raw)
         if answered is None:
             continue
-        if email:
-            seen.add(email.lower())
-        rows.append({"email": email, "answered": answered, "roles": []})
-    for entry in roster:
-        email = _text(entry.get("email"))
-        if not email or email.lower() in seen:
-            continue
-        seen.add(email.lower())
-        rows.append({"email": email, "answered": None, "roles": _roles(entry)})
-    for row in rows:  # the roster is the only place roles come from; usage rows borrow them
-        if not row["roles"]:
-            row["roles"] = _roles_for(roster, row["email"])
-    rows.sort(key=lambda row: (
-        # −1 for "no figure", so an unmeasured member sorts below a measured zero: someone the
-        # grid counted and found idle is a different fact from someone it never heard from.
-        -(_fresh(row["answered"]) if row["answered"] else -1),
-        row["email"].lower(),
-    ))
+        rows.append({"email": _text(raw.get("email")), "answered": answered})
+    rows.sort(key=lambda row: (-_fresh(row["answered"]), row["email"].lower()))
     return rows
-
-
-def _roles(entry: dict[str, Any]) -> list[str]:
-    roles = entry.get("roles")
-    return [str(role) for role in roles] if isinstance(roles, list) else []
-
-
-def _roles_for(roster: list[dict[str, Any]], email: str) -> list[str]:
-    if not email:
-        return []
-    for entry in roster:
-        if _text(entry.get("email")).lower() == email.lower():
-            return _roles(entry)
-    return []
 
 
 # ---------------------------------------------------------------------------
@@ -914,12 +861,12 @@ def cmd_remote_usage(args: argparse.Namespace) -> int:
     from . import remote_overview
 
     dimension = getattr(args, "by", "model") or "model"
-    session, rec, network_id, label, base, token = _resolve(args)
+    _session, rec, _network_id, label, base, token = _resolve(args)
     overview = remote_overview.fetch_overview(base, token, label)
     rollup = grid_rollup(overview)
     answered = rollup["answered"]
 
-    rows, note = _usage_rows(dimension, overview, answered, session, rec, network_id, label, base)
+    rows, note = _usage_rows(dimension, overview, answered, rec, label, base)
 
     if getattr(args, "json", False):
         print(json.dumps({
@@ -949,17 +896,31 @@ def _usage_rows(
     dimension: str,
     overview: dict[str, Any],
     grid_total: dict[str, int] | None,
-    session: str,
     rec: dict[str, Any],
-    network_id: str,
     label: str,
     base: str,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """The rows for one dimension, and a note for stderr when something had to be left out.
 
     Only `--by member` leaves the overview: the model and engine splits are already in it, while
-    who-ran-what names *people* and so rides an authenticated endpoint (and, for the members who
-    ran nothing, the owner-only roster).
+    who-ran-what names *people* and so rides an authenticated endpoint.
+
+    ⚠️ **It asks the GRID and nothing else — the control-plane roster is deliberately not consulted.**
+    It used to be, so that a member who had never sent a request still kept an unmeasured row. Two
+    things killed that: the roster is refused to anyone who is not the grid's owner or an active
+    member, which put a caveat on stderr far more often than it added a row; and on a grid whose
+    membership is not a stored row at all there is no roster to add — the read is guaranteed to
+    refuse and guaranteed to have nothing to contribute even if it did not.
+
+    ⚠️ **Not branched on the grid's type, and that is the same decision `cli/grid_credential` makes
+    a few files over.** The stored record does carry a `network_type`, but it is a snapshot from the
+    last login/sync that nothing refreshes on a token exchange, and keying on it would put a copy of
+    a network-type literal in this repository, which by decision holds none. Such a branch degrades
+    in **silence**: renamed at the far end it simply stops firing, with nothing red.
+
+    So this command now answers exactly one question — *who spent what* — and answers it from the
+    one place that measured it. Who may merely be a member is `grid members list`, which is the
+    command that owns that question and reports its own refusal in its own words.
     """
     if dimension == "model":
         return model_rows(overview, grid_total), None
@@ -967,17 +928,11 @@ def _usage_rows(
         return engine_usage_rows(overview), None
 
     usage = fetch_member_usage(base, _require_token(rec, label), label)
-    roster, refused = _try_roster(session, network_id)
-    rows = member_rows((usage or {}).get("members"), roster)
+    rows = member_rows((usage or {}).get("members"))
     if usage is None:
         return rows, (
             f"Note: grid {label} reports no member usage (its relay may predate the endpoint, or "
-            f"no rollup has landed yet) — rows below carry the roster only."
-        )
-    if refused:
-        return rows, (
-            "Note: only the grid owner can list members, so this shows the people the relay has "
-            "usage for, not the full roster."
+            f"no rollup has landed yet)."
         )
     return rows, None
 
@@ -1007,7 +962,5 @@ def _json_row(dimension: str, row: dict[str, Any]) -> dict[str, Any]:
     entry: dict[str, Any] = {key: row[key], **(_json_answered(row["answered"]) or {})}
     if dimension == "model":
         entry["engines"] = row["engines"]
-    if dimension == "member":
-        entry["roles"] = row["roles"]
     entry["measured"] = row["answered"] is not None
     return entry

@@ -23848,12 +23848,15 @@ def test_remote_usage_by_engine_lists_every_engine_busiest_first(monkeypatch, tm
     assert ["codex-seat", "—", "—", "—", "—"] in rows       # never measured
 
 
-def test_remote_usage_by_member_merges_the_roster_and_ranks_by_fresh_input(
+def test_remote_usage_by_member_lists_who_spent_and_ranks_by_fresh_input(
     monkeypatch, tmp_path, capsys
 ):
-    """The roster decides who is listed, the usage decides the order. Someone who has never sent a
-    request is still a member and keeps a row; someone the relay counted but the roster has since
-    dropped is not one any more and must not reappear."""
+    """The relay's rows are the whole list, ordered by fresh input.
+
+    ⚠️ **A roster entry no longer adds anybody.** `cy` is on the control plane's member list and
+    has never sent a request; the table must not carry a row for them, because this command answers
+    *who spent what* and the answer about `cy` is "nothing was measured", not a row of dashes.
+    """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     seen = {}
     _mock_member_usage(monkeypatch, {"window_seconds": 86400, "members": [
@@ -23864,40 +23867,32 @@ def test_remote_usage_by_member_merges_the_roster_and_ranks_by_fresh_input(
     ]}, seen=seen)
     _mock_members(monkeypatch, members=[
         {"email": "ana@example.com", "roles": ["admin"]},
-        {"email": "bo@example.com", "roles": ["both"]},
         {"email": "cy@example.com", "roles": ["consumer"]},
     ])
     assert cli.main(["usage", "--by", "member"]) == 0
-    lines = _lines(capsys)
+    captured = capsys.readouterr()
+    lines = [ln for ln in captured.out.splitlines()]
     rows = [ln.split() for ln in lines[lines.index(next(ln for ln in lines if ln.startswith("MEMBER"))) + 1:]
             if ln.strip()]
     assert "/relay/v1/grid/members/usage" in seen["paths"]
     assert seen["auth"] == "Bearer AT"  # this one names people, so it is authenticated
-    # 500K fresh (900K read − 400K cached) beats 90K; the member with no figure sorts last. The
-    # roster is what puts `cy` on the list at all — what each of them may *do* is `grid members list`.
-    assert rows[0] == ["Ana@example.com", "500K", "400K", "5K", "12"]
-    assert rows[1] == ["bo@example.com", "90K", "10K", "900", "3"]
-    assert rows[2] == ["cy@example.com", "—", "—", "—", "—"]
+    # 500K fresh (900K read − 400K cached) beats 90K.
+    assert rows == [
+        ["Ana@example.com", "500K", "400K", "5K", "12"],
+        ["bo@example.com", "90K", "10K", "900", "3"],
+    ]
+    assert "cy@example.com" not in captured.out
 
 
-def test_remote_usage_by_member_matches_the_roster_case_insensitively(monkeypatch, tmp_path, capsys):
-    """The control plane stores what the user typed and the relay what the token carried, so an
-    address differing only in case would list one person twice — once busy, once as never having
-    sent a request."""
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    _mock_member_usage(monkeypatch, {"window_seconds": 86400, "members": [
-        {"email": "Ana@Example.com", "requests": 1, "tokens_in": 10, "tokens_out": 2},
-    ]})
-    _mock_members(monkeypatch, members=[{"email": "ana@example.com", "roles": ["both"]}])
-    assert cli.main(["usage", "--by", "member"]) == 0
-    assert len([ln for ln in _lines(capsys) if "ana@example.com" in ln.lower()]) == 1
-
-
-def test_remote_usage_by_member_degrades_when_the_roster_is_owner_only(
+def test_remote_usage_by_member_never_asks_the_control_plane_for_the_roster(
     monkeypatch, tmp_path, capsys
 ):
-    """A member gets a 403 from the owner-only roster. Usage the relay *did* report is still worth
-    printing, so the table stands and the caveat goes to stderr — stdout stays a clean table."""
+    """The removal itself, asserted behaviourally rather than by the absence of a caveat.
+
+    A test that only checked stderr for the old note would pass on a command that still made the
+    call and merely stopped reporting its refusal — which is the silent-swallow shape, and strictly
+    worse than what was there before. So the stand-in **raises**: reaching it at all fails here.
+    """
     from remote import control_plane
 
     _seed_running_remote_grid(monkeypatch, tmp_path)
@@ -23905,26 +23900,32 @@ def test_remote_usage_by_member_degrades_when_the_roster_is_owner_only(
         {"email": "ana@example.com", "requests": 12, "tokens_in": 900_000, "tokens_out": 5_000},
     ]})
 
-    def _refuse(session_token, network_id, api_url=None):
-        raise control_plane.ControlPlaneError("forbidden", status=403)
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError("`grid usage --by member` asked the control plane for the roster")
 
-    monkeypatch.setattr(control_plane, "list_members", _refuse)
+    monkeypatch.setattr(control_plane, "list_members", _must_not_be_called)
     assert cli.main(["usage", "--by", "member"]) == 0
     captured = capsys.readouterr()
     assert "ana@example.com" in captured.out
-    assert "only the grid owner can list members" in captured.err.lower()
+    # And no caveat about a roster it never went looking for.
+    assert "roster" not in captured.err.lower()
 
 
 def test_remote_usage_by_member_reports_no_rollup_rather_than_zeros(monkeypatch, tmp_path, capsys):
     """404 is a master that predates the endpoint — the common case mid-rollout — and 401/403 is a
     caller who may not ask. Neither is a fact about how much anyone used, so neither may print as a
-    figure; the roster still gets its rows, unmeasured."""
+    figure.
+
+    ⚠️ With the roster gone there is nothing left to list, so the table says so in its own words
+    instead of showing a column of dashes for people the relay never mentioned.
+    """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_member_usage(monkeypatch, {"detail": "not found"}, status=404)
     _mock_members(monkeypatch, members=[{"email": "ana@example.com", "roles": ["both"]}])
     assert cli.main(["usage", "--by", "member"]) == 0
     captured = capsys.readouterr()
-    assert "ana@example.com" in captured.out and "—" in captured.out
+    assert "ana@example.com" not in captured.out
+    assert "no member usage" in captured.out
     assert "reports no member usage" in captured.err
 
 
