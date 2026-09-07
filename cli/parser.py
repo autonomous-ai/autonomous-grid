@@ -37,6 +37,7 @@ from .grid import (
 )
 from .credential import cmd_credential
 from .launch import cmd_launch
+from .mcp_config import cmd_mcp_config, cmd_mcp_token
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from . import project_arg
@@ -114,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_router(sub)
     _add_engine_setup(sub)
     _add_launch(sub)
+    _add_mcp(sub)
     _add_train(sub)
     _add_credential(sub)
     _add_stt(sub)
@@ -1619,6 +1621,35 @@ def _add_launch(sub) -> None:
     # two positionals above). The default is what makes `grid launch claude --`, with nothing after
     # it, identical to no `--` at all.
     launch.set_defaults(handler=cmd_launch, forward=())
+
+
+def _add_mcp(sub) -> None:
+    """`grid mcp config|token` — point a coding agent's harness at this grid's web tools (ADR 0041).
+
+    Nested subcommands rather than one positional with `choices=`: `grid mcp myteam` would otherwise
+    be an "invalid choice" error about a word the user meant as a grid name.
+    """
+    mcp = sub.add_parser(
+        "mcp",
+        help="Point Claude Code / Codex / opencode at this grid's web tools",
+        description=(
+            "Print the MCP configuration a coding agent's harness needs to search and read the\n"
+            "web through your grid. The server runs on the control plane, so it keeps working\n"
+            "whether or not the grid itself is up."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
+
+    config = mcp_sub.add_parser(
+        "config", help="Print the config for each harness (prints your grid's access token)")
+    config.add_argument("grid", nargs="?", default=None,
+                        help="Grid name or id (ag-...). Omit for the active grid.")
+    config.set_defaults(handler=cmd_mcp_config)
+
+    token = mcp_sub.add_parser(
+        "token", help="Print just the access token, for a script that builds its own config")
+    token.add_argument("grid", nargs="?", default=None,
+                       help="Grid name or id (ag-...). Omit for the active grid.")
+    token.set_defaults(handler=cmd_mcp_token)
 
 
 def _add_train(sub) -> None:
