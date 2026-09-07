@@ -902,6 +902,14 @@ Each harness spells the credential differently, so the command prints all three:
 Web tools need a hosted grid: in local mode the command refuses, because the server it points at is
 the control plane's and a local grid has no account behind it.
 
+> **Codex cancels MCP tool calls under its read-only sandbox, and blames nobody for it.** Run
+> non-interactively as `codex exec …`, a search prints `mcp: grid_web/web_search (failed)` followed
+> by `user cancelled MCP tool call` — which reads like the grid refused it. It did not: the call is
+> stopped inside Codex and never reaches the server, so nothing shows up in your allowance either.
+> That is Codex's own approval policy (`approval: never` with `sandbox: read-only` denies anything
+> that would need approving), not a grid problem. Interactive `codex` asks you instead; a scripted
+> run needs a policy that permits the call. Measured on Codex 0.144.6.
+
 See [ADR 0041](./adr/0041-a-coding-agent-reaches-the-web-through-the-control-plane.md).
 
 ## Training
