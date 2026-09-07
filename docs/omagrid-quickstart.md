@@ -1,6 +1,6 @@
 # Omagrid quickstart
 
-Omagrid is a shared grid: Omarchy machines serving models to each other.
+Omagrid is a peer-to-peer AI grid.
 
 ## 1. Install grid
 
@@ -8,7 +8,7 @@ Omagrid is a shared grid: Omarchy machines serving models to each other.
 curl -fsSL https://grid.autonomous.ai/install.sh | bash
 ```
 
-Check it with `grid --version`. "command not found"? Open a new terminal and try again.
+Check it with `grid --version`.
 
 ## 2. Sign in
 
@@ -24,11 +24,11 @@ It prints a URL and a code. Open the URL, sign in, and type the code.
 grid use Omagrid
 ```
 
-That is the last command you run by hand. Everything after this, opencode runs for you.
+That is the last command you run by hand. Everything after this, OpenCode runs for you.
 
-## 4. Let opencode connect itself
+## 4. Let OpenCode connect itself
 
-Start opencode from any directory:
+Start OpenCode from any directory:
 
 ```bash
 opencode
@@ -40,24 +40,21 @@ Then paste these two prompts, one at a time:
 
 > connect opencode to the grid
 
-The first gives opencode the operating manual for the `grid` CLI. The second has it read the
-grid's model list, write the Omagrid provider into your global opencode config
-(`~/.config/opencode/opencode.json`), and prove the path answers with a test request. It will end by
-telling you to restart.
+The first gives OpenCode the operating manual for the `grid` CLI. The second has it read the
+grid's model list and write the Omagrid provider into your global OpenCode config
+(`~/.config/opencode/opencode.json`).
 
-## 5. Restart and pick a model
+Restart OpenCode.
 
-Quit opencode and start it again. Then:
+## 5. Pick a model
 
-1. Type `/models`
-2. Search `Omagrid`
-3. Pick a model served by Omagrid
+Type `/models`, search `Omagrid`, and pick Qwen 3.8 27B or any model served by Omagrid.
 
 Start chatting. Every request now runs on Omagrid machines.
 
-## 6. Ask opencode about the grid
+## 6. Ask OpenCode about the grid
 
-With the skill loaded, opencode can operate the grid for you in plain English:
+With the skill loaded, OpenCode can operate the grid for you in plain English:
 
 - **"show me the grid's 24h stats"** — uptime, memory pool, and a card per machine.
 - **"show me usage by model"** — which models did the work. Also by member or by engine.
@@ -67,19 +64,8 @@ With the skill loaded, opencode can operate the grid for you in plain English:
 Under the hood these are `grid stats --verbose`, `grid usage --by …`, and `grid join --serve …`.
 You can run them yourself any time.
 
-## When something fails
-
-- **`Unauthorized` inside opencode** — a project-level `./opencode.json` is overriding the global
-  provider, or the token went stale. Ask opencode to "connect opencode to the grid" again.
-- **"You're not signed in"** — run `grid login --no-browser` yourself. That one needs a browser
-  and a code only you can type.
-- **A model 404s** — nothing is serving it right now. Ask for stats to see what each machine has
-  loaded.
-- **`grid: command not found`** — open a new terminal, or run the install line above.
-
 ## Where to go next
 
-- [CLI reference](./cli.md) for every command opencode is running on your behalf.
+- [CLI reference](./cli.md) for every command OpenCode is running on your behalf.
 - [Claude Code quickstart](./claude-code-quickstart.md) and [Codex quickstart](./codex-quickstart.md)
   to point other agents at the same grid.
-- [Working from anywhere](../README.md#working-from-anywhere) for how remote mode works.

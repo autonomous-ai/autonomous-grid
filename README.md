@@ -6,7 +6,7 @@
 
 [![latest release](https://img.shields.io/github/v/release/autonomous-ai/autonomous-grid?label=version)](https://github.com/autonomous-ai/autonomous-grid/releases)
 
-[**Quickstart**](#quickstart) · [Omagrid + opencode](docs/omagrid-quickstart.md) · [From anywhere](#working-from-anywhere) · [Inference](#inference) · [Training](#training-experimental) · [Local AI patterns](docs/local_ai_agent_patterns/README.md) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
+[**Quickstart**](#quickstart) · [Omagrid + OpenCode](docs/omagrid-quickstart.md) · [From anywhere](#working-from-anywhere) · [Inference](#inference) · [Training](#training-experimental) · [Local AI patterns](docs/local_ai_agent_patterns/README.md) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
 https://github.com/user-attachments/assets/9573e961-423f-45ae-ada6-b7a8a361f188
 
@@ -442,7 +442,7 @@ Three commands change. `chat`, `models`, `info` and your apps are identical.
 
 Remote `--at` is `localhost` because the engine dials out; nothing reaches in.
 
-- On Omagrid with opencode? The [Omagrid quickstart](docs/omagrid-quickstart.md) is the whole path
+- On Omagrid with OpenCode? The [Omagrid quickstart](docs/omagrid-quickstart.md) is the whole path
   in two commands.
 - `grid ls` — the grids your sign-in can reach
 - `grid start <grid-name> --type permissioned-providers` — restrict who may serve
