@@ -46,8 +46,17 @@ grid --help                           # concise help with common examples first
 grid <command> --help
 grid version
 grid --version                        # same output as `grid version`
+grid update [--check]                 # install the latest release, or just report it
 grid [--local | --remote] <command>      # override the active mode for one command
 ```
+
+`grid update` upgrades the CLI itself in place: the Linux binary verifies the new release against
+its SHA256SUMS before replacing itself, a uv-installed wheel (the macOS path) re-runs
+`uv tool install`. A grid that is already running keeps serving the old version until you restart
+it. It also tells you it is stale on its own: once a day, in the background, any `grid` command
+refreshes a cached "what is the newest version" answer, and when the cache is behind it prints one
+line on stderr after the command's output. That notice never appears in `--json` output, in
+non-terminal contexts (pipes, CI, apps driving the CLI), or when `GRID_NO_UPDATE_CHECK=1` is set.
 
 Bare `grid` is not just help. It is the dashboard for a terminal:
 
