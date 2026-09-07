@@ -1,29 +1,24 @@
-# Omagrid quickstart — use the grid from opencode on Omarchy
+# Omagrid quickstart
 
-Omagrid is a shared grid: Omarchy machines serving models to each other. This is the early-access
-path, end to end: sign in, pick the grid, and let **opencode** wire itself up. You type two commands
-by hand. opencode does the rest.
+Omagrid is a shared grid: Omarchy machines serving models to each other.
 
-## What you need
-
-- An Omarchy machine. It ships with opencode. Any Linux or macOS box with the `grid` CLI and
-  [opencode](https://opencode.ai) works the same way.
-
-Check the CLI is there with `grid --version`. If it isn't:
+## 1. Install grid
 
 ```bash
 curl -fsSL https://grid.autonomous.ai/install.sh | bash
 ```
 
-## 1. Sign in
+Check it with `grid --version`. "command not found"? Open a new terminal and try again.
+
+## 2. Sign in
 
 ```bash
 grid login --no-browser
 ```
 
-It prints a URL and a code. Open the URL on any device, approve with Google, type the code.
+It prints a URL and a code. Open the URL, sign in, and type the code.
 
-## 2. Pick the grid
+## 3. Pick the grid
 
 ```bash
 grid use Omagrid
@@ -31,7 +26,7 @@ grid use Omagrid
 
 That is the last command you run by hand. Everything after this, opencode runs for you.
 
-## 3. Let opencode connect itself
+## 4. Let opencode connect itself
 
 Start opencode from any directory:
 
@@ -50,7 +45,7 @@ grid's model list, write the Omagrid provider into your global opencode config
 (`~/.config/opencode/opencode.json`), and prove the path answers with a test request. It will end by
 telling you to restart.
 
-## 4. Restart and pick a model
+## 5. Restart and pick a model
 
 Quit opencode and start it again. Then:
 
@@ -60,7 +55,7 @@ Quit opencode and start it again. Then:
 
 Start chatting. Every request now runs on Omagrid machines.
 
-## 5. Ask opencode about the grid
+## 6. Ask opencode about the grid
 
 With the skill loaded, opencode can operate the grid for you in plain English:
 
