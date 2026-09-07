@@ -1,32 +1,20 @@
 # Omagrid quickstart
 
-Omagrid is a peer-to-peer AI grid.
+Omagrid is a peer-to-peer AI grid for Omarchy machines.
 
-## 1. Install grid
+## 1. Join Omagrid
 
 ```bash
 curl -fsSL https://grid.autonomous.ai/install.sh | bash
-```
-
-Check it with `grid --version`.
-
-## 2. Sign in
-
-```bash
 grid login --no-browser
-```
-
-It prints a URL and a code. Open the URL, sign in, and type the code.
-
-## 3. Pick the grid
-
-```bash
 grid use Omagrid
 ```
 
+Sign-in prints a URL and a code. Open the URL, sign in, and type the code.
+
 That is the last command you run by hand. Everything after this, OpenCode runs for you.
 
-## 4. Let OpenCode connect itself
+## 2. Let OpenCode connect itself
 
 Start OpenCode from any directory:
 
@@ -46,13 +34,13 @@ grid's model list and write the Omagrid provider into your global OpenCode confi
 
 Restart OpenCode.
 
-## 5. Pick a model
+## 3. Pick a model
 
 Type `/models`, search `Omagrid`, and pick Qwen 3.8 27B or any model served by Omagrid.
 
 Start chatting. Every request now runs on Omagrid machines.
 
-## 6. Ask OpenCode about the grid
+## 4. Ask OpenCode about the grid
 
 With the skill loaded, OpenCode can operate the grid for you in plain English:
 
