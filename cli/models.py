@@ -1,5 +1,6 @@
 """`grid catalog` / `grid pull` / `grid rm`: manage local GGUF model files,
-plus the static API-engine whitelist (`grid catalog --api <kind>`)."""
+plus the static API-engine whitelist (`grid catalog --api <kind>`) and the live
+catalog service (`grid catalog --online`)."""
 from __future__ import annotations
 
 import argparse
@@ -15,11 +16,313 @@ if TYPE_CHECKING:  # runtime imports stay lazy inside the handlers
 
 
 def cmd_catalog(args: argparse.Namespace) -> int:
+    # `--api` answers "what would joining an API kind serve" from the shipped whitelist;
+    # everything else answers "what can I pull here" against the live catalog service.
     # `is not None`, not truthiness: `--api ""` must reach the unknown-kind error,
-    # not silently fall through to the GGUF catalog.
+    # not silently fall through to the pullable catalog.
     if getattr(args, "api", None) is not None:
         return _catalog_api(args)
+    return _catalog_pullable(args)
 
+
+def _catalog_pullable(args: argparse.Namespace) -> int:
+    """`grid catalog`: the models this machine can pull, from the live catalog service.
+
+    Sends the device profile (same probe as `grid device-info`: class, usable memory,
+    backend) to `POST /v1/grid/catalog` — the browse endpoint the desktop app reads — and
+    prints each model with its concrete quantized versions, every field the service names
+    (`repo_id`, `versions[].version/size_bytes/pull_spec`, the per-machine `fit`) passed
+    through under the same names, `--json` verbatim. When there is no session, no network,
+    or the service answers badly, falls back to the shipped table and says so — `catalog`
+    never dies on connectivity. `grid pull <repo>` (no quant) is untouched: it fetches
+    the repo's real file list from Hugging Face and lets the reader pick a version.
+    """
+    from remote import credentials
+
+    token = credentials.load_credentials().get("session_token")
+    if token:
+        payload, error = _fetch_pullable(str(token))
+        if payload is not None:
+            if _interactive(args):
+                return _browse_picker(payload)
+            return _print_pullable(payload, args)
+        note = error
+    else:
+        note = "not signed in — run `grid login`"
+    print(f"(catalog service unavailable: {note}; showing the shipped table)", file=sys.stderr)
+    return _catalog_shipped(args)
+
+
+def _interactive(args: argparse.Namespace) -> bool:
+    """The arrow-key picker needs a real terminal both ways; `--json` and pipes get text."""
+    return not getattr(args, "json", False) and sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _fetch_pullable(token: str) -> tuple[dict | None, str]:
+    """(payload, error) from the catalog service; exactly one is set.
+
+    One call, 50 rows: `device` makes the service rank what this machine can run first,
+    and the callers decide what to show of it. No page concept anywhere — the picker
+    scrolls through this payload's models; there is nothing to advance.
+    """
+    import httpx
+
+    from remote import credentials
+
+    # The flat dict the service's fit gates read; the full collect_device_info() carries
+    # inventory the ranking does not use.
+    from shared.system.device_info import collect_device_info
+
+    info = collect_device_info()
+    body: dict = {
+        "browse": True,
+        "page_size": 50,
+        "device": {
+            "device_class": info.get("device_class"),
+            "usable_bytes": info.get("usable_bytes"),
+            "backend": info.get("backend"),
+        },
+    }
+    try:
+        resp = httpx.post(
+            f"{credentials.api_url()}/v1/grid/catalog",
+            json=body,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15.0,
+        )
+    except httpx.RequestError as exc:
+        return None, f"couldn't reach {credentials.api_url()}: {exc}"
+    if resp.status_code >= 400:
+        # stt's convention: the status rides in the message so an expired session (401)
+        # tells the reader to `grid login` without re-parsing the body.
+        return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    return resp.json(), ""
+
+
+def _read_key() -> str:
+    """One keypress as a name: up/down/left/right/enter/quit/esc, or the bare character.
+
+    Reads straight from fd 0 with `os.read` — never `sys.stdin.read`, whose TextIOWrapper
+    slurps the whole escape sequence into its buffer and leaves `select` blind to the
+    bytes that are already in Python's hands. ESC ambiguity (a lone Escape vs the start
+    of an arrow) resolves with a 50 ms second-byte wait: instant to feel, safe to parse.
+    """
+    import os
+    import select
+
+    ch = os.read(0, 1).decode("utf-8", "replace")
+    if ch != "\x1b":
+        return {"\r": "enter", "\n": "enter", " ": "enter", "q": "quit", "\x03": "quit"}.get(ch, ch)
+    if not select.select([0], [], [], 0.05)[0]:
+        return "esc"
+    seq = b""
+    while len(seq) < 2 and select.select([0], [], [], 0.05)[0]:
+        seq += os.read(0, 2 - len(seq))
+    return {"[A": "up", "[B": "down", "[C": "right", "[D": "left"}.get(seq.decode(), "")
+
+
+_QUIT_NOTE = "Nothing was downloaded. Run `grid catalog` again anytime."
+
+
+_PICKER_ROWS = 10
+
+
+def _fit_spec(model: dict) -> str | None:
+    """The pull spec for the version the service suggested, or None if it names none.
+
+    `fit.version` and the versions list come from the same payload, so matching the
+    suggested version to its `pull_spec` here cannot invent an un-pullable spec.
+    """
+    fit = (model.get("fit") or {}).get("version")
+    for version in model.get("versions") or []:
+        if fit and version.get("version") == fit:
+            return version.get("pull_spec")
+    return None
+
+
+def _download(out, spec: str) -> int:
+    """Leave the picker's screen and hand the spec to `cmd_pull`, as `grid pull` got it."""
+    out.write("\x1b[?25h")
+    print(f"\nPulling {spec} ...\n")
+    return cmd_pull(argparse.Namespace(model=spec))
+
+
+def _browse_picker(first: dict) -> int:
+    """The arrow-key browser: ↑↓ pick, ←→ flip pages, Enter downloads the suggested
+    quant, `v` opens the other quantizes, q/Esc/Ctrl-C out.
+
+    Raw-mode terminal handling straight from stdlib (`tty`/`termios`) — the same reason
+    `_pick_file` shies away from a UI dependency. One fetched payload, scrolled in place;
+    Enter on a model row pulls the suggested version's `pull_spec` through `cmd_pull`,
+    the same code `grid pull` runs, so the picker can invent nothing the CLI would refuse.
+    """
+    import shutil
+    import tty
+
+    try:
+        import termios
+    except ImportError:  # not a POSIX tty (Windows) — the text table knows the way out
+        return _print_pullable(first, argparse.Namespace(api=None, json=False, page=None))
+
+    models = [m for m in first.get("models") or [] if m.get("runnable")]
+    # One fixed column for every row: pad to the longest name on the list so the quant
+    # and GB columns land at the same column down the whole page.
+    name_w = max((len(m.get("repo_id") or "") for m in models), default=20) + 1
+    view, model_i, version_i = "models", 0, 0
+    painted = 0  # lines the previous frame drew; how far the redraw climbs back up
+    out = sys.stdout
+
+    def page_rows() -> int:
+        # A menu, not a dump: one page of rows whatever the window height; ←→ flip pages.
+        return min(shutil.get_terminal_size().lines - 4, _PICKER_ROWS)
+
+    def draw(status: str = "") -> None:
+        nonlocal painted
+        rows = page_rows()
+        page = model_i // rows
+        lines = ["Popular models on the Grid:"]
+        if view == "models":
+            if not models:
+                lines.append("  (nothing came back for this machine)")
+            start = page * rows
+            for i in range(start, min(start + rows, len(models))):
+                # Name, then its quant in parentheses, then the download size — what
+                # pulling costs, not the parameter count nobody checks before a download.
+                fit = models[i].get("fit") or {}
+                label = f"{models[i].get('repo_id') or '':<{name_w}}"
+                label += f"({fit.get('version') or ''})".ljust(9)
+                if fit.get("size"):
+                    label += f" {fit['size'] / 1e9:>5.1f} GB"
+                lines.append(("  ▸ " if i == model_i else "    ") + label)
+            lines.append("\n  ↑↓ pick · ←→ page · v other quantize · Enter = DOWNLOAD · q quit")
+        else:
+            model = models[model_i]
+            lines.append(f"{model.get('repo_id')}")
+            fit = model.get("fit") or {}
+            versions = model.get("versions") or []
+            start = min(max(version_i - rows + 1, 0), max(len(versions) - rows, 0))
+            for i in range(start, min(start + rows, len(versions))):
+                label = f"{versions[i].get('version') or '':<9}"
+                size = versions[i].get("size_bytes")
+                if size:
+                    label += f"{size / 1e9:>6.1f} GB"
+                if fit.get("version") == versions[i].get("version"):
+                    label += "   ← suggested for this machine"
+                lines.append(("  ▸ " if i == version_i else "    ") + label)
+            lines.append("\n  ↑↓ version · Enter = DOWNLOAD · ←/Esc back · q quit")
+        if status:
+            lines.append(f"  {status}")
+        # Redraw in place: climb back over the last frame and clear downward only.
+        # A full-screen clear here would eat the user's scrollback for nothing.
+        if painted:
+            out.write(f"\x1b[{painted}A")
+        text = "\n".join(lines) + "\n"
+        painted = text.count("\n")
+        out.write("\x1b[J" + text)
+        out.flush()
+
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    out.write("\x1b[?25l")  # hide the cursor while browsing; the frame owns the screen
+    # Carve the frame's footprint out of the screen first: drop below the prompt, climb
+    # back up, and every in-place redraw stays inside this block without ever scrolling.
+    reserve = min(page_rows() + 5, shutil.get_terminal_size().lines - 1)
+    out.write("\n" * reserve + f"\x1b[{reserve}A")
+    try:
+        tty.setcbreak(fd)
+        draw()
+        while True:
+            key = _read_key()
+            if key == "quit":
+                raise KeyboardInterrupt
+            if view == "models":
+                if not models:
+                    continue
+                if key == "up":
+                    model_i = (model_i - 1) % len(models)
+                elif key == "down":
+                    model_i = (model_i + 1) % len(models)
+                elif key in ("left", "right"):
+                    rows = page_rows()
+                    pages = max(-(-len(models) // rows), 1)
+                    page = (model_i // rows + (1 if key == "right" else -1)) % pages
+                    model_i = min(page * rows, len(models) - 1)
+                elif key == "enter":
+                    # Enter on a model row means "this one" — take the version the
+                    # service suggested (the one shown in parentheses) and pull it.
+                    spec = _fit_spec(models[model_i])
+                    if spec is None:  # no suggested file: fall back to choosing by hand
+                        view = "versions"
+                        version_i = 0
+                    else:
+                        return _download(out, spec)
+                elif key == "v":  # the opt-in path: browse every quant by hand
+                    view = "versions"
+                    fit = (models[model_i].get("fit") or {}).get("version")
+                    versions = models[model_i].get("versions") or []
+                    version_i = next(
+                        (i for i, v in enumerate(versions) if v.get("version") == fit), 0
+                    )
+                else:
+                    continue
+            else:  # versions
+                versions = models[model_i].get("versions") or []
+                if not versions:  # a model with no listed file cannot be entered into
+                    view = "models"
+                elif key == "up":
+                    version_i = (version_i - 1) % len(versions)
+                elif key == "down":
+                    version_i = (version_i + 1) % len(versions)
+                elif key in ("left", "esc"):
+                    view = "models"
+                elif key == "enter":
+                    spec = versions[version_i].get("pull_spec")
+                    return _download(out, spec)
+                else:
+                    continue
+            draw()
+    except KeyboardInterrupt:
+        print(f"\n{_QUIT_NOTE}")
+        return 0
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        out.write("\x1b[?25h")
+        out.flush()
+
+
+def _print_pullable(payload: dict, args: argparse.Namespace) -> int:
+    """The one-shot text list: what a pipe, a script, and `--json` get."""
+    if getattr(args, "json", False):
+        # The service payload verbatim — the app consumes the same JSON, so scripts and the
+        # app read one contract, not two. No renaming, no pruning, no additions.
+        print(json.dumps(payload, indent=2))
+        return 0
+    runnable = [m for m in payload.get("models") or [] if m.get("runnable")]
+    print("Popular models on the Grid:")
+    # Column header + a fixed spec column so the GB column actually lines up.
+    spec_col = 66
+    print(f"  {'MODEL':<{spec_col - 2}}{'SIZE':>7}   FIT")
+    for model in runnable:
+        # The model line is its name only; every quant's own download size already
+        # rides on its version row, which is what picking one comes down to.
+        print(f"  {model.get('repo_id')}")
+        fit = model.get("fit") or {}
+        for version in model.get("versions") or []:
+            spec = version.get("pull_spec") or ""
+            size = version.get("size_bytes")
+            row = f"    {spec:<{spec_col - 4}}"
+            row += f"{size / 1e9:>6.1f} GB" if size else " " * 9
+            if version.get("version") and fit.get("version") == version["version"]:
+                row += "  ← suggested"
+            print(row.rstrip())
+    if not runnable:
+        print("  (nothing came back for this machine)")
+    print("\nPull one with:  grid pull <repo>:<file>   (a specific version above)")
+    print("           or:  grid pull <repo>            (lists the repo's files to pick from)")
+    return 0
+
+
+def _catalog_shipped(args: argparse.Namespace) -> int:
     from shared.models import catalog, store
 
     if getattr(args, "json", False):
@@ -49,7 +352,7 @@ def cmd_catalog(args: argparse.Namespace) -> int:
         print(catalog.format_catalog_entry(entry))
     print()
     print("Any other GGUF on Hugging Face works too — search huggingface.co, then just pull the")
-    print("repository. It grabs Q4_K_M by default, or asks you to pick if there's more than one file:")
+    print("repository. It shows you the repo's quantized files and asks you to pick one:")
     print("  grid pull unsloth/gemma-3-4b-it-GGUF")
     return 0
 
