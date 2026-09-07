@@ -10,7 +10,7 @@ grid use Omagrid
 
 Login prints a URL and a code. Open the URL, log in, and type the code.
 
-## 2. Let OpenCode connect itself
+## 2. Use OpenCode to set up
 
 Start OpenCode from any directory:
 
