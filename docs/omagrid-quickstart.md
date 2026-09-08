@@ -18,7 +18,15 @@ Start OpenCode from any directory:
 opencode
 ```
 
-Paste these two prompts, one at a time:
+First pick the model that will do the setup. Type `/models`, search `Muse`, and choose
+**Muse Spark 1.3 Free**:
+
+![OpenCode's model picker, showing Muse Spark 1.3 Free](./omagrid-select-setup-model.png)
+
+It is free, and it handles the two prompts below — reading a page, writing a skill, editing a
+config file without stumbling. You switch to an Omagrid model in step 3.
+
+Then paste these two prompts, one at a time:
 
 ```text
 read https://github.com/autonomous-ai/autonomous-grid/blob/main/docs/opencode.txt and create a skill for it
@@ -36,7 +44,13 @@ Restart OpenCode.
 
 ## 3. Pick a model
 
-Type `/models`, search `Omagrid`, and pick `Qwen3.8-27B` or any other model Omagrid serves.
+Now switch off Muse Spark and onto the grid. Type `/models`, search `Omagrid`, and pick
+`Qwen3.8-27B` or any other model Omagrid serves.
+
+![OpenCode's model picker, showing the models Omagrid serves](./omagrid-select-grid-model.png)
+
+`Auto`, `Brute Force` and `Feedback Loop` are not models — they let the grid choose one for
+you.
 
 Start chatting. Every request now runs on Omagrid machines.
 
@@ -52,14 +66,24 @@ contribute this machine to Omagrid
 ```
 
 It picks a model your machine can run, installs the engine, downloads the model, and joins it
-to the grid. The download is a few gigabytes and takes a while — OpenCode tells you the size
-before it starts.
+to the grid. The first time on a machine the download is a few gigabytes and takes a while —
+OpenCode tells you the size before it starts. If the engine and model are already on disk, it
+skips straight to joining.
 
 Say what you want and it will follow:
 
 - **"use a smaller model, I'm still working on this machine"** — leaves memory free for you.
 - **"take only 2 requests at a time"** — how busy your machine gets.
 - **"give it a 128k context window"** — how much each request can read.
+
+You don't have to know the flags — it offers the choices and takes your own answer:
+
+![OpenCode asking which name, limit and context window to join with](./omagrid-join-ask.png)
+
+Then it joins, and checks the machine really landed on the grid rather than trusting the
+command that put it there:
+
+![OpenCode confirming the machine is serving](./omagrid-join-done.png)
 
 And afterwards:
 
@@ -72,11 +96,21 @@ Under the hood these are `grid engine install`, `grid pull`, `grid join --serve 
 
 ## 5. Ask OpenCode about the grid
 
-With the skill loaded, OpenCode can operate the grid for you in plain English:
+With the skill loaded, OpenCode can operate the grid for you in plain English. The answers
+come back read, not pasted.
 
-- **"show me the grid's 24h stats"** — uptime, memory pool, and a card per machine.
-- **"show me usage by model"** — which models did the work. Also by member or by engine.
-- **"which machine is carrying the grid right now?"** — the same readings, read for you.
+**"show me the grid's 24h stats"** — uptime, memory pool, and a card per machine.
+
+![OpenCode answering "show me Omagrid's 24h stats"](./omagrid-stats.png)
+
+**"show me usage by model"** — which models did the work. Also by member or by engine.
+
+![OpenCode answering "show me usage by model"](./omagrid-usage-by-model.png)
+
+**"which machine is carrying the grid right now?"** — a comparison and a verdict, including
+anything worth watching.
+
+![OpenCode naming the machine carrying the grid](./omagrid-carrying-load.png)
 
 Under the hood these are `grid stats --verbose` and `grid usage --by …`. You can run them
 yourself any time.
