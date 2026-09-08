@@ -179,13 +179,29 @@ ALTER TABLE grid_account ADD COLUMN IF NOT EXISTS balance_credits DOUBLE PRECISI
 ALTER TABLE grid_account DROP COLUMN IF EXISTS balance;
 ```
 
-Add-then-drop is the *only* idempotent spelling available. `init_schema` replays the whole tuple on
-every startup, and PostgreSQL has no `RENAME COLUMN IF EXISTS` — the file's one rename precedent,
+`init_schema` replays the whole tuple on every startup, and PostgreSQL has no bare
+`RENAME COLUMN IF EXISTS` — the file's one rename precedent,
 `ALTER TABLE IF EXISTS grid_member_invite RENAME TO grid_pending_charge`, works only because
-`IF EXISTS` there applies to a *table*.
+`IF EXISTS` there applies to a *table*. Add-then-drop is the plainest re-runnable spelling of the
+decision below.
+
+⚠️ **Amended 2026-09-08, during issue 04: it is NOT the only spelling available, and this ADR said it
+was.** A `DO $$ … END $$` block testing `information_schema.columns` — the shape `db.py` already uses
+for `ck_grid_networks_os_community_access_os` — can `RENAME COLUMN` and then multiply by the ratio,
+re-runnably and without losing a value. The reason not to is the decision in the next paragraph, not
+the absence of a way; "there is no other way" is a reason a later reader can disprove in one grep,
+and disproving it would reopen a decision that was actually taken on purpose.
 
 Old dollar balances are **discarded**. That is authorised because self-serve payment has never
-shipped, so no wallet holds money anyone paid for.
+shipped, so no wallet holds money anyone *paid* for.
+
+⚠️ **Amended 2026-09-08: that sentence is narrower than what the change discards.** Two paths that
+move balance HAVE shipped — the operator's own top-up (`POST /admin/accounts/{sub}/topup`) and an
+engine's revenue share (the ledger's `earning` rows) — and both are zeroed too. With a 500-credit
+gate, an account that held such a balance is refused on a billing-on grid until somebody credits it
+again. The decision stands (no grid has billing on, and the fleet's wallets are expected to be
+empty), but it is a decision about *real rows*, so the deployment note carries the count-before-you-
+deploy query rather than the assurance.
 
 ⚠️ **There is no undo.** Rolling back to the previous release re-runs the old
 `ADD COLUMN IF NOT EXISTS balance` and every wallet reads empty. This belongs in the **deployment
