@@ -1063,28 +1063,35 @@ refuses to send node or engine credentials over non-loopback plain HTTP; `--allo
 is accepted for CLI compatibility but does not override that boundary for managed nodes. A node
 started against a Grid owned by the same machine advertises the Grid's literal loopback control
 address by default. Remote workers must use HTTPS for Grid control and TLS for their advertised
-engine address — and Grid now creates both halves of that TLS itself, so no certificate has to be
-prepared by hand: `grid start --tls` mints a private CA and a server certificate covering the
-grid's advertised addresses, and a node that advertises a non-loopback host without certificate
-flags signs its engine certificate under a node-local CA whose public half travels to Grid inside
-the authenticated registration. Manual `--engine-tls-*` flags still take precedence; the
-generated material lives under `~/.grid/` (grid `tls/` and node-state `tls/` directories) with the
-private keys owner-only, and a copied `ca.crt` is the only file a peer machine needs.
-A LAN join therefore looks like:
+engine address — and Grid creates both halves of that TLS itself, so no certificate has to be
+prepared by hand: `grid start` serves HTTPS by default with a private grid-local CA, a node
+advertising a non-loopback host mints its engine certificate under a node-local CA whose public
+half travels to Grid inside the already-authenticated registration, and a client dialling a grid
+it has never met fetches that CA once (`GET /grid/ca`, trust-on-first-use, fingerprint printed to
+stderr). Only the node token is a secret; the CA is public material. Manual `--engine-tls-*`
+flags still take precedence, `--no-tls` opts out, and the generated material lives under
+`~/.grid/` with private keys owner-only. A LAN join is therefore two commands and one file copy:
 
 ```bash
 # grid owner
-grid start home --tls
+grid start home
 #   ✓ Grid 'home' running — https://192.168.1.10:8090
-#   CA:    ~/.grid/grids/ag-home-…/tls/ca.crt  (copy to the other machines)
+grid allocator token write ./node-token
+scp ./node-token worker:~/        # only the token crosses machines; no CA file to copy
 
 # each worker machine
-grid allocator token write ./node-token   # on the owner
-scp ca.crt node-token worker:~/
-grid allocator node start --grid https://192.168.1.10:8090 --tls-ca ~/ca.crt --token-file ~/node-token
-``` `grid stop` stops a managed
-allocator node before it stops the local signaling server, allowing owned model processes to
-unregister and exit cleanly.
+grid allocator node start --grid https://192.168.1.10:8090 --token-file ~/node-token
+```
+
+macOS with the application firewall enabled adds one manual step with no CLI-visible failure:
+the first grid server from a freshly built (ad-hoc-signed) binary triggers the system prompt
+“allow incoming network connections”, which must be accepted **at that machine's GUI**. A server
+started over SSH shows no prompt and reports no error — the grid looks perfectly healthy locally
+while every LAN peer connection is dropped. Accept the prompt (or add a firewall exception for
+the installed `grid` binary) before debugging a “worker cannot reach the grid” report.
+
+`grid stop` stops a managed allocator node before it stops the local signaling server, allowing
+owned model processes to unregister and exit cleanly.
 
 ### HTTP control surface
 
