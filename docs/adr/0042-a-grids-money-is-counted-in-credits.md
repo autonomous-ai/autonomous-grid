@@ -134,10 +134,24 @@ both directions of a partial rollout, for two different reasons:
   read the status*. Before that change the same 422 was discarded and the grid served free in
   silence, which is the defect this feature exists to close and would have been reintroduced by its
   own rollout.
-- **The reads refuse service.** The relay reads each of these with a default, so a field it cannot
-  find yields that default. Zero is below every threshold, so an out-of-step relay **refuses every
-  request** rather than serving free. Fail closed, deliberately: the worst case is a grid that stops,
-  not a grid that gives itself away.
+- **The reads refuse service — on the rename, and only on the rename.** The relay reads each of
+  these with a default, so a field it cannot find *on a 200* yields that default. Zero is below
+  every threshold, so an out-of-step relay **refuses every request** rather than serving free. Fail
+  closed for a renamed key, deliberately.
+
+⚠️ **Amended 2026-09-08 — "the worst case is a grid that stops, not a grid that gives itself away"
+was wrong as a general claim about the gate, and is corrected here.** It holds for the renamed key,
+because a renamed key still arrives on a `200` and defaults to zero. It does **not** hold when the
+control plane *refuses or is unreachable*: `relay._fetch_authoritative_balance` returns `None` on
+four paths — no configured URL, no subject, any exception, and by fall-through on
+**`status_code >= 400`** — and `relay.py:5476-5478` then falls back to the legacy media wallet,
+which `auth.py:107` seeds at `100.0` "welcome credits" against a `0.5` floor. A grid whose control
+plane is down therefore **serves free**, the exact outcome the original sentence claimed could not
+happen.
+
+⚠️ After D-a and D-c land, that same path **inverts**: the floor becomes the credit figure (500)
+while the media wallet still holds `100.0`, so `100 < 500` refuses *everyone*. One code path, two
+opposite wrong answers, on either side of this ADR's own change.
 
 ⚠️ **The relay's fallback for the minimum must be the credit figure (500), never the old dollar one
 (0.5).** Carrying `0.5` across leaves the gate at a thousandth of its intended height, and nothing
@@ -202,6 +216,19 @@ away from writing control-plane dollars into a credits column:
 ⚠️ The test is deleted **with** the code rather than left behind. A suite that keeps proving a
 contract nothing speaks is worse than no test: it spends review attention and reports confidence
 about a seam that is gone.
+
+⚠️ **Amended 2026-09-08 — the fence is incomplete, and this ADR did not say so.** The rename stops
+the *snapshot writer* (deletion 1 above) and D-g pins the *escrow caller*, but a third reader was
+never enumerated: the inference path's own balance gate. `relay.py:5477` calls `credits.get_balance`,
+which after the rename returns `account.media_credit_balance` (`credits.py:29`) — so the media
+wallet is still consulted **on the inference path**, as the fallback taken whenever the authoritative
+read yields `None`. Renaming the column did not stop that; it renamed the column being read.
+
+Closing it changes money behaviour and belongs to its own ticket rather than to this prefactor. The
+options are to **drop the fallback** — refuse when the authoritative balance is unavailable, making
+the gate fail closed in fact rather than in prose — or to **keep it and say so in D-g**, recording
+that the inference path has a second, media-funded door. What must not stand is the present
+position, in which this ADR asserts a fence the code does not have.
 
 ### D-g — `_billing_on()` is the sole authority on the inference path, and always was
 
@@ -301,7 +328,7 @@ because they genuinely differ:
 | value | absent ⇒ | order |
 |---|---|---|
 | the usage-report route and `cost_credits` | a loud validation refusal — ⚠️ **but only because D-h made the relay read the status**; before that it was silent and free | control plane first |
-| the balance route and `balance_credits` | the relay's default of zero ⇒ every request refused. Fail closed, deliberately | control plane first |
+| the balance route and `balance_credits` | the relay's default of zero ⇒ every request refused. Fail closed for the **rename** — ⚠️ but see D-c's amendment: a control plane that *refuses* or is unreachable yields `None`, not zero, and falls through to the media wallet instead | control plane first |
 | the minimum route and `min_balance_credits` | ⚠️ the relay's fallback must be the credit figure, not the old dollar one | control plane first |
 | `CREDITS_PER_USD` itself | ⚠️ **nothing degrades — the two sides simply disagree.** No missing route, no validation failure, no postcondition to check. The only value here whose failure is pure arithmetic | no order helps |
 | the refusal sentence the app matches | grid-src ↔ the app, **no half in this repository**; a reword makes the app render the relay's raw sentence, ⚠️ which prints the viewer's exact balance and the grid's threshold into their chat window | no order helps |
