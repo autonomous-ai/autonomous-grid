@@ -295,6 +295,19 @@ def effective_max_concurrency(record: dict[str, Any]) -> int:
     return API_ONLY_DEFAULT_CONCURRENCY if api_only and not record.get("media") else 1
 
 
+def effective_parallel(record: dict[str, Any]) -> int:
+    """The llama.cpp slot count a built-in engine launches with.
+
+    An explicit ``--parallel`` (stored truthy on the record) always wins; otherwise the engine
+    must actually hold enough slots to back the concurrency it advertises to the router, so it
+    derives from ``effective_max_concurrency``. Previously the two were silently disconnected:
+    the master routed ``--max-concurrency`` requests at a server that had launched with the
+    profile default of one slot and queued the rest.
+    """
+    explicit = record.get("parallel")
+    return int(explicit) if explicit else max(1, effective_max_concurrency(record))
+
+
 def _win_pid_alive(pid: int) -> bool:
     """Windows liveness probe. POSIX's ``os.kill(pid, 0)`` is unusable here: on Windows signal 0 is
     ``CTRL_C_EVENT``, so ``os.kill(pid, 0)`` tries to signal a console group rather than test for

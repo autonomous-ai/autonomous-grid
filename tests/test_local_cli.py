@@ -3774,6 +3774,75 @@ def test_start_llm_serves_vision_when_a_projector_is_named(monkeypatch, tmp_path
     assert cmd[cmd.index("--mmproj") + 1] == str(projector)
 
 
+def test_run_engine_from_record_derives_parallel_from_max_concurrency(monkeypatch, tmp_path):
+    """`--max-concurrency 4` without `--parallel` must still launch llama.cpp with 4 slots.
+    The record carries max_concurrency=4 and parallel=None; the derived args must carry
+    parallel=4 through to start_llm."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = {}
+    monkeypatch.setattr(runtime, "detect_local_ip", lambda: "192.168.1.50")
+
+    def fake_start_llm(model, **kwargs):
+        calls["model"] = model
+        calls["kwargs"] = kwargs
+        return launcher.LlamaProcess(proc=FakeProc(), port=kwargs["port"], log=tmp_path / "llama.log")
+
+    monkeypatch.setattr(launcher, "is_port_in_use", lambda port: False)
+    monkeypatch.setattr(runtime, "advertised_address_works", lambda url, timeout=3.0: True)
+    monkeypatch.setattr(launcher, "assert_supported_build", lambda: None)
+    monkeypatch.setattr(launcher, "start_llm", fake_start_llm)
+    monkeypatch.setattr(launcher, "wait_for_models", lambda proc: calls.setdefault("waited", proc.port))
+    monkeypatch.setattr(launcher, "stop", lambda proc: calls.setdefault("stopped", proc.port))
+    monkeypatch.setattr(cli.provider, "_register_engine", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(
+        grid_id, "eng",
+        {
+            "engine_id": "eng", "node_id": "node-test", "grid_id": grid_id,
+            "models": ["Qwen3.5-2B-UD-IQ2_M.gguf"], "max_concurrency": 4, "parallel": None,
+        },
+    )
+    assert cli.provider.run_engine_from_record(grid_id, "eng") == 0
+    assert calls["kwargs"]["parallel"] == 4
+
+
+def test_run_engine_from_record_keeps_explicit_parallel(monkeypatch, tmp_path):
+    """An explicit parallel on the record wins over the derived value — the operator set it."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = {}
+    monkeypatch.setattr(runtime, "detect_local_ip", lambda: "192.168.1.50")
+
+    def fake_start_llm(model, **kwargs):
+        calls["kwargs"] = kwargs
+        return launcher.LlamaProcess(proc=FakeProc(), port=kwargs["port"], log=tmp_path / "llama.log")
+
+    monkeypatch.setattr(launcher, "is_port_in_use", lambda port: False)
+    monkeypatch.setattr(runtime, "advertised_address_works", lambda url, timeout=3.0: True)
+    monkeypatch.setattr(launcher, "assert_supported_build", lambda: None)
+    monkeypatch.setattr(launcher, "start_llm", fake_start_llm)
+    monkeypatch.setattr(launcher, "wait_for_models", lambda proc: None)
+    monkeypatch.setattr(launcher, "stop", lambda proc: None)
+    monkeypatch.setattr(cli.provider, "_register_engine", lambda url, node_id, payload: None)
+    monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(
+        grid_id, "eng",
+        {
+            "engine_id": "eng", "node_id": "node-test", "grid_id": grid_id,
+            "models": ["Qwen3.5-2B-UD-IQ2_M.gguf"], "max_concurrency": 4, "parallel": 2,
+        },
+    )
+    assert cli.provider.run_engine_from_record(grid_id, "eng") == 0
+    assert calls["kwargs"]["parallel"] == 2
+
+
 def test_run_engine_launches_local_llama_server_by_default(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     calls = {}
@@ -16428,7 +16497,17 @@ def test_effective_max_concurrency_default_rules():
     assert run_records.effective_max_concurrency({"engines": [], "media": True}) == 1
     assert run_records.effective_max_concurrency({}) == 1
     assert run_records.effective_max_concurrency({"engines": [api], "max_concurrency": 3}) == 3
-    assert run_records.effective_max_concurrency({"engines": [hw], "max_concurrency": 8}) == 8
+def test_effective_parallel_derives_from_max_concurrency():
+    """A built-in engine must launch enough llama.cpp slots to back the concurrency it advertises.
+    --parallel (explicit) always wins; otherwise parallel = effective_max_concurrency. This is the
+    fix for 'I set --max-concurrency 4 but the server started with --parallel 1'."""
+    from shared import run_records
+
+    api = {"endpoint_url": "https://api.openai.com/v1", "models": ["openai:gpt-5.5"], "api_kind": "openai"}
+    assert run_records.effective_parallel({"max_concurrency": 4}) == 4
+    assert run_records.effective_parallel({"max_concurrency": 4, "parallel": 2}) == 2
+    assert run_records.effective_parallel({}) == 1
+    assert run_records.effective_parallel({"engines": [api], "max_concurrency": None}) == 4
 
 
 def test_effective_max_concurrency_codex_union_pins_one():

@@ -573,7 +573,7 @@ def _bring_up_one(
         port=port,
         ctx_size=record.get("ctx_size"),
         n_predict=record.get("n_predict"),
-        parallel=record.get("parallel"),
+        parallel=run_records.effective_parallel(record),
         flash_attn=record.get("flash_attn"),
         mmproj=record.get("mmproj"),
         temp=record.get("temp"),
