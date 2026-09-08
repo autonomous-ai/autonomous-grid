@@ -85,10 +85,11 @@ Say what you want and it will follow:
 And afterwards:
 
 - **"is my machine serving?"** — it shows up by name, with what it has served so far.
-- **"stop serving"** — leaves the grid. The model stays downloaded, so joining again is
-  quick.
 
 ![OpenCode confirming the machine is serving and idle](./omagrid-is-serving.png)
+
+- **"stop serving"** — leaves the grid. The model stays downloaded, so joining again is
+  quick.
 
 Under the hood these are `grid engine install`, `grid pull`, `grid join --serve …`,
 `grid stats --verbose`, and `grid leave`.
