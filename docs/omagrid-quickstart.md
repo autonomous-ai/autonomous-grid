@@ -21,7 +21,7 @@ opencode
 Paste these two prompts, one at a time:
 
 ```text
-read https://autonomous.ai/grid/opencode.txt and create a skill for it
+read https://github.com/autonomous-ai/autonomous-grid/blob/main/docs/opencode.txt and create a skill for it
 ```
 
 ```text
