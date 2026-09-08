@@ -55,6 +55,7 @@ from .remote_router import (
 )
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 from .stt import cmd_stt_transcribe
+from .update import cmd_update
 
 
 def _positive_task_count(raw: str) -> int:
@@ -100,6 +101,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     version = sub.add_parser("version", help="Print the grid version")
     version.set_defaults(handler=cmd_version)
+
+    update = sub.add_parser("update", help="Update grid to the latest release")
+    update.add_argument(
+        "--check",
+        action="store_true",
+        help="Only report whether a newer version exists; install nothing.",
+    )
+    update.set_defaults(handler=cmd_update)
 
     _add_grid_lifecycle(sub)
     _add_engines(sub)

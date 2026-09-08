@@ -204,13 +204,19 @@ def cmd_remote_models(args: argparse.Namespace) -> int:
         capable = _node_responses_models(node)  # resolved once per node, not per served model
         for model in _node_models(node, overview):
             rows.append((model, engine, name, model in capable))
-    # When auto routing is enabled, advertise the reserved `auto` model FIRST — same as the relay's
-    # /relay/v1/models endpoint (owner `grid-router`), so it shows even when zero engines are joined.
-    # An older master whose overview lacks the field reports falsy → no auto row (graceful degradation).
+    # When auto routing is enabled, advertise the reserved router family FIRST — mirroring the
+    # relay's /relay/v1/models endpoint (owner `grid-router`), so it shows even when zero engines
+    # are joined. The relay lists the three effort modes under their display names
+    # (`effort_router.EFFORT_DISPLAY_NAMES`: "Auto", "Brute Force", "Feedback Loop"); the standard
+    # one is the bare `auto` row the grid has always shown (both spellings parse the same), and
+    # these two extra names are accepted request ids too — without them the CLI hid two working
+    # models behind the one listing (an older master whose overview lacks router_enabled reports
+    # falsy → no router rows at all: graceful degradation).
     # `responses` is False for `auto`: dialect-reachability is a per-request routing outcome, not a
     # static property of the reserved model (no AC covers it) — a real model's badge is its engine's.
     if overview.get("router_enabled"):
         rows.insert(0, ("auto", "grid-router", "", False))
+        rows[1:1] = [(name, "grid-router", "", False) for name in ("Brute Force", "Feedback Loop")]
 
     if getattr(args, "json", False):
         # Derived view (not a raw passthrough like engines): new API fields on a model entry
@@ -227,11 +233,11 @@ def cmd_remote_models(args: argparse.Namespace) -> int:
         return 0
 
     seen = list(dict.fromkeys(model for model, *_ in rows))  # order-preserving dedup
-    # Prefer a real model over the reserved `auto` here: `auto` is always inserted first when
-    # routing is on, and a newcomer who just joined an engine wants to see THAT model chat-tested,
-    # not the router alias. Mirrors the local `cmd_models`' closing-the-loop hint (issue: `grid
-    # join`'s own "still loading" message can't yet promise a working model — this can).
-    target = next((m for m in seen if m != "auto"), seen[0])
+    # Prefer a real model over the reserved router family here: the router rows are always inserted
+    # first when routing is on, and a newcomer who just joined an engine wants to see THAT model
+    # chat-tested, not a router alias. Mirrors the local `cmd_models`' closing-the-loop hint (issue:
+    # `grid join`'s own "still loading" message can't yet promise a working model — this can).
+    target = next((m for m in seen if m not in ("auto", "Brute Force", "Feedback Loop")), seen[0])
 
     if getattr(args, "verbose", False):
         mwidth = max(len("MODEL"), *(len(model) for model, _, _, _ in rows))

@@ -60,6 +60,7 @@ from .parser import build_parser
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 from .stt import cmd_stt_transcribe
+from .update import cmd_update
 
 __all__ = [
     "main",
@@ -115,4 +116,5 @@ __all__ = [
     "cmd_engine_start",
     "cmd_engine_stop",
     "cmd_stt_transcribe",
+    "cmd_update",
 ]

@@ -9,7 +9,7 @@ from datetime import datetime
 from local import config
 from local import runtime
 from shared import logging_setup, paths
-from . import json_error
+from . import json_error, update
 from .dispatch import dispatch, resolve_override, split_forwarded
 from .parser import build_parser
 
@@ -149,7 +149,18 @@ def main(argv: list[str] | None = None) -> int:
             # the attribute — `grid launch claude --` with nothing after it is therefore identical
             # to no `--` at all.
             args.forward = forwarded
-        return dispatch(args, override)
+        # `--json` anywhere the user typed it suppresses the version notice, not just the global
+        # slot — argparse lets a subcommand's own `--json` default mask the parent's parsed value,
+        # so the parsed flag OR'd with the raw argv is the reliable witness.
+        json_requested = bool(args.json) or "--json" in cleaned
+        # The version check spawns here — before the command runs — so the network call happens
+        # while the user watches their command's work, not as added latency; the notice then prints
+        # after the command's own output finishes. Both are total functions that swallow everything:
+        # a stale-version hint must never change this run's exit code or output (cli/update.py).
+        update.maybe_spawn_check(args, json_requested=json_requested)
+        rc = dispatch(args, override)
+        update.print_notice(args, json_requested=json_requested)
+        return rc
     except SystemExit as exc:
         # `args` is `None` when argparse itself refused, so the flag is read out of the raw argv —
         # see `json_error.asked_for_json`.
@@ -189,6 +200,12 @@ def _maybe_internal(argv: list[str]) -> int | None:
         parser.add_argument("--week-limit", type=int, default=None)
         parser.add_argument("--quota-ttl", type=float, default=60.0)
         return cmd_internal_cli_seat_server(parser.parse_args(argv[1:]))
+    if argv[0] == "__update-check":
+        # Detached background refresh of ~/.grid/update-check.json, spawned by `maybe_spawn_check`.
+        # No flags, and it always exits 0: the only consumer is the next command's notice.
+        from .update import run_check
+
+        return run_check()
     if argv[0] == "__engine":
         from .provider import run_engine_from_record
 
