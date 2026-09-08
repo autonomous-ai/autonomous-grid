@@ -1,0 +1,372 @@
+HOW TO OPERATE MY GRID
+
+This file is your reference for the `grid` CLI. I do exactly one thing by hand:
+
+    grid login --no-browser
+
+It needs a browser and a code I type, so it cannot be yours. Everything else I ask you for
+in conversation, and you do it with the commands below. Don't ask me to run something you
+can run yourself, and don't ask me for the base URL, the API key, or the model list — all
+three are discoverable from the commands here.
+
+**Choosing the grid is one of those things.** When I say "use Omagrid", "switch to
+<name>", or name a grid as part of a bigger ask, run it:
+
+    grid use <name>
+
+Which grid I work on is my decision, but saying it to you *is* me deciding — don't hand
+the command back. `grid ls` lists the names if I got one wrong. Everything after that
+acts on the grid you just selected.
+
+Three things I'll ask for, each with its own section:
+
+    A. connect opencode to the grid, so I can chat with its models
+    B. contribute this machine to the grid, so it serves a model for others
+    C. show me what the grid is doing
+
+Read the section for what I asked. Don't do the other two unprompted. A "use <name>" may
+arrive on its own or attached to one of these — "use Omagrid and connect opencode to the
+grid" is one request, not two. Select the grid first, then do the section.
+
+
+## Ground rules — these apply to every section
+
+**Never split the `eval` from the command that needs it.** If each shell command you run
+is its own process — which is true of most agent shells — an export dies with the process
+that made it, and this pair silently does nothing:
+
+    eval "$(grid info --env)"        # process 1 — exports, then exits
+    curl "$OPENAI_BASE_URL/models"   # process 2 — the variable is empty here
+
+The failure is quiet: curl gets an empty URL and an empty bearer, so you see a confusing
+error rather than "the variable was unset". Chain them into one invocation every time and
+it works whether or not your shell keeps state:
+
+    eval "$(grid info --env)" && curl -s -H "Authorization: Bearer $OPENAI_API_KEY" \
+      "$OPENAI_BASE_URL/models"
+
+**Only section A needs those variables at all.** Every `grid` command reads my stored
+credentials itself, so sections B and C need no `eval` and no env — just run `grid ...`.
+
+**The key goes in my GLOBAL opencode config, never in a project file.** The distinction
+is the whole point: `~/.config/opencode/opencode.json` is private to my machine and is
+never committed, while a project's `./opencode.json` lands in a repo. Writing the token
+to the first is the same posture as `~/.grid/credentials.toml`, which already holds it in
+cleartext; writing it to the second leaks it. Never put the key — or the provider block
+that carries it — in a project file.
+
+**No `--remote` flag, and no grid name.** `grid login` already switched the CLI to remote
+mode, and `grid use` already chose the grid — whether I ran it or you did — so every
+command below acts on that grid with no flag and no name argument. Leave the name off
+rather than hardcoding one: it is what makes these commands still correct after the grid
+changes. `grid info --json` is how you find out which grid that currently is (see section
+A, step 3).
+
+**If a command fails because I'm not signed in**, stop and tell me to run
+`grid login --no-browser`. That one is mine — it needs a browser and a code I type. It is
+the only command in this file you should ever hand back to me.
+
+
+## A. Connect opencode to the grid
+
+Goal: the grid registered as a provider in `~/.config/opencode/opencode.json`, my global
+opencode config, carrying the models it serves. Global rather than per-project so it
+works in every directory, needs no environment set up before launch, and keeps the token
+out of any repo.
+
+**Step 1 — list the models.** One invocation:
+
+    eval "$(grid info --env)" && curl -s -H "Authorization: Bearer $OPENAI_API_KEY" \
+      "$OPENAI_BASE_URL/models"
+
+A real entry looks like:
+
+    { "id": "DeepSeek-V4-Flash-0731", "owned_by": "autonomous-grid",
+      "context_window": 256000, "provider_count": 1 }
+
+Two things change what you write:
+
+  - `context_window` is the real context length. It is sometimes absent — then leave the
+    limit out. Never substitute a default.
+  - Entries whose `owned_by` is **`grid-router`** (`Auto`, and sometimes named routing
+    modes) are not models, they are routing strategies: send a request to one and the grid
+    picks a real model. List them — `Auto` is useful — but they have no context window and
+    none of them may be the default.
+
+`grid-router` is the only `owned_by` value worth matching on. Everything else names
+whichever fleet is serving the model, varies between relay versions, and must not be used
+to include or exclude anything — treat any non-`grid-router` entry as a real model.
+
+**Step 2 — get the base URL and the key as literals.** Both go into the JSON as strings:
+
+    eval "$(grid info --env)" && echo "$OPENAI_BASE_URL" && echo "$OPENAI_API_KEY"
+
+Yes, that prints my token into your transcript. That is expected and unavoidable — you
+have to write it. What matters is where it lands: the global config in step 4, nowhere
+else, and never a project file, a log, or a commit.
+
+**Step 3 — find out which grid I'm actually on.** Never hardcode a grid name; read the
+one `grid use` selected:
+
+    grid info --json
+
+The `grid` field is the answer — e.g. `"grid": "autonomous.ai"`. Derive two things from it:
+
+  - **display name** — the grid name verbatim, however it is spelled.
+  - **provider id** — that name lowercased, with every run of non-alphanumeric characters
+    turned into a single `-` and any leading/trailing `-` trimmed. If nothing is left,
+    use `grid`.
+
+Grid names really do carry dots, spaces and capitals, so this matters:
+
+    "Omagrid"            -> omagrid
+    "autonomous.ai"      -> autonomous-ai
+    "private autonomous" -> private-autonomous
+    "macOS"              -> macos
+
+The provider id is what I type as `<id>/<model>`, so it has to be lowercase and free of
+spaces. The display name is what I see in the model picker, so it stays as written.
+
+**Step 4 — write `~/.config/opencode/opencode.json`.** Create the directory and file if
+absent. If the file exists, MERGE — keep every existing key, provider and formatting
+choice, and add only what is missing. Never rewrite it from scratch; never drop a
+provider I already have.
+
+**Then clear the provider out of any project config.** opencode merges its config files
+and a project's `./opencode.json` **overrides** the global one, so a stale provider block
+there — especially one whose `apiKey` is `{env:OPENAI_API_KEY}` — silently wins and the
+grid answers `Unauthorized`. If `./opencode.json` in the current directory defines this
+provider, remove that provider block from it (leave the rest of the file alone) and tell
+me you did. That file may already be committed: if the block you removed contained a
+literal token rather than an `{env:...}` reference, say so plainly — it is in my git
+history and I need to rotate it.
+
+Below, `<provider-id>` and `<display-name>` are the two values from step 3 — substitute
+them, don't copy them literally:
+
+    {
+      "$schema": "https://opencode.ai/config.json",
+      "provider": {
+        "<provider-id>": {
+          "npm": "@ai-sdk/openai-compatible",
+          "name": "<display-name>",
+          "options": {
+            "baseURL": "<the literal value of $OPENAI_BASE_URL>",
+            "apiKey": "<the literal value of $OPENAI_API_KEY>"
+          },
+          "models": {
+            "DeepSeek-V4-Flash-0731": {
+              "name": "DeepSeek-V4-Flash-0731",
+              "limit": { "context": 256000, "output": 32768 }
+            },
+            "GLM-4.7-Flash": {
+              "name": "GLM-4.7-Flash"
+            },
+            "Auto": { "name": "Auto (grid picks the model)" }
+          }
+        }
+      }
+    }
+
+So on a grid named `autonomous.ai` the provider key is `autonomous-ai`, its `name` is
+`autonomous.ai`, and I select models as `autonomous-ai/DeepSeek-V4-Flash-0731`.
+
+Rules for filling it in — each of these has bitten someone:
+
+  1. `baseURL` is `$OPENAI_BASE_URL` EXACTLY AS IT IS. It already ends in `/relay/v1`.
+     Do not append `/v1`, strip anything, or "normalise" it — the SDK appends
+     `/chat/completions` itself.
+  2. `apiKey` is the token itself, written out — because this is the global config, which
+     is never committed. Do **not** use `{env:OPENAI_API_KEY}` here: opencode replaces an
+     unset variable with an empty string rather than erroring, so that form works only
+     when opencode is launched from a shell that ran the `eval`, and fails confusingly
+     from every other shell. (If I ever say I want the stricter form, see the note at the
+     end of this section.)
+  3. One entry per model, keyed by its exact `id`, case included. Ids can contain a
+     slash (`Qwen/Qwen3.8-27B`) and can contain spaces. Copy them verbatim — do not
+     slugify, lowercase, or rename them.
+  4. `limit` is **both fields or neither** — opencode's schema requires `context` AND
+     `output` together, and rejects the whole config with "Missing key ... limit.output"
+     if you write `context` alone. It also allows no other keys inside `limit`.
+       - `context_window` present  -> "limit": { "context": <it>, "output": <see below> }
+       - `context_window` absent   -> omit `limit` entirely. Do not invent a context
+         window; a model with no limit block still works, opencode just uses its defaults.
+     The grid publishes no maximum output length, so `output` is a **chosen** value, not a
+     reported one: use `min(32768, context / 2)`, rounded down. Say in your report that you
+     picked it and that I can tune it — raise it if replies get cut short, lower it if the
+     engine rejects long generations.
+  5. Provider id is the one derived in step 3 — never a name you chose. It is what I
+     type as `<provider-id>/<model>`, so it must match exactly what you wrote as the key.
+
+**Step 5 — do NOT set the top-level `model`.** Leave that key exactly as you found it,
+whether or not it exists.
+
+The reason is worth knowing, because the obvious helpful move here is a trap. In
+opencode's schema the top-level `model` is not a free string: it `$ref`s
+`models.dev/model-schema.json#/$defs/Model`, a closed enum of ~7,560 known models with no
+wildcard branch. Nothing served by a private grid is in that list, so writing
+`"model": "<provider-id>/<id>"` risks the same class of startup rejection as a malformed
+`limit` — and it would arrive on the restart, after you have already told me we're done.
+
+Instead, end by telling me which models are now available and let me pick one in the
+picker (step 7). If I ask you explicitly to set a default anyway, do it — but say that
+opencode may refuse the config, and that removing that one key is the fix.
+
+**Step 6a — re-read what you wrote and check it.** opencode validates this file on
+startup and refuses to run on any error, so a mistake here costs me a restart to discover.
+Read the file back and confirm, per model entry:
+
+  - every `limit` block has **both** `context` and `output`, or there is no `limit` at all
+  - nothing else appears inside a `limit` — only `context`, `input`, `output` are allowed
+  - the JSON parses, and every provider I already had is still there
+  - the file is not world-readable — it holds a live token now. `chmod 600
+    ~/.config/opencode/opencode.json`, matching what `~/.grid/credentials.toml` already
+    uses.
+
+If `check-jsonschema` or `ajv` happens to be installed, validating against
+`https://opencode.ai/config.json` is stronger than reading — use it. Don't install
+anything just for this.
+
+**Step 6b — prove it answers** before claiming success:
+
+    eval "$(grid info --env)" && curl -s -X POST "$OPENAI_BASE_URL/chat/completions" \
+      -H "Authorization: Bearer $OPENAI_API_KEY" -H "Content-Type: application/json" \
+      -d '{"model":"<any real model id from step 1>",
+           "messages":[{"role":"user","content":"say ok"}],"max_tokens":4}'
+
+A response with a `choices` array means the whole path works.
+
+**Step 7 — tell me to restart.** You cannot load the new config into the session you are
+running in. A plain `opencode` from any shell and any directory is enough — the key is in
+the config, so there is no environment to set up first. That is the point of writing it
+there.
+
+Then tell me: `/models`, search the provider's display name, pick a model — and list the
+two or three worth picking, largest context first. Don't claim the models are usable
+until I've restarted.
+
+**If I ask for the stricter setup instead** — no token on disk outside `~/.grid/` — the
+change is `"apiKey": "{env:OPENAI_API_KEY}"`, and then opencode must be launched as
+`eval "$(grid info --env)" && opencode` every time, because an unset variable resolves to
+an empty string and the grid rejects the empty bearer. Offer me
+`alias oc='eval "$(grid info --env)" && opencode'` if I go that way.
+
+
+## B. Contribute this machine to the grid
+
+Goal: this computer serves a model that everyone on the grid can call. Three steps, in
+order. Two are slow — say so before you start, and don't run them behind my back.
+
+**Step 1 — the engine, once per machine.**
+
+    grid engine install llama.cpp --from-source
+
+`--from-source` builds it (Metal on macOS, CUDA on Linux NVIDIA). It takes a while.
+Without the flag it downloads a prebuilt release, which is faster — mention both and
+use `--from-source` unless I say otherwise. Skip this entirely if `grid engine status`
+shows llama.cpp already installed.
+
+**Step 2 — the weights.**
+
+    grid catalog                                    # what's pullable, if I didn't name one
+    grid pull unsloth/Qwen3.8-27B-GGUF:Qwen3.8-27B-UD-Q4_K_XL.gguf
+
+`grid pull` takes a catalog label or `<hf-repo>:<file>`. This is a multi-gigabyte
+download — tell me the size before starting it. What it saves is the **filename**
+(`Qwen3.8-27B-UD-Q4_K_XL.gguf`), and that filename is what step 3 serves.
+
+**Step 3 — join.**
+
+    grid join --serve Qwen3.8-27B-UD-Q4_K_XL.gguf \
+      --advertise-as Qwen3.8-27B \
+      --name omarchy-is-awesome \
+      --max-concurrency 2 \
+      --ctx-size 128000
+
+What each flag means, because two of them are easy to confuse:
+
+  - `--serve` is the **file** step 2 saved, exactly as saved.
+  - `--advertise-as` is the **model name others see and call**. Without it the grid
+    advertises the raw filename, which nobody wants to type.
+  - `--name` is the **machine's** display name on the grid — a different thing from
+    `--advertise-as`. One names the model, the other names the computer.
+  - `--max-concurrency` is how many requests this box takes at once. Keep it low (2) on
+    a shared machine; higher on a dedicated GPU box.
+  - `--ctx-size` pins the context window. Left off, the engine decides.
+
+Ask me before picking values I haven't given you — they depend on hardware you can check
+with `grid device-info`.
+
+`grid join` returns as soon as the engine is up; it keeps serving in the background.
+**Verify with `grid stats --verbose`** and find the machine by the `--name` you gave it.
+Don't report success on the join command's exit code alone.
+
+To stop serving: `grid leave` (add `--all` for every engine on this box).
+
+
+## C. Show me what the grid is doing
+
+None of these need env vars or an eval. Read-only, safe to run any time.
+
+    grid stats --verbose     # uptime, memory pool, and a card per machine
+    grid usage --by member   # who spent the tokens
+    grid usage --by model    # which models did the work
+    grid usage --by engine   # which machines did the work
+
+`grid stats` without `--verbose` is just the summary block. Every one takes `--json` if
+you need to compute on the output rather than show it to me.
+
+Two things to get right when you summarise these for me:
+
+  - **A `0` and a `—` are different answers.** `0` means measured and idle; `—` means
+    nothing measured it at all. Don't collapse them, and don't report a `—` as zero.
+  - **`input` excludes cached tokens.** `input`, `cached` and `output` are three
+    non-overlapping figures that add up to the total. Don't add input and cached
+    together — that double-counts the cached prefill.
+
+Pick the split that answers what I asked and show me that one, rather than dumping all
+four commands.
+
+
+## When something fails
+
+Say what failed and stop — don't paper over it or retry blindly.
+
+  - **`Unauthorized: {"detail":"Missing or invalid Authorization header"}` inside
+    opencode** → the bearer reaching the relay is empty or wrong. Check in this order:
+      1. A project `./opencode.json` redefining the provider and overriding the global
+         one — the most likely cause, and step 4 says to remove it.
+      2. An `apiKey` still reading `{env:OPENAI_API_KEY}` somewhere: an unset variable
+         becomes an empty string, and the relay rejects an empty bearer exactly as it
+         rejects a missing one. Replace it with the literal token.
+      3. A stale token, if the config predates my last `grid login`. Re-run step 2 and
+         update the value.
+  - **401 / 403 on curl** → the per-grid token expired. The fix is `eval "$(grid info
+    --env)"` again in the same command, not a config change.
+  - **"You're not signed in"** → mine to fix: `grid login --no-browser`.
+  - **"isn't up; run `grid start <name>`"** → the grid is stopped. Tell me; ask before
+    starting it, since it affects everyone on the grid, not just me.
+  - **404 on a model** → wrong id, or nothing is currently serving it. `grid stats
+    --verbose` shows what each machine actually has loaded.
+  - **`grid: command not found`** → the CLI isn't on PATH in your shell. Tell me rather
+    than hunting for the binary.
+
+
+## Worth knowing
+
+Because the provider id comes from the grid's own name, running section A again after
+`grid use <other>` **adds** a second provider rather than overwriting the first — so I can
+keep two grids side by side and pick between them as `<grid-a>/<model>` or
+`<grid-b>/<model>`. Do re-run it after switching: the new grid has its own `baseURL`, its
+own models, and its own key.
+
+The API key is per-grid and expires. When opencode starts failing with 401, that's the
+key, not the config.
+
+**The token in the global config goes stale eventually** — a grid access token is good
+for about a year, and `grid login` mints a new one. When opencode starts returning
+`Unauthorized` and nothing else changed, that is the cause: re-run section A, which
+rewrites the value. Nothing else needs touching.
+
+**One command stays mine.** `grid login` needs a browser and a code I type. Everything
+else in this file — `grid use` included — is yours to run when I ask for it.
