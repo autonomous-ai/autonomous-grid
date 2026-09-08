@@ -1,4 +1,4 @@
-"""grid-apis' POST routes, read out of its source — the one derivation, for every pin here.
+"""grid-apis' routes, read out of its source — the one derivation, for every pin here.
 
 Two lockstep suites need the same answer to the same question: *what whole paths does the control
 plane actually serve?* The path is a concatenation — `APIRouter(prefix="/v1/grid")` in one place, a
@@ -21,6 +21,13 @@ from tests.grid_src_repo import grid_apis_root
 
 HANDLER = "grid_networks/handler.py"
 ROUTER = "router"
+
+#: The decorator names `APIRouter` hangs a route off. A method outside this set is a typo, never an
+#: answer — see `decorated_paths`. FastAPI also exposes `api_route(path, methods=[…])`; grid-apis
+#: uses none, and the day it does this reader must be taught about it rather than quietly missing
+#: those routes, which is why the vocabulary is written down instead of inferred.
+HTTP_METHODS = frozenset(
+    {"get", "post", "put", "patch", "delete", "head", "options", "trace"})
 
 SKIP_NO_APIS = "the grid-apis worktree is not beside this one; the lockstep cannot be checked here"
 
@@ -73,8 +80,17 @@ def router_prefix(tree: ast.Module) -> str:
         f"renamed or moved, so teach this check where it went rather than deleting it")
 
 
-def posted_paths(tree: ast.Module) -> list[str]:
-    """Every literal path grid-apis hangs a POST handler off, decorator by decorator.
+def _reject_unknown_method(method: str) -> None:
+    """One membership check, so the two readers cannot disagree about what a method is."""
+    if method not in HTTP_METHODS:
+        raise AssertionError(
+            f"{method!r} is not a route decorator grid-apis' router carries — the known ones are "
+            f"{sorted(HTTP_METHODS)}, all lowercase. Reading it would answer an empty list, which "
+            f"is spelled the same as a route that was renamed")
+
+
+def decorated_paths(tree: ast.Module, method: str) -> list[str]:
+    """Every literal path grid-apis hangs a handler for `method` off, decorator by decorator.
 
     Matched on the decorator rather than the handler name so that renaming a handler — an ordinary
     refactor that moves no route — does not read as drift.
@@ -82,7 +98,14 @@ def posted_paths(tree: ast.Module) -> list[str]:
     ⚠️ BOTH function kinds: `async def` is an `ast.AsyncFunctionDef` and is NOT a subclass of
     `ast.FunctionDef`, and that module already spells many of its routes that way. Matching only the
     sync kind would make converting one handler look like a deleted route.
+
+    ⚠️ **A method this reader does not know RAISES rather than answering `[]`.** `"POST"` is the
+    natural spelling everywhere else in this repository, it matches no decorator, and an empty list
+    is spelled exactly like *the route was renamed* — so a pin fed one either reports drift that is
+    not there or, worse, counts nothing and reports an agreement it never checked. Both readings
+    are wrong and neither is loud, which is why the vocabulary is a set rather than a comment.
     """
+    _reject_unknown_method(method)
     return [
         decorator.args[0].value
         for node in tree.body
@@ -90,7 +113,7 @@ def posted_paths(tree: ast.Module) -> list[str]:
         for decorator in node.decorator_list
         if isinstance(decorator, ast.Call)
         and isinstance(decorator.func, ast.Attribute)
-        and decorator.func.attr == "post"
+        and decorator.func.attr == method
         and getattr(decorator.func.value, "id", None) == ROUTER
         and decorator.args
         and isinstance(decorator.args[0], ast.Constant)
@@ -98,9 +121,31 @@ def posted_paths(tree: ast.Module) -> list[str]:
     ]
 
 
-def served_post_paths() -> list[str]:
-    """The whole paths grid-apis answers POSTs on — prefix and decorator, joined the way it serves
-    them. Skips only when grid-apis is not beside this worktree."""
+def posted_paths(tree: ast.Module) -> list[str]:
+    """`decorated_paths(tree, "post")` — the POST-only spelling this module shipped with.
+
+    Kept rather than replaced: it is part of this module's existing surface, and taking a public
+    name out of shared test infrastructure is a different change from adding one to it.
+    """
+    return decorated_paths(tree, "post")
+
+
+def served_paths(method: str) -> list[str]:
+    """The whole paths grid-apis answers `method` on — prefix and decorator, joined the way it
+    serves them. Skips only when grid-apis is not beside this worktree.
+
+    ⚠️ **The method is checked BEFORE `handler_tree()`, and the order is the point.** `handler_tree`
+    skips when the sibling worktree is absent, which is what happens in CI — so validating after it
+    would report a typo'd method as *"grid-apis is not beside this one"* everywhere the typo could
+    still be caught cheaply. A programming error must not be reachable only on a developer's laptop.
+    """
+    _reject_unknown_method(method)
     tree = handler_tree()
     prefix = router_prefix(tree)
-    return [prefix + path for path in posted_paths(tree)]
+    return [prefix + path for path in decorated_paths(tree, method)]
+
+
+def served_post_paths() -> list[str]:
+    """`served_paths("post")` — the accessor `test_session_revoke_lockstep.py` and
+    `test_harness_login_lockstep.py` already call, kept by that name so neither had to change."""
+    return served_paths("post")
