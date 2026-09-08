@@ -44,11 +44,44 @@ def ensure_usable(rec: dict[str, Any], label: str, token: str, base: str) -> str
     return _prove(rec, label, token, base, refreshed=refreshed, expiry_note=expiry_note)
 
 
+def refresh_if_stale(
+    rec: dict[str, Any],
+    label: str,
+    token: str,
+    *,
+    margin_seconds: int = LAUNCH_EXPIRY_MARGIN_SECONDS,
+    proceeding: str = "using it anyway",
+) -> str:
+    """The offline half of :func:`ensure_usable`, for a caller that has nothing to probe.
+
+    `grid launch` can afford to be lenient about a stale token because a relay round-trip is one
+    line away and authoritative. A caller that only *prints* the credential — `grid mcp config`,
+    whose server is the control plane's rather than the grid's — has no such second opinion, and a
+    different deadline to protect: what it hands over is pasted into a file and left there, so the
+    margin is its own to choose.
+
+    Returns the token to use, having persisted a renewed one; raises ``SystemExit`` only when the
+    token has already expired **and** the exchange failed, which is the one state no caller can make
+    anything of.
+    """
+    token, _refreshed, _expiry_note = _repair_if_stale(
+        rec, label, token, margin=margin_seconds, proceeding=proceeding
+    )
+    return token
+
+
 # ---------------------------------------------------------------------------
 # Layer 1 + 2: what the token says about itself, and the repair
 # ---------------------------------------------------------------------------
 
-def _repair_if_stale(rec: dict[str, Any], label: str, token: str) -> tuple[str, bool, str | None]:
+def _repair_if_stale(
+    rec: dict[str, Any],
+    label: str,
+    token: str,
+    *,
+    margin: int = LAUNCH_EXPIRY_MARGIN_SECONDS,
+    proceeding: str = "launching anyway",
+) -> tuple[str, bool, str | None]:
     """``(token, refreshed, expiry_note)`` after the offline check has had its say.
 
     ``expiry_note`` is what we learned and could not act on — carried forward so that if the probe
@@ -62,7 +95,7 @@ def _repair_if_stale(rec: dict[str, Any], label: str, token: str) -> tuple[str, 
     """
     exp = _token_expiry(token)
     now = time.time()
-    if exp is None or exp - now > LAUNCH_EXPIRY_MARGIN_SECONDS:
+    if exp is None or exp - now > margin:
         return token, False, None
 
     phrase = _expiry_phrase(exp, now)
@@ -78,9 +111,12 @@ def _repair_if_stale(rec: dict[str, Any], label: str, token: str) -> tuple[str, 
         fresh = _refresh(rec, label)
     except _RefreshFailed as failure:
         if not expired:
-            # It still works. A control-plane hiccup must not cost a launch that would have succeeded.
+            # It still works. A control-plane hiccup must not cost a launch — or a config — that
+            # would have succeeded. ⚠️ `proceeding` is the caller's word because this sentence is
+            # shared: "launching anyway" printed by `grid mcp config`, which launches nothing, is a
+            # message about a command the user did not run.
             _warn(f"couldn't renew grid {label}'s access token ({failure.reason}); it {phrase}, "
-                  f"launching anyway.")
+                  f"{proceeding}.")
             return token, False, phrase
         raise SystemExit(failure.refusal(label, phrase)) from None
     _note(f"Refreshed grid {label}'s access token (it {phrase}).")

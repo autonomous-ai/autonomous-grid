@@ -142,9 +142,34 @@ listener, not read off vendor documentation:
 
 | harness | where the header goes |
 |---|---|
-| Claude Code | `claude mcp add --transport http … --header "Authorization: Bearer <tok>"` |
+| Claude Code | `claude mcp add --transport http … --header "Authorization: Bearer <tok>"` → `mcpServers.<n>` in `~/.claude.json` |
 | Codex | `http_headers = { Authorization = "Bearer <tok>" }` under `[mcp_servers.<n>]` |
-| opencode | `"headers": {"Authorization": "Bearer <tok>"}`, `type: "remote"` |
+| GitHub Copilot CLI | `copilot mcp add --transport http --header "Authorization: Bearer <tok>" <n> <url>` → `mcpServers.<n>` in `~/.copilot/mcp-config.json` |
+| opencode | `"headers": {"Authorization": "Bearer <tok>"}`, `type: "remote"`; its `mcp add --header` takes ⚠️ `KEY=VALUE`, not `Key: value` |
+| Hermes | `headers: {Authorization: "Bearer <tok>"}` under `mcp_servers.<n>` in `~/.hermes/config.yaml` |
+| pi | ⚠️ **nowhere — pi ships no MCP client at all**, by design ("No MCP." in its own README) |
+
+Extended 2026-09-08 to the three harnesses above, the same way and to the same standard: each binary
+run against a throwaway home so the file *it* writes could be read back, then a header-logging
+listener with a positive control proving what actually goes on the wire (Copilot 1.0.83, opencode
+1.18.29, Hermes 0.21.1 all send the literal header; Codex 0.153.4 still has no `--header`). The
+Hermes and opencode configs were then pointed at the **live** control plane with a real per-grid
+token: both connect and discover both tools.
+
+⚠️ **The server name keeps its hyphen everywhere, Codex included.** `codex mcp add` writes
+`[mcp_servers.grid-web]` itself, so a hyphen is a legal TOML bare key here; spelling it `grid_web`
+for Codex alone — which this command did until it was measured — renames the tools for that one
+harness while every other harness sees `grid-web`.
+
+⚠️ **Hermes's block is YAML, so its indentation is part of the document.** TOML and JSON ignore
+leading whitespace and had been printed indented for readability; a `mcp_servers:` printed the same
+way is a block that cannot be pasted. File blocks now start at column zero and only shell commands
+are indented.
+
+**pi is a listed target that refuses.** Leaving it out of `--harness`'s choices would answer
+argparse's "invalid choice", which reads as an oversight in this command rather than a fact about
+pi; and the refusal is decided **before** a grid is resolved, so a signed-out machine is told about
+pi rather than told to run `grid login` for a config that would not exist either way.
 
 ⚠️ **Codex's `mcp add` flags hide the field that works.** It offers only `--bearer-token-env-var`
 and the OAuth flags; there is no `--header`. `http_headers` is nonetheless a first-class field —
@@ -215,3 +240,39 @@ a minute, and Exa's `/search` is capped at ten queries per second across the who
 client in a retry loop makes every other user's search fail. The relay was absorbing that shape.
 Per-process and therefore `limit × workers`, which is right for a stuck client and, as
 `ratelimit.py` says of itself, would not be right as an abuse control.
+
+### D-h — `grid mcp config` renews the credential it is about to print, and only then
+
+The command used to be pure local work: read the store, print. That made D-c's 401 body — *"This
+grid credential was refused. Run `grid mcp config <grid>` to get a fresh one"* — untrue in the case
+it exists for. A refused credential is usually an expired one, and re-running a command that reprints
+the same expired token from the same file is a loop, not a remedy.
+
+So the offline half of ADR 0029's credential check is reused here: read `exp` out of the token, and
+if it is inside the margin exchange the stored refresh credential for a fresh 365-day one, persisting
+**both** halves (⚠️ the control plane rotates the refresh token on every exchange; storing the access
+token alone destroys this machine's ability to renew anything again — silently, and not until some
+later day). One implementation, one place, in `cli/grid_credential.py`.
+
+**The margin is 30 days, not the launch path's 24 hours.** They protect different deadlines. A launch
+protects a work session starting now, so a day of headroom is generous; what this command prints is
+pasted into a config file and left there for months, and a token with 25 hours left passes a one-day
+margin and hands somebody a harness that dies tomorrow. Thirty days is 8% of the token's life, so it
+cannot cause a renewal that would not have happened within the month anyway.
+
+⚠️ **This is the one place that must be LESS forgiving than `grid launch`.** That command warns about
+an unrepairable token and lets its relay probe decide, because the probe is authoritative and a wrong
+local clock must not cost a launch that would have worked. There is no probe here — the web-tools
+server is the control plane's, not the grid's — so an expired token with no refresh credential is
+**refused** rather than printed: the alternative writes a certainly-dead credential into a harness's
+config file, where the 401 that follows tells the user to re-run the command that gave it to them.
+A renewal that *fails* on a token which still works stays a warning on stderr, for the opposite
+reason: nothing was learned, and a control-plane hiccup must not cost somebody a config.
+
+**It reaches the network only when it is about to print the credential.** With no `--harness` the
+command lists the harnesses and prints no token, so it needs no fresh one — and an arg-less
+invocation must not rotate this machine's refresh credential to draw a menu. That listing view also
+exists so the command people run first, often on a shared screen, does not put a live 365-day
+credential on it to answer a question about which harnesses are supported. `grid mcp token`, which
+existed only to print that credential with nothing else around it, is **removed**; `--json` carries
+the same three values in a shape a script can read, and one command fewer can drift from the other.

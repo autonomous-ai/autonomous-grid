@@ -877,13 +877,14 @@ Step by step: [Claude Code quickstart](./claude-code-quickstart.md) ·
 ## Web tools over MCP
 
 ```
-grid mcp config [grid]     # print the config each harness needs (prints your access token)
-grid mcp token  [grid]     # print just the access token, for a script that builds its own config
+grid mcp config [grid]                 # list the harnesses; prints NO token
+grid mcp config --harness <name> [grid]  # print that harness's config (prints your access token)
+grid mcp config --json [grid]          # {server, url, authorization} for a script
 ```
 
-`grid mcp config` points a **coding agent's harness** — Claude Code, Codex, opencode — at your grid's
-web search and page reading. It prints a configuration; it changes nothing on your machine and makes
-no network call.
+`grid mcp config` points a **coding agent's harness** at your grid's web search and page reading:
+`claude`, `codex`, `copilot`, `hermes`, `opencode`. With no `--harness` it lists them and the server
+URL and prints **no credential** — the token appears only when you name the harness that needs it.
 
 The server itself runs on the control plane, not on your grid's relay, so it keeps answering whether
 or not the grid is up (ADR 0041). What the harness gets is two tools:
@@ -897,27 +898,42 @@ Both are free to you and bounded by your **account's** daily allowance, not the 
 several grids does not give you several allowances, and it is spent by whichever of your machines
 uses it.
 
-Each harness spells the credential differently, so the command prints all three:
+Each harness spells the credential differently, and every spelling below was measured against the
+binary — run against a throwaway home, the file it wrote read back, and the header watched arriving
+at a listener — never taken from vendor documentation:
 
-- **Claude Code** takes a command with `--header`.
-- **Codex** takes a config block. It has **no `--header` flag** on `codex mcp add`, so the block goes
-  into `~/.codex/config.toml` by hand; `http_headers` is what it honours.
-- **opencode** takes a `headers` object in `opencode.json`.
+| harness | what the command prints |
+|---|---|
+| **Claude Code** | `claude mcp add … --header 'Authorization: …'`, plus the `mcpServers` block it writes into `~/.claude.json` |
+| **Codex** | a `[mcp_servers.grid-web]` block for `~/.codex/config.toml`. It has **no `--header` flag**, so there is no command to print; `http_headers` is what it honours |
+| **GitHub Copilot CLI** | `copilot mcp add --transport http --header 'Authorization: …'`, plus the `~/.copilot/mcp-config.json` block |
+| **opencode** | `opencode mcp add … --header 'Authorization=Bearer …'` — ⚠️ `KEY=VALUE`, not `Key: value` — plus the `~/.config/opencode/opencode.json` block |
+| **Hermes** | the `mcp_servers:` block for `~/.hermes/config.yaml`, plus `hermes mcp add … --auth header`, which asks for the token instead of putting it in your shell history |
+| **pi** | nothing — pi ships no MCP client, by design. The command says so and exits non-zero rather than pretending there is a config |
 
-> `grid mcp config` prints a live credential that lasts a year. Anyone who has it can search the web
-> on your account's allowance. Treat the output like a password, and re-run the command after
-> `grid login` if a harness starts reporting that the server refuses it.
+**The token is renewed before it is printed.** If your grid's access token expires within a month —
+or has expired already — the command exchanges the stored refresh credential for a fresh 365-day one,
+says so on stderr, and prints the new token. So this is the command to run when a harness starts
+reporting that the server refuses it, which is what the server's own 401 tells you to do. It reaches
+the control plane only when it is about to print a credential: the plain listing view is local work.
+A renewal that fails on a token which still works is a warning, not a refusal; an *expired* token
+with no refresh credential stored is refused, because pasting it into a harness config would 401
+forever.
+
+> `grid mcp config --harness …` prints a live credential that lasts a year. Anyone who has it can
+> search the web on your account's allowance. Treat the output like a password.
 
 Web tools need a hosted grid: in local mode the command refuses, because the server it points at is
 the control plane's and a local grid has no account behind it.
 
 > **Codex cancels MCP tool calls under its read-only sandbox, and blames nobody for it.** Run
-> non-interactively as `codex exec …`, a search prints `mcp: grid_web/web_search (failed)` followed
+> non-interactively as `codex exec …`, a search prints `mcp: <server>/web_search (failed)` followed
 > by `user cancelled MCP tool call` — which reads like the grid refused it. It did not: the call is
 > stopped inside Codex and never reaches the server, so nothing shows up in your allowance either.
 > That is Codex's own approval policy (`approval: never` with `sandbox: read-only` denies anything
 > that would need approving), not a grid problem. Interactive `codex` asks you instead; a scripted
-> run needs a policy that permits the call. Measured on Codex 0.144.6.
+> run needs a policy that permits the call. Measured on Codex 0.144.6, when this command spelled the
+> server `grid_web`; it now prints `grid-web`, which is the name that appears in that line.
 
 See [ADR 0041](./adr/0041-a-coding-agent-reaches-the-web-through-the-control-plane.md).
 

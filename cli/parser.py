@@ -37,7 +37,7 @@ from .grid import (
 )
 from .credential import cmd_credential
 from .launch import cmd_launch
-from .mcp_config import cmd_mcp_config, cmd_mcp_token
+from .mcp_config import HARNESS_CHOICES, cmd_mcp_config
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from . import project_arg
@@ -1633,14 +1633,15 @@ def _add_launch(sub) -> None:
 
 
 def _add_mcp(sub) -> None:
-    """`grid mcp config|token` — point a coding agent's harness at this grid's web tools (ADR 0041).
+    """`grid mcp config` — point a coding agent's harness at this grid's web tools (ADR 0041).
 
     Nested subcommands rather than one positional with `choices=`: `grid mcp myteam` would otherwise
-    be an "invalid choice" error about a word the user meant as a grid name.
+    be an "invalid choice" error about a word the user meant as a grid name. The harness is a
+    **flag** for the same reason — `grid mcp config myteam` has to keep naming a grid.
     """
     mcp = sub.add_parser(
         "mcp",
-        help="Point Claude Code / Codex / opencode at this grid's web tools",
+        help="Point a coding agent's harness at this grid's web tools",
         description=(
             "Print the MCP configuration a coding agent's harness needs to search and read the\n"
             "web through your grid. The server runs on the control plane, so it keeps working\n"
@@ -1649,16 +1650,19 @@ def _add_mcp(sub) -> None:
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
 
     config = mcp_sub.add_parser(
-        "config", help="Print the config for each harness (prints your grid's access token)")
+        "config", help="Print the config one harness needs (prints your grid's access token)")
     config.add_argument("grid", nargs="?", default=None,
                         help="Grid name or id (ag-...). Omit for the active grid.")
+    # Mutually exclusive: one asks for a harness's own spelling, the other for the values with no
+    # spelling at all. `--json` is also declared here rather than left to the global `grid --json`,
+    # like every other subcommand's — a subparser's default overrides the parent's value anyway, so
+    # the global spelling would silently stop working the moment this flag existed.
+    target = config.add_mutually_exclusive_group()
+    target.add_argument("--harness", choices=HARNESS_CHOICES,
+                        help="Print the config for one harness. Omit to list them.")
+    target.add_argument("--json", action="store_true",
+                        help="Emit machine-readable JSON: the server name, URL and header.")
     config.set_defaults(handler=cmd_mcp_config)
-
-    token = mcp_sub.add_parser(
-        "token", help="Print just the access token, for a script that builds its own config")
-    token.add_argument("grid", nargs="?", default=None,
-                       help="Grid name or id (ag-...). Omit for the active grid.")
-    token.set_defaults(handler=cmd_mcp_token)
 
 
 def _add_train(sub) -> None:
