@@ -261,6 +261,7 @@ def create_app(
     *,
     grid_id: str,
     grid_name: str,
+    tls_ca_pem: str = "",
     allocator_state_path: Path | None = None,
     allocator_control_token: str = "",
     allocator_interval_seconds: float = 15.0,
@@ -308,6 +309,9 @@ def create_app(
     app.state.nodes = {}
     app.state.grid_id = grid_id
     app.state.grid_name = grid_name
+    # The CA's public half, served so a first-time peer can trust this grid without being told a
+    # file path (see GET /grid/ca). A CA carries no authority — the allocator token does.
+    app.state.tls_ca_pem = tls_ca_pem
     allocator, warning, quarantine_path = _load_allocator_controller(
         allocator_state_path
     )
@@ -361,6 +365,13 @@ def create_app(
     @app.get("/grid/info")
     async def grid_info():
         return _grid_info(app)
+
+    @app.get("/grid/ca")
+    async def grid_ca():
+        ca_pem = str(getattr(app.state, "tls_ca_pem", "") or "")
+        if not ca_pem:
+            raise HTTPException(status_code=404, detail="this grid does not serve a TLS CA")
+        return Response(content=ca_pem, media_type="application/x-pem-file")
 
     @app.post("/nodes")
     async def create_node(req: NodeCreateRequest):

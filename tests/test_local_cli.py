@@ -34,6 +34,7 @@ from local import config
 from shared import paths
 from shared import state
 from local import runtime
+from remote import credentials
 from shared.agent import codex_installer
 from shared.agent import installer as agent_installer
 from shared.engine import comfyui, installer, launcher
@@ -954,6 +955,154 @@ def test_catalog_without_api_unchanged(monkeypatch, tmp_path, capsys):
     assert rc == 0
     assert "Grid can pull:" in out
     assert "openai:" not in out
+
+
+def _install_fake_catalog_http(monkeypatch, payload, status=200, token="tok-123"):
+    """Stubs the catalog round-trip: httpx.post, the control-plane URL, the saved session
+    token, and the device probe. Returns the dict capturing the single call's kwargs."""
+    calls: dict = {}
+
+    class _Response:
+        status_code = status
+        text = json.dumps(payload) if status < 400 else "boom"
+
+        def __init__(self, served):
+            self._served = served
+
+        def json(self):
+            return self._served
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.update(url=url, json=json, headers=headers)
+        return _Response(payload)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(credentials, "api_url", lambda explicit=None: "https://api.test")
+    monkeypatch.setattr(
+        credentials,
+        "load_credentials",
+        lambda: ({"session_token": token} if token else {}),
+    )
+    monkeypatch.setattr(
+        "shared.system.device_info.collect_device_info",
+        lambda: {"device_class": "apple-silicon", "usable_bytes": 12 << 30, "backend": "metal"},
+    )
+    return calls
+
+
+_BROWSE_PAYLOAD = {
+    "mode": "browse",
+    "models": [
+        {
+            "repo_id": "unsloth/Big-9B-GGUF",
+            "params_b": 9.0,
+            "task": "text-generation",
+            "runnable": True,
+            "fit": {"version": "Q4_K_XL", "size": 5_966_000_000, "est_tok_s": 28.4},
+            "versions": [
+                {"version": "BF16", "size_bytes": 17_920_000_000,
+                 "pull_spec": "unsloth/Big-9B-GGUF:Qwen-BF16.gguf"},
+                {"version": "Q4_K_XL", "size_bytes": 5_966_000_000,
+                 "pull_spec": "unsloth/Big-9B-GGUF:Qwen-Q4_K_XL.gguf"},
+            ],
+        },
+        {
+            "repo_id": "bigorg/Huge-70B-GGUF",
+            "params_b": 70.0,
+            "task": "text-generation",
+            "runnable": False,
+            "versions": [
+                {"version": "Q4_K_M", "size_bytes": 40_000_000_000,
+                 "pull_spec": "bigorg/Huge-70B-GGUF:Huge-Q4_K_M.gguf"}
+            ],
+        },
+    ],
+    "pagination": {"page": 1, "page_size": 10, "total": 299, "total_pages": 30},
+    "runnable_total": 50,
+}
+
+
+def _catalog_ns(**over):
+    ns = dict(api=None, json=False)
+    ns.update(over)
+    return argparse.Namespace(**ns)
+
+
+def test_catalog_sends_device_and_prints_every_quant_version(monkeypatch, capsys):
+    calls = _install_fake_catalog_http(monkeypatch, _BROWSE_PAYLOAD)
+
+    rc = cli.cmd_catalog(_catalog_ns())
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    # Both quantized versions print, each with the exact pull spec the service named.
+    assert "unsloth/Big-9B-GGUF:Qwen-BF16.gguf" in out
+    assert "unsloth/Big-9B-GGUF:Qwen-Q4_K_XL.gguf" in out
+    assert "suggested" in out and "tok/s" not in out  # no speed estimate on our screens
+    assert "MODEL" in out and "SIZE" in out and "FIT" in out  # the column header
+    # Runnable-only: the oversized model is neither listed nor mentioned.
+    assert "Huge-70B" not in out and "too large" not in out
+    # A plain heading: no total count, no paging vocabulary anywhere.
+    assert "Popular models on the Grid:" in out
+    assert "50" not in out and "page" not in out.lower()
+    # The request: browse mode, the service's own device-gate fields, auth'd.
+    assert calls["url"] == "https://api.test/v1/grid/catalog"
+    assert calls["headers"]["Authorization"] == "Bearer tok-123"
+    body = calls["json"]
+    assert body["browse"] is True
+    assert body["device"] == {"device_class": "apple-silicon",
+                              "usable_bytes": 12 << 30, "backend": "metal"}
+    assert body["page_size"] == 50 and "page" not in body  # one fetch, no paging
+
+
+def test_catalog_json_is_the_service_payload_verbatim(monkeypatch, capsys):
+    _install_fake_catalog_http(monkeypatch, _BROWSE_PAYLOAD)
+
+    rc = cli.cmd_catalog(_catalog_ns(json=True))
+
+    assert rc == 0
+    # One contract with the app: every field, same names, no additions.
+    assert json.loads(capsys.readouterr().out) == _BROWSE_PAYLOAD
+
+
+
+def test_catalog_falls_back_to_shipped_table_when_service_fails(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _install_fake_catalog_http(monkeypatch, {"detail": "expired"}, status=401)
+
+    rc = cli.cmd_catalog(_catalog_ns())
+
+    captured = capsys.readouterr()
+    assert rc == 0  # a dead catalog service must leave the command usable
+    assert "HTTP 401" in captured.err and "shipped table" in captured.err
+    assert "Grid can pull:" in captured.out  # the old offline table, unchanged
+
+
+def test_catalog_offline_without_session(monkeypatch):
+    calls = _install_fake_catalog_http(monkeypatch, _BROWSE_PAYLOAD, token=None)
+
+    rc = cli.cmd_catalog(_catalog_ns())
+
+    assert rc == 0
+    assert calls == {}  # not even signed in: no network call at all
+
+
+def test_catalog_api_kind_never_touches_the_service(monkeypatch):
+    calls = _install_fake_catalog_http(monkeypatch, _BROWSE_PAYLOAD)
+
+    rc = cli.cmd_catalog(_catalog_ns(api="openai"))
+
+    assert rc == 0
+    assert calls == {}  # --api stays the shipped whitelist read
+
+
+def test_catalog_parser_flags():
+    args = cli.build_parser().parse_args(["catalog"])
+    assert args.handler is cli.cmd_catalog
+    assert args.api is None and args.json is False
+    for gone in ("--online", "--page", "--page-size"):
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(["catalog", gone])
 
 
 def test_api_whitelist_integrity():
@@ -3667,6 +3816,75 @@ def test_start_llm_serves_vision_when_a_projector_is_named(monkeypatch, tmp_path
     assert cmd[cmd.index("--mmproj") + 1] == str(projector)
 
 
+def test_run_engine_from_record_derives_parallel_from_max_concurrency(monkeypatch, tmp_path):
+    """`--max-concurrency 4` without `--parallel` must still launch llama.cpp with 4 slots.
+    The record carries max_concurrency=4 and parallel=None; the derived args must carry
+    parallel=4 through to start_llm."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = {}
+    monkeypatch.setattr(runtime, "detect_local_ip", lambda: "192.168.1.50")
+
+    def fake_start_llm(model, **kwargs):
+        calls["model"] = model
+        calls["kwargs"] = kwargs
+        return launcher.LlamaProcess(proc=FakeProc(), port=kwargs["port"], log=tmp_path / "llama.log")
+
+    monkeypatch.setattr(launcher, "is_port_in_use", lambda port: False)
+    monkeypatch.setattr(runtime, "advertised_address_works", lambda url, timeout=3.0: True)
+    monkeypatch.setattr(launcher, "assert_supported_build", lambda: None)
+    monkeypatch.setattr(launcher, "start_llm", fake_start_llm)
+    monkeypatch.setattr(launcher, "wait_for_models", lambda proc: calls.setdefault("waited", proc.port))
+    monkeypatch.setattr(launcher, "stop", lambda proc: calls.setdefault("stopped", proc.port))
+    monkeypatch.setattr(cli.provider, "_register_engine", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(
+        grid_id, "eng",
+        {
+            "engine_id": "eng", "node_id": "node-test", "grid_id": grid_id,
+            "models": ["Qwen3.5-2B-UD-IQ2_M.gguf"], "max_concurrency": 4, "parallel": None,
+        },
+    )
+    assert cli.provider.run_engine_from_record(grid_id, "eng") == 0
+    assert calls["kwargs"]["parallel"] == 4
+
+
+def test_run_engine_from_record_keeps_explicit_parallel(monkeypatch, tmp_path):
+    """An explicit parallel on the record wins over the derived value — the operator set it."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = {}
+    monkeypatch.setattr(runtime, "detect_local_ip", lambda: "192.168.1.50")
+
+    def fake_start_llm(model, **kwargs):
+        calls["kwargs"] = kwargs
+        return launcher.LlamaProcess(proc=FakeProc(), port=kwargs["port"], log=tmp_path / "llama.log")
+
+    monkeypatch.setattr(launcher, "is_port_in_use", lambda port: False)
+    monkeypatch.setattr(runtime, "advertised_address_works", lambda url, timeout=3.0: True)
+    monkeypatch.setattr(launcher, "assert_supported_build", lambda: None)
+    monkeypatch.setattr(launcher, "start_llm", fake_start_llm)
+    monkeypatch.setattr(launcher, "wait_for_models", lambda proc: None)
+    monkeypatch.setattr(launcher, "stop", lambda proc: None)
+    monkeypatch.setattr(cli.provider, "_register_engine", lambda url, node_id, payload: None)
+    monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(
+        grid_id, "eng",
+        {
+            "engine_id": "eng", "node_id": "node-test", "grid_id": grid_id,
+            "models": ["Qwen3.5-2B-UD-IQ2_M.gguf"], "max_concurrency": 4, "parallel": 2,
+        },
+    )
+    assert cli.provider.run_engine_from_record(grid_id, "eng") == 0
+    assert calls["kwargs"]["parallel"] == 2
+
+
 def test_run_engine_launches_local_llama_server_by_default(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     calls = {}
@@ -5006,7 +5224,7 @@ def test_join_help_marks_mode_scoped_flags():
 
 
 def test_positional_grid_help_present():
-    assert "Grid name or id" in _subcmd_help("up")
+    assert "Grid name or id" in _subcmd_help("start")
     assert "Grid name or id" in _subcmd_help("join")
 
 
@@ -5123,6 +5341,7 @@ def test_engine_ls_accepts_grid_and_json():
 
 def test_engine_ls_local_delegates_to_cmd_engines(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     seen = {}
 
     def fake_engines(args):
@@ -5153,37 +5372,39 @@ def test_looks_like_grid_id_detector():
     assert cli.grid._looks_like_grid_id("ag-team") is False  # no hex8 suffix → still a creatable name
 
 
-def test_up_rejects_unknown_grid_id_without_creating(monkeypatch, tmp_path):
+def test_start_rejects_unknown_grid_id_without_creating(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
-        cli.main(["up", "ag-home-deadbeef"])
+        cli.main(["start", "ag-home-deadbeef"])
     assert "grid ls" in str(exc.value)
     from local import config as local_config
     assert local_config.iter_grid_configs() == []  # nothing created, nothing spawned
 
 
-def test_up_creates_for_human_name(monkeypatch, tmp_path):
+def test_start_creates_for_human_name(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     monkeypatch.setattr(cli.grid.runtime, "start_grid", lambda cfg: None)
-    assert cli.main(["up", "workshop"]) == 0
+    assert cli.main(["start", "workshop"]) == 0
     from local import config as local_config
     assert any(c["name"] == "workshop" for c in local_config.iter_grid_configs())
 
 
-def test_up_starts_existing_grid_by_id(monkeypatch, tmp_path):
+def test_start_starts_existing_grid_by_id(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     cfg = runtime.init_grid_config(name="home", port=8090)
     monkeypatch.setattr(cli.grid.runtime, "start_grid", lambda cfg: None)
-    assert cli.main(["up", cfg["grid_id"]]) == 0  # found by id → guard skipped
+    assert cli.main(["start", cfg["grid_id"]]) == 0  # found by id → guard skipped
 
 
-def test_up_rejects_known_remote_grid_in_local_mode(monkeypatch, tmp_path):
+def test_start_rejects_known_remote_grid_in_local_mode(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
     state.set_mode("local")  # the remote grid is known via credentials, but we're in local mode
     from local import config as local_config
     for arg in ("team", "n1"):  # matched by name and by network_id
         with pytest.raises(SystemExit) as exc:
-            cli.main(["up", arg])
+            cli.main(["start", arg])
         assert "remote" in str(exc.value).lower()
     assert local_config.iter_grid_configs() == []  # nothing created
 
@@ -7187,13 +7408,72 @@ def test_scan_engine_children_reports_an_unreadable_table_as_none(monkeypatch):
 # Mode state kernel (shared/state.py)
 # ---------------------------------------------------------------------------
 
-def test_state_defaults_to_local_with_no_active_when_absent(monkeypatch, tmp_path):
+def _write_local_grid(home, grid_id="home"):
+    """The on-disk evidence of an existing local install: one grid's config."""
+    path = home / "grids" / grid_id / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"grid_id": grid_id, "name": grid_id}))
+    return path
+
+
+def test_state_defaults_to_remote_with_no_active_when_absent(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
 
-    assert state.get_mode() == "local"
+    assert state.get_mode() == "remote"
     assert state.get_active("local") is None
     assert state.get_active("remote") is None
     assert not state.state_path().exists()
+
+
+def test_state_defaults_to_local_when_local_grids_already_exist(monkeypatch, tmp_path):
+    """ADR 0001's invariant: an existing local user with no state file is untouched."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _write_local_grid(tmp_path)
+
+    assert state.get_mode() == "local"
+    assert not state.state_path().exists()  # derived, never written behind the user's back
+
+
+def test_state_default_ignores_a_grid_dir_with_no_config(monkeypatch, tmp_path):
+    """A bare directory is not a grid — only a ``config.json`` is the evidence."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    (tmp_path / "grids" / "leftover").mkdir(parents=True)
+
+    assert state.get_mode() == "remote"
+
+
+def test_state_default_keeps_local_when_the_grids_dir_is_unreadable(monkeypatch, tmp_path):
+    """Cannot tell ⇒ local: the reading that never takes a working grid out of sight."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+
+    class _Unreadable:
+        def glob(self, _pattern):
+            raise OSError("permission denied")
+
+    monkeypatch.setattr(state.paths, "grids_dir", lambda: _Unreadable())
+
+    assert state._has_local_grids() is True
+    assert state._default_mode() == "local"
+    assert state.get_mode() == "local"
+
+
+def test_set_active_does_not_flip_an_existing_local_user_to_remote(monkeypatch, tmp_path):
+    """``grid use <name>`` writes state.json; the mode it stamps must be the derived one."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _write_local_grid(tmp_path)
+
+    state.set_active("local", "home")
+
+    assert json.loads(state.state_path().read_text())["mode"] == "local"
+    assert state.get_mode() == "local"
+
+
+def test_set_active_stamps_remote_for_a_new_install(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+
+    state.set_active("remote", "team")
+
+    assert json.loads(state.state_path().read_text())["mode"] == "remote"
 
 
 def test_state_set_mode_persists_and_preserves_active(monkeypatch, tmp_path):
@@ -7247,9 +7527,9 @@ def test_state_recovers_from_malformed_file(monkeypatch, tmp_path):
     state.state_path().parent.mkdir(parents=True, exist_ok=True)
     state.state_path().write_text("{ this is not json")
 
-    assert state.get_mode() == "local"  # lenient: corrupt file => defaults
-    state.set_mode("remote")           # self-heals on next write
-    assert state.get_mode() == "remote"
+    assert state.get_mode() == "remote"  # lenient: corrupt file => defaults
+    state.set_mode("local")             # self-heals on next write
+    assert state.get_mode() == "local"
 
 
 # ---------------------------------------------------------------------------
@@ -7258,6 +7538,7 @@ def test_state_recovers_from_malformed_file(monkeypatch, tmp_path):
 
 def test_grid_mode_reads_and_persists(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _write_local_grid(tmp_path)  # start on the derived `local` so the switch below is a real one
 
     assert cli.cmd_mode(cli.build_parser().parse_args(["mode"])) == 0
     assert capsys.readouterr().out.strip() == "local"
@@ -7308,12 +7589,12 @@ def test_grid_use_rejects_unknown_grid_in_local(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_resolve_override_strips_flag_in_any_position():
-    assert dispatch.resolve_override(["--remote", "up"]) == ("remote", ["up"])
-    assert dispatch.resolve_override(["up", "--remote"]) == ("remote", ["up"])
+    assert dispatch.resolve_override(["--remote", "start"]) == ("remote", ["start"])
+    assert dispatch.resolve_override(["start", "--remote"]) == ("remote", ["start"])
     assert dispatch.resolve_override(["models", "--local", "home"]) == ("local", ["models", "home"])
-    assert dispatch.resolve_override(["up"]) == (None, ["up"])
+    assert dispatch.resolve_override(["start"]) == (None, ["start"])
     with pytest.raises(SystemExit):
-        dispatch.resolve_override(["--local", "--remote", "up"])
+        dispatch.resolve_override(["--local", "--remote", "start"])
 
 
 def test_remote_engines_models_require_session_when_signed_out(monkeypatch, tmp_path):
@@ -7334,39 +7615,39 @@ def test_remote_lifecycle_requires_session_when_signed_out(monkeypatch, tmp_path
     state.set_mode("remote")  # remote mode, but not signed in
 
     # The lifecycle verbs are no longer stubbed: they reach the auth gate, not the old stub.
-    for argv in (["up", "team"], ["down", "team"], ["info", "team"]):
+    for argv in (["start", "team"], ["stop", "team"], ["info", "team"]):
         with pytest.raises(SystemExit) as exc:
             cli.main(argv)
         assert "login" in str(exc.value).lower()
 
 
-def test_remote_up_create_rejects_missing_network_id(monkeypatch, tmp_path):
+def test_remote_start_create_rejects_missing_network_id(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path)
     # 200 OK but no network_id (API regression): a clean error, not false success + a later KeyError.
     _mock_lifecycle(monkeypatch, create={"name": "team", "network_type": "permissioned-public"})
     with pytest.raises(SystemExit) as exc:
-        cli.main(["up", "team"])
+        cli.main(["start", "team"])
     assert "no usable id" in str(exc.value).lower()
 
     from remote import credentials
     assert credentials.load_credentials()["networks"] == []  # nothing persisted
 
 
-def test_remote_down_rejects_unsafe_network_id(monkeypatch, tmp_path):
+def test_remote_stop_rejects_unsafe_network_id(monkeypatch, tmp_path):
     # A stored id that could re-target the request path is refused before any control-plane call.
     _seed_remote(monkeypatch, tmp_path, networks=[{"network_id": "n1/../admin", "name": "team"}])
     calls = _mock_lifecycle(monkeypatch, stop={"status": "stopped"})
     with pytest.raises(SystemExit):
-        cli.main(["down", "team"])
+        cli.main(["stop", "team"])
     assert "stop" not in calls  # rejected before reaching the network
 
 
-def test_remote_down_bare_stops_active_grid(monkeypatch, tmp_path, capsys):
+def test_remote_stop_bare_stops_active_grid(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}, {"network_id": "n2", "name": "lab"}],
                 active="lab")
     calls = _mock_lifecycle(monkeypatch, stop={"status": "stopped"})
-    assert cli.main(["down"]) == 0  # no name → the active grid
+    assert cli.main(["stop"]) == 0  # no name → the active grid
     assert calls.get("stop") == {"session": "sess-tok", "network_id": "n2"}
     assert "lab" in capsys.readouterr().out
 
@@ -11575,7 +11856,8 @@ def test_dispatch_runs_agnostic_command_in_remote(monkeypatch, tmp_path, capsys)
 
 
 def test_override_sets_remote_active_without_persisting_mode(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # persisted mode stays local
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # load-bearing: with a `remote` default this assertion could not fail
 
     assert cli.main(["--remote", "use", "team"]) == 0  # G1: --remote reaches cmd_use
     capsys.readouterr()
@@ -11586,6 +11868,7 @@ def test_override_sets_remote_active_without_persisting_mode(monkeypatch, tmp_pa
 
 def test_mode_query_ignores_override(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # load-bearing: with a `remote` default this assertion could not fail
 
     assert cli.main(["--remote", "mode"]) == 0
     assert capsys.readouterr().out.strip() == "local"  # prints persisted mode, not the override
@@ -11613,9 +11896,14 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
     is *not* sign-in registers its own and is covered by its own test instead, and one that answers
     local mode by switching rather than refusing (`login`) is driven through `--local` below.
     """
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     argvs = {
-        "login": ["login"],
+        # `login` is `dispatch.SELF_SWITCHING`: in plain local mode it no longer meets this gate at
+        # all — it signs in and moves the mode — so only an explicit `--local` still refuses. Driven
+        # without the flag this test runs the REAL device flow against the live control plane: CI
+        # fails it on the sign-in timeout, and on a developer's machine it can actually sign in.
+        "login": ["--local", "login"],
         "logout": ["logout"],
         "sync": ["sync"],
         "members": ["members", "list"],
@@ -11623,6 +11911,9 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
         "router": ["router", "status"],
         "task": ["task", "get", "T1"],
         "project": ["project", "list"],
+        # ADR 0041. Gated for the ordinary reason: the web-tools MCP server is the control plane's
+        # and the credential is a per-grid access token, so there is nothing here without an account.
+        "mcp": ["mcp", "config"],
     }
     # A reason must be None or real text. An empty one would be masked by the `or` in ``local_stub``
     # *and* skipped by the `is None` filter below — the one state that is invisible in both
@@ -11632,6 +11923,12 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
     defaulted = {c for c, reason in dispatch.REMOTE_ONLY.items() if reason is None}
     assert defaulted, "nothing takes the default reason any more: delete this lock, don't let it pass vacuously"
     assert defaulted <= set(argvs), f"no argv here for defaulted command(s): {defaulted - set(argvs)}"
+    # The lock above cannot see the difference between a gate that refused and a handler that ran, so
+    # it is stated separately: a self-switching command reaches its REAL handler without `--local`.
+    unflagged = sorted(c for c in dispatch.SELF_SWITCHING & defaulted if "--local" not in argvs[c])
+    assert not unflagged, (
+        f"self-switching command(s) {unflagged} must be driven with an explicit --local here, or "
+        "this test calls the real handler and reaches the live control plane")
 
     for command in sorted(defaulted):
         # A self-switching command reaches this gate only when someone names the mode: bare
@@ -11655,7 +11952,8 @@ def test_local_gate_prints_a_commands_own_reason_when_it_registers_one(monkeypat
     Messages dialect, is a later slice). The `grid mode remote` signpost lives in the fixed part of
     the sentence, so it must survive a custom reason.
     """
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     monkeypatch.setattr(dispatch, "REMOTE_ONLY", {**dispatch.REMOTE_ONLY, "price": "to reach Mars."})
 
     with pytest.raises(SystemExit) as exc:
@@ -11725,10 +12023,26 @@ def test_overview_remote_is_stub_without_network(monkeypatch, tmp_path, capsys):
     assert "grid login" in out  # accurate remote guidance, still no network call
     assert "grid chat" in out  # consume has shipped — overview points at it
     assert "later release" not in out  # the stale "chatting comes later" line is gone
+    assert "grid mode local" in out  # local mode keeps a signpost now that `remote` is the default
+
+
+def test_bare_grid_on_a_new_install_lands_in_remote_and_names_the_local_way_out(
+        monkeypatch, tmp_path, capsys):
+    """The screen a brand-new user sees. It must not be a dead end for someone who wants no account."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # no state file, no grids: a new install
+    monkeypatch.setattr(cli.grid, "_live_engines",
+                        lambda url: (_ for _ in ()).throw(AssertionError("no network on a bare grid")))
+
+    assert cli.main([]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "mode: remote"
+    assert "grid login" in out
+    assert "grid mode local" in out
 
 
 def test_overview_json_local_no_grids_has_stable_keys(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
 
     assert cli.main(["--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -11924,6 +12238,97 @@ def test_control_plane_poll_sends_device_code(monkeypatch, tmp_path):
     assert seen["body"] == {"device_code": "dc123"}
 
 
+def test_control_plane_harness_sign_in_posts_the_token_to_the_hand_off_route(monkeypatch, tmp_path):
+    """The hand-off's own request: the route PRD D-1 fixes, and the token in the BODY.
+
+    Not a header. The Autonomous account token is the credential being *traded in*, not one that
+    authenticates this call, and the control plane reads it off `HarnessAuthRequest.harness_token`
+    — `tests/test_harness_login_lockstep.py` pins both spellings against grid-apis' own source.
+    An `Authorization:` header here would additionally put a live account credential somewhere
+    proxies and access logs habitually keep.
+    """
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        seen["auth"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"session_token": "SESS", "user": {"email": "a@b.com"}})
+
+    _mock_control_plane(monkeypatch, handler)
+
+    assert control_plane.sign_in_with_harness_token("HT-secret")["session_token"] == "SESS"
+    assert (seen["method"], seen["path"]) == ("POST", "/v1/grid/auth/harness")
+    assert seen["body"] == {"harness_token": "HT-secret"}
+    assert seen["auth"] is None
+
+
+def test_control_plane_harness_sign_in_carries_the_status_of_a_refusal(monkeypatch, tmp_path):
+    """`cli.auth` decides what to say from `.status`, so the exchange has to carry one.
+
+    The 404 is the only status it branches on — an old control plane, which is a sentence about
+    deployment rather than about the credential — and it can only tell that from a 403 if the
+    status survives the raise.
+    """
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_control_plane(monkeypatch, lambda request: httpx.Response(404, text="Not Found"))
+
+    with pytest.raises(control_plane.ControlPlaneError) as exc:
+        control_plane.sign_in_with_harness_token("HT")
+    assert exc.value.status == 404
+
+
+def test_control_plane_harness_sign_in_takes_the_token_back_out_of_a_refusal(monkeypatch, tmp_path):
+    """This is the one route whose REQUEST BODY is a live credential, and refusals echo bodies.
+
+    `_raise` renders up to 400 bytes of the response into a message `cli.auth` prints verbatim on
+    stderr, and a validation refusal names the value it rejected — FastAPI's default 422 carries the
+    submitted one under `input`. So a token that comes back in a body must not go out on the screen,
+    in a module whose stated contract is that tokens are never printed or logged.
+
+    Not reachable through today's validators; guarded because it becomes reachable the first time
+    the far end puts a `max_length` on `harness_token`, which is a one-line change in another
+    repository that no test on either side would otherwise notice.
+    """
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_control_plane(monkeypatch, lambda request: httpx.Response(
+        422, json={"detail": [{"loc": ["body", "harness_token"], "msg": "too long",
+                               "input": "HT-secret"}]}))
+
+    with pytest.raises(control_plane.ControlPlaneError) as exc:
+        control_plane.sign_in_with_harness_token("HT-secret")
+
+    rendered = str(exc.value)
+    assert "HT-secret" not in rendered
+    assert "<redacted>" in rendered
+    assert exc.value.status == 422  # still classifiable — only the credential was taken out
+
+
+def test_control_plane_harness_sign_in_leaves_a_clean_refusal_alone(monkeypatch, tmp_path):
+    """The remedy sentences this seam really shows carry no token, so nothing verbatim is lost.
+
+    The positive control for the redaction above: without it, a scrubber that rewrote every message
+    — or one that had stopped matching anything at all — would look identical from that test.
+    """
+    from remote import control_plane
+
+    remedy = "Sign in to Autonomous with Google at least once, then try again."
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_control_plane(monkeypatch, lambda request: httpx.Response(403, json={"detail": remedy}))
+
+    with pytest.raises(control_plane.ControlPlaneError) as exc:
+        control_plane.sign_in_with_harness_token("HT-secret")
+
+    assert remedy in str(exc.value) and "<redacted>" not in str(exc.value)
+
+
 def test_control_plane_fetch_tokens_attaches_bearer_and_query(monkeypatch, tmp_path):
     from remote import control_plane
 
@@ -11937,7 +12342,7 @@ def test_control_plane_fetch_tokens_attaches_bearer_and_query(monkeypatch, tmp_p
 
     _mock_control_plane(monkeypatch, handler)
     nets = control_plane.fetch_tokens("sess-tok", "dev-1")
-    assert nets == [{"network_id": "n1", "name": "team"}]
+    assert nets.networks == [{"network_id": "n1", "name": "team"}]
     assert seen["auth"] == "Bearer sess-tok"
     assert seen["device_id"] == "dev-1"
 
@@ -11947,7 +12352,434 @@ def test_control_plane_fetch_tokens_defaults_missing_networks_to_empty(monkeypat
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, json={"networks": None}))
-    assert control_plane.fetch_tokens("sess", "dev-1") == []
+    assert control_plane.fetch_tokens("sess", "dev-1").networks == []
+
+
+# --- the OS token on the token fetch (ADR 0039 D-b, D-c, D-e) --------------------------------------
+# `os=` is the ONLY channel a machine has to say what it runs: the device-login start and poll calls
+# carry nothing about the machine, and the browser that approves a sign-in may be a different device
+# entirely. Asserted AT THE WIRE rather than on `os_grid.os_token`'s internals — what matters is what a
+# machine of a given system ends up sending, and the parameter is what the control plane gates on.
+
+
+def _fetch_tokens_query(monkeypatch, tmp_path, system, os_release=None):
+    """The query string `fetch_tokens` builds on a machine whose ``platform.system()`` is ``system``.
+
+    ``os_release`` is that machine's ``/etc/os-release``, or ``None`` for a machine that has none.
+
+    ⚠️ **Both are stubbed on every call, and the second is not optional decoration.** Since `omarchy`
+    landed (issue 04) a Linux machine's token is read off that file, so a test that left the real one
+    alone would be asking whatever host the suite runs on what the answer is — green on this Mac,
+    green on an Ubuntu runner, and quietly wrong the day somebody runs it on Omarchy. Pointing the
+    module at a path that does not exist is the deterministic *no distro signal* case, and it is what
+    keeps `("Linux", "linux")` a statement about the code rather than about the machine.
+    """
+    import platform
+
+    from remote import control_plane
+    from shared.system import os_grid
+
+    monkeypatch.setattr(platform, "system", lambda: system)
+    os_release_path = tmp_path / "os-release"
+    if os_release is not None:
+        os_release_path.write_text(os_release, encoding="utf-8")
+    monkeypatch.setattr(os_grid, "_OS_RELEASE", os_release_path)
+    seen = {}
+
+    def handler(request):
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"networks": []})
+
+    _mock_control_plane(monkeypatch, handler)
+    assert control_plane.fetch_tokens("sess-tok", "dev-1").networks == []
+    return seen["params"]
+
+
+@pytest.mark.parametrize(
+    "system,expected",
+    [("Darwin", "macos"), ("Linux", "linux")])
+def test_fetch_tokens_sends_the_os_token_of_the_machine_it_runs_on(
+    monkeypatch, tmp_path, system, expected
+):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(monkeypatch, tmp_path, system)
+    assert params["os"] == expected
+    assert params["device_id"] == "dev-1"  # the OS rides ALONGSIDE the device id, never instead of it
+
+
+@pytest.mark.parametrize("system", ["Windows", "FreeBSD", "Java", ""])
+def test_fetch_tokens_sends_no_os_parameter_when_the_system_resolves_to_nothing(
+    monkeypatch, tmp_path, system
+):
+    """ADR 0039 D-c: anything outside the closed set resolves to NOTHING, and the call still works.
+
+    Absent, never an empty string or a placeholder: the control plane's gate is an equality test
+    against a grid's own token, and `os=` sent empty would be one more value that has to be
+    recognised as "no claim" at the far end. The request itself must not fail — a machine with no OS
+    grid still has every other grid it belongs to.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(monkeypatch, tmp_path, system)
+    assert "os" not in params
+    assert params["device_id"] == "dev-1"
+
+
+# --- Omarchy is its own grid, and Arch is not it (ADR 0039 D-c, issue 04) --------------------------
+# The fourth token is the only one a machine cannot answer from `platform.system()`: Omarchy reports
+# `Linux` like every other distribution, so the signal is `ID=` in `/etc/os-release`, which its
+# `omarchy-settings` package writes and `cp -f`s over the file on every install and upgrade.
+#
+# ⚠️ **`ID=`, and NEVER `ID_LIKE=`.** Omarchy writes `ID=omarchy` AND `ID_LIKE=arch`, and every other
+# Arch derivative writes that same `ID_LIKE`. `shared/engine/installer._detect_distro` — the shape
+# ADR 0039 D-c pointed at — reads the two fields into ONE list and matches either, and copying that
+# here is the mis-sorting the closed set exists to prevent: EndeavourOS, CachyOS and Manjaro would
+# all land on the Omarchy grid. The tests below are written so that copying it fails.
+
+_OMARCHY_OS_RELEASE = (
+    'NAME="Omarchy"\n'
+    'PRETTY_NAME="Omarchy"\n'
+    "ID=omarchy\n"
+    "ID_LIKE=arch\n"
+    'HOME_URL="https://omarchy.org/"\n'
+)
+
+_ARCH_OS_RELEASE = 'NAME="Arch Linux"\nID=arch\nBUILD_ID=rolling\n'
+
+
+def test_fetch_tokens_sends_omarchy_from_a_machine_whose_os_release_says_so(monkeypatch, tmp_path):
+    """The whole point of the fourth token: people running Omarchy meet each other."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(
+        monkeypatch, tmp_path, "Linux", os_release=_OMARCHY_OS_RELEASE)
+    assert params["os"] == "omarchy"
+
+
+def test_a_machine_on_omarchy_does_not_also_claim_the_linux_grid(monkeypatch, tmp_path):
+    """One claim per request, and on Omarchy that claim is NOT `linux`.
+
+    Written as its own case because it is the behaviour somebody is most likely to "fix" back:
+    Omarchy is built on Linux, so a reading that has it join both grids sounds generous. The wire
+    cannot express it — `os=` is a single value — and the gate is an equality test against one grid's
+    own token, so claiming `omarchy` is exactly what takes this machine off the Linux grid. That is
+    the decision (ADR 0039 D-c), not a gap.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(
+        monkeypatch, tmp_path, "Linux", os_release=_OMARCHY_OS_RELEASE)
+    assert params["os"] != "linux"
+
+
+@pytest.mark.parametrize(
+    "label,os_release",
+    [
+        ("stock Arch", _ARCH_OS_RELEASE),
+        # ⚠️ The three below all carry `ID_LIKE=arch`. Read the way `_detect_distro` reads it — ID and
+        # ID_LIKE merged into one list — every one of them would be an Omarchy machine.
+        ("EndeavourOS", 'NAME="EndeavourOS"\nID=endeavouros\nID_LIKE=arch\n'),
+        ("CachyOS", 'NAME="CachyOS"\nID=cachyos\nID_LIKE="arch"\n'),
+        ("Manjaro", 'NAME="Manjaro Linux"\nID=manjaro\nID_LIKE=arch\n'),
+        ("Ubuntu", 'NAME="Ubuntu"\nID=ubuntu\nID_LIKE=debian\n'),
+        ("a distribution nobody has heard of", "ID=serenity\n"),
+        ("a file with no ID at all", 'NAME="Something"\nVERSION_ID="1"\n'),
+        ("an empty file", ""),
+        ("no /etc/os-release at all", None),
+    ])
+def test_every_other_linux_still_claims_the_linux_grid(monkeypatch, tmp_path, label, os_release):
+    """The new branch narrows NOTHING — issue 04's third acceptance criterion.
+
+    An unusual choice of distribution must not exclude somebody from the general Linux grid, and a
+    machine that says nothing about its distribution is an ordinary Linux machine, not a machine with
+    no OS grid. `linux` is the fallback for every Linux; `omarchy` is the one exception to it.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(monkeypatch, tmp_path, "Linux", os_release=os_release)
+    assert params["os"] == "linux", label
+
+
+@pytest.mark.parametrize(
+    "label,line",
+    [
+        ("double-quoted", 'ID="omarchy"'),
+        ("single-quoted", "ID='omarchy'"),
+        ("trailing whitespace", "ID=omarchy   "),
+        ("shouted", "ID=OMARCHY"),
+    ])
+def test_the_id_is_read_the_way_os_release_is_actually_written(monkeypatch, tmp_path, label, line):
+    """os-release values may be quoted, and the file is written by hand as often as by a package.
+
+    Not defensive padding: the same normalisation `installer._detect_distro` already applies, plus a
+    case fold. The cost of missing one of these is a machine silently sorted into the wrong grid, and
+    the cost of applying them is nothing — none of these spellings names any other distribution.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(
+        monkeypatch, tmp_path, "Linux", os_release=f"NAME=x\n{line}\nID_LIKE=arch\n")
+    assert params["os"] == "omarchy", label
+
+
+@pytest.mark.parametrize("system,expected", [("Darwin", "macos"), ("Windows", None)])
+def test_a_machine_that_is_not_linux_never_consults_os_release(
+    monkeypatch, tmp_path, system, expected
+):
+    """A Mac with a stray `/etc/os-release` is still a Mac — and a Windows box is still outside the set.
+
+    The distro read hangs off the `linux` answer and nothing else. Written down because the file is
+    not Linux's alone — a container image, a Homebrew package, WSL or a hand-rolled script can leave
+    one on either system — and a lookup done before the system is known would move that machine's
+    grid, or invent one for a machine this CLI serves no grid to at all.
+
+    ``expected`` is ``None`` for the system with no token: the parameter is ABSENT, not empty.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(
+        monkeypatch, tmp_path, system, os_release=_OMARCHY_OS_RELEASE)
+    assert params.get("os") == expected
+
+
+@pytest.mark.parametrize(
+    "label,content",
+    [("not UTF-8", b"ID=omarchy\n\xff\xfe\x00rubbish\n"), ("a lone NUL", b"\x00\x00\x00")])
+def test_an_unreadable_os_release_never_takes_the_sign_in_down(
+    monkeypatch, tmp_path, label, content
+):
+    """A file this cannot decode is *no signal*, never an exception.
+
+    `installer._detect_distro` guards `OSError` only, and `Path.read_text` on a file that is not
+    UTF-8 raises `UnicodeDecodeError` — a `ValueError`, which no `except OSError` sees. On that path
+    it would surface as a traceback out of `grid login`, on a machine whose only fault is a
+    mis-encoded system file. The first case still holds a readable `ID=omarchy` before the bad bytes
+    and is deliberately NOT required to find it: what is pinned is that the sign-in completes.
+    """
+    from shared.system import os_grid
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    path = tmp_path / "os-release"
+    path.write_bytes(content)
+    monkeypatch.setattr(os_grid, "_OS_RELEASE", path)
+
+    import platform
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    assert os_grid.os_token() in ("linux", "omarchy"), label
+
+
+def test_a_gigantic_os_release_is_not_read_into_memory(monkeypatch, tmp_path):
+    """The read is bounded, so a pathological file cannot be turned into a crash by reading it.
+
+    `/etc/os-release` is root-owned and a few hundred bytes in every real deployment, so this is a
+    bound and not a threat model. It matters because the alternative — an unbounded `read_text` on a
+    path chosen by somebody else's package manager — is the shape that has to be argued about later.
+    Truncation can only LOSE the signal, and losing it lands on `linux`, the safe direction.
+    """
+    from shared.system import os_grid
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    path = tmp_path / "os-release"
+    path.write_text("#" + " " * (os_grid._MAX_OS_RELEASE_BYTES * 2) + "\nID=omarchy\n")
+    monkeypatch.setattr(os_grid, "_OS_RELEASE", path)
+
+    import platform
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    assert os_grid.os_token() == "linux"
+
+
+def test_windows_is_not_a_system_this_cli_has_a_grid_for(monkeypatch, tmp_path):
+    """Windows is deliberately OUTSIDE the closed set — the OS grids are macOS, Linux and Omarchy.
+
+    ⚠️ **A Windows machine is not a machine with a broken claim; it is a machine with no OS grid**,
+    and it takes the same branch a BSD does. The distinction matters because it decides which sentence
+    the person reads: `UNSUPPORTED_SYSTEM` names the set they are outside of, which is actionable,
+    while `NOT_SERVED` would tell them to wait for a deployment that is never coming.
+
+    ⚠️ It is also the one entry in this file that removes a system rather than adding one, so the pin
+    is on the ABSENCE. Re-adding `windows` to `_BY_SYSTEM` would leave every other test in this file
+    green — the matrices simply would not exercise it — which is why this asserts on the token and on
+    the wire rather than trusting a parametrize to notice.
+    """
+    from cli import os_grid_notice
+    from shared.system import os_grid
+
+    assert "windows" not in os_grid.OS_TOKENS
+    assert not hasattr(os_grid, "OS_WINDOWS")
+
+    params = _fetch_tokens_query(monkeypatch, tmp_path, "Windows")
+    assert "os" not in params, "a Windows machine must claim nothing at all, not an unserved token"
+
+    absent = _absence(monkeypatch, "Windows", None, tmp_path)
+    assert absent is not None
+    assert absent.reason == os_grid_notice.UNSUPPORTED_SYSTEM
+    assert absent.os_token is None
+    # The sentence names the machine's own system and the set it is outside of.
+    assert "Windows" in absent.line() and "windows" not in absent.line().split(":", 1)[1]
+
+
+def test_omarchy_is_one_of_the_tokens_this_cli_can_emit():
+    """The closed set grew, and three things read it rather than writing the members out again.
+
+    `cli/os_grid_notice` names it in the sentence a machine outside the set is shown, and
+    `tests/test_os_grid_type_lockstep` pins it against what the control plane will serve. A token
+    that resolves but is absent from `OS_TOKENS` would be claimable and unmentionable.
+    """
+    from shared.system import os_grid
+
+    assert os_grid.OS_OMARCHY == "omarchy"
+    assert os_grid.OS_OMARCHY in os_grid.OS_TOKENS
+
+
+# --- `os_served`, the answer to "why is there no OS grid in my list" (ADR 0039 D-k) ---------------
+# Read off the RESPONSE rather than inferred from the grid list, and deliberately so: this repository
+# holds no `os-community` constant of its own (see `tests/test_os_grid_type_lockstep.py`), so the
+# network types in the bundle are strings it prints and never compares. The key is the only thing
+# here that can tell "you were served an OS grid" from "you were not".
+
+
+def _fetch_tokens_answer(monkeypatch, tmp_path, payload):
+    """What `fetch_tokens` makes of a control plane that answered ``payload``."""
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, json=payload))
+    return control_plane.fetch_tokens("sess-tok", "dev-1")
+
+
+def test_fetch_tokens_carries_the_os_served_flag_beside_the_networks(monkeypatch, tmp_path):
+    answer = _fetch_tokens_answer(
+        monkeypatch, tmp_path,
+        {"networks": [{"network_id": "n1", "name": "macOS"}], "os_served": True})
+    assert answer.os_served is True
+    assert answer.networks == [{"network_id": "n1", "name": "macOS"}]  # the networks are untouched
+
+
+def test_fetch_tokens_reports_an_explicit_false_as_false(monkeypatch, tmp_path):
+    """The whole point of the key: an empty list that says WHY it is empty."""
+    answer = _fetch_tokens_answer(monkeypatch, tmp_path, {"networks": [], "os_served": False})
+    assert answer.os_served is False
+    assert answer.networks == []
+
+
+def test_fetch_tokens_reports_a_missing_os_served_as_unknown(monkeypatch, tmp_path):
+    """An older control plane does not send the key, and that must not read as ``False``.
+
+    ADR 0039 D-k: a new key on an existing endpoint degrades silently. ``None`` is what makes the CLI
+    print nothing and behave exactly as it did before — a ``False`` here would put "this control plane
+    isn't serving one" in front of everybody who has not upgraded their control plane yet.
+    """
+    answer = _fetch_tokens_answer(monkeypatch, tmp_path, {"networks": []})
+    assert answer.os_served is None
+
+
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, "", None, [], {}])
+def test_fetch_tokens_reads_a_non_boolean_os_served_as_unknown(monkeypatch, tmp_path, value):
+    """Anything that is not a real ``bool`` degrades to "the control plane did not say".
+
+    Compared by identity against ``True``/``False``, never for truthiness — the standing rule for
+    every wire enum in these repositories. ``"false"`` is the one that matters most: truthy in Python,
+    so a truthiness test would read a control plane REFUSING to serve an OS grid as serving one.
+    """
+    answer = _fetch_tokens_answer(monkeypatch, tmp_path, {"networks": [], "os_served": value})
+    assert answer.os_served is None
+
+
+@pytest.mark.parametrize("body", [[{"network_id": "n1"}], [], "ok", 7])
+def test_fetch_tokens_refuses_a_body_that_is_not_an_object(monkeypatch, tmp_path, body):
+    """A 200 whose body is not a JSON object is a DATA error, and must never read as "zero grids".
+
+    ⚠️ **This overturns the rule the previous test encoded** ("no networks and no flag — never a
+    crash"), and the reason is what that rule cost. `_validated` is the trust boundary for bad ROWS,
+    but it iterates a list: a body that is not an object yields no rows to validate, sails through,
+    and `cmd_sync` then writes `networks: []` authoritatively — discarding every grid's access AND
+    refresh token, which refresh rotation makes unrecoverable. A stderr line saying it "may be
+    transient" is not a recovery.
+
+    "Never a crash" is still honoured and was never the same question: `ControlPlaneError` is a
+    `SystemExit` subclass, so this is the CLI's ordinary clean-error idiom — a sentence and a non-zero
+    exit, no traceback — not the `AttributeError` the code raised before the fallback was added.
+    """
+    from remote import control_plane
+
+    with pytest.raises(SystemExit) as exc:
+        _fetch_tokens_answer(monkeypatch, tmp_path, body)
+
+    assert isinstance(exc.value, control_plane.ControlPlaneError)
+    assert "/v1/grid/tokens" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("label", "content"),
+    [("json null", b"null"), ("not json at all", b"<html>502</html>"), ("empty body", b"")])
+def test_fetch_tokens_refuses_a_body_it_cannot_read_as_an_object(
+    monkeypatch, tmp_path, label, content
+):
+    """The shapes that never reach `isinstance` — same fault, same refusal, still no traceback.
+
+    An empty 200 is why this route does not use the module's own `_json_or_empty`: its `{}` is exactly
+    the "zero grids" reading that costs the credential store. `RecursionError` is caught beside
+    `ValueError` because `json.loads` raises it on a deeply nested body and no `except ValueError`
+    would see it.
+    """
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, content=content))
+
+    with pytest.raises(control_plane.ControlPlaneError) as exc:
+        control_plane.fetch_tokens("sess-tok", "dev-1")
+
+    assert "/v1/grid/tokens" in str(exc.value), label
+
+
+def test_the_malformed_body_refusal_is_not_mistaken_for_an_expired_session(monkeypatch, tmp_path):
+    """`cmd_sync` rewrites one class of failure and must not rewrite this one.
+
+    Its `_SESSION_EXPIRED_RE` is anchored on `control_plane._raise`'s "<METHOD> <URL> failed (401):"
+    rendering. A refusal that matched it would tell somebody to run `grid login` for a control plane
+    that answered 200 with a broken body — sending them to re-authenticate against a fault no
+    credential can fix.
+    """
+    with pytest.raises(SystemExit) as exc:
+        _fetch_tokens_answer(monkeypatch, tmp_path, [])
+
+    assert cli.auth._SESSION_EXPIRED_RE.match(str(exc.value)) is None
+
+
+def test_sync_keeps_every_stored_credential_when_the_answer_is_malformed(monkeypatch, tmp_path):
+    """The failure the refusal above exists to prevent, asserted where it would actually happen.
+
+    `cmd_sync`'s overwrite is authoritative and last-writer-wins, so there is no second copy of a
+    refresh token anywhere once it has run.
+    """
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _disable_orphan_sweep(monkeypatch)
+    _sync_seed([_sync_bundle("net-a", refresh_token="RT-a"), _sync_bundle("net-b")])
+    _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, json=[]))
+
+    with pytest.raises(SystemExit):
+        _run_sync()
+
+    data = credentials.load_credentials()
+    assert [n["network_id"] for n in data["networks"]] == ["net-a", "net-b"]
+    assert data["networks"][0]["refresh_token"] == "RT-a"
+
+
+def test_sync_still_accepts_an_ordinary_empty_answer(monkeypatch, tmp_path):
+    """The negative control, and the case the refusal must NOT swallow.
+
+    A control plane that genuinely serves this account no grids answers `{"networks": []}` — an
+    object. That is an ordinary answer, it still clears the stored list, and it still warns. Without
+    this, the refusal above is satisfied by a CLI that had stopped honouring a real removal.
+    """
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _disable_orphan_sweep(monkeypatch)
+    _sync_seed([_sync_bundle("net-a")])
+    _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, json={"networks": []}))
+
+    assert _run_sync() == 0
+    assert credentials.load_credentials()["networks"] == []
 
 
 def test_control_plane_raises_on_error_status(monkeypatch, tmp_path):
@@ -11961,9 +12793,19 @@ def test_control_plane_raises_on_error_status(monkeypatch, tmp_path):
 
 
 def test_control_plane_refresh_network_token_posts_refresh_unauthenticated(monkeypatch, tmp_path):
+    import platform
+
     from remote import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # ⚠️ Pinned, because this body is otherwise MACHINE-DEPENDENT and the exact-equality assertion
+    # below would pass or fail on who ran it. Since ADR 0039 D-e the call also carries the machine's
+    # OS claim, so it is two keys on a Mac or a Linux box and one on anything outside the closed set
+    # — this test failed on the developer's Mac and would have passed untouched on a BSD. Pinning
+    # keeps the assertion EXACT (which is what catches an unconditional extra field being added)
+    # rather than loosening it to a subset check. The claim's own presence and omission are covered
+    # by `test_the_refresh_exchange_carries_the_os_token_too` and its sibling.
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
     seen = {}
 
     def handler(request):
@@ -11976,7 +12818,7 @@ def test_control_plane_refresh_network_token_posts_refresh_unauthenticated(monke
     bundle = control_plane.refresh_network_token(network_id="n1", refresh_token="RT1")
     assert bundle == {"access_token": "AT2", "refresh_token": "RT2"}
     assert (seen["method"], seen["path"]) == ("POST", "/v1/grid/tokens/n1")
-    assert seen["body"] == {"refresh_token": "RT1"}
+    assert seen["body"] == {"refresh_token": "RT1", "os": "macos"}
     assert seen["auth"] is None  # the refresh token IS the credential — no Bearer header
 
 
@@ -12702,6 +13544,43 @@ def _has_image_part(body):
         ):
             return True
     return False
+
+
+def test_probe_sglang_ollama_compat_show_does_not_hide_vision(monkeypatch, tmp_path):
+    """SGLang exposes an Ollama-compatible /api/show but its static capabilities list contains only
+    `completion`, including for a vision model. It marks that synthetic response as format:sglang, so
+    Grid must not mistake the missing `vision` item for authoritative Ollama metadata and gate out the
+    live image probe."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {"image_probe": False}
+
+    def handler(request):
+        path = request.url.path
+        if path == "/props" or path == "/api/v0/models":
+            return httpx.Response(404)
+        if path == "/api/show":
+            return httpx.Response(200, json={
+                "details": {"format": "sglang", "family": "Qwen3.8-Flash-Next-FP8"},
+                "capabilities": ["completion"],
+            })
+        if path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "qwen38-flash-next-sm120"}]})
+        if path.endswith("/chat/completions"):
+            if _has_image_part(json.loads(request.content)):
+                seen["image_probe"] = True
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        return httpx.Response(404)
+
+    _mock_engine(monkeypatch, handler)
+    entry = probe.capabilities(
+        "http://h:8000/v1", "qwen38-flash-next-sm120"
+    )["models"]["qwen38-flash-next-sm120"]
+
+    assert entry["features"]["vision"] is True
+    assert entry["input_modalities"] == ["text", "image"]
+    assert seen["image_probe"] is True
 
 
 def test_probe_vision_from_live_image_probe_when_engine_accepts(monkeypatch, tmp_path):
@@ -15882,7 +16761,17 @@ def test_effective_max_concurrency_default_rules():
     assert run_records.effective_max_concurrency({"engines": [], "media": True}) == 1
     assert run_records.effective_max_concurrency({}) == 1
     assert run_records.effective_max_concurrency({"engines": [api], "max_concurrency": 3}) == 3
-    assert run_records.effective_max_concurrency({"engines": [hw], "max_concurrency": 8}) == 8
+def test_effective_parallel_derives_from_max_concurrency():
+    """A built-in engine must launch enough llama.cpp slots to back the concurrency it advertises.
+    --parallel (explicit) always wins; otherwise parallel = effective_max_concurrency. This is the
+    fix for 'I set --max-concurrency 4 but the server started with --parallel 1'."""
+    from shared import run_records
+
+    api = {"endpoint_url": "https://api.openai.com/v1", "models": ["openai:gpt-5.5"], "api_kind": "openai"}
+    assert run_records.effective_parallel({"max_concurrency": 4}) == 4
+    assert run_records.effective_parallel({"max_concurrency": 4, "parallel": 2}) == 2
+    assert run_records.effective_parallel({}) == 1
+    assert run_records.effective_parallel({"engines": [api], "max_concurrency": None}) == 4
 
 
 def test_effective_max_concurrency_codex_union_pins_one():
@@ -19026,6 +19915,173 @@ def test_meta_uses_meta_name_for_grid_page_name(monkeypatch, tmp_path):
     assert serve._meta({"endpoint_url": "http://h/v1"}, "remote")["name"] == "remote"
 
 
+def test_meta_says_whether_a_person_chose_the_node_name(monkeypatch, tmp_path):
+    """`name_chosen` — the fact the relay needs to publish a name on an `os-community` grid.
+
+    ADR 0039 D-n. The relay never guesses from the string: measured on the live fleet, `Grid`,
+    `mac-studio-turtle` and `8x50902-67-qwen38-27b` are all chosen and all look machine-generated,
+    while `MacBooks-MacBook-Pro-7.local` looks like a model number. So the provider states it, and
+    this is the half of that statement the public CLI sends.
+
+    ⚠️ **A record written before this change has no such key, and must read as NOT chosen.** That is
+    the fail-closed direction and it is load-bearing: this is a new key on an existing payload, so
+    nothing 404s to say it went missing. Same precedent as `meta_name` falling back to `engine_id`
+    for a pre-singleton record.
+    """
+    from remote import serve
+
+    chosen = {"meta_name": "mybox", "meta_name_chosen": True, "endpoint_url": "http://h/v1"}
+    assert serve._meta(chosen, "remote")["name_chosen"] is True
+
+    hostname = {"meta_name": "MacBooks-MacBook-Pro-7.local", "meta_name_chosen": False,
+                "endpoint_url": "http://h/v1"}
+    assert serve._meta(hostname, "remote")["name_chosen"] is False
+
+    # A record written by a build from before this key existed — absent, so not chosen.
+    old = {"meta_name": "mybox", "endpoint_url": "http://h/v1"}
+    assert serve._meta(old, "remote")["name_chosen"] is False, (
+        "a record written before D-n read as CHOSEN, so the hostname of every provider that has "
+        "not re-joined is published on an os-community grid — silently")
+
+    # The name itself is untouched either way: D-n withholds on the relay, never here.
+    assert serve._meta(hostname, "remote")["name"] == "MacBooks-MacBook-Pro-7.local"
+
+
+def test_remote_join_records_whether_the_operator_chose_the_name(monkeypatch, tmp_path):
+    """`--name` given survives into the run record, which is where `_meta` reads it a process later.
+
+    `cmd_remote_join`'s `args.name or socket.gethostname()` collapses two different facts into one
+    string, so the record needs its own key or the distinction is gone by the time the serve child
+    builds the meta a process later.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["meta_name"] == "mybox"
+    assert record["meta_name_chosen"] is True
+
+
+def test_remote_join_without_a_name_records_the_hostname_as_not_chosen(monkeypatch, tmp_path):
+    """The other half, and the one D-n exists for: a hostname nobody typed."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(
+        cli.remote_provider.socket, "gethostname", lambda: "MacBooks-MacBook-Pro-7.local")
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["meta_name"] == "MacBooks-MacBook-Pro-7.local"
+    assert record["meta_name_chosen"] is False
+
+
+def test_dropping_name_on_a_box_the_hostname_already_matches_says_the_claim_was_dropped(
+    monkeypatch, tmp_path, capsys
+):
+    """The mirror of the claim, and the only direction that changes nothing on screen.
+
+    `meta_name` is not inherited — a `grid join` without `--name` has always reset the display name to
+    the hostname. On a box whose hostname IS the name that was chosen, that reset produces the same
+    string and drops the claim underneath it, so an operator sees a join that changed nothing while
+    the grid page quietly stops naming their machine on a type that publishes only chosen names.
+
+    Acting on it is right and is the mirror of `test_choosing_the_name_the_hostname_already_had_is_not
+    _a_no_op`: both change what the relay is told. What is added here is *saying so*.
+
+    ⚠️ The sentence never names a network type. This repository deliberately holds no `os-community`
+    constant — `tests/test_os_grid_type_lockstep.py` says why — so the note describes the claim, and
+    which grids act on it is the relay's business.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.socket, "gethostname", lambda: "mybox")
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    capsys.readouterr()
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["meta_name"] == "mybox" and record["meta_name_chosen"] is False
+    err = capsys.readouterr().err
+    assert "mybox" in err and "--name mybox" in err, (
+        f"the claim was dropped with nothing on screen to say so: {err!r}")
+
+
+def test_a_join_that_keeps_the_claim_says_nothing_about_it(monkeypatch, tmp_path, capsys):
+    """The negative control. A note that fired on an ordinary re-join would be noise on every box."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.socket, "gethostname", lambda: "mybox")
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    capsys.readouterr()
+    assert cli.main(["join", "--at", "http://h:8000/v1", "-m", "qwen", "--name", "mybox"]) == 0
+
+    assert "--name" not in capsys.readouterr().err
+
+
+def test_a_record_that_never_stated_who_named_the_box_does_not_disagree_with_this_join(
+    monkeypatch, tmp_path, capsys
+):
+    """Upgrading is never a new failure — the rule the sidecar gate already keeps, one key over.
+
+    A record written before D-n carries no `meta_name_chosen`, and "no facts" must not read as "bad
+    facts". Read as *not chosen* here, every re-join that passes `--name` on every upgraded provider
+    on every grid type would stop being a no-op and hot-reload a healthy child for a rename nobody
+    asked for. The key lands the first time the identity is genuinely respawned, which running the
+    new serve child needs anyway — only that child puts `name_chosen` on the wire at all.
+
+    Pairs with `test_choosing_the_name_the_hostname_already_had_is_not_a_no_op` below: there the
+    record DOES state the fact and states the other one, so the same-string re-join must act.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ], started_at="2020-01-01T00:00:00+00:00",  # a pre-D-n record: no `meta_name_chosen` at all
+        registered_at="2020-01-01T00:00:01+00:00")
+    _seed_heartbeat_sidecar()
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+
+    assert "Already serving on team; nothing to append." in capsys.readouterr().out
+    assert spawned["signals"] == [], "a healthy child was reloaded for a fact its record never stated"
+
+
+def test_choosing_the_name_the_hostname_already_had_is_not_a_no_op(monkeypatch, tmp_path):
+    """`--name mybox` on a box already called `mybox` CHANGES what the grid may publish.
+
+    The no-op gate compares display names, and these two joins produce the same string — so without
+    `meta_name_chosen` in the gate an operator who deliberately claims their machine's name is told
+    "already serving" and the relay never hears the claim. The name on the page would stay withheld
+    on an os-community grid, with nothing anywhere to say why.
+    """
+    import signal as _sig
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.socket, "gethostname", lambda: "mybox")
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["meta_name_chosen"] is True, (
+        "the claim was swallowed by the no-op gate: same string, different fact")
+    assert spawned["signals"] == [(4242, _sig.SIGHUP)], (
+        "the running child was never told, so it keeps advertising the old fact")
+
+
 def test_meta_labels_all_external_union_as_external(monkeypatch, tmp_path):
     """A union of external --at engines (each engine_label=None) shows engine='external' on the grid page,
     not the built-in 'llama.cpp' default; only a built-in --serve spec (no endpoint_url) is 'llama.cpp'
@@ -19486,8 +20542,13 @@ def test_live_identities_reports_an_unreadable_table_as_unscanned(monkeypatch, t
 # grid login / grid logout (cli/auth.py + dispatch gate)
 # ---------------------------------------------------------------------------
 
-def _device_flow(monkeypatch, *, poll_statuses, networks, started=None):
-    """Wire control_plane + webbrowser + sleep for a cmd_login run; return a calls record."""
+def _device_flow(monkeypatch, *, poll_statuses, networks, started=None, os_served=None):
+    """Wire control_plane + webbrowser + sleep for a cmd_login run; return a calls record.
+
+    ``os_served`` is the control plane's answer to "were you handed an OS grid" (ADR 0039 D-k) and
+    defaults to ``None`` — a control plane too old to send the key, which is what every test that
+    predates it was really exercising and the one value that makes `grid login` say nothing new.
+    """
     from cli import auth
     from remote import control_plane
 
@@ -19501,7 +20562,7 @@ def _device_flow(monkeypatch, *, poll_statuses, networks, started=None):
 
     def fetch(session_token, device_id, api_url=None):
         calls["fetch_device_id"], calls["fetch_session"] = device_id, session_token
-        return networks
+        return control_plane.TokenFetch(networks=networks, os_served=os_served)
 
     monkeypatch.setattr(control_plane, "fetch_tokens", fetch)
 
@@ -19589,7 +20650,8 @@ def test_login_logout_classified_remote_only():
 
 
 def test_logout_gated_in_local_mode(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["logout"])
     assert "remote" in str(exc.value).lower()
@@ -19597,9 +20659,14 @@ def test_logout_gated_in_local_mode(monkeypatch, tmp_path):
 
 
 def test_login_in_local_mode_runs_and_switches_the_mode(monkeypatch, tmp_path, capsys):
-    """A fresh install is in local mode, and `grid login` is the first thing the installer suggests:
-    it signs in and moves the mode instead of refusing with a second command to type."""
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    """`grid login` signs in and moves the mode instead of refusing with a second command to type.
+
+    The local mode is set explicitly: since ADR 0001 D-2 was amended a *fresh* install is already
+    `remote`, so this path is now what an existing local user meets. Left implicit, `switched` would
+    be False, no message would print, and the test would exercise no self-switch at all.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")
     _device_flow(monkeypatch, poll_statuses=[_APPROVED],
                  networks=[{"network_id": "n1", "name": "team", "network_type": "permissioned-public",
                             "access_token": "AT", "refresh_token": "RT"}])
@@ -19613,6 +20680,7 @@ def test_login_in_local_mode_runs_and_switches_the_mode(monkeypatch, tmp_path, c
 def test_login_with_explicit_local_override_still_refuses(monkeypatch, tmp_path):
     """`--local login` is someone naming the mode they mean; the self-switch must not overrule it."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["--local", "login"])
     assert "remote" in str(exc.value).lower()
@@ -19726,7 +20794,14 @@ def test_relogin_reuses_device_id_and_overwrites_tokens(monkeypatch, tmp_path):
 
 
 def test_login_json_emits_names_only_and_no_tokens(monkeypatch, tmp_path, capsys):
+    import platform
+
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # ⚠️ Pinned, because the `os_grid` field below is otherwise MACHINE-DEPENDENT (ADR 0039 D-k):
+    # on a system outside the closed OS-token set this payload would carry an absence and the
+    # exact-equality assertion would fail on who ran it. `None` — nothing to report — is what a Mac,
+    # a Linux box or a Windows box all produce against a control plane that sent no `os_served`.
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
     _device_flow(
         monkeypatch,
         poll_statuses=[_APPROVED],
@@ -19739,11 +20814,347 @@ def test_login_json_emits_names_only_and_no_tokens(monkeypatch, tmp_path, capsys
     assert json.loads(captured.out) == {
         "signed_in": True, "email": "a@b.com",
         "grids": [{"name": "team", "type": "permissioned-public"}], "active": None,
+        "os_grid": None,
     }
     for secret in ("SESS-secret", "AT-secret", "RT-secret"):
         assert secret not in captured.out
         assert secret not in captured.err  # not leaked via the stderr prompt either
     assert "UC" in captured.err  # the prompt goes to stderr so stdout stays clean JSON
+
+
+# ---------------------------------------------------------------------------
+# grid login --harness — the hand-off from the agent harness (PRD D-6)
+# ---------------------------------------------------------------------------
+
+_HARNESS_SESSION = {"session_token": "SESS-secret", "user": {"email": "a@b.com"}}
+
+
+class _SeveredPipe:
+    """A stdin whose read fails the way the real one does when the harness dies mid-hand-off."""
+
+    def readline(self, size: int = -1) -> bytes:
+        raise OSError(errno.EPIPE, "broken pipe")
+
+
+class _WaitsForEof:
+    """A pipe with a whole line on it whose writer has **not** closed: `read()` would still block.
+
+    The real shape of the harness half — `spawn`, write the token, wait for the child to exit — and
+    `read()` on it returns only at the cap or at EOF, so a reader that used one would deadlock both
+    processes forever with no output and no timeout. This double makes that choice a test rather
+    than a comment: `read` is the failure, `readline` is the pass.
+    """
+
+    def __init__(self, payload: bytes) -> None:
+        self._line = io.BytesIO(payload)
+
+    def read(self, size: int = -1) -> bytes:
+        raise AssertionError("`grid login --harness` must not wait for EOF; a writer may still hold "
+                             "the pipe open after sending the token")
+
+    def readline(self, size: int = -1) -> bytes:
+        return self._line.readline(size)
+
+
+def _piped(payload: bytes):
+    """A stdin shaped like the real one: bytes behind `.buffer`, which is what the reader prefers.
+
+    ⚠️ A **factory**, always called inside the test that uses it — never built in a `parametrize`
+    decorator, where one object is constructed at collection time and drained by the first read. A
+    second read of the same row would yield `b""`, which is the *other* refusal's input and asserts
+    the same sentence, so three of the four rows below would pass without reading anything and
+    without a visible symptom.
+    """
+    return SimpleNamespace(buffer=_WaitsForEof(payload))
+
+
+def _harness_flow(monkeypatch, *, stdin, networks=(), session=None, error=None, os_served=None):
+    """Wire stdin + the account-token exchange + the token fetch for a `grid login --harness` run.
+
+    The device flow's two entry points are wired to *raise*: `--harness` reaching either of them is
+    the failure this flag exists to avoid, and a counter checked at the end of one test would leave
+    every other test in this block blind to it.
+    """
+    from cli import auth
+    from remote import control_plane
+
+    calls = {"harness_token": None, "fetch_session": None, "fetch_device_id": None}
+    monkeypatch.setattr(auth.sys, "stdin", stdin)
+
+    def sign_in(token, api_url=None):
+        calls["harness_token"] = token
+        if error is not None:
+            raise error
+        return dict(session if session is not None else _HARNESS_SESSION)
+
+    monkeypatch.setattr(control_plane, "sign_in_with_harness_token", sign_in)
+
+    def fetch(session_token, device_id, api_url=None):
+        calls["fetch_session"], calls["fetch_device_id"] = session_token, device_id
+        return control_plane.TokenFetch(networks=list(networks), os_served=os_served)
+
+    monkeypatch.setattr(control_plane, "fetch_tokens", fetch)
+
+    def no_device_flow(*a, **k):
+        raise AssertionError("`grid login --harness` must never touch the browser device flow")
+
+    monkeypatch.setattr(control_plane, "start_device_login", no_device_flow)
+    monkeypatch.setattr(control_plane, "poll_device_login", no_device_flow)
+    monkeypatch.setattr(auth.webbrowser, "open", no_device_flow)
+    return calls
+
+
+def test_parser_offers_the_harness_hand_off_and_refuses_it_beside_the_browser_flow():
+    """Two ways in, never both at once — and the flag is visible, not a hidden convention.
+
+    Argparse's own refusal is what the issue asks for: exit **2**, which is also what the harness
+    reads as "the installed `grid` predates `--harness`" (PRD D-7). A hand-rolled check would exit
+    1 and the harness would report the wrong thing.
+    """
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["login"]).harness is False
+    assert parser.parse_args(["login", "--harness"]).harness is True
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["login", "--harness", "--no-browser"])
+    assert exc.value.code == 2
+
+    help_text = _subcmd_help("login")
+    assert "--harness" in help_text
+
+
+def test_harness_login_persists_tokens_and_selects_no_grid(monkeypatch, tmp_path, capsys):
+    """The happy path is the existing path: the token on stdin is the ONLY thing that differs.
+
+    So the same postconditions are asserted as the browser flow's — the bundle on disk at 0600, no
+    active grid picked, and no secret in what was printed.
+    """
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("remote")
+    calls = _harness_flow(
+        monkeypatch,
+        stdin=_piped(b"HT-secret\n"),
+        networks=[{"network_id": "n1", "name": "team", "network_type": "permissioned-public",
+                   "access_token": "AT-secret", "refresh_token": "RT-secret"}],
+    )
+
+    assert cli.main(["login", "--harness"]) == 0  # routes through dispatch in remote mode
+    out = capsys.readouterr().out
+
+    assert calls["harness_token"] == "HT-secret"  # stripped of the newline `echo` leaves
+    assert calls["fetch_session"] == "SESS-secret"
+    assert calls["fetch_device_id"] == credentials.device_id()  # this machine speaks for itself
+    saved = credentials.load_credentials()
+    assert saved["session_token"] == "SESS-secret"
+    assert saved["user"]["email"] == "a@b.com"
+    assert [n["name"] for n in saved["networks"]] == ["team"]
+    assert stat.S_IMODE(paths.credentials_file().stat().st_mode) == 0o600
+    assert state.get_active("remote") is None  # the hand-off never auto-selects either
+    assert "Signed in as a@b.com" in out and "team" in out and "grid use" in out
+    for secret in ("HT-secret", "SESS-secret", "AT-secret", "RT-secret"):
+        assert secret not in out
+
+
+def test_harness_login_reads_a_token_from_a_stdin_without_a_buffer(monkeypatch, tmp_path):
+    """A text-only stdin is a test double or an unusual embedding, never an error."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = _harness_flow(monkeypatch, stdin=io.StringIO("HT-text\n"))
+
+    assert cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"])) == 0
+    assert calls["harness_token"] == "HT-text"
+
+
+def test_harness_login_refuses_an_overrun_rather_than_sending_a_prefix(monkeypatch, tmp_path):
+    """The cap bounds a pipe this process does not control — and reaching it is its OWN refusal.
+
+    Truncating silently would send a *prefix* of the token, which is a perfectly well-formed request:
+    the control plane answers 401, and the person is shown a sentence blaming a credential that is
+    fine for something this process decided locally. So nothing is sent at all, and the sentence
+    names the input instead.
+    """
+    from cli import auth
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    oversized = b"x" * (auth._MAX_HARNESS_TOKEN_BYTES * 4)  # no newline: the token never ends
+    calls = _harness_flow(monkeypatch, stdin=_piped(oversized))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"]))
+
+    assert str(auth._MAX_HARNESS_TOKEN_BYTES) in str(exc.value)
+    assert calls["harness_token"] is None  # no prefix went to the control plane
+    assert credentials.load_credentials() == {}
+
+
+def test_harness_login_does_not_wait_for_the_writer_to_close_the_pipe(monkeypatch, tmp_path):
+    """A newline is enough; the harness need not close stdin for the hand-off to complete.
+
+    `_WaitsForEof.read` is an outright failure, so this pins the reader's choice rather than
+    describing it: reading to EOF would hang against the obvious harness shape (write the token,
+    then wait for this process to exit) with neither side ever moving.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = _harness_flow(monkeypatch, stdin=_piped(b"HT-secret\n"))
+
+    assert cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"])) == 0
+    assert calls["harness_token"] == "HT-secret"
+
+
+@pytest.mark.parametrize("make_stdin, why", [
+    (lambda: _piped(b""), "nothing on the pipe at all"),
+    (lambda: _piped(b"   \n\n"), "whitespace is not a token"),
+    (lambda: _piped(b"\xff\xfe not utf-8"), "undecodable bytes are not a token either"),
+    (lambda: SimpleNamespace(buffer=_SeveredPipe()), "the harness died mid-hand-off"),
+    (lambda: SimpleNamespace(isatty=lambda: True), "a person typed the flag; nobody is piping"),
+    (lambda: None, "an embedding handed this process no stdin at all"),
+])
+def test_harness_login_refuses_unusable_input_naming_the_harness_command(
+        monkeypatch, tmp_path, make_stdin, why):
+    """Every way the pipe can carry no token collapses to one sentence, never a traceback or a hang.
+
+    It names `harness grid login` because that is the command that produces the token: somebody who
+    ran `grid login --harness` by hand has no other way to find out where the input was meant to
+    come from — and the terminal row is that person, who would otherwise meet a silent wait they
+    have to guess Ctrl-D out of to reach the sentence written for them.
+    """
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = _harness_flow(monkeypatch, stdin=make_stdin())
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"]))
+
+    assert "harness grid login" in str(exc.value), why
+    assert calls["harness_token"] is None  # refused before anything was sent
+    assert credentials.load_credentials() == {}  # and nothing persisted
+
+
+def test_harness_login_turns_a_404_into_a_sentence_about_the_control_plane(monkeypatch, tmp_path):
+    """The one status this path translates: the route is not deployed yet (PRD D-9).
+
+    A bare `POST … failed (404): Not Found` blames the credential the person is holding, which is
+    fine; there is nothing wrong with it. The remedy is the other door, so the sentence names it.
+    """
+    from remote import control_plane, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _harness_flow(monkeypatch, stdin=_piped(b"HT"), error=control_plane.ControlPlaneError(
+        "POST https://api.example/v1/grid/auth/harness failed (404): Not Found", status=404))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"]))
+
+    message = str(exc.value)
+    assert "grid login" in message and "404" not in message
+    assert credentials.load_credentials() == {}
+
+
+@pytest.mark.parametrize("status, remedy", [
+    (403, "Sign in to Autonomous with Google at least once, then try again."),
+    (502, "Could not reach the Autonomous account API. Try again in a moment."),
+])
+def test_harness_login_shows_a_refusal_verbatim(monkeypatch, tmp_path, status, remedy):
+    """Everything that is not a 404 reaches the person exactly as the control plane wrote it.
+
+    Each of those refusals already names its own way forward, and none of them is parsed for a
+    code: exactly three refusal codes are read anywhere across these repositories, and a fourth
+    reader is a fourth thing a reworded message could silently break.
+    """
+    from remote import control_plane, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    rendered = f"POST https://api.example/v1/grid/auth/harness failed ({status}): {remedy}"
+    _harness_flow(monkeypatch, stdin=_piped(b"HT"),
+                  error=control_plane.ControlPlaneError(rendered, status=status))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"]))
+
+    assert str(exc.value) == rendered  # the remedy sentence, intact and untouched
+    assert credentials.load_credentials() == {}
+
+
+def test_harness_login_names_the_account_it_replaces_and_the_grids_it_strands(
+        monkeypatch, tmp_path, capsys):
+    """Nobody typed an email, so the swap has to be said out loud.
+
+    The browser flow shows whose account was approved; the hand-off shows nothing, so a token from
+    a second Autonomous account would silently take the machine's grids away — and the serve child
+    of the grid it dropped keeps heartbeating on the token it holds in memory. One line names the
+    account, and the existing stranded-grid warning names the consequence. Neither is a refusal.
+    """
+    from remote import credentials
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({
+        "session_token": "old", "api_url": "https://api.example",
+        "user": {"email": "first@b.com"},
+        "networks": [{"network_id": "net-old", "name": "first-account-grid", "access_token": "AT"}],
+    })
+    run_records.write_record("net-old", "remote", {
+        "engine_id": "remote", "grid_id": "net-old", "pid": 4242,
+        "signaling_url": "https://relay.example",
+    })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    _harness_flow(monkeypatch, stdin=_piped(b"HT"),
+                  networks=[{"network_id": "net-new", "name": "second-account-grid"}])
+
+    assert cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"])) == 0
+
+    captured = capsys.readouterr()
+    assert "Signed in as a@b.com (was first@b.com)." in captured.out
+    assert "first-account-grid" in captured.err and "grid leave net-old" in captured.err
+
+
+def test_login_says_nothing_about_a_replacement_when_the_account_is_the_same(
+        monkeypatch, tmp_path, capsys):
+    """A line on every ordinary re-sign-in is a line people learn to skip past."""
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "old", "user": {"email": "a@b.com"},
+                                  "networks": []})
+    _harness_flow(monkeypatch, stdin=_piped(b"HT"))
+
+    assert cli.cmd_login(cli.build_parser().parse_args(["login", "--harness"])) == 0
+    assert "(was " not in capsys.readouterr().out
+
+
+def test_harness_login_json_keeps_stdout_clean_and_says_the_swap_on_stderr(
+        monkeypatch, tmp_path, capsys):
+    """`--json` is what a script drives, which is exactly where a silent account swap would land.
+
+    stdout stays the JSON contract — unchanged, no new key — so the sentence goes to stderr, beside
+    the sign-in prompt and the stranded-grid warnings that are already there.
+    """
+    import platform
+
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")  # pin the machine-dependent os_grid
+    credentials.save_credentials({"session_token": "old", "user": {"email": "first@b.com"},
+                                  "networks": []})
+    _harness_flow(monkeypatch, stdin=_piped(b"HT-secret"),
+                  networks=[{"network_id": "n1", "name": "team",
+                             "network_type": "permissioned-public"}])
+
+    assert cli.cmd_login(cli.build_parser().parse_args(["login", "--harness", "--json"])) == 0
+    captured = capsys.readouterr()
+
+    assert json.loads(captured.out) == {
+        "signed_in": True, "email": "a@b.com",
+        "grids": [{"name": "team", "type": "permissioned-public"}], "active": None,
+        "os_grid": None,
+    }
+    assert "Signed in as a@b.com (was first@b.com)." in captured.err
+    assert "HT-secret" not in captured.out and "HT-secret" not in captured.err
 
 
 def test_logout_clears_credentials_and_active(monkeypatch, tmp_path, capsys):
@@ -19870,6 +21281,7 @@ def test_logout_json_is_unchanged_by_a_foreign_child(monkeypatch, tmp_path, caps
     assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--json"])) == 0
     assert json.loads(capsys.readouterr().out) == {
         "signed_out": True, "stopped": [{"grid": "team", "deregistered": True}],
+        "revoked_everywhere": False,
     }
 
 
@@ -20326,7 +21738,229 @@ def test_logout_json(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     credentials.save_credentials({"session_token": "S"})
     assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--json"])) == 0
-    assert json.loads(capsys.readouterr().out) == {"signed_out": True, "stopped": []}
+    assert json.loads(capsys.readouterr().out) == {
+        "signed_out": True, "stopped": [], "revoked_everywhere": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# grid logout --everywhere (issue 07): the local sign-out, plus the one that takes the
+# account's other sessions back. `grid logout` on its own stays local and unchanged.
+# ---------------------------------------------------------------------------
+
+def _revoke_spy(monkeypatch, *, raises=None):
+    """Stand in for `control_plane.revoke_sessions` and record what it was handed."""
+    from remote import control_plane
+
+    calls = {"tokens": []}
+
+    def _revoke(session_token, api_url=None):
+        calls["tokens"].append(session_token)
+        if raises is not None:
+            raise raises
+
+    monkeypatch.setattr(control_plane, "revoke_sessions", _revoke)
+    return calls
+
+
+def test_parser_accepts_logout_everywhere():
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["logout", "--everywhere"]).everywhere is True
+    assert parser.parse_args(["logout"]).everywhere is False
+
+
+def test_logout_everywhere_revokes_with_the_session_then_clears_it(monkeypatch, tmp_path, capsys):
+    """The order is the contract: the revoke needs the session token, and the delete destroys it.
+
+    Reversed, the local sign-out would take away the one credential that can reach the route — so
+    a person asking for a revocation would get a local delete and no revocation at all, reported
+    as a success.
+    """
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    calls = _revoke_spy(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--everywhere"])) == 0
+
+    assert calls["tokens"] == ["S"]
+    assert not paths.credentials_file().exists()
+    out = capsys.readouterr().out
+    assert "Signed out." in out and "signed out too" in out
+
+
+def test_plain_logout_never_reaches_the_control_plane(monkeypatch, tmp_path, capsys):
+    """ADR 0040: `grid logout` is the per-machine answer and stays a local delete.
+
+    Its own case because the two verbs share every line of `cmd_logout` but one, and a revocation
+    that leaked into the default would sign a person out of every other machine they own for
+    typing the sign-out they have typed for a year.
+    """
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    calls = _revoke_spy(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+
+    assert calls["tokens"] == []
+    assert "signed out too" not in capsys.readouterr().out
+
+
+def test_logout_everywhere_keeps_the_credentials_when_the_revoke_fails(monkeypatch, tmp_path):
+    """A refused revocation leaves the session token where it is, and says so by exiting non-zero.
+
+    Deleting it anyway would be the worst of both: the stolen session stays live and the one
+    credential that could still reach the route is gone from the machine that was trying to. Same
+    reasoning as the refusal that keeps credentials over a live serve child.
+    """
+    from remote import control_plane, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    _revoke_spy(monkeypatch, raises=control_plane.ControlPlaneError("nope", status=500))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.cmd_logout(cli.build_parser().parse_args(["logout", "--everywhere"]))
+
+    assert "nope" in str(excinfo.value)
+    assert paths.credentials_file().exists()
+
+
+def test_logout_everywhere_on_an_older_control_plane_says_so(monkeypatch, tmp_path):
+    """The one refusal that is not about the caller: the control plane predates the route.
+
+    `POST … failed (404): Not Found` reads as a verdict on a credential that is fine, and the
+    rollout order (control plane first) makes this an ordinary deployment window. Every other
+    refusal already carries the control plane's own remedy sentence and is re-raised untouched.
+
+    The credentials are **kept**, which is the opposite call from the 401 above and for the opposite
+    reason: here the session is still good, so it is the handle that works the moment the control
+    plane catches up.
+    """
+    from remote import control_plane, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    _revoke_spy(monkeypatch, raises=control_plane.ControlPlaneError("404!", status=404))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.cmd_logout(cli.build_parser().parse_args(["logout", "--everywhere"]))
+
+    assert "cannot sign your other machines out yet" in str(excinfo.value)
+    assert paths.credentials_file().exists()
+
+
+def test_logout_everywhere_still_signs_out_locally_when_the_session_is_already_gone(
+    monkeypatch, tmp_path, capsys
+):
+    """A 401 does NOT keep the credentials, and this is the case the "keep them" rule gets wrong.
+
+    Sign out everywhere from machine A, then run the same command on machine B: B's stored session
+    is already revoked, so the route refuses it. Keeping B's credentials "so a retry can reach the
+    route" would keep the one credential that will never be accepted again — `grid logout
+    --everywhere` could then never sign B out at all, and the person would have to guess to drop
+    the flag. So the local sign-out runs, and the report says what actually happened.
+    """
+    from remote import control_plane, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    _revoke_spy(monkeypatch, raises=control_plane.ControlPlaneError("revoked", status=401))
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--everywhere", "--json"])) == 0
+
+    captured = capsys.readouterr()
+    assert not paths.credentials_file().exists()
+    assert json.loads(captured.out)["revoked_everywhere"] is False
+    assert "nothing could be signed out elsewhere" in captured.err
+
+
+def test_logout_everywhere_with_no_session_claims_nothing(monkeypatch, tmp_path, capsys):
+    """Nothing to revoke *with*, so nothing is revoked — and the report must not say otherwise."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = _revoke_spy(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--everywhere", "--json"])) == 0
+
+    assert calls["tokens"] == []
+    assert json.loads(capsys.readouterr().out) == {
+        "signed_out": False, "stopped": [], "revoked_everywhere": False,
+    }
+
+
+def test_logout_json_says_whether_the_other_sessions_went(monkeypatch, tmp_path, capsys):
+    """Present on every logout, not only the ones that revoke — a stable shape beats a conditional
+    key, the same rule `stopped` already follows."""
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    _revoke_spy(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--everywhere", "--json"])) == 0
+
+    assert json.loads(capsys.readouterr().out) == {
+        "signed_out": True, "stopped": [], "revoked_everywhere": True,
+    }
+
+
+def test_revoke_sessions_posts_to_the_pinned_path_with_the_session(monkeypatch, tmp_path):
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"revoked": True, "session_epoch": 3})
+
+    _mock_control_plane(monkeypatch, handler)
+    control_plane.revoke_sessions("S", "http://cp")
+
+    assert seen == {
+        "method": "POST",
+        "path": control_plane.SESSIONS_REVOKE_PATH,
+        "auth": "Bearer S",
+    }
+
+
+def test_revoke_sessions_refuses_a_200_that_does_not_confirm(monkeypatch, tmp_path):
+    """The postcondition, because a new route's absence is loud and a mangled reply is not.
+
+    A 404 from an older control plane is a bare one this CLI turns into a sentence. What nothing
+    else would catch is a 200 that revoked nothing — a proxy's own cheerful answer, or a reply key
+    renamed on the far side — and reporting that as a sign-out is the one lie this path must not
+    tell.
+    """
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    for body in ({}, {"revoked": False}, {"revoked": "yes"}, {"ok": True}):
+        _mock_control_plane(monkeypatch, lambda r, b=body: httpx.Response(200, json=b))
+        with pytest.raises(SystemExit) as excinfo:
+            control_plane.revoke_sessions("S", "http://cp")
+        assert "did not confirm" in str(excinfo.value), body
+
+
+def test_revoke_sessions_refuses_a_200_that_is_not_json(monkeypatch, tmp_path):
+    """A captive portal or a proxy's own page answering 2xx. Unconfirmed, like any other reply that
+    does not say so — and a sentence rather than the `JSONDecodeError` traceback it would otherwise
+    be, on a path whose every other failure is a sentence."""
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_control_plane(
+        monkeypatch, lambda r: httpx.Response(200, text="<html>sign in to the wifi</html>"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        control_plane.revoke_sessions("S", "http://cp")
+
+    assert "did not confirm" in str(excinfo.value)
 
 
 def test_logout_json_names_each_grid_it_stopped(monkeypatch, tmp_path, capsys):
@@ -20346,6 +21980,7 @@ def test_logout_json_names_each_grid_it_stopped(monkeypatch, tmp_path, capsys):
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {
         "signed_out": True, "stopped": [{"grid": "team", "deregistered": True}],
+        "revoked_everywhere": False,
     }
     assert "node-jwt" not in captured.out  # the node id is not a secret, but the token it came from is
     assert "AT" not in json.dumps(json.loads(captured.out))
@@ -20468,8 +22103,13 @@ def _sync_seed(networks: list[dict[str, Any]] | None = None, *, session_token: s
 
 
 def _sync_patch_fetch(monkeypatch: pytest.MonkeyPatch, networks: list[dict[str, Any]],
-                      calls: list[dict[str, Any]] | None = None) -> None:
+                      calls: list[dict[str, Any]] | None = None,
+                      os_served: bool | None = None) -> None:
     """Patch control_plane.fetch_tokens to return `networks` (no live control plane).
+
+    ``os_served`` is the control plane's answer to "were you handed an OS grid" (ADR 0039 D-k);
+    ``None`` — the default — is a control plane too old to send the key, so `grid sync` prints
+    nothing new and every test written before it keeps asserting the same output.
 
     Note for anyone adding a sync test: `grid sync` overwrites `[[networks]]` authoritatively, so it
     asks `signout.warn_stranded` which grids still have a live serve child — which reads the real host
@@ -20482,7 +22122,7 @@ def _sync_patch_fetch(monkeypatch: pytest.MonkeyPatch, networks: list[dict[str, 
     def fake_fetch_tokens(session_token, device_id, api_url=None):
         if calls is not None:
             calls.append({"session_token": session_token, "device_id": device_id, "api_url": api_url})
-        return [dict(n) for n in networks]
+        return control_plane.TokenFetch(networks=[dict(n) for n in networks], os_served=os_served)
 
     monkeypatch.setattr(control_plane, "fetch_tokens", fake_fetch_tokens)
 
@@ -20508,9 +22148,11 @@ def test_sync_classified_remote_only():
 def test_sync_gated_in_local_mode(monkeypatch, tmp_path):
     from remote import control_plane
 
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     called = []
-    monkeypatch.setattr(control_plane, "fetch_tokens", lambda *a, **k: called.append(1) or [])
+    monkeypatch.setattr(control_plane, "fetch_tokens",
+                        lambda *a, **k: called.append(1) or control_plane.TokenFetch([], None))
     with pytest.raises(SystemExit) as exc:
         cli.main(["sync"])
     assert "remote" in str(exc.value).lower()
@@ -20523,7 +22165,8 @@ def test_sync_requires_login(monkeypatch, tmp_path):
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # not signed in
     called = []
-    monkeypatch.setattr(control_plane, "fetch_tokens", lambda *a, **k: called.append(1) or [])
+    monkeypatch.setattr(control_plane, "fetch_tokens",
+                        lambda *a, **k: called.append(1) or control_plane.TokenFetch([], None))
     with pytest.raises(SystemExit) as exc:
         _run_sync()
     assert "signed in" in str(exc.value).lower()  # require_session message
@@ -20739,9 +22382,16 @@ def test_sync_treats_a_renamed_grid_as_the_same_grid(monkeypatch, tmp_path, caps
 def test_sync_json_keeps_stdout_clean_while_warning_about_a_stranded_child(monkeypatch, tmp_path, capsys):
     """The warning is a human line on stderr; `--json` stdout stays parseable, as it already does for
     the 0-grids wipe warning beside it."""
+    import platform
+
     from shared import run_records
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # ⚠️ Pinned, because the `os_grid` field below is otherwise MACHINE-DEPENDENT (ADR 0039 D-k):
+    # on a system outside the closed OS-token set this payload would carry an absence and the
+    # exact-equality assertion would fail on who ran it. `None` — nothing to report — is what a Mac,
+    # a Linux box or a Windows box all produce against a control plane that sent no `os_served`.
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
     _sync_seed([_sync_bundle("net-b")])
     run_records.write_record("net-b", "remote", {
         "engine_id": "remote", "grid_id": "net-b", "pid": 4242,
@@ -20752,7 +22402,7 @@ def test_sync_json_keeps_stdout_clean_while_warning_about_a_stranded_child(monke
 
     assert _run_sync(["sync", "--json"]) == 0
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"synced": True, "grids": []}
+    assert json.loads(captured.out) == {"synced": True, "grids": [], "os_grid": None}
     assert "grid leave net-b" in captured.err
 
 
@@ -20767,7 +22417,7 @@ def test_sync_concurrent_logout_does_not_strand_partial_file(monkeypatch, tmp_pa
 
     def logout_then_return(session_token, device_id, api_url=None):
         credentials.clear_credentials()  # concurrent `grid logout` deletes the file mid-call
-        return [dict(_sync_bundle("net-a"))]
+        return control_plane.TokenFetch(networks=[dict(_sync_bundle("net-a"))], os_served=None)
 
     monkeypatch.setattr(control_plane, "fetch_tokens", logout_then_return)
     assert _run_sync() == 0
@@ -20831,7 +22481,14 @@ def test_sync_other_error_propagates_unchanged(monkeypatch, tmp_path):
 
 
 def test_sync_json_emits_names_only_and_no_tokens(monkeypatch, tmp_path, capsys):
+    import platform
+
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # ⚠️ Pinned, because the `os_grid` field below is otherwise MACHINE-DEPENDENT (ADR 0039 D-k):
+    # on a system outside the closed OS-token set this payload would carry an absence and the
+    # exact-equality assertion would fail on who ran it. `None` — nothing to report — is what a Mac,
+    # a Linux box or a Windows box all produce against a control plane that sent no `os_served`.
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
     _sync_seed([_sync_bundle("net-a", name="team", access_token="AT-secret",
                              refresh_token="RT-secret")], session_token="SESS-secret")
     _sync_patch_fetch(monkeypatch, [_sync_bundle("net-a", name="team", access_token="AT-secret",
@@ -20841,13 +22498,21 @@ def test_sync_json_emits_names_only_and_no_tokens(monkeypatch, tmp_path, capsys)
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {
         "synced": True, "grids": [{"name": "team", "type": "permissioned-public"}],
+        "os_grid": None,
     }
     for secret in ("SESS-secret", "AT-secret", "RT-secret"):
         assert secret not in captured.out
 
 
 def test_sync_json_survives_empty_list_warning(monkeypatch, tmp_path, capsys):
+    import platform
+
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # ⚠️ Pinned, because the `os_grid` field below is otherwise MACHINE-DEPENDENT (ADR 0039 D-k):
+    # on a system outside the closed OS-token set this payload would carry an absence and the
+    # exact-equality assertion would fail on who ran it. `None` — nothing to report — is what a Mac,
+    # a Linux box or a Windows box all produce against a control plane that sent no `os_served`.
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
     _sync_seed([_sync_bundle("net-a")])
     _disable_orphan_sweep(monkeypatch)
     _sync_patch_fetch(monkeypatch, [])
@@ -20855,9 +22520,325 @@ def test_sync_json_survives_empty_list_warning(monkeypatch, tmp_path, capsys):
     assert _run_sync(["sync", "--json"]) == 0
     captured = capsys.readouterr()
     # stdout stays clean, parseable JSON; the human warning is confined to stderr
-    assert json.loads(captured.out) == {"synced": True, "grids": []}
+    assert json.loads(captured.out) == {"synced": True, "grids": [], "os_grid": None}
     assert "Warning" not in captured.out
     assert "cleared locally" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# A missing OS grid says why (ADR 0039 D-k) — `cli/os_grid_notice.py`
+# ---------------------------------------------------------------------------
+# Three different things leave somebody with no OS grid in their list, and today they share one
+# symptom. The CLI answers one of them on its own — it knows its own operating system and the closed
+# set of tokens it can emit — and the control plane's `os_served` answers the other two.
+#
+# The bar the whole section is written against: nothing here may turn an absent OS grid into a failed
+# command, and somebody who HAS an OS grid must see no new output at all. A line on every ordinary
+# sign-in is a line people learn to scroll past.
+
+
+def _absence(monkeypatch, system, os_served, tmp_path=None):
+    """The notice a machine running ``system`` produces for that ``os_served`` answer.
+
+    ``/etc/os-release`` is pointed at a path that does not exist unless a caller supplies one, so a
+    ``Linux`` case here means *an ordinary Linux machine* rather than *whatever this developer runs*.
+    """
+    import platform
+
+    from cli import os_grid_notice
+    from shared.system import os_grid
+
+    monkeypatch.setattr(platform, "system", lambda: system)
+    monkeypatch.setattr(os_grid, "_OS_RELEASE", (tmp_path or Path("/nonexistent")) / "none")
+    return os_grid_notice.absence(os_served)
+
+
+@pytest.mark.parametrize("os_served", [True, False, None])
+def test_a_system_with_no_os_token_is_answered_without_the_control_plane(monkeypatch, os_served):
+    """The CLI's own answer, and it does not consult the round trip AT ALL — including the `True`.
+
+    ADR 0039 D-k gives this cause to the CLI precisely because no round trip is needed for it: the
+    machine knows its own system and the closed set of tokens it can emit. Parametrised over every
+    answer the control plane can give so the independence is pinned rather than assumed — a later
+    refactor that folded this into the `os_served` branch would still pass on `False` alone.
+    """
+    from cli import os_grid_notice
+
+    absent = _absence(monkeypatch, "FreeBSD", os_served)
+    assert absent is not None
+    assert absent.reason == os_grid_notice.UNSUPPORTED_SYSTEM
+    assert absent.system == "FreeBSD"
+    assert absent.os_token is None  # there is no token — that IS the reason
+    assert "FreeBSD" in absent.line()
+
+
+def test_a_control_plane_that_serves_no_grid_for_this_os_is_a_different_answer(monkeypatch):
+    from cli import os_grid_notice
+
+    absent = _absence(monkeypatch, "Darwin", False)
+    assert absent is not None
+    assert absent.reason == os_grid_notice.NOT_SERVED
+    assert (absent.system, absent.os_token) == ("Darwin", "macos")
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_a_deployment_serving_no_os_grid_at_all_still_says_so(monkeypatch, system):
+    """The state a reviewer will read as a bug, pinned as the decision it is (ADR 0039 D-k).
+
+    A control plane with `GRID_OS_GRID_ENABLED` off and nothing provisioned answers `os_served:
+    false` for **every** caller — `grid_networks/handler.get_tokens` computes it as "is an
+    os-community grid among the bundles this call is returning", and `_ensure_os_network` creates
+    none while the switch is off. So on that deployment every user on every supported system sees
+    this line on every sign-in and every sync.
+
+    ⚠️ **That is decided, not accidental.** D-k names *the feature switched off with nothing
+    provisioned* as the first of four states `false` collapses, and says all four reach a person as
+    the same sentence — *this service is not giving me one*. The alternative that would have kept
+    them apart, a reason string, was rejected on three counts, none of which was difficulty.
+
+    So this test exists to make a "fix" fail. Suppressing the line for a not-serving deployment would
+    ALSO suppress it for the three other states, including a provision that failed and left the row
+    `pending` — which is the state somebody actually needs to be told about. If the noise is judged
+    too high, the change is an amendment to D-k.
+    """
+    from cli import os_grid_notice
+
+    absent = _absence(monkeypatch, system, False)
+
+    assert absent is not None, (
+        f"a {system} machine on a deployment serving no OS grid was told nothing — D-k decided it "
+        f"is told; amend the ADR rather than the code")
+    assert absent.reason == os_grid_notice.NOT_SERVED
+    assert "isn't serving one" in absent.line()
+
+
+def _cause_clause(absent):
+    """Everything after ``absent``'s sentence names the machine — that is, the CAUSE, on its own.
+
+    ⚠️ **The two cases can never share a machine** — one has an OS token and the other by definition
+    has none — so their raw sentences ALWAYS differ by that name, and comparing whole lines is
+    satisfied by the name even when both branches give the same cause. Measured, not guessed:
+    collapsing `line()`'s two cause clauses into one left this file green, including the test named
+    for the distinction.
+
+    ⚠️ **The subject is removed by its known PREFIX, never by `str.replace`.** The first version of
+    this helper blanked every occurrence of the name — which on the unsupported branch also blanks it
+    inside the list of tokens that branch names, so two identical clauses came out different and the
+    mirror of that mutation survived anyway. Over-blanking is the same failure as no blanking: the
+    comparison stops looking at the cause.
+    """
+    named = absent.os_token or absent.system
+    assert named, "the fixtures below name their system; a blank one would blank nothing"
+    prefix = f"No OS grid for {named}: "
+    line = absent.line()
+    assert line.startswith(prefix), (prefix, line)  # the shape this helper is cutting on
+    clause = line[len(prefix):]
+    assert clause.strip(), line  # never vacuous — an empty clause would compare equal to anything
+    return clause
+
+
+def test_the_two_reasons_do_not_read_as_the_same_sentence(monkeypatch):
+    """ADR 0039 D-k's whole purpose — a support conversation must be able to tell them apart."""
+    unsupported = _absence(monkeypatch, "FreeBSD", False)
+    not_served = _absence(monkeypatch, "Darwin", False)
+
+    # Both directions of the same mistake. Collapsing EITHER branch onto the other's clause must
+    # fail here: fixing one direction and leaving the mirror alive is what a whole-line comparison
+    # did, and what an over-blanking helper did after it.
+    assert _cause_clause(unsupported) != _cause_clause(not_served)
+    # And the name really is in the line a person reads — blanked above, never absent.
+    assert "FreeBSD" in unsupported.line() and "FreeBSD" not in not_served.line()
+
+
+@pytest.mark.parametrize("os_served", [True, None])
+def test_nothing_is_said_when_the_machine_has_a_token_and_no_refusal(monkeypatch, os_served):
+    """`True` is somebody who HAS an OS grid; `None` is a control plane too old to have said.
+
+    Both must be silent, and for different reasons: the first has nothing to report, and the second
+    is the clean silent degrade — the key is absent, so the CLI behaves exactly as it did before.
+    """
+    assert _absence(monkeypatch, "Darwin", os_served) is None
+
+
+@pytest.mark.parametrize("system", ["Linux", "Darwin"])
+def test_every_system_the_cli_has_a_token_for_stays_quiet_when_served(monkeypatch, system):
+    assert _absence(monkeypatch, system, True) is None
+
+
+def test_a_system_that_does_not_even_name_itself_still_produces_a_sentence(monkeypatch):
+    """`platform.system()` answers the empty string on some frozen builds — already in the closed
+    set's list of things that resolve to no token. The line must still say something."""
+    absent = _absence(monkeypatch, "", False)
+    assert absent is not None and absent.line().strip()
+    assert "for :" not in absent.line()  # never a sentence with the subject missing
+
+
+def test_the_unsupported_line_names_every_token_this_cli_could_have_claimed(monkeypatch):
+    """The cause clause has to carry a FACT, not restate its own subject (ADR 0039 D-k).
+
+    ⚠️ **Derived from `OS_TOKENS`, so it cannot drift from what this CLI can actually ask for.**
+    Written out by hand it would keep naming three systems after `omarchy` lands (issue 04) — a line
+    telling somebody on the Omarchy grid that no grid exists for them. Asserted against the constant
+    rather than against the three of today, or this test would be the thing that has to be remembered.
+    """
+    from shared.system import os_grid
+
+    line = _absence(monkeypatch, "FreeBSD", False).line()
+    for token in os_grid.OS_TOKENS:
+        assert token in line, (token, line)
+    assert "FreeBSD" in line
+
+
+def test_the_absence_carries_the_same_fact_to_a_script_as_to_a_person(monkeypatch):
+    """ADR 0039 D-k / issue 07: `--json` must not lose what the human line says.
+
+    `os_token` is `None` exactly when the reason is `unsupported_system` — the two are one fact seen
+    twice, and a script may key on either.
+    """
+    from cli import os_grid_notice
+
+    assert _absence(monkeypatch, "FreeBSD", False).as_json() == {
+        "reason": os_grid_notice.UNSUPPORTED_SYSTEM, "system": "FreeBSD", "os_token": None}
+    assert _absence(monkeypatch, "Darwin", False).as_json() == {
+        "reason": os_grid_notice.NOT_SERVED, "system": "Darwin", "os_token": "macos"}
+
+
+# --- and the same fact, where a person actually meets it: `grid login` and `grid sync` -------------
+
+
+def _login_output(monkeypatch, tmp_path, capsys, *, system, os_served, args=("login", "--no-browser")):
+    import platform
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(platform, "system", lambda: system)
+    _device_flow(monkeypatch, poll_statuses=[_APPROVED], networks=[], os_served=os_served)
+    code = cli.cmd_login(cli.build_parser().parse_args(list(args)))
+    return code, capsys.readouterr()
+
+
+def _sync_output(monkeypatch, tmp_path, capsys, *, system, os_served, args=("sync",)):
+    import platform
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _sync_seed([], session_token="sess-1")
+    _disable_orphan_sweep(monkeypatch)
+    monkeypatch.setattr(platform, "system", lambda: system)
+    _sync_patch_fetch(monkeypatch, [], os_served=os_served)
+    code = _run_sync(args)
+    return code, capsys.readouterr()
+
+
+# Each command paired with the LAST thing it prints of its own accord, which is what the absence line
+# is appended after. Pairing them is what lets every case below assert on that command's own report
+# instead of on a phrase from the new sentence: keying on `"OS grid" not in out` would go vacuous the
+# moment `line()` is reworded to drop those two words, with nothing to notice. It also retires an `or`
+# across the two helpers that could not say which half had fired.
+_COMMAND_OUTPUTS = [
+    # Login's own report ends with the next-steps block it prints for an account with no grids, so
+    # that block's last line — not the "Signed in as" sentence above it — is what the absence line
+    # must come after.
+    pytest.param(_login_output,
+                 "  grid start <name>   # or create your own, then `grid use <name>`\n\n",
+                 id="login"),
+    pytest.param(_sync_output, "Synced 0 grids.\n", id="sync"),
+]
+
+
+@pytest.mark.parametrize("output,reported", _COMMAND_OUTPUTS)
+def test_a_machine_outside_the_token_set_is_told_so_on_sign_in_and_on_sync(
+    monkeypatch, tmp_path, capsys, output, reported
+):
+    code, captured = output(monkeypatch, tmp_path, capsys, system="FreeBSD", os_served=None)
+    assert code == 0  # an absent OS grid is not a failure
+    assert "FreeBSD" in captured.out
+    assert reported in captured.out  # said as well as, never instead of
+
+
+@pytest.mark.parametrize("output,reported", _COMMAND_OUTPUTS)
+def test_a_control_plane_serving_no_os_grid_says_so_on_sign_in_and_on_sync(
+    monkeypatch, tmp_path, capsys, output, reported
+):
+    code, captured = output(monkeypatch, tmp_path, capsys, system="Darwin", os_served=False)
+    assert code == 0
+    assert "macos" in captured.out
+    assert "FreeBSD" not in captured.out
+    assert reported in captured.out
+
+
+@pytest.mark.parametrize("output,reported", _COMMAND_OUTPUTS)
+@pytest.mark.parametrize("os_served", [True, None])
+def test_nothing_extra_is_printed_when_there_is_nothing_to_report(
+    monkeypatch, tmp_path, capsys, output, os_served, reported
+):
+    """`None` is the pin on ADR 0039 D-k's silent degrade: against a control plane that does not send
+    the key, this prints nothing extra and behaves exactly as it did before.
+
+    ⚠️ Asserted as *the command's own report is the last thing on stdout*, never as "the new
+    sentence's words are absent". A phrase test passes for free the day somebody rewords `line()`,
+    and this is the criterion that keeps the feature quiet for everybody who has an OS grid — the one
+    least likely to be noticed if it silently stopped being checked.
+    """
+    code, captured = output(monkeypatch, tmp_path, capsys, system="Darwin", os_served=os_served)
+    assert code == 0
+    assert captured.out.endswith(reported), captured.out
+
+
+@pytest.mark.parametrize("output,reported", _COMMAND_OUTPUTS)
+def test_the_line_never_displaces_what_the_command_already_said(
+    monkeypatch, tmp_path, capsys, output, reported
+):
+    """It is an extra line, not a replacement — `grid sync` still reports its count, `grid login`
+    still reports the account, and something follows it.
+
+    ⚠️ **The `code == 0` here is a regression guard, not evidence.** Nothing in `absence()` or
+    `_print_os_grid_absence` raises or returns, so no mutation of today's code can fail it; it is
+    here so that an implementation which later grows a raise cannot land quietly. Do not read the
+    green as the suite defending the criterion — it defends it against the future, not the present.
+    """
+    code, captured = output(monkeypatch, tmp_path, capsys, system="FreeBSD", os_served=False)
+    assert code == 0
+    assert reported in captured.out            # the command's own report survived...
+    assert not captured.out.endswith(reported)  # ...and the line was appended after it
+
+
+def test_login_json_carries_the_absence_as_a_field(monkeypatch, tmp_path, capsys):
+    from cli import os_grid_notice
+
+    _, captured = _login_output(monkeypatch, tmp_path, capsys, system="FreeBSD", os_served=False,
+                                args=("login", "--no-browser", "--json"))
+    payload = json.loads(captured.out)
+    assert payload["os_grid"] == {
+        "reason": os_grid_notice.UNSUPPORTED_SYSTEM, "system": "FreeBSD", "os_token": None}
+    assert payload["signed_in"] is True  # the rest of the answer is unchanged
+
+
+def test_sync_json_carries_the_absence_as_a_field(monkeypatch, tmp_path, capsys):
+    from cli import os_grid_notice
+
+    _, captured = _sync_output(monkeypatch, tmp_path, capsys, system="Darwin", os_served=False,
+                               args=("sync", "--json"))
+    payload = json.loads(captured.out)
+    assert payload["os_grid"] == {
+        "reason": os_grid_notice.NOT_SERVED, "system": "Darwin", "os_token": "macos"}
+    assert payload["synced"] is True
+
+
+@pytest.mark.parametrize("os_served", [True, None])
+def test_the_json_field_is_null_rather_than_absent_when_there_is_nothing_to_say(
+    monkeypatch, tmp_path, capsys, os_served
+):
+    """A key that comes and goes is a key every script has to guard; `null` is one shape to read."""
+    _, login = _login_output(monkeypatch, tmp_path, capsys, system="Darwin", os_served=os_served,
+                             args=("login", "--no-browser", "--json"))
+    assert json.loads(login.out)["os_grid"] is None
+
+
+def test_the_json_line_is_not_also_printed_as_prose(monkeypatch, tmp_path, capsys):
+    """`--json` keeps stdout parseable — the fact rides the field, never a sentence beside it."""
+    _, captured = _sync_output(monkeypatch, tmp_path, capsys, system="FreeBSD", os_served=False,
+                               args=("sync", "--json"))
+    assert json.loads(captured.out)["os_grid"]["system"] == "FreeBSD"
+    assert "FreeBSD" not in captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -21005,14 +22986,14 @@ def _mock_lifecycle(monkeypatch, *, create=None, start=None, stop=None, status=N
     return calls
 
 
-def test_remote_up_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
+def test_remote_start_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path)
     calls = _mock_lifecycle(monkeypatch, create={
         "network_id": "n-new", "name": "team", "network_type": "permissioned-public",
         "signaling_url": "https://relay.example", "status": "running",
     })
 
-    assert cli.main(["up", "team"]) == 0
+    assert cli.main(["start", "team"]) == 0
     out = capsys.readouterr().out
     assert calls["create"] == {"session": "sess-tok", "name": "team", "network_type": "permissioned-public"}
     assert "create" in calls and "start" not in calls
@@ -21024,90 +23005,90 @@ def test_remote_up_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
     assert nets[0]["signaling_url"] == "https://relay.example"
 
 
-def test_remote_up_starts_when_name_known(monkeypatch, tmp_path, capsys):
+def test_remote_start_starts_when_name_known(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "network_type": "permissioned-public",
          "signaling_url": "https://relay.example", "status": "stopped"}])
     calls = _mock_lifecycle(monkeypatch, start={"status": "running", "signaling_url": "https://relay.example"})
 
-    assert cli.main(["up", "team"]) == 0
+    assert cli.main(["start", "team"]) == 0
     out = capsys.readouterr().out
     assert calls.get("start") == {"session": "sess-tok", "network_id": "n1"}
     assert "create" not in calls  # known grid → start, not create
     assert "grid=team" in out and "grid_url=https://relay.example" in out
 
 
-def test_remote_up_bare_starts_active_grid(monkeypatch, tmp_path, capsys):
+def test_remote_start_bare_starts_active_grid(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "signaling_url": "https://r1"},
         {"network_id": "n2", "name": "lab", "signaling_url": "https://r2"}],
         active="lab")
     calls = _mock_lifecycle(monkeypatch, start={"status": "running"})
 
-    assert cli.main(["up"]) == 0  # no name → the active grid
+    assert cli.main(["start"]) == 0  # no name → the active grid
     out = capsys.readouterr().out
     assert calls.get("start") == {"session": "sess-tok", "network_id": "n2"}
     assert "create" not in calls
     assert "grid=lab" in out
 
 
-def test_remote_up_bare_errors_when_unresolvable(monkeypatch, tmp_path):
+def test_remote_start_bare_errors_when_unresolvable(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path, networks=[])  # signed in, but no grids and no active
     _mock_lifecycle(monkeypatch)
     with pytest.raises(SystemExit) as exc:
-        cli.main(["up"])
+        cli.main(["start"])
     assert "name" in str(exc.value).lower()  # guidance to name a grid to create
 
 
-def test_remote_up_type_on_create_sets_network_type(monkeypatch, tmp_path, capsys):
+def test_remote_start_type_on_create_sets_network_type(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path)
     calls = _mock_lifecycle(monkeypatch, create={
         "network_id": "n1", "name": "lab", "network_type": "permissioned-providers",
         "signaling_url": "https://r"})
 
-    assert cli.main(["up", "lab", "--type", "permissioned-providers"]) == 0
+    assert cli.main(["start", "lab", "--type", "permissioned-providers"]) == 0
     capsys.readouterr()
     assert calls["create"]["network_type"] == "permissioned-providers"
 
 
-def test_remote_up_type_on_start_warns_and_ignores(monkeypatch, tmp_path, capsys):
+def test_remote_start_type_on_start_warns_and_ignores(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "signaling_url": "https://r"}])
     calls = _mock_lifecycle(monkeypatch, start={"status": "running"})
 
-    assert cli.main(["up", "team", "--type", "permissioned-providers"]) == 0
+    assert cli.main(["start", "team", "--type", "permissioned-providers"]) == 0
     out = capsys.readouterr().out
     assert "start" in calls and "create" not in calls
     assert "type" in out.lower()  # a note that --type is ignored on an existing grid
     assert calls["start"] == {"session": "sess-tok", "network_id": "n1"}  # start carries no type
 
 
-def test_remote_up_start_reports_grid_url_from_status(monkeypatch, tmp_path, capsys):
+def test_remote_start_reports_grid_url_from_status(monkeypatch, tmp_path, capsys):
     # Live shape: start → {network_id, status} (no signaling_url); the bundle has none stored either,
-    # so `up` reads the address from the status endpoint.
+    # so `start` reads the address from the status endpoint.
     _seed_remote(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
     _mock_lifecycle(monkeypatch, start={"network_id": "n1", "status": "running"},
                     status={"state": "running", "signaling_url": "https://live.relay"})
 
-    assert cli.main(["up", "team"]) == 0
+    assert cli.main(["start", "team"]) == 0
     assert "grid_url=https://live.relay" in capsys.readouterr().out
 
 
-def test_remote_down_stops(monkeypatch, tmp_path, capsys):
+def test_remote_stop_stops(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
     calls = _mock_lifecycle(monkeypatch, stop={"status": "stopped"})
 
-    assert cli.main(["down", "team"]) == 0
+    assert cli.main(["stop", "team"]) == 0
     out = capsys.readouterr().out
     assert calls.get("stop") == {"session": "sess-tok", "network_id": "n1"}
     assert "team" in out and "down" in out.lower()
 
 
-def test_remote_down_errors_when_unresolvable(monkeypatch, tmp_path):
+def test_remote_stop_errors_when_unresolvable(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
     _mock_lifecycle(monkeypatch)
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "ghost"])  # not a known grid
+        cli.main(["stop", "ghost"])  # not a known grid
     assert "ghost" in str(exc.value)
 
 
@@ -21133,6 +23114,28 @@ def test_remote_ls_json_emits_grid_and_type(monkeypatch, tmp_path, capsys):
     assert cli.main(["ls", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == [
         {"grid": "team", "type": "permissioned-public", "id": "n1"}]
+
+
+def test_remote_ls_prints_an_os_grid_like_any_other_type(monkeypatch, tmp_path, capsys):
+    """An OS grid is a row like any other, and its type is printed VERBATIM (ADR 0039 Consequences).
+
+    `grid ls` reads the locally-stored list `GET /tokens` filled, and this repository holds no
+    `os-community` constant to compare against — the type is whatever the control plane said. So the
+    thing worth pinning is that a type this CLI has never heard of still renders in full: a renderer
+    that mapped known types to labels would print a blank column for the one grid most users will
+    never have created, and `grid ls` is the ONLY surface an OS grid has (ADR 0039 D-e — a browser
+    session has no machine to report, so `/me` and the app show nothing).
+    """
+    _seed_remote(monkeypatch, tmp_path, networks=[
+        {"network_id": "n1", "name": "team", "network_type": "permissioned-public"},
+        {"network_id": "n2", "name": "macOS", "network_type": "os-community"}])
+    assert cli.main(["ls"]) == 0
+    out = capsys.readouterr().out
+    assert "macOS" in out and "os-community" in out
+    assert "team" in out and "permissioned-public" in out  # the ordinary row is untouched
+    assert cli.main(["ls", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)[1] == {
+        "grid": "macOS", "type": "os-community", "id": "n2"}
 
 
 def test_remote_list_alias_lists_like_ls(monkeypatch, tmp_path, capsys):
@@ -21471,7 +23474,9 @@ def test_remote_models_prepends_auto_when_router_enabled(monkeypatch, tmp_path, 
     _mock_overview(monkeypatch, {**_OVERVIEW_2NODES, "router_enabled": True})
     assert cli.main(["models"]) == 0
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-    assert lines == ["auto", "glm-5.2", "qwen-3"]  # auto first (mirrors /relay/v1/models), then engine models
+    # The router family first (mirrors /relay/v1/models: auto + the two effort display names),
+    # then engine models.
+    assert lines == ["auto", "Brute Force", "Feedback Loop", "glm-5.2", "qwen-3"]
 
 
 def test_remote_models_omits_auto_when_router_disabled(monkeypatch, tmp_path, capsys):
@@ -21480,6 +23485,7 @@ def test_remote_models_omits_auto_when_router_disabled(monkeypatch, tmp_path, ca
     assert cli.main(["models"]) == 0
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
     assert lines == ["glm-5.2", "qwen-3"] and "auto" not in lines
+    assert "Brute Force" not in lines and "Feedback Loop" not in lines
 
 
 def test_remote_models_omits_auto_when_field_absent(monkeypatch, tmp_path, capsys):
@@ -21506,14 +23512,39 @@ def test_remote_models_json_includes_auto_first_when_router_enabled(monkeypatch,
     payload = json.loads(capsys.readouterr().out)
     assert payload[0] == {"model": "auto", "engine": "grid-router", "node": "", "responses": False}
 
-
 def test_remote_models_shows_auto_even_with_zero_nodes_when_enabled(monkeypatch, tmp_path, capsys):
-    # Mirrors /relay/v1/models: auto is advertised whenever routing is on, independent of engines.
+    # Mirrors /relay/v1/models: the router family is advertised whenever routing is on,
+    # independent of engines.
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_overview(monkeypatch, {"nodes": [], "router_enabled": True})
     assert cli.main(["models"]) == 0
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-    assert lines == ["auto"]
+    assert lines == ["auto", "Brute Force", "Feedback Loop"]
+
+
+def test_remote_models_json_lists_effort_rows_after_auto(monkeypatch, tmp_path, capsys):
+    # The two effort display names are rows of their own (each independently chat-addressable),
+    # owned by grid-router with no node — exactly what the relay advertises.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {**_OVERVIEW_2NODES, "router_enabled": True})
+    assert cli.main(["models", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[1:3] == [
+        {"model": "Brute Force", "engine": "grid-router", "node": "", "responses": False},
+        {"model": "Feedback Loop", "engine": "grid-router", "node": "", "responses": False},
+    ]
+
+
+def test_remote_models_hint_skips_effort_names(monkeypatch, tmp_path, capsys):
+    # Zero engines + router on: every listed name is a router alias — the hint must fall back to
+    # `auto`, never suggest chat-testing an effort alias as if it were the newcomer's own model.
+    # The hint rides stderr behind a tty check (print_models_hint), so fake the tty.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"nodes": [], "router_enabled": True})
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    assert cli.main(["models"]) == 0
+    err = capsys.readouterr().err
+    assert "-m auto" in err and "Brute Force" not in err and "Feedback Loop" not in err
 
 
 # ── responses dialect annotation on the live listing (issue 10) ──
@@ -21835,21 +23866,24 @@ def test_remote_info_env_requires_access_token(monkeypatch, tmp_path):
 
 
 def test_local_chat_rejects_remote_only_flags(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default local mode
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["chat", "-m", "m", "hi", "--target-provider", "e1"])
     assert "remote mode" in str(exc.value).lower()
 
 
 def test_local_image_rejects_allow_self_provider(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default local mode
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["image", "a cat", "-m", "comfyui:image_generation", "--allow-self-provider"])
     assert "remote mode" in str(exc.value).lower()
 
 
 def test_local_edit_and_video_reject_remote_only_flags(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default local mode
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     img = tmp_path / "a.png"
     img.write_bytes(b"x")
     with pytest.raises(SystemExit) as exc:  # reject runs before the >3-image check / file reads
@@ -21859,6 +23893,619 @@ def test_local_edit_and_video_reject_remote_only_flags(monkeypatch, tmp_path):
         cli.main(["video", "p", "-m", "doggi:Wan-AI/Wan2.2-I2V-A14B-Lightning",
                   "-i", str(img), "--allow-self-provider"])
     assert "remote mode" in str(exc.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Remote `grid stats` / `grid usage` (cli/remote_stats.py + cli/_format.py)
+#
+# The terminal form of the desktop app's grid panels, off the same two relay reads. The rules under
+# test are the ones ported from it deliberately — absent is not zero, cached input is a share of
+# input, a subscription seat brings a plan rather than memory — because those are what make the two
+# surfaces agree about one grid, and each is invisible when it breaks (a wrong figure, not an error).
+# ---------------------------------------------------------------------------
+
+# One busy GPU box, one idle Mac, one asleep machine and one subscription seat: between them they
+# exercise every membership and every "the relay didn't say" branch in one payload.
+_OVERVIEW_STATS = {
+    "grid": {"state": "running"},
+    "stats": {"models": 2, "nodes": 3, "concurrent_capacity": 20, "uptime_pct": 99.9},
+    "answered": {"window_seconds": 86400, "tokens_in": 1_200_000, "tokens_cached": 200_000,
+                 "tokens_out": 90_000, "requests": 400},
+    "models": [{"id": "GLM-5.2"}, {"id": "Qwen-3"}],
+    "nodes": [
+        {"name": "gpu-box", "provider_email": "ana@example.com", "device": "NVIDIA RTX 5090 ×2",
+         "platform": "linux", "engine": "vllm", "models": ["glm-5.2"],
+         "model_capabilities": {"glm-5.2": {"context_length": 256000}},
+         "vram_gb": 64.0, "vram_total_mb": 65536.0, "vram_used_mb": 32768.0,
+         "gpu_util_pct": 55.0, "gpu_temp_c": 61.0, "gpu_power_w": 300.0, "gpu_power_limit_w": 600.0,
+         "disk_total_gb": 900.0, "disk_used_gb": 450.0,
+         "throughput_tok_s": 120.0, "max_concurrency": 16, "online": True,
+         "answered": {"window_seconds": 86400, "tokens_in": 1_000_000, "tokens_cached": 200_000,
+                      "tokens_out": 80_000, "requests": 300,
+                      "by_model": [{"model": "glm-5.2", "tokens_in": 1_000_000,
+                                    "tokens_cached": 200_000, "tokens_out": 80_000,
+                                    "requests": 300}]}},
+        {"name": "mac-studio", "provider_email": "bo@example.com", "chip": "Apple M2 Ultra",
+         "platform": "macos-arm64", "engine": "llama.cpp", "models": ["qwen-3"],
+         "vram_gb": 192.0, "vram_total_mb": 196608.0, "vram_used_mb": 49152.0,
+         "throughput_tok_s": 20.0, "max_concurrency": 1, "online": True,
+         "answered": {"window_seconds": 86400, "tokens_in": 0, "tokens_cached": 0,
+                      "tokens_out": 0, "requests": 0, "by_model": []}},
+        {"name": "asleep-box", "vram_gb": 999.0, "throughput_tok_s": 500.0,
+         "max_concurrency": 8, "online": False},
+        {"name": "codex-seat", "plan_type": "pro", "vram_gb": 128.0, "engine": "codex",
+         "models": ["codex:gpt-5.5"], "max_concurrency": 4, "online": True},
+    ],
+}
+
+
+def _mock_member_usage(monkeypatch, payload, *, status=200, seen=None):
+    """Serve both relay reads `grid usage` makes: the overview, then `/grid/members/usage`."""
+    def handler(request):
+        if seen is not None:
+            seen.setdefault("paths", []).append(request.url.path)
+            seen["auth"] = request.headers.get("authorization")
+        if request.url.path.endswith("/members/usage"):
+            return httpx.Response(status, json=payload)
+        return httpx.Response(200, json=_OVERVIEW_STATS)
+
+    _mock_relay(monkeypatch, handler)
+
+
+def _lines(capsys):
+    return [ln for ln in capsys.readouterr().out.splitlines()]
+
+
+def _overview(lines):
+    """The aligned overview block as a dict — what `grid stats` and `grid usage` both open with.
+
+    A pair is identified by its column gap, so the heading (single-spaced prose) is skipped without
+    this having to know what it says, and the block ends at the first line that is not a pair — the
+    blank before the node cards or the breakdown table.
+    """
+    out = {}
+    for line in lines:
+        if "  " in line and not line.startswith(" "):
+            name, _, value = line.partition("  ")
+            out[name.strip()] = value.strip()
+        elif out:
+            break
+    return out
+
+
+def _heading(lines):
+    """The first line `grid stats` prints — the span-qualified title."""
+    return lines[0]
+
+
+# -- `grid stats` ----------------------------------------------------------
+
+def test_stats_and_usage_are_classified_remote_only_with_their_own_reason():
+    """Neither has a local handler to fall back to, and neither is gated for sign-in — so both must
+    carry a reason of their own rather than inheriting "to sign in."."""
+    assert {"stats", "usage"} <= set(dispatch.REMOTE_ONLY)
+    assert not (set(dispatch.AGNOSTIC) & {"stats", "usage"})
+    assert not (set(dispatch.REMOTE_HANDLERS) & {"stats", "usage"})
+    assert all(dispatch.REMOTE_ONLY[command] for command in ("stats", "usage"))
+
+
+def test_stats_in_local_mode_says_a_local_grid_computes_none_of_it(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["stats"])
+    message = str(exc.value)
+    assert message.startswith("`grid stats` is a remote-mode command.")
+    assert "does not compute" in message and "sign in" not in message
+
+
+def test_remote_stats_prints_the_grid_rollup(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    seen = {}
+    _mock_overview(monkeypatch, _OVERVIEW_STATS, seen)
+    assert cli.main(["stats"]) == 0
+    values = _overview(_lines(capsys))
+    assert seen["path"] == "/relay/v1/grid/overview"
+    assert values["grid"] == "team" and values["status"] == "running"
+    assert values["uptime"] == "99.9%"
+    assert values["nodes"] == "3"  # online only — the sleeping box is not serving
+    assert values["models"] == "2"
+    assert values["parallel"] == "20"  # the relay's own capacity wins over the engines' summed 21
+    # Speed is a property of the machine that answers, not of the grid: each engine's figure is its
+    # own decode estimate taken at its own moment, so there is no summed rate here to read.
+    assert "throughput" not in values
+
+
+def test_remote_stats_opens_with_a_span_qualified_heading_over_one_column(monkeypatch, tmp_path, capsys):
+    """The block's shape is the contract here: a heading naming the span, then one column of
+    figures. No `window` row — the heading already qualifies every token figure under it."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats"]) == 0
+    assert capsys.readouterr().out == (
+        "24h Grid Overview:\n"
+        "\n"
+        "grid      team\n"
+        "status    running\n"
+        "uptime    99.9%\n"
+        "nodes     3\n"
+        "models    2\n"
+        "memory    80/256 GB (31%)\n"
+        "parallel  20\n"
+        "input     1M\n"
+        "cached    200K\n"
+        "output    90K\n"
+        "requests  400\n"
+    )
+
+
+def test_remote_stats_heading_names_the_relays_span_not_a_hardcoded_day(monkeypatch, tmp_path, capsys):
+    """The window is an operator knob (`node_answered_window_seconds`). A heading reading "24h"
+    while the master counted six would be wrong in the one way a figure must never be — and with
+    the `window` row gone, this heading is the only thing saying what the figures cover."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    six_hours = {**_OVERVIEW_STATS,
+                 "answered": {**_OVERVIEW_STATS["answered"], "window_seconds": 21600}}
+    _mock_overview(monkeypatch, six_hours)
+    assert cli.main(["stats"]) == 0
+    lines = _lines(capsys)
+    assert _heading(lines) == "6h Grid Overview:"
+    assert "window" not in _overview(lines)
+
+
+def test_remote_stats_heading_drops_the_span_when_nothing_measured_one(monkeypatch, tmp_path, capsys):
+    """A grid whose relay computes no rollup names no span — the bare noun, not an empty one, and
+    certainly not a day it never counted."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"grid": {"state": "running"}, "stats": {}, "nodes": []})
+    assert cli.main(["stats"]) == 0
+    assert _heading(_lines(capsys)) == "Grid Overview:"
+
+
+def test_remote_usage_opens_with_the_shared_block_under_its_own_title(monkeypatch, tmp_path, capsys):
+    """One shape from one place — but each command names it for itself. Here the block is a header
+    over a breakdown, so it stays light; in `grid stats` it *is* the answer and says so."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["usage"]) == 0
+    assert _lines(capsys)[:7] == [
+        "24h overview:",
+        "",
+        "input     1M",
+        "cached    200K",
+        "output    90K",
+        "requests  400",
+        "",
+    ]
+
+
+def test_remote_usage_heading_names_the_relays_span(monkeypatch, tmp_path, capsys):
+    """Same rule as `grid stats`: with no `window` row under it, this heading is the only thing
+    saying what the figures cover, so it cannot be a hardcoded day."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {**_OVERVIEW_STATS,
+                                 "answered": {**_OVERVIEW_STATS["answered"], "window_seconds": 21600}})
+    assert cli.main(["usage"]) == 0
+    lines = _lines(capsys)
+    assert _heading(lines) == "6h overview:"
+    assert "window" not in _overview(lines)
+
+
+def test_remote_stats_memory_pool_excludes_offline_boxes_and_subscription_seats(
+    monkeypatch, tmp_path, capsys
+):
+    """64 + 192 GB of hardware, not 999 (asleep — it can run nothing now) and not 128 (a seat, which
+    relays to a hosted model, so its host's memory never runs anything for the grid)."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats"]) == 0
+    # 32 GB used of 256 GB pooled. Used is summed over exactly the machines the total is.
+    assert _overview(_lines(capsys))["memory"] == "80/256 GB (31%)"
+
+
+def test_remote_stats_prints_the_fresh_input_leg_not_the_raw_one(monkeypatch, tmp_path, capsys):
+    """Cached prefill is a share OF input, never additional to it — so the three legs printed here
+    add up to what passed through. Raw `tokens_in` would show 1.2M and a total larger than the grid."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats"]) == 0
+    lines = _lines(capsys)
+    values = _overview(lines)
+    assert _heading(lines) == "24h Grid Overview:"  # the span is stated once, above the figures
+    assert values["input"] == "1M"  # 1_200_000 read − 200_000 from cache
+    assert values["cached"] == "200K" and values["output"] == "90K" and values["requests"] == "400"
+
+
+def test_remote_stats_marks_an_unmeasured_field_rather_than_printing_zero(monkeypatch, tmp_path, capsys):
+    """A relay too old to compute a rollup sends none, and a `0` there would report a busy fleet as
+    dead. The name still prints — the block is the same shape either way — with a dash where the
+    figure would be, which in a column is what keeps it from reading as a rendering failure."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"grid": {"state": "running"}, "stats": {}, "nodes": [
+        {"name": "quiet-box", "online": True},
+    ]})
+    assert cli.main(["stats"]) == 0
+    lines = _lines(capsys)
+    values = _overview(lines)
+    assert _heading(lines) == "Grid Overview:"  # no span to name
+    assert values["uptime"] == "—" and values["memory"] == "—" and values["parallel"] == "—"
+    assert [values[key] for key in ("input", "cached", "output", "requests")] == ["—"] * 4
+
+
+def test_remote_stats_prefers_the_grids_own_rollup_over_summing_engines(monkeypatch, tmp_path, capsys):
+    """An engine is listed only while its heartbeat is live, and the relay's per-node rollup drops
+    rows it cannot attribute — so a summed total is quietly low by an amount that moves as machines
+    come and go. The grid's own figure is authoritative wherever it sends one."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats"]) == 0
+    # The one engine that answered reports 80K out; the grid says 90K. The grid's figure wins.
+    assert _overview(_lines(capsys))["output"] == "90K"
+
+
+def test_remote_stats_falls_back_to_the_engine_sum_when_the_grid_sends_no_rollup(
+    monkeypatch, tmp_path, capsys
+):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {k: v for k, v in _OVERVIEW_STATS.items() if k != "answered"})
+    assert cli.main(["stats"]) == 0
+    lines = _lines(capsys)
+    assert _overview(lines)["output"] == "80K" and _overview(lines)["requests"] == "300"
+    assert _heading(lines) == "24h Grid Overview:"  # span taken from the engines, not assumed
+
+
+def test_remote_stats_verbose_prints_a_card_per_engine(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats", "--verbose"]) == 0
+    out = capsys.readouterr().out
+    card = out.split("gpu-box\n", 1)[1]
+    assert "owner        ana@example.com" in card
+    assert "NVIDIA RTX 5090 ×2 · Linux" in card
+    assert "vllm · 16 parallel" in card
+    # The catalog's case, not the lowercased id the node advertises — a name copied off a card has
+    # to be one `grid chat -m` will answer to.
+    assert "models       GLM-5.2 (256K ctx)" in card
+    assert "VRAM         32/64 GB (50%) · 32 GB free" in card
+    assert "temperature  61°C" in card and "usage        55%" in card
+    assert "power        300W/600W" in card and "storage      450/900 GB (50%)" in card
+    assert "throughput   ~120 tok/s" in card
+    assert "tokens 24h   800K input · 200K cached · 80K output · 300 requests" in card
+    assert "asleep-box  (offline)" in out  # listed, and marked, rather than dropped
+    # The heading stands off the rollup on both sides — a `key=value` block running straight into a
+    # prose heading read as a fourteenth key rather than as the start of a new section.
+    assert "\nrequests  400\n\nTop 20 nodes:\n\n" in out
+
+
+def test_remote_stats_verbose_caps_the_node_list_and_keeps_the_strongest(monkeypatch, tmp_path, capsys):
+    """A card is eleven lines, so an uncapped list would scroll the rollup — the part every run is
+    read for — off the screen. Sorted strongest-first, the cap drops the tail rather than an
+    arbitrary slice, and the `nodes=` line still states how many there really are."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"grid": {"state": "running"}, "stats": {}, "nodes": [
+        {"name": f"box-{i:02d}", "vram_gb": float(i), "online": True} for i in range(1, 26)
+    ]})
+    assert cli.main(["stats", "--verbose"]) == 0
+    out = capsys.readouterr().out
+    headers = [ln for ln in out.splitlines() if ln.startswith("box-")]
+    assert _overview(out.splitlines())["nodes"] == "25"  # the real count is never hidden
+    assert "Top 20 nodes:" in out
+    assert len(headers) == 20
+    assert headers[0] == "box-25" and headers[-1] == "box-06"  # biggest kept, smallest dropped
+    assert "box-05" not in out and "box-01" not in out
+
+
+def test_remote_stats_json_is_never_capped(monkeypatch, tmp_path, capsys):
+    """The cap is a reading aid, not a filter. A script asking for the fleet must get the fleet."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"grid": {"state": "running"}, "stats": {}, "nodes": [
+        {"name": f"box-{i:02d}", "vram_gb": float(i), "online": True} for i in range(1, 26)
+    ]})
+    assert cli.main(["stats", "--verbose", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["engines"]) == 25 and payload["engines_online"] == 25
+
+
+def test_remote_stats_verbose_keeps_a_measured_zero_apart_from_an_unmeasured_reading(
+    monkeypatch, tmp_path, capsys
+):
+    """The Mac reports memory and speed but no temperature or power — macOS exposes neither outside a
+    root `powermetrics` — while its token figures are real zeros the relay did measure. A `0` in the
+    first pair would libel a working machine; a `—` in the second would hide a true fact."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats", "--verbose"]) == 0
+    card = capsys.readouterr().out.split("mac-studio\n", 1)[1].split("\n\n", 1)[0]
+    assert "temperature  —" in card and "power        —" in card and "usage        —" in card
+    assert "tokens 24h   0 input · 0 cached · 0 output · 0 requests" in card
+    assert "RAM          48/192 GB (25%)" in card  # unified memory is RAM, not VRAM
+
+
+def test_remote_stats_json_carries_the_engines_whether_verbose_or_not(monkeypatch, tmp_path, capsys):
+    """`--verbose` must not change the machine-readable shape, or every script would depend on how
+    it was invoked."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats", "--json"]) == 0
+    plain = json.loads(capsys.readouterr().out)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats", "--verbose", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == plain
+
+    assert plain["grid"] == "team" and plain["engines_online"] == 3 and plain["engines_total"] == 4
+    assert plain["memory_gb"] == 256.0 and plain["memory_used_gb"] == 80.0
+    assert plain["memory_used_pct"] == 31.2 and "throughput_tok_s" not in plain
+    assert next(e for e in plain["engines"] if e["engine"] == "gpu-box")["throughput_tok_s"] == 120.0
+    assert plain["answered"]["tokens_in"] == 1_200_000  # the relay's own name keeps its own meaning
+    assert plain["answered"]["tokens_in_fresh"] == 1_000_000
+    seat = next(e for e in plain["engines"] if e["engine"] == "codex-seat")
+    assert seat["plan_type"] == "pro" and seat["memory_gb"] is None  # a plan, not memory
+
+
+# -- `grid usage` ----------------------------------------------------------
+
+def test_remote_usage_by_model_ranks_by_output_and_counts_serving_engines(
+    monkeypatch, tmp_path, capsys
+):
+    """Ordered by what each model did, not by catalog order — the position itself carries
+    information. A model the grid lists but nothing answered on keeps its row, unmeasured."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["usage"]) == 0
+    lines = _lines(capsys)
+    header = next(ln for ln in lines if ln.startswith("MODEL"))
+    rows = [ln for ln in lines[lines.index(header) + 1:] if ln.strip()]
+    assert header.split() == ["MODEL", "INPUT", "CACHED", "OUTPUT", "REQUESTS", "SHARE", "ENGINES"]
+    # Catalog casing is what prints, though the node advertises `glm-5.2` — matched case-insensitively.
+    assert rows[0].split() == ["GLM-5.2", "800K", "200K", "80K", "300", "89%", "1"]
+    # A real zero, not a dash: the grid's rollup landed, so "nobody used this model today" is a
+    # measured fact — see the third branch in `model_rows`.
+    assert rows[1].split() == ["Qwen-3", "0", "0", "0", "0", "0%", "1"]
+
+
+def test_remote_usage_by_model_stays_unmeasured_when_nothing_measured_the_grid(
+    monkeypatch, tmp_path, capsys
+):
+    """The other side of the same rule. An older master computes no rollup at all, and printing
+    `0 requests` against every model on such a grid would report a busy fleet as dead — so with
+    nothing measured anywhere the rows stay silent rather than claiming an idle day."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {
+        "models": [{"id": "GLM-5.2"}],
+        "nodes": [{"name": "old-box", "models": ["glm-5.2"], "online": True}],
+    })
+    assert cli.main(["usage"]) == 0
+    lines = _lines(capsys)
+    row = next(ln for ln in lines if ln.startswith("GLM-5.2"))
+    assert row.split() == ["GLM-5.2", "—", "—", "—", "—", "—", "1"]
+
+
+def test_remote_usage_by_model_keeps_a_model_the_catalog_no_longer_lists(monkeypatch, tmp_path, capsys):
+    """Work that happened is printed whatever the catalog says now — dropping it would leave the
+    column adding up to less than its own header with nothing to show why."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {**_OVERVIEW_STATS, "models": []})
+    assert cli.main(["usage"]) == 0
+    assert any(ln.startswith("glm-5.2 ") for ln in _lines(capsys))
+
+
+def test_remote_usage_by_engine_lists_every_engine_busiest_first(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["usage", "--by", "engine"]) == 0
+    lines = _lines(capsys)
+    rows = [ln.split() for ln in lines[lines.index(next(ln for ln in lines if ln.startswith("ENGINE"))) + 1:]
+            if ln.strip()]
+    assert rows[0] == ["gpu-box", "800K", "200K", "80K", "300"]
+    assert ["mac-studio", "0", "0", "0", "0"] in rows       # measured, and idle
+    assert ["codex-seat", "—", "—", "—", "—"] in rows       # never measured
+
+
+def test_remote_usage_by_member_lists_who_spent_and_ranks_by_fresh_input(
+    monkeypatch, tmp_path, capsys
+):
+    """The relay's rows are the whole list, ordered by fresh input.
+
+    ⚠️ **A roster entry no longer adds anybody.** `cy` is on the control plane's member list and
+    has never sent a request; the table must not carry a row for them, because this command answers
+    *who spent what* and the answer about `cy` is "nothing was measured", not a row of dashes.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    seen = {}
+    _mock_member_usage(monkeypatch, {"window_seconds": 86400, "members": [
+        {"email": "Ana@example.com", "requests": 12, "tokens_in": 900_000,
+         "tokens_cached": 400_000, "tokens_out": 5_000},
+        {"email": "bo@example.com", "requests": 3, "tokens_in": 100_000,
+         "tokens_cached": 10_000, "tokens_out": 900},
+    ]}, seen=seen)
+    _mock_members(monkeypatch, members=[
+        {"email": "ana@example.com", "roles": ["admin"]},
+        {"email": "cy@example.com", "roles": ["consumer"]},
+    ])
+    assert cli.main(["usage", "--by", "member"]) == 0
+    captured = capsys.readouterr()
+    lines = [ln for ln in captured.out.splitlines()]
+    rows = [ln.split() for ln in lines[lines.index(next(ln for ln in lines if ln.startswith("MEMBER"))) + 1:]
+            if ln.strip()]
+    assert "/relay/v1/grid/members/usage" in seen["paths"]
+    assert seen["auth"] == "Bearer AT"  # this one names people, so it is authenticated
+    # 500K fresh (900K read − 400K cached) beats 90K.
+    assert rows == [
+        ["Ana@example.com", "500K", "400K", "5K", "12"],
+        ["bo@example.com", "90K", "10K", "900", "3"],
+    ]
+    assert "cy@example.com" not in captured.out
+
+
+def test_remote_usage_by_member_never_asks_the_control_plane_for_the_roster(
+    monkeypatch, tmp_path, capsys
+):
+    """The removal itself, asserted behaviourally rather than by the absence of a caveat.
+
+    A test that only checked stderr for the old note would pass on a command that still made the
+    call and merely stopped reporting its refusal — which is the silent-swallow shape, and strictly
+    worse than what was there before. So the stand-in **raises**: reaching it at all fails here.
+    """
+    from remote import control_plane
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_member_usage(monkeypatch, {"window_seconds": 86400, "members": [
+        {"email": "ana@example.com", "requests": 12, "tokens_in": 900_000, "tokens_out": 5_000},
+    ]})
+
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError("`grid usage --by member` asked the control plane for the roster")
+
+    monkeypatch.setattr(control_plane, "list_members", _must_not_be_called)
+    assert cli.main(["usage", "--by", "member"]) == 0
+    captured = capsys.readouterr()
+    assert "ana@example.com" in captured.out
+    # And no caveat about a roster it never went looking for.
+    assert "roster" not in captured.err.lower()
+
+
+def test_remote_usage_by_member_reports_no_rollup_rather_than_zeros(monkeypatch, tmp_path, capsys):
+    """404 is a master that predates the endpoint — the common case mid-rollout — and 401/403 is a
+    caller who may not ask. Neither is a fact about how much anyone used, so neither may print as a
+    figure.
+
+    ⚠️ With the roster gone there is nothing left to list, so the table says so in its own words
+    instead of showing a column of dashes for people the relay never mentioned.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_member_usage(monkeypatch, {"detail": "not found"}, status=404)
+    _mock_members(monkeypatch, members=[{"email": "ana@example.com", "roles": ["both"]}])
+    assert cli.main(["usage", "--by", "member"]) == 0
+    captured = capsys.readouterr()
+    assert "ana@example.com" not in captured.out
+    assert "no member usage" in captured.out
+    assert "reports no member usage" in captured.err
+
+
+def test_remote_usage_totals_are_the_grids_own_in_every_dimension(monkeypatch, tmp_path, capsys):
+    """One grid, one window, one set of totals — whichever way the rows are split. Summing the rows
+    instead would make `--by member` and `grid stats` print two different figures for one grid."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    totals = {}
+    for dimension in ("model", "engine"):
+        _mock_overview(monkeypatch, _OVERVIEW_STATS)
+        assert cli.main(["usage", "--by", dimension]) == 0
+        totals[dimension] = _overview(_lines(capsys))
+    _mock_member_usage(monkeypatch, {"window_seconds": 86400, "members": []})
+    _mock_members(monkeypatch, members=[])
+    assert cli.main(["usage", "--by", "member"]) == 0
+    totals["member"] = _overview(_lines(capsys))
+    assert len({tuple(sorted(v.items())) for v in totals.values()}) == 1
+    assert totals["model"]["input"] == "1M" and totals["model"]["output"] == "90K"
+
+
+def test_remote_usage_json_carries_the_raw_and_the_fresh_input(monkeypatch, tmp_path, capsys):
+    """`tokens_in` keeps the relay's own meaning (cached included) so nothing on the wire is
+    redefined; `tokens_in_fresh` is the leg the human table prints."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["usage", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["by"] == "model" and payload["window_seconds"] == 86400
+    assert payload["totals"] == {
+        "tokens_in": 1_200_000, "tokens_in_fresh": 1_000_000, "tokens_cached": 200_000,
+        "tokens_out": 90_000, "requests": 400,
+    }
+    served, idle = payload["rows"][0], payload["rows"][1]
+    assert served["model"] == "GLM-5.2" and served["engines"] == 1 and served["measured"] is True
+    assert idle["model"] == "Qwen-3" and idle["measured"] is True and idle["tokens_out"] == 0
+
+
+def test_remote_usage_rejects_an_unknown_dimension(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit):
+        cli.main(["usage", "--by", "planet"])
+
+
+def test_remote_stats_requires_a_started_grid(monkeypatch, tmp_path):
+    """A stopped grid has no relay to read, and the message points at the lifecycle verb that fixes
+    it — `grid start`, which replaced `grid up`."""
+    _seed_remote(monkeypatch, tmp_path,
+                networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
+    _mock_lifecycle(monkeypatch, status={"state": "stopped"})
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["stats"])
+    assert "grid start" in str(exc.value).lower()
+
+
+def test_remote_stats_works_without_an_access_token(monkeypatch, tmp_path, capsys):
+    """The overview route is public, so the rollup must read before `grid sync` stores a token."""
+    _seed_remote(monkeypatch, tmp_path,
+                networks=[{"network_id": "n1", "name": "team"}], active="team")  # no access_token
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    assert cli.main(["stats"]) == 0
+    assert _overview(_lines(capsys))["nodes"] == "3"
+
+
+def test_remote_usage_by_member_needs_the_grids_own_token(monkeypatch, tmp_path):
+    """Unlike the overview beside it, this endpoint names people — so a grid whose token has not
+    been synced gets the familiar `grid login` guidance rather than an opaque 401."""
+    _seed_remote(monkeypatch, tmp_path,
+                networks=[{"network_id": "n1", "name": "team"}], active="team")  # no access_token
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    _mock_overview(monkeypatch, _OVERVIEW_STATS)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["usage", "--by", "member"])
+    assert "grid login" in str(exc.value)
+
+
+def test_relay_client_omits_the_bearer_when_there_is_no_token():
+    """`Bearer ` with nothing after it is not a legal header value: h11 refuses to write it, so a
+    public read on a tokenless grid died as `Illegal header value` before leaving the machine. The
+    header is omitted instead — which MockTransport cannot catch, hence this direct check."""
+    from remote import relay
+
+    with relay.open_consumer_client("https://relay.example", "", timeout=1.0) as client:
+        assert "authorization" not in client.headers
+    with relay.open_consumer_client("https://relay.example", "AT", timeout=1.0) as client:
+        assert client.headers["authorization"] == "Bearer AT"
+
+
+# -- the shared formatters (cli/_format.py) --------------------------------
+
+def test_format_count_steps_units_before_a_four_digit_figure_appears():
+    """`1000K` and `1285M` are the same numbers as `1M` and `1.3B` but read as a unit that was never
+    carried — the one thing a shortened figure must not do. The step is at 999.5, before the
+    rounding below it could expose one."""
+    from cli import _format
+
+    assert [_format.count(n) for n in (0, 940, 999, 1000, 12_345)] == ["0", "940", "999", "1K", "12.3K"]
+    assert [_format.count(n) for n in (999_499, 999_500)] == ["999K", "1M"]
+    assert [_format.count(n) for n in (1_000_000, 1_285_402_913)] == ["1M", "1.3B"]
+
+
+def test_format_memory_share_writes_one_unit_chosen_from_the_total():
+    """Two figures either side of a slash are being compared, and a comparison written in two units
+    is a puzzle — so the unit is the total's, written once."""
+    from cli import _format
+
+    assert _format.memory_share(950.6, 1404.3) == "0.9/1.4 TB"   # a terabyte grid, both halves in TB
+    assert _format.memory_share(276.9, 382.4) == "277/382 GB"    # three digits: the tenth is noise
+    assert _format.memory_share(31.8, 63.7) == "31.8/63.7 GB"    # under 100 the decimal is a 20th
+
+
+def test_format_share_never_rounds_a_working_model_to_nothing():
+    """A model at 0.4% of the grid rounding to `0%` reads as "did nothing" against a row plainly
+    showing tokens."""
+    from cli import _format
+
+    assert [_format.share(f) for f in (0.98, 0.0145, 0.004, 0.0004, 0.0)] == \
+        ["98%", "1.5%", "0.4%", "<0.1%", "0%"]
+
+
+def test_format_window_says_the_span_the_relay_actually_reported():
+    """The window is an operator knob; a label hardcoded to 24h would go quietly wrong the moment
+    someone retuned it. A day stays "24h" — that is how people talk about what a machine did today."""
+    from cli import _format
+
+    assert [_format.window(s) for s in (86400, 172800, 604800, 21600, 1800, 45, 0)] == \
+        ["24h", "2d", "7d", "6h", "30m", "45s", ""]
 
 
 # ---------------------------------------------------------------------------
@@ -22022,7 +24669,8 @@ def test_remote_members_grid_not_found(monkeypatch, tmp_path):
 
 
 def test_remote_members_gated_in_local_mode(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default local mode
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["members", "list"])
     assert "remote" in str(exc.value).lower()
@@ -22557,7 +25205,8 @@ def test_router_classified_remote_only():
 
 
 def test_router_gated_in_local_mode(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default local mode
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     with pytest.raises(SystemExit) as exc:
         cli.main(["router", "status"])
     assert "remote" in str(exc.value).lower()
@@ -29327,7 +31976,7 @@ def test_engine_health_follows_a_hot_reload_that_repoints_a_model(monkeypatch, t
 
 
 # ---------------------------------------------------------------------------
-# `grid down` — the grid server's pid is a claim, not a handle (grid-leave issue 18, ADR 0026)
+# `grid stop` — the grid server's pid is a claim, not a handle (grid-leave issue 18, ADR 0026)
 # ---------------------------------------------------------------------------
 
 def _no_signals_anywhere(monkeypatch):
@@ -29378,9 +32027,9 @@ def _grid_port(monkeypatch, answers: dict[str, Any] | None) -> SimpleNamespace:
     return seen
 
 
-def test_grid_down_never_signals_a_recycled_server_pid(monkeypatch, tmp_path):
+def test_grid_stop_never_signals_a_recycled_server_pid(monkeypatch, tmp_path):
     """`server_pid` is written once at `start_grid` and can be arbitrarily stale — a reboot, a crash,
-    a machine that has run something else since. `grid down` used to hand that bare number straight to
+    a machine that has run something else since. `grid stop` used to hand that bare number straight to
     `os.killpg`, so a recycled pid SIGTERMed an unrelated process **group** the operator owns.
 
     The stamped `(pid, start_time)` is what tells them apart: same number, different token ⇒
@@ -29408,7 +32057,7 @@ def test_grid_down_never_signals_a_recycled_server_pid(monkeypatch, tmp_path):
     assert sent == [], "signalled a recycled server pid — that is somebody else's process"
 
 
-def test_grid_down_never_signals_the_group_stamped_beside_a_recycled_pid(monkeypatch, tmp_path):
+def test_grid_stop_never_signals_the_group_stamped_beside_a_recycled_pid(monkeypatch, tmp_path):
     """The second half, which needs its own arrangement to reach at all.
 
     `killpg(pgid, 0)` proves a process group exists, never that it is *ours* — the only thing that
@@ -29465,9 +32114,9 @@ def _fake_server_spawn(monkeypatch, pid: int):
 
 
 @pytest.mark.parametrize("corrupt", ["abc", -1, 2**63, [], True])
-def test_grid_up_does_not_traceback_on_a_corrupt_server_pid(monkeypatch, tmp_path, corrupt):
+def test_grid_start_does_not_traceback_on_a_corrupt_server_pid(monkeypatch, tmp_path, corrupt):
     """`start_grid` read `int(cfg.get("server_pid") or 0)`, so a hand-edited or corrupt config took
-    `grid up` down before it could do anything about it: `"abc"` raised `ValueError` at the `int()`,
+    `grid start` down before it could do anything about it: `"abc"` raised `ValueError` at the `int()`,
     and an out-of-range value reached `os.kill` inside the old `_pid_alive`, which raises
     `OverflowError` — an `ArithmeticError`, which that function's own `except OSError` never caught.
 
@@ -29487,12 +32136,12 @@ def test_grid_up_does_not_traceback_on_a_corrupt_server_pid(monkeypatch, tmp_pat
 
 
 @pytest.mark.parametrize("corrupt", ["abc", -1, 2**63, []])
-def test_grid_down_says_when_the_recorded_server_pid_is_not_a_process_id(
+def test_grid_stop_says_when_the_recorded_server_pid_is_not_a_process_id(
     monkeypatch, tmp_path, capsys, corrupt
 ):
     """A `server_pid` of an unusable shape correctly signals nothing — and said nothing about it.
 
-    That silence is the failure: `grid down` would print "is down" having signalled nothing, over a
+    That silence is the failure: `grid stop` would print "is down" having signalled nothing, over a
     server that may well still be running. Name what was unusable, the way the run-record reap does
     (`run_records.discard_own_record`). Whether it *mattered* is the port probe's answer, not this
     note's — so this is a note on stderr, not a refusal.
@@ -29525,7 +32174,7 @@ def _server_dies_when_signalled(monkeypatch):
     return sent
 
 
-def test_grid_down_still_stops_a_server_recorded_before_identity_tokens_existed(monkeypatch, tmp_path):
+def test_grid_stop_still_stops_a_server_recorded_before_identity_tokens_existed(monkeypatch, tmp_path):
     """Every grid config already on a user's machine carries `server_pid` and nothing beside it.
 
     `record_verdict` calls that `LIVE_UNVERIFIED` — no token is neither a match nor a mismatch — and
@@ -29548,7 +32197,7 @@ def test_grid_down_still_stops_a_server_recorded_before_identity_tokens_existed(
     assert [pid for pid, _ in sent] == [4242], "a pre-token config's server was not stopped"
 
 
-def test_grid_down_confirms_a_zombie_server_without_burning_the_stop_grace(monkeypatch, tmp_path):
+def test_grid_stop_confirms_a_zombie_server_without_burning_the_stop_grace(monkeypatch, tmp_path):
     """In a container whose PID 1 never reaps, a dead server leaves a permanent `Z` entry that
     `os.kill(pid, 0)` reports as alive. The old teardown would SIGTERM the corpse, wait out the full
     25s grace, SIGKILL it, and still read it as running. A corpse is already stopped: nothing to
@@ -29575,8 +32224,8 @@ def test_grid_down_confirms_a_zombie_server_without_burning_the_stop_grace(monke
     assert time.monotonic() - started < 5, "burned the stop grace on a process that had already exited"
 
 
-def test_grid_up_stamps_the_servers_identity_beside_its_pid(monkeypatch, tmp_path):
-    """A pid on its own cannot be verified later — which is the whole reason `grid down` could signal
+def test_grid_start_stamps_the_servers_identity_beside_its_pid(monkeypatch, tmp_path):
+    """A pid on its own cannot be verified later — which is the whole reason `grid stop` could signal
     a stranger. `start_grid` now writes the same `(pid, start_time, pgid)` a run record carries, under
     `server_`-prefixed keys, in the **one** config write: that is what lets a verified pid vouch for
     the group id stored beside it (ADR 0020).
@@ -29602,10 +32251,10 @@ def test_grid_up_stamps_the_servers_identity_beside_its_pid(monkeypatch, tmp_pat
     assert saved["server_pid"] == os.getpid(), "server_pid must stay the config's one pid"
 
 
-def test_grid_down_fails_loud_when_the_grid_is_still_answering_on_its_port(
+def test_grid_stop_fails_loud_when_the_grid_is_still_answering_on_its_port(
     monkeypatch, tmp_path, capsys
 ):
-    """The tracer bullet for the honest report: `grid down` printed "is down" unconditionally.
+    """The tracer bullet for the honest report: `grid stop` printed "is down" unconditionally.
 
     A config whose pid names nothing is reachable in one command — `start_grid` saves the pid *before*
     `wait_for_health`, so a health failure leaves a live server behind — and the old teardown then
@@ -29625,7 +32274,7 @@ def test_grid_down_fails_loud_when_the_grid_is_still_answering_on_its_port(
     _grid_port(monkeypatch, {"grid_id": cfg["grid_id"], "name": "home"})  # …but the grid is up
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "8090" in str(exc.value), str(exc.value)
     assert "down" not in capsys.readouterr().out.lower(), "claimed the grid was down while it served"
@@ -29638,7 +32287,7 @@ def test_grid_down_fails_loud_when_the_grid_is_still_answering_on_its_port(
 def test_the_grid_health_probe_addresses_the_host_the_server_bound(
     monkeypatch, tmp_path, host, addressed
 ):
-    """`grid up --host 10.0.0.5` really binds only that address (`cli/_main.cmd_internal_server`), but
+    """`grid start --host 10.0.0.5` really binds only that address (`cli/_main.cmd_internal_server`), but
     both health probes asked `127.0.0.1`. A wildcard bind is reachable on loopback so it maps there;
     anything specific has to be addressed as itself.
 
@@ -29658,7 +32307,7 @@ def test_the_grid_health_probe_addresses_the_host_the_server_bound(
     assert seen.targets == [(addressed, 8090)], seen.targets
 
 
-def test_grid_down_does_not_traceback_on_a_corrupt_port(monkeypatch, tmp_path):
+def test_grid_stop_does_not_traceback_on_a_corrupt_port(monkeypatch, tmp_path):
     """The regression this change could have introduced. `stop_grid` read no port at all before; its
     new probe does, and a bare `int(cfg["port"])` would have added a fresh traceback to the very
     command whose promise is that a hand-edited config no longer produces one.
@@ -29677,16 +32326,16 @@ def test_grid_down_does_not_traceback_on_a_corrupt_port(monkeypatch, tmp_path):
     _no_signals_anywhere(monkeypatch)
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "'abc'" in str(exc.value), str(exc.value)
 
 
-def test_grid_down_keeps_the_pid_and_fails_loud_when_the_server_outlives_sigkill(
+def test_grid_stop_keeps_the_pid_and_fails_loud_when_the_server_outlives_sigkill(
     monkeypatch, tmp_path
 ):
-    """The honest teardown. `grid down` wrote `server_pid = 0` unconditionally, so a server that
-    ignored SIGTERM survived *and* lost the only handle to it — after which `grid up` dead-ends on
+    """The honest teardown. `grid stop` wrote `server_pid = 0` unconditionally, so a server that
+    ignored SIGTERM survived *and* lost the only handle to it — after which `grid start` dead-ends on
     "Port 8090 is already in use" with nothing left able to stop the thing holding it."""
     from shared import process_identity, run_records
 
@@ -29705,13 +32354,13 @@ def test_grid_down_keeps_the_pid_and_fails_loud_when_the_server_outlives_sigkill
     _grid_port(monkeypatch, None)
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "4242" in str(exc.value) and "kill -9 4242" in str(exc.value), str(exc.value)
     assert config.load_grid_config(cfg["grid_id"])["server_pid"] == 4242, "threw away the handle"
 
 
-def test_grid_down_names_a_surviving_process_group_as_a_group(monkeypatch, tmp_path):
+def test_grid_stop_names_a_surviving_process_group_as_a_group(monkeypatch, tmp_path):
     """A group id printed as a pid tells the operator to `kill -9 <group leader>` — and the leader is
     precisely the process that is already gone, so the command they are handed does nothing while the
     server keeps running."""
@@ -29725,18 +32374,18 @@ def test_grid_down_names_a_surviving_process_group_as_a_group(monkeypatch, tmp_p
     )
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "process group 777" in str(exc.value) and "kill -9 -777" in str(exc.value), str(exc.value)
 
 
-def test_grid_down_converges_when_the_pid_is_unprovable_but_the_port_is_dead(
+def test_grid_stop_converges_when_the_pid_is_unprovable_but_the_port_is_dead(
     monkeypatch, tmp_path, capsys
 ):
     """The convergence rule, and the reason the port probe exists at all.
 
     A config whose pid cannot be verified — never stamped, recycled, long dead — classifies
-    `verified=False`, the same as every alarming case. Keyed on that alone, `grid down` would fail on
+    `verified=False`, the same as every alarming case. Keyed on that alone, `grid stop` would fail on
     an already-stopped grid **forever**, and there is no `grid rm` to escape with. Nothing listening on
     the grid's own port is positive proof it is down, whatever the pid could not tell us.
     """
@@ -29751,13 +32400,13 @@ def test_grid_down_converges_when_the_pid_is_unprovable_but_the_port_is_dead(
     _no_signals_anywhere(monkeypatch)
     _grid_port(monkeypatch, None)
 
-    assert cli.main(["down", "home"]) == 0
+    assert cli.main(["stop", "home"]) == 0
     assert "stopped" in capsys.readouterr().out
     saved = config.load_grid_config(cfg["grid_id"])
     assert runtime._server_identity(saved) == {"pid": 0, "pid_start_time": None, "pgid": None}
 
 
-def test_grid_down_says_so_when_it_could_neither_verify_the_pid_nor_reach_the_port(
+def test_grid_stop_says_so_when_it_could_neither_verify_the_pid_nor_reach_the_port(
     monkeypatch, tmp_path
 ):
     """Both nets blind at once — ADR 0025's rule for local leave, applied to the lifecycle verb.
@@ -29782,13 +32431,13 @@ def test_grid_down_says_so_when_it_could_neither_verify_the_pid_nor_reach_the_po
         httpx.ReadTimeout("timed out")))
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "curl -s 'http://127.0.0.1:8090/grid/info'" in str(exc.value), str(exc.value)
     assert config.load_grid_config(cfg["grid_id"])["server_pid"] == 4242, "threw away the handle"
 
 
-def test_grid_down_on_an_already_stopped_grid_is_quiet(monkeypatch, tmp_path, capsys):
+def test_grid_stop_on_an_already_stopped_grid_is_quiet(monkeypatch, tmp_path, capsys):
     """The ordinary repeat. A `server_pid` of 0 is the config's own "nothing is running" — not a
     corrupt value, so no note — and with nothing listening the command simply succeeds again."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
@@ -29796,21 +32445,21 @@ def test_grid_down_on_an_already_stopped_grid_is_quiet(monkeypatch, tmp_path, ca
     sent = _no_signals_anywhere(monkeypatch)
     _grid_port(monkeypatch, None)
 
-    assert cli.main(["down", "home"]) == 0
+    assert cli.main(["stop", "home"]) == 0
 
     out, err = capsys.readouterr()
     assert "stopped" in out and sent == []
     assert err == "", f"an already-stopped grid should say nothing on stderr: {err}"
 
 
-def test_grid_down_does_not_traceback_when_the_recorded_pid_is_not_ours_to_signal(
+def test_grid_stop_does_not_traceback_when_the_recorded_pid_is_not_ours_to_signal(
     monkeypatch, tmp_path, capsys
 ):
     """`pid_alive` reports EPERM as **alive** (ADR 0024: calling another user's process dead would let
     a teardown claim it reaped something still running), so a `server_pid` that has drifted onto a
     process owned by another principal reaches `terminate_pid` — whose `os.kill` catches only
     `ProcessLookupError`. Reproduced against pid 1: a raw `PermissionError` traceback out of
-    `grid down`, which is precisely what this change promises the command no longer does.
+    `grid stop`, which is precisely what this change promises the command no longer does.
 
     The catch belongs at this call site and **not** inside `terminate_pid`: `orphan_sweep.terminate`
     depends on that exception escaping — it is how a swept match is classified `foreign` instead of
@@ -29833,7 +32482,7 @@ def test_grid_down_does_not_traceback_when_the_recorded_pid_is_not_ours_to_signa
         PermissionError(1, "Operation not permitted")))
     _grid_port(monkeypatch, None)  # nothing is serving this grid — so it really is down
 
-    assert cli.main(["down", "home"]) == 0
+    assert cli.main(["stop", "home"]) == 0
 
     assert "4242" in capsys.readouterr().err
 
@@ -29843,7 +32492,7 @@ def test_a_pid_we_could_not_signal_never_counts_as_a_verified_teardown(monkeypat
 
     The sibling above exits 0 only because the *port* proved the grid was down. Take that second
     opinion away — an unusable port, so there is nothing to probe with — and the teardown's own answer
-    is all that is left: it must be `verified=False`, or `grid down` reports success over a live
+    is all that is left: it must be `verified=False`, or `grid stop` reports success over a live
     process it was refused permission to touch.
     """
     from shared import process_identity, run_records
@@ -29859,14 +32508,14 @@ def test_a_pid_we_could_not_signal_never_counts_as_a_verified_teardown(monkeypat
         PermissionError(1, "Operation not permitted")))
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "nothing about this box was established" in str(exc.value), str(exc.value)
 
 
 def test_a_closed_port_really_is_proof_that_nothing_is_serving(monkeypatch, tmp_path):
     """The positive direction, against a real socket rather than a mocked exception: a port nothing
-    is listening on must still read as proof, or `grid down` never succeeds on an unverifiable pid."""
+    is listening on must still read as proof, or `grid stop` never succeeds on an unverifiable pid."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     with socket.socket() as sock:  # bind then release, so the port is genuinely closed
         sock.bind(("127.0.0.1", 0))
@@ -29883,7 +32532,7 @@ def test_an_unreachable_host_is_not_proof_that_the_grid_stopped(monkeypatch, tmp
     `ENETUNREACH` and `EHOSTUNREACH` are all plain `OSError`s — so httpcore maps every one of them to
     the same `ConnectError` a genuine refusal produces. Reading that as proof is the exact laundering
     ADR 0026 exists to forbid, and it is reachable through the `--host` support this change added: a
-    laptop that roams networks between `grid up --host <lan-ip>` and `grid down` would have its live
+    laptop that roams networks between `grid start --host <lan-ip>` and `grid stop` would have its live
     server reported as stopped and the recorded pid — the only handle a retry has — thrown away.
 
     Hermetic on purpose: a real `.invalid` lookup makes the test's speed a property of the resolver.
@@ -29904,7 +32553,7 @@ def test_an_unreachable_host_is_not_proof_that_the_grid_stopped(monkeypatch, tmp
         httpx.ConnectError("[Errno 8] nodename nor servname provided, or not known")))
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["down", "home"])
+        cli.main(["stop", "home"])
 
     assert "nothing about this box was established" in str(exc.value), str(exc.value)
     assert config.load_grid_config(cfg["grid_id"])["server_pid"] == 4242, "threw away the handle"
@@ -30568,7 +33217,8 @@ def test_launch_claude_targets_a_named_grid_and_defaults_to_the_active_one(monke
 def test_launch_in_local_mode_refuses_naming_the_dialect_and_the_mode_switch(monkeypatch, tmp_path):
     """A local grid serves chat/completions, never Anthropic Messages — so the refusal must name the
     dialect (or the user files a bug) *and* the command that moves them (or it is a dead end)."""
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")  # the default for a fresh home is `remote` (ADR 0001 D-2, amended)
     _capture_launch(monkeypatch)  # if the gate leaked, the spawn below would be reached
 
     with pytest.raises(SystemExit) as exc:
@@ -31980,6 +34630,45 @@ def test_launch_refusals_distinguish_a_dead_credential_from_a_broken_control_pla
         assert forbidden not in message, (status, message)
         assert "the reason" in message, "the control plane's own words reach the user"
         assert seen["spawns"] == [], "nothing is started on a refusal"
+
+
+def test_launch_never_tells_a_403_that_re_syncing_cannot_restore_the_membership(monkeypatch,
+                                                                                tmp_path):
+    """The one piece of advice in this file that is INVERTED on `os-community` grids (ADR 0039 D-e).
+
+    A 403 on the refresh exchange says the membership the refresh credential names is not currently
+    good. On every grid type that predates OS grids that membership is a stored row somebody else
+    controls, so `grid login` re-mints from the same row and re-signing in really is a circle — which
+    is what this message used to state flatly. On an OS grid there is no row at all: membership is
+    re-derived on every request from the `os=` claim that ONLY the token fetch sends, so
+    `grid sync` / `grid login` is the *whole* repair, and a machine told "signing in will not change
+    it" is a machine told to give up on the one thing that works.
+
+    So the message may not promise either outcome. It names the cheap thing to try and says what it
+    means when that does not work, which is true on both kinds of grid — and stays out of the
+    business of guessing which one this is, because a local `network_type` is a snapshot from the
+    last sync and a fourth copy of a cross-repo literal this repository deliberately does not hold.
+    """
+    from remote import control_plane
+
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(-86400)}))
+    _mock_token_refresh(monkeypatch, error=control_plane.ControlPlaneError(
+        "POST https://api.example/v1/grid/tokens/n1 failed (403): "
+        '{"detail": "Not allowed on this Grid network"}', status=403))
+    _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+    message = str(exc.value)
+    assert "grid sync" in message, (
+        "the refusal must name the command that re-makes the OS claim, which is the only repair "
+        f"there is on an OS grid: {message}")
+    assert "will not change it" not in message, (
+        "the flat denial is false on an `os-community` grid, where re-syncing is the whole repair: "
+        f"{message}")
+    # The 401/403 split still has to survive the rewording: a 403 is not "your sign-in expired", and
+    # a message that read that way would send the user to a browser for a membership problem.
+    assert "not your sign-in" in message, message
 
 
 def test_launch_warns_and_launches_when_a_still_valid_token_cannot_be_renewed(monkeypatch, tmp_path,
@@ -39331,3 +42020,109 @@ def test_a_root_the_operator_NAMED_is_not_judged_by_the_defaults_rules(
     assert _the_child_would_claim_tasks(spawned), (
         f"a root the operator named was judged by the default's rules: {capsys.readouterr().err!r}")
     assert not (tmp_path / "never-made").exists(), "the default root was made despite a named one"
+
+
+def _refresh_body(monkeypatch, tmp_path, system, os_release=None):
+    """The JSON body `refresh_network_token` builds on a machine whose ``platform.system()`` is that.
+
+    ``/etc/os-release`` is stubbed here for the same reason `_fetch_tokens_query` stubs it: since
+    `omarchy` landed, a Linux machine's token is read off that file, and leaving the real one in place
+    would make a `("Linux", "linux")` case a statement about the host running the suite rather than
+    about the code.
+    """
+    import json as _json
+    import platform
+
+    from remote import control_plane
+    from shared.system import os_grid
+
+    monkeypatch.setattr(platform, "system", lambda: system)
+    os_release_path = tmp_path / "os-release"
+    if os_release is not None:
+        os_release_path.write_text(os_release, encoding="utf-8")
+    monkeypatch.setattr(os_grid, "_OS_RELEASE", os_release_path)
+    seen = {}
+
+    def handler(request):
+        seen["body"] = _json.loads(request.content)
+        return httpx.Response(200, json={"access_token": "a", "refresh_token": "r"})
+
+    _mock_control_plane(monkeypatch, handler)
+    control_plane.refresh_network_token(network_id="grid-1", refresh_token="rt-1")
+    return seen["body"]
+
+
+@pytest.mark.parametrize(
+    "system,expected",
+    [("Darwin", "macos"), ("Linux", "linux")])
+def test_the_refresh_exchange_carries_the_os_token_too(monkeypatch, tmp_path, system, expected):
+    """ADR 0039 D-e, issue 10 — the claim rides the RENEWAL, not only the first fetch.
+
+    On an `os-community` grid nothing about the OS is stored, so a refresh that carried no claim
+    matched nothing and was refused: the bundle the fetch handed out contained a `refresh_token` that
+    was inert on exactly one network type. A machine serving such a grid then went dark the first time
+    the grid's `network_epoch` moved, and the recovery was a person — `grid sync` needs a session
+    token, and those live 24 hours.
+
+    Asserted at the wire, and on the BODY rather than the query string: this route is a POST and the
+    refresh credential already travels in the body, so the claim goes with it.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    body = _refresh_body(monkeypatch, tmp_path, system)
+    assert body["os"] == expected
+    assert body["refresh_token"] == "rt-1"  # the claim rides ALONGSIDE the credential, never instead
+
+
+@pytest.mark.parametrize("system", ["Windows", "FreeBSD", "Java", ""])
+def test_the_refresh_exchange_omits_the_os_key_when_there_is_no_token(monkeypatch, tmp_path, system):
+    """Omitted entirely, never an empty string — the same discipline as the fetch, for the same reason.
+
+    The far end gates by equality against a grid's own token, so an empty string would be a second
+    spelling of "no claim" for it to recognise. And a machine outside the closed set must still renew
+    every OTHER grid it belongs to: this call is not about OS grids, it merely also serves them.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    body = _refresh_body(monkeypatch, tmp_path, system)
+    assert "os" not in body
+    assert body["refresh_token"] == "rt-1"
+
+
+def test_the_serve_loops_own_refresh_carries_the_os_claim(monkeypatch, tmp_path):
+    """The scenario issue 10 exists for, asserted at the loop rather than at the HTTP helper.
+
+    An access token lives a year, so a serving machine does not refresh on expiry — it refreshes when
+    the grid's `network_epoch` moves, which makes the relay answer 401 and sends `_ServeState.refresh`
+    here. On an `os-community` grid that exchange used to be refused, and because a refused exchange
+    also CONSUMED the credential, the machine went dark permanently with no person watching.
+
+    Asserted through `_ServeState.refresh` and not `control_plane.refresh_network_token` because the
+    loop is the caller that matters and it passes no claim of its own: it inherits one because the
+    helper reads `os_grid.os_token()` itself. A future refactor that threaded the claim through the
+    loop's arguments instead would leave the helper's own test green and this one red, which is the
+    right way round.
+    """
+    import json as _json
+    import platform
+
+    from remote import credentials, serve
+
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    state = _serve_state(monkeypatch, tmp_path)
+    credentials.save_credentials({"networks": [
+        {"network_id": "n1", "access_token": "AT", "refresh_token": "RT"}]})
+    seen = {}
+
+    def handler(request):
+        seen["body"] = _json.loads(request.content)
+        return httpx.Response(200, json={"access_token": "AT-2", "refresh_token": "RT-2"})
+
+    _mock_control_plane(monkeypatch, handler)
+
+    assert serve._ServeState.refresh(state, "AT") is True
+    assert seen["body"]["os"] == "macos"
+    assert seen["body"]["refresh_token"] == "RT"
+    # And the loop kept what it was given, so the NEXT 401 does not replay a spent credential.
+    assert state.token() == "AT-2"
+    stored = next(n for n in credentials.load_credentials()["networks"] if n["network_id"] == "n1")
+    assert stored["access_token"] == "AT-2"
+    assert stored["refresh_token"] == "RT-2"

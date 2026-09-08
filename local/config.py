@@ -35,6 +35,24 @@ def iter_grid_configs() -> list[dict[str, Any]]:
 
 
 def select_grid(name_or_id: str | None) -> dict[str, Any]:
+    """Resolve the grid and trust its HTTPS CA for this process.
+
+    A grid started with `--tls-cert` serves HTTPS; when it is also trusted only by a private CA
+    (`--tls-ca`), every later command's client must verify against it. Setting SSL_CERT_FILE here
+    — the one boundary every grid-addressing command passes — covers health probes, allocator
+    control calls, chat, and engine joins without threading the CA through each handler.
+    """
+    cfg = _select_grid(name_or_id)
+    try:
+        from . import runtime
+
+        runtime.apply_server_tls_client_env(cfg)
+    except Exception:  # a malformed CA must not blind every command to its grid
+        pass
+    return cfg
+
+
+def _select_grid(name_or_id: str | None) -> dict[str, Any]:
     """Resolve the grid to act on.
 
     Honors the CLI convention: when a name is given, look it up; when omitted,

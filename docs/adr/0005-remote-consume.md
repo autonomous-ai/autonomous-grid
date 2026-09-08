@@ -5,7 +5,7 @@ Status: accepted (2026-06-28)
 ## Context
 
 ADR 0001 set up modes + dispatch; 0002 sign-in + the per-grid `access_token`; 0003 the remote grid
-lifecycle (`grid up/down/ls/info`) and the `signaling_url` relay base; 0004 the provider serve loop
+lifecycle (`grid start/stop/ls/info`) and the `signaling_url` relay base; 0004 the provider serve loop
 (`grid join`). This slice fills the last everyday surface: **consuming** a remote grid. `grid chat` /
 `image` / `edit` / `video` route through the active grid's hosted relay with the per-grid token, and
 `grid info --env` prints the relay base URL + token for any OpenAI SDK — the same verbs as local, routed
@@ -53,9 +53,9 @@ no off-local calls leak into `shared/`/`local/`. Tokens are never printed except
    `access_token` but **not** the `signaling_url` (`cmd_login` stores `/tokens` verbatim;
    `auth._validated` requires only `network_id`+`name`). So each consume command — and `info --env` —
    takes `access_token` from the bundle and reads `signaling_url` from
-   `control_plane.get_managed_network_status`, exactly as `grid join`/`up`/`info` already do, and emits
-   a clean "run `grid up`" if the grid isn't running. A pure consumer (`login → use → chat`, never
-   `grid up`) would otherwise have no address. This is account-level (member-readable, like `grid
+   `control_plane.get_managed_network_status`, exactly as `grid join`/`start`/`info` already do, and emits
+   a clean "run `grid start`" if the grid isn't running. A pure consumer (`login → use → chat`, never
+   `grid start`) would otherwise have no address. This is account-level (member-readable, like `grid
    join`'s status read); it is the only deviation from the reference client, which read the address from
    a self-host bundle field that the hosted model no longer provides.
 
@@ -89,7 +89,7 @@ no off-local calls leak into `shared/`/`local/`. Tokens are never printed except
   `httpx.MockTransport`, adjustable if the hosted relay's consumer API diverges.
 - Every consume command and `info --env` makes one control-plane status call to learn the live relay
   address — the documented cost of not persisting `signaling_url` at sign-in, and consistent with how
-  `grid join`/`up`/`info` already behave. A grid created/started elsewhere works without re-login.
+  `grid join`/`start`/`info` already behave. A grid created/started elsewhere works without re-login.
 - Tokens live only in `credentials.toml`; the consume path reads, never writes them, and prints one
   only through `info --env`. A future multi-engine / streaming-chat enhancement extends the same
   handlers without touching the wire boundary.

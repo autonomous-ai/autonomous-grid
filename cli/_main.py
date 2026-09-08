@@ -10,12 +10,17 @@ from datetime import UTC, datetime
 
 from local import config, runtime
 from shared import logging_setup, paths
-from . import json_error
+from . import json_error, update
 from .dispatch import dispatch, resolve_override, split_forwarded
 from .parser import build_parser
 
 
-def cmd_internal_server(grid_id: str, instance_id: str | None = None) -> int:
+def cmd_internal_server(
+    grid_id: str,
+    instance_id: str | None = None,
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
+) -> int:
     import uvicorn
 
     if instance_id is not None and not instance_id.strip():
@@ -29,11 +34,21 @@ def cmd_internal_server(grid_id: str, instance_id: str | None = None) -> int:
     app = create_app(
         grid_id=cfg["grid_id"],
         grid_name=cfg["name"],
+        tls_ca_pem=(
+            runtime._read_pem(str(cfg.get("server_tls_ca_file") or ""), "grid TLS CA")
+            or str(cfg.get("server_tls_ca_pem") or "")
+        ),
         allocator_state_path=paths.grid_dir(grid_id) / runtime.ALLOCATOR_STATE_FILE,
         allocator_control_token=allocator_control_token,
     )
     host = cfg.get("host") or runtime.DEFAULT_HOST
     port = int(cfg["port"])
+    # Cert files are passed on the command line (argv is visible to `ps`), but the key must
+    # survive the grid's persisted record; reading here lets a hand-edited key path still boot.
+    cert_file = str(tls_cert or cfg.get("server_tls_cert_file") or "")
+    key_file = str(tls_key or cfg.get("server_tls_key_file") or "")
+    if bool(cert_file) != bool(key_file):
+        raise SystemExit("TLS requires both a certificate and a private key.")
     level = os.getenv("UVICORN_LOG_LEVEL", "info").upper()
     if level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}:
         level = "INFO"  # a typo'd level would otherwise crash dictConfig at boot
@@ -48,6 +63,18 @@ def cmd_internal_server(grid_id: str, instance_id: str | None = None) -> int:
     if old_size is not None:
         _note_server_log_truncation(log_path, old_size, max_bytes)
     # Pass ONLY log_config (no log_level=/use_colors=) so our dictConfig is the single source of truth.
+    if cert_file:
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            ssl_certfile=cert_file,
+            ssl_keyfile=key_file,
+            log_config=logging_setup.build_uvicorn_log_config(
+                log_path, max_bytes=max_bytes, backup_count=backup_count, level=level
+            ),
+        )
+        return 0
     uvicorn.run(
         app,
         host=host,
@@ -303,7 +330,18 @@ def main(argv: list[str] | None = None) -> int:
             # the attribute — `grid launch claude --` with nothing after it is therefore identical
             # to no `--` at all.
             args.forward = forwarded
-        return dispatch(args, override)
+        # `--json` anywhere the user typed it suppresses the version notice, not just the global
+        # slot — argparse lets a subcommand's own `--json` default mask the parent's parsed value,
+        # so the parsed flag OR'd with the raw argv is the reliable witness.
+        json_requested = bool(args.json) or "--json" in cleaned
+        # The version check spawns here — before the command runs — so the network call happens
+        # while the user watches their command's work, not as added latency; the notice then prints
+        # after the command's own output finishes. Both are total functions that swallow everything:
+        # a stale-version hint must never change this run's exit code or output (cli/update.py).
+        update.maybe_spawn_check(args, json_requested=json_requested)
+        rc = dispatch(args, override)
+        update.print_notice(args, json_requested=json_requested)
+        return rc
     except SystemExit as exc:
         # `args` is `None` when argparse itself refused, so the flag is read out of the raw argv —
         # see `json_error.asked_for_json`.
@@ -318,8 +356,10 @@ def _maybe_internal(argv: list[str]) -> int | None:
         parser = argparse.ArgumentParser(prog="grid __server")
         parser.add_argument("grid_id")
         parser.add_argument("--instance-id", required=True)
+        parser.add_argument("--tls-cert", default=None)
+        parser.add_argument("--tls-key", default=None)
         args = parser.parse_args(argv[1:])
-        return cmd_internal_server(args.grid_id, args.instance_id)
+        return cmd_internal_server(args.grid_id, args.instance_id, args.tls_cert, args.tls_key)
     if argv[0] == "__allocator-node":
         parser = argparse.ArgumentParser(prog="grid __allocator-node")
         parser.add_argument("grid_selector")
@@ -373,6 +413,12 @@ def _maybe_internal(argv: list[str]) -> int | None:
         parser.add_argument("--week-limit", type=int, default=None)
         parser.add_argument("--quota-ttl", type=float, default=60.0)
         return cmd_internal_cli_seat_server(parser.parse_args(argv[1:]))
+    if argv[0] == "__update-check":
+        # Detached background refresh of ~/.grid/update-check.json, spawned by `maybe_spawn_check`.
+        # No flags, and it always exits 0: the only consumer is the next command's notice.
+        from .update import run_check
+
+        return run_check()
     if argv[0] == "__engine":
         from .provider import run_engine_from_record
 

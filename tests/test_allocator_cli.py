@@ -927,7 +927,80 @@ def test_node_start_preserves_crashed_daemon_children_for_fenced_replacement_ado
     assert persisted["residencies"][0]["handle"] == {"pid": 42_001, "port": 18_081}
 
 
-def test_node_start_rejects_plaintext_lan_engine_before_spawn(monkeypatch, tmp_path):
+def test_node_start_creates_engine_tls_automatically_for_a_lan_advertise_host(
+    monkeypatch,
+    tmp_path,
+):
+    """A LAN node needs no hand-made certificate: Grid mints and signs one itself."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "grid-home"))
+    cfg = grid_config()
+    monkeypatch.setattr(config, "select_grid", lambda _value: cfg)
+    monkeypatch.setattr(
+        allocator,
+        "_request",
+        lambda *_args, **_kwargs: {"grid_id": cfg["grid_id"]},
+    )
+    monkeypatch.setattr(runtime, "cli_command", lambda: ["grid"])
+    monkeypatch.setattr(run_records, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(allocator, "_await_process_start_marker", lambda _pid: "birth")
+    scope = allocator._scope(cfg["grid_id"])
+    state_path = allocator._node_state_path(scope)
+    jsonio.atomic_write_json(state_path, {"host_id": "host-a"})
+    launched: dict[str, object] = {}
+
+    real_popen = allocator.subprocess.Popen
+
+    class Process:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+    def popen(command, **kwargs):
+        # The certificate generator shells out to openssl through the same subprocess module this
+        # test patches, so intercept only the grid child and let the real tool run.
+        if Path(str(command[0])).name == "openssl":
+            return real_popen(command, **kwargs)
+        launched["command"] = command
+        return Process()
+
+    def await_start(process, startup_path, instance_id, _log_path):
+        jsonio.atomic_write_json(
+            startup_path,
+            {
+                "instance_id": instance_id,
+                "pid": process.pid,
+                "host_id": "host-a",
+                "registered_at": 1.0,
+            },
+        )
+
+    monkeypatch.setattr(allocator.subprocess, "Popen", popen)
+    monkeypatch.setattr(allocator, "_await_node_start", await_start)
+    args = cli.build_parser().parse_args(
+        ["allocator", "node", "start", "--advertise-host", "10.0.0.5"]
+    )
+
+    assert args.handler(args) == 0
+    command = launched["command"]
+    assert isinstance(command, list)
+    cert = Path(command[command.index("--engine-tls-cert") + 1])
+    key = Path(command[command.index("--engine-tls-key") + 1])
+    ca = Path(command[command.index("--engine-tls-ca") + 1])
+    assert cert.is_file() and ca.is_file()
+    assert oct(key.stat().st_mode & 0o777) == "0o600"
+    # The generated certificate must cover the address peers dial, and be CA-signed (a bare
+    # self-signed certificate is what the CA transport in the registration envelope exists for).
+    # os.system, not subprocess.run: this test patches subprocess.Popen wholesale, and
+    # subprocess.run would route through that fake on its way to openssl.
+    san_out = tmp_path / "san.txt"
+    assert os.system(f"openssl x509 -in {cert} -noout -ext subjectAltName > {san_out}") == 0
+    assert "10.0.0.5" in san_out.read_text()
+    assert os.system(f"openssl verify -CAfile {ca} {cert} > /dev/null") == 0
+
+
+def test_node_start_reports_when_tls_material_cannot_be_created(monkeypatch, tmp_path):
+    """The failure stays a clear refusal — no node spawns without a certificate."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path / "grid-home"))
     cfg = grid_config()
     monkeypatch.setattr(config, "select_grid", lambda _value: cfg)
@@ -944,6 +1017,12 @@ def test_node_start_rejects_plaintext_lan_engine_before_spawn(monkeypatch, tmp_p
     scope = allocator._scope(cfg["grid_id"])
     jsonio.atomic_write_json(allocator._node_state_path(scope), {"host_id": "host-a"})
 
+    from shared import tls
+
+    def refuse(*_args, **_kwargs):
+        raise tls.TlsToolMissing("openssl was not found on PATH")
+
+    monkeypatch.setattr(tls, "ensure_server_cert", refuse)
     args = cli.build_parser().parse_args(
         [
             "allocator",
@@ -954,7 +1033,7 @@ def test_node_start_rejects_plaintext_lan_engine_before_spawn(monkeypatch, tmp_p
             "--allow-insecure-http",
         ]
     )
-    with pytest.raises(SystemExit, match="non-loopback.*end-to-end TLS"):
+    with pytest.raises(SystemExit, match="could not create the engine"):
         args.handler(args)
 
 
@@ -1139,7 +1218,7 @@ def test_node_local_override_rejects_nonpositive_or_nonfinite_duration(
         args.handler(args)
 
 
-def test_grid_down_stops_allocator_node_before_server(monkeypatch):
+def test_grid_stop_stops_allocator_node_before_server(monkeypatch):
     cfg = grid_config()
     order = []
     monkeypatch.setattr(config, "select_grid", lambda _value: cfg)
@@ -1154,7 +1233,7 @@ def test_grid_down_stops_allocator_node_before_server(monkeypatch):
         lambda actual: order.append(("server", actual["grid_id"]))
         or SimpleNamespace(stopped=lambda: True),
     )
-    args = cli.build_parser().parse_args(["down", "test"])
+    args = cli.build_parser().parse_args(["stop", "test"])
     assert args.handler(args) == 0
     assert order == [("node", "ag-test"), ("server", "ag-test")]
 

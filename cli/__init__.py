@@ -77,6 +77,7 @@ from .remote_grid import (
 )
 from .remote_price import cmd_remote_price
 from .remote_project import cmd_remote_project
+from .remote_stats import cmd_remote_stats, cmd_remote_usage
 from .remote_task import cmd_remote_task
 from .remote_request import (
     cmd_remote_chat,
@@ -87,6 +88,7 @@ from .remote_request import (
 from .remote_router import cmd_remote_router
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 from .stt import cmd_stt_transcribe
+from .update import cmd_update
 
 __all__ = [
     "main",
@@ -128,7 +130,9 @@ __all__ = [
     "cmd_remote_members",
     "cmd_remote_price",
     "cmd_remote_project",
+    "cmd_remote_stats",
     "cmd_remote_task",
+    "cmd_remote_usage",
     "cmd_remote_router",
     "cmd_remote_chat",
     "cmd_remote_image",
@@ -166,4 +170,5 @@ __all__ = [
     "cmd_engine_status",
     "cmd_engine_stop",
     "cmd_stt_transcribe",
+    "cmd_update",
 ]

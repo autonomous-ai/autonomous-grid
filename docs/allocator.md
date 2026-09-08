@@ -910,7 +910,7 @@ Start the local grid and join each computer that should offer managed capacity. 
 supported and avoids cold network transfer:
 
 ```bash
-grid up
+grid start
 grid pull <hugging-face-repo>:<model.gguf>
 grid allocator node start
 grid allocator node status
@@ -1043,7 +1043,7 @@ write it to an owner-only file on the controller and transfer that file over you
 administration channel:
 
 ```bash
-grid allocator token write ./grid-node-token --host-id host-mac-studio
+grid allocator token write ./grid-node-token --host-id host-studio-01
 # securely copy the file to the other computer, then:
 grid allocator node start --grid https://grid.company.internal \
   --token-file ./grid-node-token \
@@ -1063,7 +1063,26 @@ refuses to send node or engine credentials over non-loopback plain HTTP; `--allo
 is accepted for CLI compatibility but does not override that boundary for managed nodes. A node
 started against a Grid owned by the same machine advertises the Grid's literal loopback control
 address by default. Remote workers must use HTTPS for Grid control and TLS for their advertised
-engine address. `grid down` stops a managed
+engine address — and Grid now creates both halves of that TLS itself, so no certificate has to be
+prepared by hand: `grid start --tls` mints a private CA and a server certificate covering the
+grid's advertised addresses, and a node that advertises a non-loopback host without certificate
+flags signs its engine certificate under a node-local CA whose public half travels to Grid inside
+the authenticated registration. Manual `--engine-tls-*` flags still take precedence; the
+generated material lives under `~/.grid/` (grid `tls/` and node-state `tls/` directories) with the
+private keys owner-only, and a copied `ca.crt` is the only file a peer machine needs.
+A LAN join therefore looks like:
+
+```bash
+# grid owner
+grid start home --tls
+#   ✓ Grid 'home' running — https://192.168.1.10:8090
+#   CA:    ~/.grid/grids/ag-home-…/tls/ca.crt  (copy to the other machines)
+
+# each worker machine
+grid allocator token write ./node-token   # on the owner
+scp ca.crt node-token worker:~/
+grid allocator node start --grid https://192.168.1.10:8090 --tls-ca ~/ca.crt --token-file ~/node-token
+``` `grid stop` stops a managed
 allocator node before it stops the local signaling server, allowing owned model processes to
 unregister and exit cleanly.
 

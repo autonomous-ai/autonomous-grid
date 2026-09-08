@@ -1,4 +1,4 @@
-"""Grid lifecycle + overview: `grid`, `grid version`, `grid up/down/ls/info`."""
+"""Grid lifecycle + overview: `grid`, `grid version`, `grid start/stop/ls/info`."""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +16,8 @@ from local import config, runtime
 from shared import paths, run_records, shell, state
 from shared._version import __version__
 
+from .next_steps import print_env_hint
+
 
 def cmd_version(args: argparse.Namespace) -> int:
     print(f"grid {__version__}")
@@ -32,13 +34,42 @@ def cmd_up(args: argparse.Namespace) -> int:
             port=args.port if args.port is not None else runtime.DEFAULT_PORT,
             host=args.host if args.host is not None else runtime.DEFAULT_HOST,
             advertise_host=args.advertise_host,
+            tls_cert_file=args.tls_cert,
+            tls_key_file=args.tls_key,
+            tls_ca_file=args.tls_ca,
+            # HTTPS unless --no-tls: every consumer of a LAN grid (allocator nodes, chat from
+            # other machines) needs encrypted transport, and asking before granting it is a
+            # footgun that reads as a hang, not a choice.
+            tls_auto=args.tls is not False,
         )
     else:
         cfg, _ = _apply_up_overrides(cfg, args)
     # Both paths, first run included — a busy port must never be something the reader has to
     # resolve before they can get started.
+    # A grid predating TLS defaults has no opinion stored; HTTPS is what it gets on next start.
+    # Only `server_tls: false` — written by --no-tls — keeps plain HTTP.
+    if cfg.get("server_tls") is None and not cfg.get("server_tls_cert_file"):
+        cfg["server_tls"] = True
+    tls_requested = bool(cfg.get("server_tls") or cfg.get("server_tls_cert_file"))
+    if tls_requested:
+        # The generated pair lands after overrides (the advertise host may have just changed), and
+        # the advertised URL must carry the scheme the cert will actually serve. An explicit
+        # --tls fails loudly when the material cannot be made; the silent default degrades to
+        # plain HTTP with a warning so a machine without openssl can still start a local grid.
+        tls_on = runtime.auto_tls_on_config(
+            cfg, advertise_host=_advertised_host(cfg), required=bool(args.tls)
+        )
+        if tls_on:
+            cfg["lan_signaling_url"] = runtime.make_local_url(
+                cfg["port"], _advertised_host(cfg), "https"
+            )
+        else:
+            cfg["lan_signaling_url"] = runtime.make_local_url(
+                cfg["port"], _advertised_host(cfg), "http"
+            )
     cfg, _ = _resolve_port(cfg)
     config.save_grid_config(cfg["grid_id"], cfg)
+    runtime.apply_server_tls_client_env(cfg)
     runtime.start_grid(cfg)
     cfg, local_only = _resolve_address(cfg)
     _report_up(cfg, local_only)
@@ -61,7 +92,9 @@ def _resolve_address(cfg: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     if runtime.advertised_address_works(url):
         return cfg, False
 
-    loopback = runtime.make_local_url(cfg["port"], "127.0.0.1")
+    loopback = runtime.make_local_url(
+        cfg["port"], "127.0.0.1", "https" if cfg.get("server_tls_cert_file") else "http"
+    )
     if not runtime.advertised_address_works(loopback):
         return cfg, True
 
@@ -81,6 +114,14 @@ def _report_up(cfg: dict[str, Any], local_only: bool) -> None:
     """
     scope = "  (this computer only)" if local_only else ""
     print(f"\n✓ Grid '{cfg['name']}' running — {runtime.grid_url(cfg)}{scope}")
+    if str(cfg.get("server_tls_cert_file") or ""):
+        # The join command is the very next thing every other machine runs; the CA path is shown
+        # because the copy-to-peer route still exists for machines behind a captured-first TLS pin.
+        ca_file = str(cfg.get("server_tls_ca_file") or "")
+        if ca_file:
+            print(f"CA:    {ca_file}")
+        print(f"Next:  grid allocator node start --grid {runtime.grid_url(cfg)}")
+        return
     print("\nNext:  grid engine install llama.cpp")
     print("See:   grid info")
 
@@ -88,7 +129,7 @@ def _report_up(cfg: dict[str, Any], local_only: bool) -> None:
 def _resolve_port(cfg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     """Move to a free port rather than asking the reader to pick one.
 
-    `grid up` is the first command anyone runs, and a busy 8090 used to end the story there: an
+    `grid start` is the first command anyone runs, and a busy 8090 used to end the story there: an
     error about a port they never chose, no clue what was holding it, and — until the flag was
     honoured — no escape even by choosing another. A port conflict is not a decision anyone needs
     to be consulted about; it just needs solving, out loud.
@@ -111,7 +152,11 @@ def _resolve_port(cfg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         )
     updated = dict(cfg)
     updated["port"] = replacement
-    updated["lan_signaling_url"] = runtime.make_local_url(replacement, _advertised_host(cfg))
+    updated["lan_signaling_url"] = runtime.make_local_url(
+        replacement,
+        _advertised_host(cfg),
+        "https" if updated.get("server_tls_cert_file") else "http",
+    )
     return updated, f"Port {port} is in use{by} — starting on {replacement} instead."
 
 
@@ -119,7 +164,7 @@ def _apply_up_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> tuple[
     """Let `--port` / `--host` / `--advertise-host` change a grid that already exists.
 
     These used to be read only when creating a grid. Bringing an existing one up dropped them
-    silently, which produced the worst error text in the CLI: `grid up --port 8099` answering
+    silently, which produced the worst error text in the CLI: `grid start --port 8099` answering
     "Port 8090 is already in use. Choose a different --port." — naming the stored port, telling
     you to change a flag you had just changed, and doing it again for every port you tried.
 
@@ -132,6 +177,10 @@ def _apply_up_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> tuple[
             ("port", args.port),
             ("host", args.host),
             ("advertise_host", args.advertise_host),
+            ("tls", getattr(args, "tls", None)),
+            ("tls_cert", getattr(args, "tls_cert", None)),
+            ("tls_key", getattr(args, "tls_key", None)),
+            ("tls_ca", getattr(args, "tls_ca", None)),
         )
         if value is not None
     }
@@ -143,10 +192,23 @@ def _apply_up_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> tuple[
         updated["port"] = int(changes["port"])
     if "host" in changes:
         updated["host"] = changes["host"]
+    if "tls" in changes:
+        updated["server_tls"] = bool(changes["tls"])
+    tls_cert = changes.get("tls_cert", cfg.get("server_tls_cert_file"))
+    tls_key = changes.get("tls_key", cfg.get("server_tls_key_file"))
+    tls_ca = changes.get("tls_ca", cfg.get("server_tls_ca_file"))
+    if changes.get("tls_cert") is not None or changes.get("tls_key") is not None:
+        updated["server_tls_cert_file"] = str(tls_cert or "")
+        updated["server_tls_key_file"] = str(tls_key or "")
+        updated["server_tls_ca_file"] = str(tls_ca or "")
+        updated["server_tls_ca_pem"] = runtime._read_pem(str(tls_ca or ""), "grid TLS CA")
+    # server_tls without a cert yet still means https: the material is generated at start,
+    # and the URL must already carry the scheme that start will serve.
+    scheme = "https" if (updated.get("server_tls_cert_file") or updated.get("server_tls")) else "http"
     # Rebuilt from the new port whether or not `--advertise-host` was given, since the URL carries
     # the port too — otherwise a port change would leave the old one advertised.
     updated["lan_signaling_url"] = runtime.make_local_url(
-        updated["port"], changes.get("advertise_host") or _advertised_host(cfg)
+        updated["port"], changes.get("advertise_host") or _advertised_host(cfg), scheme
     )
     # Port is announced by the caller after the free-port check, so only host is reported here.
     notes = [
@@ -183,7 +245,7 @@ def cmd_down(args: argparse.Namespace) -> int:
 
 
 def _refuse_false_stop(cfg: dict[str, Any], outcome: runtime.StopOutcome) -> None:
-    """Fail a `grid down` that did not stop the grid, naming what is still running and a remedy that
+    """Fail a `grid stop` that did not stop the grid, naming what is still running and a remedy that
     reaches it.
 
     Three ways to get here and each needs a different next step: a server that outlived SIGKILL, a
@@ -298,6 +360,7 @@ def cmd_info(args: argparse.Namespace) -> int:
         # different quoting styles is how one of them stays wrong after the other is fixed.
         print(f"export OPENAI_BASE_URL={shell.quote(f'{grid_url}/v1')}")
         print(f"export OPENAI_API_KEY={shell.quote('local-grid')}")
+        print_env_hint("grid info --env" + (f" {shlex.quote(args.grid)}" if args.grid else ""))
         return 0
 
     engines, reachable = _live_engines(grid_url)
@@ -344,6 +407,9 @@ def _overview_remote(as_json: bool) -> int:
     print(f"active grid: {active}" if active else "active grid: (none)")
     print("\nSign in with `grid login`, then manage your remote grids with `grid start`/`ls`/`info`, "
           "serve models with `grid join`, and use them with `grid chat -m <model> \"…\"`.")
+    # `remote` is the default for a new install (ADR 0001 D-2, amended), so this screen is the first
+    # thing a new user sees — and without this line the local mode has no signpost anywhere.
+    print("Or run a grid on this machine alone, no account needed: `grid mode local`.")
     return 0
 
 
@@ -397,7 +463,7 @@ def _overview_local(as_json: bool) -> int:
 # helpers
 # ---------------------------------------------------------------------------
 
-# Local grid ids are minted as ``ag-<slug>-<hex8>`` (local/runtime.init_grid_config). `grid up` uses this
+# Local grid ids are minted as ``ag-<slug>-<hex8>`` (local/runtime.init_grid_config). `grid start` uses this
 # to refuse auto-creating a junk grid when the arg is an unsynced id, not a new name (ADR 0011 D-f).
 # fullmatch (anchored) so a real name like ``ag-team`` still creates.
 _GRID_ID_RE = re.compile(r"ag-.+-[0-9a-f]{8}")
@@ -417,7 +483,7 @@ def _reject_foreign_grid(name: str) -> None:
     if remote_grid._by_name(name) is not None:  # a grid from `grid login`, pasted in local mode
         raise SystemExit(
             f"{name!r} is one of your remote grids, not a new local grid. Switch to it with "
-            f"`grid mode remote` (or `grid --remote up {name}`)."
+            f"`grid mode remote` (or `grid --remote start {name}`)."
         )
     if _looks_like_grid_id(name):
         raise SystemExit(

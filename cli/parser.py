@@ -79,6 +79,7 @@ from .logical_test import (
     real_request_count,
     real_user_count,
 )
+from .mcp_config import HARNESS_CHOICES, cmd_mcp_config
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from . import project_arg
@@ -86,6 +87,7 @@ from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .remote_grid import cmd_remote_members
 from .remote_price import cmd_remote_price
 from .remote_project import cmd_remote_project
+from .remote_stats import USAGE_DIMENSIONS, cmd_remote_stats, cmd_remote_usage
 from .remote_task import cmd_remote_task
 from .remote_router import (
     MAX_ADVISORS,
@@ -95,6 +97,7 @@ from .remote_router import (
 )
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 from .stt import cmd_stt_transcribe
+from .update import cmd_update
 
 
 def _positive_task_count(raw: str) -> int:
@@ -165,8 +168,17 @@ def build_parser() -> argparse.ArgumentParser:
     version = sub.add_parser("version", help="Print the grid version")
     version.set_defaults(handler=cmd_version)
 
+    update = sub.add_parser("update", help="Update grid to the latest release")
+    update.add_argument(
+        "--check",
+        action="store_true",
+        help="Only report whether a newer version exists; install nothing.",
+    )
+    update.set_defaults(handler=cmd_update)
+
     _add_grid_lifecycle(sub)
     _add_engines(sub)
+    _add_stats(sub)
     _add_models(sub)
     _add_use(sub)
     _add_state(sub)
@@ -180,6 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_launch(sub)
     _add_allocator(sub)
     _add_logical_test(sub)
+    _add_mcp(sub)
     _add_train(sub)
     _add_credential(sub)
     _add_stt(sub)
@@ -480,6 +493,8 @@ def _add_allocator(sub) -> None:
     )
     allocator_join.add_argument("grid", nargs="?", default=None)
     allocator_join.add_argument("--heartbeat-interval", type=float, default=15.0)
+    allocator_join.add_argument("--tls-ca", default=None,
+                                help="PEM CA bundle trusting the HTTPS grid being joined.")
     allocator_join.add_argument(
         "--dedicated",
         action="store_true",
@@ -667,6 +682,8 @@ def _add_allocator(sub) -> None:
         ),
     )
     node_start.add_argument("--advertise-host", default=None)
+    node_start.add_argument("--tls-ca", default=None,
+                            help="PEM CA bundle trusting the HTTPS grid this node reports to.")
     node_start.add_argument(
         "--engine-tls-cert",
         default=None,
@@ -780,22 +797,14 @@ def _add_credential(sub) -> None:
 
 
 def _add_grid_lifecycle(sub) -> None:
-    # `start`/`stop` beside `up`/`down`. The command names are the vocabulary a reader learns, and
-    # two metaphors is one too many: a grid went "up" while a computer "joined" it, so nothing
-    # paired with `grid leave`. Now the grid **starts** and **stops**, computers **join** and
-    # **leave**, and the docs can say one thing. `up`/`down` keep working — every existing script,
-    # every older README and every muscle memory still resolves.
-    for _verb, _summary in (("up", "Start a grid (creates it on first run; default: home)"),
-                            ("start", "Start a grid — same as `grid up`")):
-        _build_up_parser(sub, _verb, _summary)
+    # The command names are the vocabulary a reader learns. A grid **starts** and **stops**,
+    # computers **join** and **leave** — one metaphor each, so the docs can say one thing.
+    _build_up_parser(sub, "start", "Start a grid (creates it on first run; default: home)")
 
-
-    for _verb, _summary in (("down", "Stop a grid (its setup is kept)"),
-                            ("stop", "Stop a grid — same as `grid down`")):
-        _d = sub.add_parser(_verb, help=_summary)
-        _d.add_argument("name", nargs="?", default=None,
-                        help="Grid name or id (ag-…). Omit for the active grid.")
-        _d.set_defaults(handler=cmd_down)
+    _d = sub.add_parser("stop", help="Stop a grid (its setup is kept)")
+    _d.add_argument("name", nargs="?", default=None,
+                    help="Grid name or id (ag-…). Omit for the active grid.")
+    _d.set_defaults(handler=cmd_down)
 
     delete = sub.add_parser(
         "delete", help="Delete a grid's local config for good (`grid stop` only pauses it)"
@@ -837,7 +846,21 @@ def _build_up_parser(sub, verb: str, summary: str):
     parser.add_argument("--advertise-host", default=None,
                         help="Address to hand out to other computers, when the one Grid picks is "
                              "not reachable. Use 127.0.0.1 to keep everything on this machine.")
-    # Remote-only (local cmd_up ignores it): the network type set when `grid up` creates a remote
+    parser.add_argument("--tls", action="store_true", default=None,
+                        help="Serve the signaling server over HTTPS (already the default; this "
+                             "only forces it on and fails loudly if the material cannot be made).")
+    parser.add_argument("--no-tls", action="store_false", dest="tls", default=None,
+                        help="Serve plain HTTP instead. Weakens the LAN: node credentials cannot "
+                             "travel to other machines except with --allow-insecure-http.")
+    parser.add_argument("--tls-cert", default=None,
+                        help="Serve the signaling server over HTTPS with this PEM certificate. "
+                             "Enables allocator nodes over a LAN without a tunnel (see --tls-ca).")
+    parser.add_argument("--tls-key", default=None,
+                        help="Owner-only PEM private key paired with --tls-cert.")
+    parser.add_argument("--tls-ca", default=None,
+                        help="PEM CA bundle peers must trust to reach this grid over HTTPS. Workers "
+                             "pass the same --tls-ca to `grid allocator join`/`node start`.")
+    # Remote-only (local cmd_up ignores it): the network type set when `grid start` creates a remote
     # grid. default=None lets the remote handler tell an explicit value from this create default.
     parser.add_argument(
         "--type",
@@ -1054,6 +1077,31 @@ def _add_engines(sub) -> None:
     engines.set_defaults(handler=cmd_engines)
 
 
+def _add_stats(sub) -> None:
+    """`grid stats` / `grid usage` — the live readouts of a hosted grid (remote-only).
+
+    Both read the relay's own rollup, which is the same source the desktop app's grid panels
+    read, so the two surfaces report one grid identically. A local grid computes no such
+    figures, which is why `cli.dispatch` gates these with a reason of their own rather than
+    the sign-in default.
+    """
+    stats = sub.add_parser("stats", help="A remote grid's live capacity and answered tokens")
+    stats.add_argument("grid", nargs="?", default=None,
+                       help="Grid name or id (ag-…). Omit for the active grid.")
+    stats.add_argument("--verbose", action="store_true",
+                       help="Also print a card per engine: memory, telemetry, storage and its own tokens.")
+    stats.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    stats.set_defaults(handler=cmd_remote_stats)
+
+    usage = sub.add_parser("usage", help="Tokens a remote grid answered, by model, member or engine")
+    usage.add_argument("grid", nargs="?", default=None,
+                       help="Grid name or id (ag-…). Omit for the active grid.")
+    usage.add_argument("--by", choices=USAGE_DIMENSIONS, default="model",
+                       help="What to split the tokens by (default: model).")
+    usage.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    usage.set_defaults(handler=cmd_remote_usage)
+
+
 def _add_models(sub) -> None:
     device_info = sub.add_parser(
         "device-info",
@@ -1069,6 +1117,8 @@ def _add_models(sub) -> None:
         metavar="KIND",
         help="Show the API-engine whitelist for a service kind (e.g. openai, codex).",
     )
+    # No pagination flags on purpose: one fetch, one scrolling list. Paging was a
+    # terminal problem the moment ↑↓ could scroll through the rows.
     catalog.set_defaults(handler=cmd_catalog)
 
     pull = sub.add_parser(
@@ -1185,10 +1235,22 @@ def _add_state(sub) -> None:
 
 def _add_auth(sub) -> None:
     login = sub.add_parser("login", help="Sign in to remote mode")
-    login.add_argument(
+    # Two ways in, never both at once. `--harness` is an alternative to the browser device flow
+    # rather than a modifier of it, so argparse refuses the pair — and its exit 2 is also what the
+    # harness reads as "the installed `grid` predates `--harness`", which a hand-rolled check
+    # exiting 1 would take away. `--no-browser` is the device flow's own option, so it is what
+    # stands for that flow here. Neither is hidden: this CLI has no suppressed-command convention.
+    how = login.add_mutually_exclusive_group()
+    how.add_argument(
         "--no-browser",
         action="store_true",
         help="Print the sign-in URL and code instead of opening a browser (for headless machines).",
+    )
+    how.add_argument(
+        "--harness",
+        action="store_true",
+        help="Sign in with an Autonomous account token read from standard input, with no browser "
+             "and no approval to wait for. `harness grid login` runs this for you.",
     )
     login.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     login.set_defaults(handler=cmd_login)
@@ -1199,6 +1261,15 @@ def _add_auth(sub) -> None:
         action="store_true",
         help="Sign out even if a serve child on this box could not be stopped (it is still stopped "
              "first; `grid leave <grid-id>` reaps a survivor afterwards).",
+    )
+    # Not mutually exclusive with `--force`: the two answer different questions (what to do about a
+    # serve child here, and what to do about sign-ins elsewhere), and somebody signing out a machine
+    # they have lost control of wants both.
+    logout.add_argument(
+        "--everywhere",
+        action="store_true",
+        help="Also sign out every other machine signed in to this account; they have to sign in "
+             "again. Needs a control plane that supports it.",
     )
     logout.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     logout.set_defaults(handler=cmd_logout)
@@ -2253,6 +2324,39 @@ def _add_launch(sub) -> None:
     # two positionals above). The default is what makes `grid launch claude --`, with nothing after
     # it, identical to no `--` at all.
     launch.set_defaults(handler=cmd_launch, forward=())
+
+
+def _add_mcp(sub) -> None:
+    """`grid mcp config` — point a coding agent's harness at this grid's web tools (ADR 0041).
+
+    Nested subcommands rather than one positional with `choices=`: `grid mcp myteam` would otherwise
+    be an "invalid choice" error about a word the user meant as a grid name. The harness is a
+    **flag** for the same reason — `grid mcp config myteam` has to keep naming a grid.
+    """
+    mcp = sub.add_parser(
+        "mcp",
+        help="Point a coding agent's harness at this grid's web tools",
+        description=(
+            "Print the MCP configuration a coding agent's harness needs to search and read the\n"
+            "web through your grid. The server runs on the control plane, so it keeps working\n"
+            "whether or not the grid itself is up."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
+
+    config = mcp_sub.add_parser(
+        "config", help="Print the config one harness needs (prints your grid's access token)")
+    config.add_argument("grid", nargs="?", default=None,
+                        help="Grid name or id (ag-...). Omit for the active grid.")
+    # Mutually exclusive: one asks for a harness's own spelling, the other for the values with no
+    # spelling at all. `--json` is also declared here rather than left to the global `grid --json`,
+    # like every other subcommand's — a subparser's default overrides the parent's value anyway, so
+    # the global spelling would silently stop working the moment this flag existed.
+    target = config.add_mutually_exclusive_group()
+    target.add_argument("--harness", choices=HARNESS_CHOICES,
+                        help="Print the config for one harness. Omit to list them.")
+    target.add_argument("--json", action="store_true",
+                        help="Emit machine-readable JSON: the server name, URL and header.")
+    config.set_defaults(handler=cmd_mcp_config)
 
 
 def _add_train(sub) -> None:

@@ -299,6 +299,10 @@ def cmd_allocator_token_write(args: argparse.Namespace) -> int:
 
 def cmd_allocator_node_start(args: argparse.Namespace) -> int:
     cfg = config.select_grid(getattr(args, "grid", None))
+    tls_ca = getattr(args, "tls_ca", None)
+    if tls_ca:
+        cfg["server_tls_ca_file"] = str(tls_ca)
+    runtime.apply_server_tls_client_env(cfg)
     grid_url = runtime.grid_url(cfg)
     grid_info = _request(cfg, "GET", "/grid/info")
     grid_id = _validated_grid_id(grid_info.get("grid_id"))
@@ -313,6 +317,44 @@ def cmd_allocator_node_start(args: argparse.Namespace) -> int:
             scope=scope,
             record_path=record_path,
         )
+
+
+def _fetch_grid_ca(cfg: dict[str, Any], control_url: str) -> bool:
+    """Learn a LAN grid's CA on first contact so joining needs no copied file.
+
+    A self-signed LAN certificate fails the platform trust store; making the operator copy one
+    file by hand to fix an error they never caused is the friction this removes. The fetch is
+    trust-on-first-use like SSH's host key: the CA is public and carries no capability (the
+    allocator token authorises, not the certificate), and the fingerprint is printed so a
+    same-network attacker would have to be consistent from the very first contact onward.
+    A grid with an operator-supplied CA never lands here.
+    """
+    if cfg.get("server_tls_ca_file") or not control_url.lower().startswith("https://"):
+        return False
+    import hashlib
+    import sys
+
+    try:
+        response = httpx.get(f"{control_url}/grid/ca", timeout=10.0, verify=False)
+        response.raise_for_status()
+    except httpx.HTTPError:
+        return False
+    ca_pem = response.text
+    if "BEGIN CERTIFICATE" not in ca_pem:
+        return False
+    ca_path = runtime.learned_ca_path(control_url)
+    ca_path.parent.mkdir(parents=True, exist_ok=True)
+    ca_path.write_text(ca_pem, encoding="utf-8")
+    ca_path.chmod(0o644)
+    cfg["server_tls_ca_file"] = str(ca_path)
+    runtime.apply_server_tls_client_env(cfg)
+    digest = hashlib.sha256(ca_pem.encode("utf-8")).hexdigest()
+    print(
+        "Trusting this grid's certificate for the first time — "
+        f"CA fingerprint {digest[:16]}:{digest[16:32]}",
+        file=sys.stderr,
+    )
+    return True
 
 
 def cmd_allocator_join(args: argparse.Namespace) -> int:
@@ -453,10 +495,11 @@ def _start_allocator_node_locked(
         and not _literal_loopback_host(effective_advertise_host)
         and not tls_cert
     ):
-        raise SystemExit(
-            "A non-loopback managed engine requires end-to-end TLS. Pass "
-            "--engine-tls-cert, --engine-tls-key, and (for a private CA) --engine-tls-ca."
-        )
+        # Nobody should have to invent an openssl command line to add one machine to their own
+        # LAN: mint the engine certificate here. It lives beside the node state and is signed by
+        # a node-local CA whose public half rides up to the master inside the authenticated
+        # registration envelope (ManagedModelRuntime.report already transports it).
+        tls_cert, tls_key, tls_ca = _auto_engine_tls(state_path, effective_advertise_host, tls_ca)
     shutdown_request_path(state_path).unlink(missing_ok=True)
     startup_path = _node_startup_path(scope)
     startup_path.unlink(missing_ok=True)
@@ -492,6 +535,7 @@ def _start_allocator_node_locked(
         **os.environ,
         "PYTHONUNBUFFERED": "1",
         NODE_TOKEN_ENV: token,
+        **runtime.server_tls_client_env(cfg),
     }
     # A shell-level operator credential must not leak into the long-running worker process.
     child_env.pop(OPERATOR_TOKEN_ENV, None)
@@ -602,6 +646,26 @@ def _allocator_node_selector(cfg: dict[str, Any]) -> str:
     if cfg.get("managed_server", True):
         return str(cfg["grid_id"])
     return runtime.grid_url(cfg)
+
+
+def _auto_engine_tls(
+    state_path: Path, advertise_host: str, tls_ca: str | None
+) -> tuple[str, str, str]:
+    """Generate the managed-engine certificate pair a LAN node needs, in place.
+
+    Returns the ``(cert, key, ca)`` paths to forward to the detached node child. The CA argument
+    stays authoritative when the operator passed one explicitly.
+    """
+    from shared import tls
+
+    directory = state_path.parent / "tls"
+    try:
+        crt, key, ca = tls.ensure_server_cert(directory, [advertise_host])
+    except (tls.TlsToolMissing, RuntimeError, ValueError) as exc:
+        raise SystemExit(
+            f"Grid could not create the engine's LAN TLS certificate: {exc}"
+        ) from exc
+    return str(crt), str(key), str(tls_ca or ca)
 
 
 def cmd_allocator_node_stop(args: argparse.Namespace) -> int:
@@ -807,19 +871,28 @@ def _request(
             "Refusing to send an allocator credential over non-loopback HTTP. "
             "Use HTTPS or pass --allow-insecure-http for a trusted LAN."
         )
-    try:
-        with httpx.Client(
-            timeout=15.0,
-            trust_env=control_url.lower().startswith("https://"),
-        ) as client:
-            response = client.request(
-                method,
-                f"{control_url}{path}",
-                json=body,
-                headers=headers,
-            )
-    except httpx.RequestError as exc:
-        raise SystemExit(f"Could not reach allocator on {cfg['name']}: {exc}") from exc
+    for attempt in (0, 1):
+        try:
+            with httpx.Client(
+                timeout=15.0,
+                trust_env=control_url.lower().startswith("https://"),
+                verify=runtime.server_tls_ca_bundle(cfg) or True,
+            ) as client:
+                response = client.request(
+                    method,
+                    f"{control_url}{path}",
+                    json=body,
+                    headers=headers,
+                )
+            break
+        except httpx.RequestError as exc:
+            if (
+                attempt == 0
+                and "CERTIFICATE_VERIFY_FAILED" in str(exc)
+                and _fetch_grid_ca(cfg, control_url)
+            ):
+                continue
+            raise SystemExit(f"Could not reach allocator on {cfg['name']}: {exc}") from exc
     if response.status_code >= 400:
         try:
             detail = response.json().get("detail")

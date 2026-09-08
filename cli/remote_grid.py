@@ -1,4 +1,4 @@
-"""Remote-mode grid lifecycle: `grid up` / `down` / `ls` / `info` against the hosted
+"""Remote-mode grid lifecycle: `grid start` / `stop` / `ls` / `info` against the hosted
 managed-networks API.
 
 Remote-only — `cli.dispatch` routes these here in remote mode, so the handlers assume remote and
@@ -21,8 +21,10 @@ from typing import Any
 
 from shared import shell, state
 
+from .next_steps import print_env_hint
 
-# Default network type for `grid up` on create (DECISIONS D11; the other choice is
+
+# Default network type for `grid start` on create (DECISIONS D11; the other choice is
 # permissioned-providers). `--type` parses with default None so a value passed on a *start* can
 # be told apart from this create default.
 DEFAULT_NETWORK_TYPE = "permissioned-public"
@@ -51,7 +53,7 @@ def _resolve_default() -> dict[str, Any] | None:
     """The grid to act on when none is named: the active selection, else the sole grid, else
     ``None``. No ``home`` fallback — remote never auto-creates one. Mirrors the default branch of
     ``local/config.select_grid``; a stale active (its grid was removed) falls through to the sole grid.
-    The single home of the active>sole precedence, shared by ``up`` (no name) and ``_select``.
+    The single home of the active>sole precedence, shared by ``start`` (no name) and ``_select``.
     """
     nets = _networks()
     active = state.get_active("remote")
@@ -63,7 +65,7 @@ def _resolve_default() -> dict[str, Any] | None:
 
 
 def _select(name: str | None) -> dict[str, Any]:
-    """The grid a name-taking command (``down``/``info``) acts on. An explicit name must exist;
+    """The grid a name-taking command (``stop``/``info``) acts on. An explicit name must exist;
     otherwise fall back to ``_resolve_default`` (active>sole). Clear ``SystemExit`` either way."""
     if name:
         rec = _by_name(name)
@@ -207,7 +209,7 @@ def cmd_remote_up(args: argparse.Namespace) -> int:
         credentials.add_network(record)
     except OSError as exc:
         # The grid exists server-side now; tell the user rather than leaving a bare traceback and a
-        # next `grid up <name>` that would create a duplicate.
+        # next `grid start <name>` that would create a duplicate.
         raise SystemExit(
             f"Grid {name!r} was created in remote mode but couldn't be saved locally ({exc}). "
             "Run `grid login` to re-sync your grids before retrying."
@@ -270,6 +272,7 @@ def cmd_remote_info(args: argparse.Namespace) -> int:
         # of a double-quoted context and be *executed* by the eval this command invites.
         print(f"export OPENAI_BASE_URL={shell.quote(base_url)}")
         print(f"export OPENAI_API_KEY={shell.quote(token)}")
+        print_env_hint(_env_command(args.grid))
         return 0
     rec = _select(args.grid)
     # Status is creator-only; a member sees `{}` here and just gets a blank run-state (never an error).
@@ -336,3 +339,8 @@ def cmd_remote_members(args: argparse.Namespace) -> int:
         roles = ",".join(member.get("roles") or [])
         print(f"{email}\t{roles}")
     return 0
+
+
+def _env_command(grid: str | None) -> str:
+    """The `info --env` command as this caller typed it, re-quoted so the hint can be pasted back."""
+    return "grid info --env" + (f" {shlex.quote(grid)}" if grid else "")

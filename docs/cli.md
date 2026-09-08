@@ -28,9 +28,9 @@ as a product noun. Those are implementation terms for architecture docs and code
 
 ## Design Rules
 
-- The common path is one screen: `grid up`, `grid join`, `grid models`, `grid chat`.
+- The common path is one screen: `grid start`, `grid join`, `grid models`, `grid chat`.
 - `home` is the default grid. Users name a grid only when they have several.
-- `up` is idempotent: create if missing, start if stopped, print the same contract every time.
+- `start` is idempotent: create if missing, start if stopped, print the same contract every time.
 - Default output is human-readable. Every state-reading command supports `--json` —
   swept by `tests/test_application_surface.py`, so the claim is checked rather than asserted.
 - Use examples before exhaustive flags in help text.
@@ -47,8 +47,17 @@ grid --help                           # concise help with common examples first
 grid <command> --help
 grid version
 grid --version                        # same output as `grid version`
+grid update [--check]                 # install the latest release, or just report it
 grid [--local | --remote] <command>      # override the active mode for one command
 ```
+
+`grid update` upgrades the CLI itself in place: the Linux binary verifies the new release against
+its SHA256SUMS before replacing itself, a uv-installed wheel (the macOS path) re-runs
+`uv tool install`. A grid that is already running keeps serving the old version until you restart
+it. It also tells you it is stale on its own: once a day, in the background, any `grid` command
+refreshes a cached "what is the newest version" answer, and when the cache is behind it prints one
+line on stderr after the command's output. That notice never appears in `--json` output, in
+non-terminal contexts (pipes, CI, apps driving the CLI), or when `GRID_NO_UPDATE_CHECK=1` is set.
 
 Bare `grid` is not just help. It is the dashboard for a terminal:
 
@@ -73,7 +82,7 @@ mode: local
 No grid yet.
 
 Start one:
-  grid up
+  grid start
 
 Then join an engine:
   grid join
@@ -85,7 +94,7 @@ In `remote` mode bare `grid` shows the mode and your active remote grid, then th
 mode: remote
 active grid: research
 
-Sign in with `grid login`, then manage your remote grids with `grid up`/`ls`/`info`, serve models
+Sign in with `grid login`, then manage your remote grids with `grid start`/`ls`/`info`, serve models
 with `grid join`, and use them with `grid chat -m <model> "…"`.
 ```
 
@@ -99,7 +108,7 @@ network grid whose inference, discovery, and ordinary registry are unauthenticat
 membership is in memory. Allocator mutations and managed-node control are the narrow authenticated
 exception (see [Allocator](#allocator)). **`remote`** is a signed-in thin client to autonomous's
 hosted relay: sign in with `grid login`, then bring up and manage hosted **remote grids** with the
-same `up`/`down`/`ls`/`info` verbs, serve them (`join`/`leave`), consume them
+same `start`/`stop`/`ls`/`info` verbs, serve them (`join`/`leave`), consume them
 (`chat`/`image`/`edit`/`video`), price your served models (`grid price`), and manage who may join or
 use them (`grid members`).
 
@@ -111,14 +120,17 @@ grid use --none                       # clear the active grid for the current mo
 grid [--local | --remote] <command>      # override the mode for a single command
 ```
 
-The mode is persisted in `~/.grid/state.json` (default `local`); each mode remembers its own
-active grid. Which mode a command runs in is resolved as `--local`/`--remote` (one command) > the
-persisted mode > `local`. `grid use <name>` sets the persistent default grid, so `grid chat` /
+The mode is persisted in `~/.grid/state.json`; each mode remembers its own active grid. Which mode
+a command runs in is resolved as `--local`/`--remote` (one command) > the persisted mode > the
+default. With no state file the default is `remote`, except on a machine that already holds local
+grids (`~/.grid/grids/*/config.json`), which stays `local` until you run `grid mode remote` (or
+`grid login`, which moves the mode itself — see [Sign in](#sign-in)) — so an
+upgrade never takes a running local grid out of sight. `grid use <name>` sets the persistent default grid, so `grid chat` /
 `grid info` / `grid models` target it without naming it — naming a grid explicitly still wins (the
 `[grid]` positional on `info`/`models`/`engines`, `--grid` on `chat`/`image`/`edit`/`video`), and a
 stale selection (its grid was removed) is ignored.
 
-In `remote` mode the grid lifecycle (`up`/`down`/`ls`/`info`), live reads (`engines`/`models`),
+In `remote` mode the grid lifecycle (`start`/`stop`/`ls`/`info`), live reads (`engines`/`models`),
 sign-in (`login`/`logout`), serving (`join`/`leave`), consuming (`chat`/`image`/`edit`/`video`),
 handing an app the grid (`grid launch`), and
 membership admin (`grid members`) all work. `grid members` and `grid launch` are remote-only — in
@@ -142,16 +154,25 @@ Notes:
 ## Sign in
 
 ```
-grid login [--no-browser] [--json]    # sign in to remote mode (device-code flow)
-grid logout [--force] [--json]        # stop serving, then clear stored remote credentials
+grid login [--no-browser | --harness] [--json]   # sign in to remote mode
+grid logout [--force] [--everywhere] [--json]   # stop serving, then clear stored credentials
 grid sync [--json]                    # refresh your remote grids without signing in again
 ```
 
 **Remote-only.** `grid login` signs you in to autonomous's hosted relay with a device-code
 flow — it prints the sign-in URL and code, and opens a browser at that URL unless you pass
-`--no-browser` (for headless machines) — and stores your credentials under `~/.grid`. Signing in does
-**not** pick an active grid: run `grid ls` to see the remote grids you can reach, then
-`grid use <name>` (or name one per command).
+`--no-browser` (for headless machines) — and stores your credentials under `~/.grid`.
+`--harness` is the browser-less alternative: it reads an Autonomous account token on **standard
+input** and trades it for the same session with nothing to approve, which is how `harness grid login`
+signs `grid` in for you. The two are mutually exclusive. Signing in does
+**not** pick an active grid: it prints the grids you can reach (the `grid ls` columns, `*` on the
+active one) followed by the commands that act on one — `grid use <name>` to pick it, `grid chat`,
+`grid info --env` to point a coding agent at it, `grid join` to serve a model to it.
+
+`login` is the one remote-only command that answers `local` mode by **switching the mode** instead
+of refusing: it runs, and the persisted mode moves to `remote` once the credentials are stored (a
+sign-in that times out or is denied leaves the mode alone). An explicit `grid --local login` still
+refuses, like every other remote-only command in `local` mode.
 
 `grid logout` **stops serving, then clears the stored credentials and the remote mode's active
 grid** — in that order, because a serve
@@ -165,27 +186,56 @@ has. `--force` signs out anyway (it still tries first, and still tells you what 
 that is serving nothing, logout is what it always was: local, offline, instant. `device.toml` and
 `api_keys.toml` are untouched either way.
 
+`grid logout --everywhere` does all of that **and** signs out every other machine signed in to the
+same account — they have to sign in again. It is the answer to a laptop you no longer control, or to
+a sign-in code you approved and should not have: without it the only lever was rotating the
+platform's signing secret, which signs out everybody on it. It moves one number on your account, so
+no other account is touched, and your per-grid tokens are untouched too — those have their own
+lever, on the grid rather than on your account. The revocation runs after the teardown and **before** the local credentials are
+deleted — those credentials are what authorizes it — so if the control plane refuses, nothing is
+signed out anywhere and your credentials stay put (whatever this box was serving has still been
+stopped by then, as it is on any logout). A control plane too old to know the route says so. If your
+sign-in on *this* machine was already signed out from somewhere else, it says that and signs you out
+here anyway — there is nothing left for it to revoke with. Plain `grid logout` never contacts the
+control plane at all.
+
 `grid sync` re-fetches your grids and tokens using your saved sign-in (no browser), so a grid
 created on the website or one you were just added to appears after `grid sync` — it never changes
 your active grid, and an expired session tells you to run `grid login`. If its refresh (or a
 `grid login` as a different account) drops a grid this box is still serving, it says so, naming the
 process and the `grid leave <grid-id>` that stops it — neither command kills an engine on your behalf,
-because a control-plane answer is not a decision to stop serving. In `local` mode these
-commands exit with guidance to switch — sign-in is a remote concept. See
+because a control-plane answer is not a decision to stop serving. `grid sync` reports its result the
+way `grid login` does: the same grid table, the same following commands. In `local` mode `logout`
+and `sync` exit with guidance to switch — sign-in is a remote concept — while `login` switches the
+mode itself, as above. See
 [ADR 0002](./adr/0002-remote-sign-in.md) and
 [ADR 0023](./adr/0023-signing-out-with-live-serve-children.md).
+
+Both commands say one line when there is no **OS grid** for this machine — the grid that exists for
+everyone running one operating system, provisioned for you rather than created by you. It names
+either the system this CLI has no OS grid for, listing the ones it does have (a BSD, say), or the
+fact that the control plane is serving none for yours — so the two do not have to be told apart by
+guesswork. It is never an error and it never changes an exit code. Somebody who has an OS grid sees
+nothing extra, and so does anyone whose control plane is too old to answer the question. See
+[ADR 0039](./adr/0039-a-grid-can-be-keyed-on-an-os.md).
+
+⚠️ `--json` carries the same fact under a **new `os_grid` key, present on every `grid login --json`
+and `grid sync --json`** — an object with `reason`, `system` and `os_token`, or `null` when there is
+nothing to say. It is `null` rather than absent on purpose: a key that comes and goes is one every
+script has to guard. It is the one part of this that is not invisible to a client written before it,
+so a consumer comparing the whole payload shape sees one more key.
 
 ## Grid Lifecycle
 
 ```
-grid up [name] [--type <t>] [--port <n>] [--host <h>] [--advertise-host <h>]
-grid down [name]                      # stop a grid (may fail loud); the grid/config persists
+grid start [name] [--type <t>] [--port <n>] [--host <h>] [--advertise-host <h>]
+grid stop [name]                      # stop a grid (may fail loud); the grid/config persists
 grid ls [--json]                      # saved grids (local: name, id, where, url · remote: name, id, type)
 grid info [grid] [--json]             # grid, grid_url, live engine count, live models
 grid info [grid] --env                # print OPENAI_* exports (local key, or remote relay URL + token)
 ```
 
-`grid up` output is stable and scriptable:
+`grid start` output is stable and scriptable:
 
 ```text
 grid=home
@@ -196,11 +246,11 @@ grid_url=http://192.168.1.25:8090
 server binds; `--advertise-host` overrides the host published in `grid_url` (otherwise the detected
 LAN IP). Those three are local-only, and `--type` is remote-only (the grid type, set on create).
 
-No separate `create` or `start` in the main surface — `up` is the single lifecycle verb, so
+No separate `create` command — `start` is the single lifecycle verb, so
 first use feels like one operation rather than infrastructure management. (`grid use` only sets
 which grid is *active*; it is a selection pointer, not a lifecycle step — see Modes.)
 
-In `local` mode **`grid down` waits and can fail.** It stops the server it can prove is this grid's
+In `local` mode **`grid stop` waits and can fail.** It stops the server it can prove is this grid's
 own — a recycled or corrupt `server_pid` is reported and never signalled — and then asks the grid's
 own port whether that worked. Exit is non-zero, naming a remedy, when a server outlived SIGKILL, when
 the grid is still answering on its port, or when it could neither verify the pid nor reach the port;
@@ -209,9 +259,9 @@ instant: a wedged server can cost the shared 25s stop grace and, if its process 
 another 25s. Healthy stops return as soon as the process exits, and a grid that is already down
 succeeds quietly. See [ADR 0026](./adr/0026-the-grid-servers-pid-is-a-claim-too.md).
 
-In `remote` mode these same verbs act on hosted **remote grids**: `grid up <name>` create-or-starts
+In `remote` mode these same verbs act on hosted **remote grids**: `grid start <name>` create-or-starts
 one — `--type` is `permissioned-public` (default) or `permissioned-providers`, set on create, and
-creating needs an explicit name (no auto-`home`). `grid down` stops it (the grid persists),
+creating needs an explicit name (no auto-`home`). `grid stop` stops it (the grid persists),
 `grid ls` lists the grids your sign-in fetched (local — no network call, `* ` marking the active
 one, columns name/id/type), and `grid info` prints `grid`, `type`, `status` and `grid_url` — the
 same four keys under `--json`. `status` comes from the creator-only live status, so a member who
@@ -273,7 +323,7 @@ as `:8000`. Each step must resolve to exactly one engine, or it errors listing t
 In remote mode the same verb serves your models on a remote grid: it brings the engine up the same
 way, then runs a detached loop that registers the engine's capabilities with the hosted relay,
 long-polls it for work, forwards each claimed job to the local engine, and heartbeats — `grid
-leave` stops and unregisters it. You must be signed in and the grid must be up (`grid up`) — with one
+leave` stops and unregisters it. You must be signed in and the grid must be up (`grid start`) — with one
 deliberate exception: `grid leave <grid-id>` also works **signed out**, so a serve child left running by
 an earlier sign-out can still be reaped. It stops the process but cannot tell the grid (there is no
 token), so the models drop at the node TTL (~120s) and it says so. `grid
@@ -689,6 +739,150 @@ To make vLLM allocator-managed, enroll its existing Grid provider with
 `grid --remote allocator join <grid> --dedicated` and configure an immutable `vllm` model profile;
 the allocator still refuses any process it cannot prove it owns.
 
+## Stats
+
+```
+grid stats [grid] [--verbose] [--json]                       # what the grid brings, and what it answered
+grid usage [grid] [--by model|member|engine] [--json]        # who and what spent the tokens
+```
+
+**Remote-only.** These are the terminal form of the desktop app's grid panels, and they read the
+same two relay endpoints the app reads — the public `grid/overview` and the token-authenticated
+`grid/members/usage` — so a grid cannot report one thing in the app and another in a shell. A local
+grid computes none of these figures (no uptime, no memory pool, no answered-token books), which is
+what the local-mode gate says rather than "sign in".
+
+`grid stats` is the grid at a glance:
+
+```text
+24h Grid Overview:
+
+grid      autonomous.ai
+status    running
+uptime    99.9%
+nodes     6
+models    6
+memory    0.9/1.4 TB (68%)
+parallel  59
+input     36.2M
+cached    518M
+output    6.2M
+requests  8.1K
+```
+
+**The span in the heading is the relay's, never the literal string `24h`.** The window is an
+operator knob, so a hardcoded label would go quietly wrong the moment someone retuned it — a grid
+counting six hours reads `6h Grid Overview:`, and one whose relay computes no rollup reads
+`Grid Overview:` with no span at all. It sits in the heading rather than in a row because it
+qualifies every token figure beneath it.
+
+`nodes` counts the machines currently serving. It is the one place this CLI says *node* rather
+than *engine* (the [Output Contract](#output-contract) mandates `engines` elsewhere, and `grid info`
+still prints it): here a machine is a node while `engine` is the software running on it, which each
+card states on its own `engine` line, and one word could not carry both. `--json` keeps
+`engines_online` / `engines_total` / `engines` for the same reason a wire name is never redefined.
+
+`memory` is the GPU-memory pool summed across **online** engines — a machine that is asleep
+contributes nothing, and a subscription seat contributes a plan rather than memory, so neither is
+counted. `parallel` is how many requests the grid will take at once (the relay's own capacity when
+it reports one, else the engines' summed concurrency). Every value is **empty when the grid did not
+report it**, printed as `—` like the readings on the cards below: a `0` standing in for "not
+measured" would libel a working fleet as an idle one.
+
+`grid usage` opens with the same block, built by the same code, under a lighter title — here it is
+a header over a breakdown rather than the answer itself. The grid's totals, then whichever
+breakdown was asked for. Two renderings of one set of figures would drift, and these two are read
+minutes apart against the same grid.
+
+There is deliberately **no grid-level speed**. Each engine's tok/s is its own decode estimate, taken
+whenever it last answered something, so adding them up gives a rate no request ever sees and no two
+engines were measured at the same moment. Speed belongs to the machine that answers you, and is
+reported per engine by `--verbose`.
+
+`--verbose` adds a card per engine — its owner, hardware, the models it serves and their context
+windows, memory and free headroom, temperature, utilisation, power, disk, speed, and its own share
+of the window's tokens. A reading the machine never sent prints `—`, which is what keeps it apart
+from a measured zero (an online, idle GPU). Apple Silicon reports no temperature or power at all, so
+those rows are routinely `—` on a Mac, and its memory is labelled `RAM` rather than `VRAM` because a
+unified pool is not a graphics card's own.
+
+**The list stops at 20 machines**, strongest first, however many the grid has. A card is eleven
+lines, so an uncapped list scrolls the rollup — the part every run is read for — off the screen;
+capping a sorted list drops the tail rather than an arbitrary slice. Nothing is concealed by it:
+`nodes=` above states the real count, and `--json` is never capped, so a script always sees the
+whole fleet. Sleeping machines are listed too, marked `(offline)`, which is why the number of cards
+can exceed `nodes=`.
+
+```text
+Top 20 nodes:
+
+scholes-60001
+  owner        scholes@autonomous.ai
+  hardware     NVIDIA RTX PRO 6000 Blackwell Workstation Edition ×4 · Linux
+  engine       external · 16 parallel
+  models       deepseek-v4-flash-0731 (256K ctx)
+  VRAM         277.2/382.4 GB (72%) · 105.2 GB free
+  temperature  36°C
+  usage        0%
+  power        198.7W/2400W
+  storage      796.1/914.8 GB (87%)
+  throughput   ~162 tok/s
+  tokens 24h   4.2M input · 5.2M cached · 91.5K output · 185 requests
+```
+
+`grid usage` splits the same window three ways — by `model` (the default), by `member`, or by
+`engine`:
+
+```text
+24h overview:
+
+input     35.3M
+cached    520M
+output    6.2M
+requests  8.1K
+
+MODEL                   INPUT  CACHED  OUTPUT  REQUESTS  SHARE  ENGINES
+Qwen3.8-Flash-Next      31M    515M    6.1M    7.9K      98%    1
+DeepSeek-V4-Flash-0731  4.2M   5.2M    91.5K   185       1.5%   1
+Qwen/Qwen3.8-27B        85.4K  0       5.8K    30        0.1%   1
+gemma-4-31B-it          0      0       0       0         0%     2
+```
+
+A `0` and a `—` are different answers and are never interchangeable. A model that answered
+nothing on a grid whose rollup landed reads `0` — nobody used it today, which is a fact worth
+seeing. A `—` means nothing measured it at all: an engine whose master predates the rollup, a
+reading the machine never reported, or a member the grid has no figures for.
+
+**`input` is the fresh leg, not the raw figure.** Cached input is a share *of* input, never
+additional to it — billing settles `(in − cached)·input + cached·cache + out·output` — so `input`,
+`cached` and `output` are three non-overlapping legs that add up to what actually passed through.
+`--json` carries the relay's raw `tokens_in` beside `tokens_in_fresh`, so nothing on the wire is
+redefined.
+
+The header totals are the **grid's own** rollup in every dimension, never the sum of the rows below
+them, so `grid stats` and `grid usage` can never print two different figures for one grid. The rows
+can therefore add up to slightly less: work the relay could not attribute to a machine, or to a
+named person, is counted once at the top and nowhere else.
+
+`--by member` names people, so it rides the authenticated endpoint (the grid's own access token)
+and additionally merges the roster `grid members list` reads — a member who has never sent a
+request still gets a row, printed as unmeasured. That roster is owner-only, so a non-owner sees the
+people the relay has usage for and a note on stderr saying so; stdout stays a clean table either
+way.
+
+```text
+MEMBER                      INPUT  CACHED  OUTPUT  REQUESTS
+scholes@autonomous.ai       26.8M  344M    5.1M    6.3K
+dev@autonomous.ai           4M     3.8M    72.2K   131
+tuan.dev@autonomous.ai      3.9M   171M    972K    1.6K
+accounting@autonomous.ai    —      —       —       —
+```
+
+Ordered by what each person actually read, with everyone the grid has no figure for after them,
+alphabetically — so the list answers "who is using this grid" before it answers "who is on it".
+What each of them is *allowed* to do is a different question, and `grid members list` is where it
+is asked; `--json` still carries their roles for a script that wants both in one call.
+
 ## Use
 
 ```
@@ -853,6 +1047,69 @@ command's.
 Step by step: [Claude Code quickstart](./claude-code-quickstart.md) ·
 [ADR 0028](./adr/0028-launch-hands-an-app-the-grid.md) ·
 [ADR 0029](./adr/0029-the-credential-is-checked-before-it-is-handed-over.md).
+
+## Web tools over MCP
+
+```
+grid mcp config [grid]                 # list the harnesses; prints NO token
+grid mcp config --harness <name> [grid]  # print that harness's config (prints your access token)
+grid mcp config --json [grid]          # {server, url, authorization} for a script
+```
+
+`grid mcp config` points a **coding agent's harness** at your grid's web search and page reading:
+`claude`, `codex`, `copilot`, `hermes`, `opencode`. With no `--harness` it lists them and the server
+URL and prints **no credential** — the token appears only when you name the harness that needs it.
+
+The server itself runs on the control plane, not on your grid's relay, so it keeps answering whether
+or not the grid is up (ADR 0041). What the harness gets is two tools:
+
+- **`web_search(query, num_results)`** → `{title, url, excerpt}` per result.
+- **`web_read(urls, max_chars)`** → the main text of up to five pages, each truncated at
+  `max_chars` (default 6000). `status` says whether a page could be fetched at all — "the page
+  refused us" is not the same as "the page is empty".
+
+Both are free to you and bounded by your **account's** daily allowance, not the grid's — so being on
+several grids does not give you several allowances, and it is spent by whichever of your machines
+uses it.
+
+Each harness spells the credential differently, and every spelling below was measured against the
+binary — run against a throwaway home, the file it wrote read back, and the header watched arriving
+at a listener — never taken from vendor documentation:
+
+| harness | what the command prints |
+|---|---|
+| **Claude Code** | `claude mcp add … --header 'Authorization: …'`, plus the `mcpServers` block it writes into `~/.claude.json` |
+| **Codex** | a `[mcp_servers.grid-web]` block for `~/.codex/config.toml`. It has **no `--header` flag**, so there is no command to print; `http_headers` is what it honours |
+| **GitHub Copilot CLI** | `copilot mcp add --transport http --header 'Authorization: …'`, plus the `~/.copilot/mcp-config.json` block |
+| **opencode** | `opencode mcp add … --header 'Authorization=Bearer …'` — ⚠️ `KEY=VALUE`, not `Key: value` — plus the `~/.config/opencode/opencode.json` block |
+| **Hermes** | the `mcp_servers:` block for `~/.hermes/config.yaml`, plus `hermes mcp add … --auth header`, which asks for the token instead of putting it in your shell history |
+| **pi** | nothing — pi ships no MCP client, by design. The command says so and exits non-zero rather than pretending there is a config |
+
+**The token is renewed before it is printed.** If your grid's access token expires within a month —
+or has expired already — the command exchanges the stored refresh credential for a fresh 365-day one,
+says so on stderr, and prints the new token. So this is the command to run when a harness starts
+reporting that the server refuses it, which is what the server's own 401 tells you to do. It reaches
+the control plane only when it is about to print a credential: the plain listing view is local work.
+A renewal that fails on a token which still works is a warning, not a refusal; an *expired* token
+with no refresh credential stored is refused, because pasting it into a harness config would 401
+forever.
+
+> `grid mcp config --harness …` prints a live credential that lasts a year. Anyone who has it can
+> search the web on your account's allowance. Treat the output like a password.
+
+Web tools need a hosted grid: in local mode the command refuses, because the server it points at is
+the control plane's and a local grid has no account behind it.
+
+> **Codex cancels MCP tool calls under its read-only sandbox, and blames nobody for it.** Run
+> non-interactively as `codex exec …`, a search prints `mcp: <server>/web_search (failed)` followed
+> by `user cancelled MCP tool call` — which reads like the grid refused it. It did not: the call is
+> stopped inside Codex and never reaches the server, so nothing shows up in your allowance either.
+> That is Codex's own approval policy (`approval: never` with `sandbox: read-only` denies anything
+> that would need approving), not a grid problem. Interactive `codex` asks you instead; a scripted
+> run needs a policy that permits the call. Measured on Codex 0.144.6, when this command spelled the
+> server `grid_web`; it now prints `grid-web`, which is the name that appears in that line.
+
+See [ADR 0041](./adr/0041-a-coding-agent-reaches-the-web-through-the-control-plane.md).
 
 ## Training
 
@@ -2574,7 +2831,7 @@ JSON output should use snake_case keys and include enough detail for scripts:
 ## First-Run Happy Path
 
 ```bash
-grid up
+grid start
 grid join
 grid models
 grid chat -m qwen36-27b-mtp "hello"
@@ -2584,7 +2841,7 @@ eval "$(grid info --env)"
 For a machine with no engine:
 
 ```bash
-grid up
+grid start
 grid engine install llama.cpp
 grid pull unsloth/Qwen3.6-35B-A3B-MTP-GGUF:Qwen3.6-35B-A3B-UD-IQ3_S.gguf
 grid join --serve Qwen3.6-35B-A3B-UD-IQ3_S.gguf --advertise-as qwen36-35b-a3b-mtp

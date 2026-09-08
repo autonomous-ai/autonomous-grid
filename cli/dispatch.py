@@ -29,6 +29,9 @@ from . import remote_allocator, remote_grid, remote_overview, remote_provider, r
 AGNOSTIC = frozenset({
     None,
     "version",
+    # `update` replaces the CLI binary itself — the same file in both modes, so mode cannot
+    # meaningfully gate it (and refusing it in one mode would strand that mode's users).
+    "update",
     "device-info",
     "catalog",
     "pull",
@@ -60,11 +63,9 @@ AGNOSTIC = frozenset({
 # ship the remote handlers. NOTE: gated ``engines`` (live, networked) is distinct from the
 # agnostic ``engine`` (local setup) — one keystroke apart.
 GATED = (
-    "up",
-    "down",
-    # `start`/`stop` are `up`/`down` under a name that doesn't clash with `grid join`/`leave`
-    # (cli/parser.py `_build_up_parser`) — same handler, so they need the same remote classification
-    # or they hit the "not classified for remote dispatch" internal-error guard below.
+    # `grid join`/`leave` pair with a grid that starts and stops (cli/parser.py `_build_up_parser`)
+    # — they need the remote classification here or they hit the "not classified for remote
+    # dispatch" internal-error guard below.
     "start",
     "stop",
     # No remote handler on purpose: `cmd_delete` reads LOCAL grid config only (`local.config`), never
@@ -101,8 +102,6 @@ def remote_stub(command: str | None) -> NoReturn:
 _REMOTE_STUBS = {command: (lambda args, _c=command: remote_stub(_c)) for command in GATED}
 REMOTE_HANDLERS = {
     **_REMOTE_STUBS,
-    "up": remote_grid.cmd_remote_up,
-    "down": remote_grid.cmd_remote_down,
     "start": remote_grid.cmd_remote_up,
     "stop": remote_grid.cmd_remote_down,
     "ls": remote_grid.cmd_remote_ls,
@@ -147,6 +146,19 @@ REMOTE_ONLY: dict[str, str | None] = {
     # not the control plane's — and the repository they name is served by the relay's git plane. A
     # local grid has none of it.
     "project": None,
+    # The web-tools MCP server is the CONTROL PLANE's (ADR 0041), so this command needs an account
+    # and a per-grid token. A local grid has neither, and there is no local server to point at.
+    "mcp": None,
+    # Two more whose reason is not sign-in: uptime, the memory pool, per-engine telemetry and the
+    # answered-token rollup are all computed by the hosted relay. A local grid serves models and
+    # keeps no such books, so there is nothing for a local handler to print — see cli/remote_stats.py.
+    "stats": (
+        "to read a hosted grid's live rollup — uptime, its memory pool and the tokens it has "
+        "answered — which a local grid does not compute."
+    ),
+    "usage": (
+        "to read a hosted grid's token rollup, which a local grid does not compute."
+    ),
     # The one command whose reason is not sign-in (ADR 0028): a local grid serves chat/completions,
     # completions, models and media — never Anthropic Messages, which is the only dialect Claude Code
     # speaks. Naming the dialect is what stops this being filed as a bug.

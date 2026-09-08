@@ -138,9 +138,124 @@ def _is_loopback_address(host: str) -> bool:
         return value.lower() == "localhost"
 
 
-def make_local_url(port: int, advertise_host: str | None = None) -> str:
+def make_local_url(port: int, advertise_host: str | None = None, scheme: str = "http") -> str:
+    # ``scheme`` is the caller's decision, mirrored from server_tls_serves_https (or from the
+    # flags at config-creation time, before any cert file exists to ask).
     host = url_host(advertise_host or detect_local_ip())
-    return f"http://{host}:{int(port)}"
+    return f"{scheme}://{host}:{int(port)}"
+
+
+def auto_tls_on_config(cfg: dict[str, Any], *, advertise_host: str | None,
+                       required: bool = True) -> bool:
+    """Create (or reuse) this grid's LAN TLS material; return whether TLS is on.
+
+    ``server_tls: true`` is the durable request: the certificate is generated on every start, so
+    an address change re-signs SANs to match. Manual ``--tls-cert`` files always win over the
+    generated pair. ``required=False`` marks the silent default (TLS on, nobody asked): a machine
+    without the certificate tool falls back to plain HTTP with a warning instead of losing the
+    ability to start a grid at all.
+    """
+    if not cfg.get("server_tls"):
+        return False
+    if str(cfg.get("server_tls_cert_file") or ""):
+        return True
+    from shared import tls
+
+    hosts = [advertise_host or "", detect_local_ip()]
+    try:
+        directory = paths.grid_dir(cfg["grid_id"]) / "tls"
+        crt, key, ca = tls.ensure_server_cert(directory, hosts)
+    except (tls.TlsToolMissing, RuntimeError, ValueError) as exc:
+        if required:
+            raise SystemExit(str(exc)) from exc
+        print(f"Warning: HTTPS unavailable ({exc}); this grid will serve plain HTTP.")
+        cfg["server_tls"] = False
+        return False
+    cfg["server_tls_cert_file"] = str(crt)
+    cfg["server_tls_key_file"] = str(key)
+    cfg["server_tls_ca_file"] = str(ca)
+    cfg["server_tls_ca_pem"] = ca.read_text(encoding="utf-8")
+    return True
+
+
+def server_tls_serves_https(cfg: dict[str, Any]) -> bool:
+    """Whether this grid's URL scheme must be https.
+
+    The certificate file — not the `server_tls` intention — is the witness: it is what uvicorn
+    actually binds, so every URL handed to a client must agree with it or health probes and
+    allocator calls dial the wrong protocol against the same port.
+    """
+    return bool(str(cfg.get("server_tls_cert_file") or ""))
+
+
+def _read_pem(path: str | None, what: str) -> str:
+    """Read a PEM file named by ``path``; "" when unset, a clear refusal when unreadable."""
+    if not path:
+        return ""
+    try:
+        return Path(path).expanduser().read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"Cannot read {what}: {exc}") from exc
+
+
+def server_tls_ca_bundle(cfg: dict[str, Any]) -> str:
+    """A file path this process/child can point SSL_CERT_FILE at to trust the grid CA.
+
+    ``httpx``/``ssl`` read ``SSL_CERT_FILE``; it must be a file, so when only the PEM body was
+    persisted (a config hand-edited or carried without its source path) it is materialised beside
+    the grid so the trust survives restarts. Returns "" for a grid that serves plain HTTP.
+    """
+    ca_file = str(cfg.get("server_tls_ca_file") or "")
+    if ca_file and Path(ca_file).expanduser().is_file():
+        return ca_file
+    # A CA fetched on first contact lives beside the grid's record; any client that resolves the
+    # grid trusts it from then on, so only the very first command pays for the fetch.
+    learned = grid_dir_ca_candidate(str(cfg.get("grid_id") or ""))
+    if learned:
+        return learned
+    ca_pem = str(cfg.get("server_tls_ca_pem") or "")
+    if not ca_pem:
+        return ""
+    bundle = paths.grid_dir(cfg["grid_id"]) / "tls-ca.pem"
+    try:
+        if bundle.read_text(encoding="utf-8") != ca_pem:
+            bundle.parent.mkdir(parents=True, exist_ok=True)
+            bundle.write_text(ca_pem, encoding="utf-8")
+    except OSError:
+        return ""
+    return str(bundle)
+
+
+def grid_dir_ca_candidate(value: str) -> str:
+    """The learned-CA path for a URL-addressed grid ("" unless one was fetched before).
+
+    The file lives in the allocator node's per-grid directory, keyed by the same stable digest
+    the node record uses, so every command that resolves the grid trusts the CA it learned once.
+    """
+    path = learned_ca_path(value)
+    return str(path) if path is not None and path.is_file() else ""
+
+
+def learned_ca_path(control_url: str) -> Path | None:
+    from shared.allocator.models import stable_digest
+
+    if not str(control_url).startswith("https://"):
+        return None
+    scope = stable_digest(str(control_url).rstrip("/"))[:16]
+    return paths.grid_home() / "allocator" / scope / "tls" / "learned-ca.crt"
+
+
+def server_tls_client_env(cfg: dict[str, Any]) -> dict[str, str]:
+    """Environment that lets any httpx/ssl client in a child process trust this grid's HTTPS."""
+    bundle = server_tls_ca_bundle(cfg)
+    return {"SSL_CERT_FILE": bundle} if bundle else {}
+
+
+def apply_server_tls_client_env(cfg: dict[str, Any]) -> None:
+    """Trust this grid's CA for every client in the current process (self-signed LAN servers)."""
+    env = server_tls_client_env(cfg)
+    if env:
+        os.environ["SSL_CERT_FILE"] = env["SSL_CERT_FILE"]
 
 
 def advertised_address_works(url: str, timeout: float = 3.0) -> bool:
@@ -215,16 +330,26 @@ def init_grid_config(
     host: str = DEFAULT_HOST,
     grid_id: str | None = None,
     advertise_host: str | None = None,
+    tls_cert_file: str | None = None,
+    tls_key_file: str | None = None,
+    tls_ca_file: str | None = None,
+    tls_auto: bool = False,
 ) -> dict[str, Any]:
     grid_id = grid_id or f"ag-{slug_name(name)}-{uuid.uuid4().hex[:8]}"
+    scheme = "https" if (tls_cert_file or tls_auto) else "http"
     data = {
+        "server_tls": bool(tls_auto),
+        "server_tls_cert_file": str(tls_cert_file or ""),
+        "server_tls_key_file": str(tls_key_file or ""),
+        "server_tls_ca_file": str(tls_ca_file or ""),
+        "server_tls_ca_pem": _read_pem(tls_ca_file, "allocator/grid TLS CA"),
         "grid_id": grid_id,
         "name": name,
         "grid_type": GRID_TYPE,
         "managed_server": True,
         "host": host,
         "port": int(port),
-        "lan_signaling_url": make_local_url(port, advertise_host),
+        "lan_signaling_url": make_local_url(port, advertise_host, scheme),
         # This capability is intentionally separate from the permissionless inference/discovery
         # surface. It authorizes model-placement mutations on the local control plane.
         "allocator_control_token": secrets.token_urlsafe(32),
@@ -279,7 +404,7 @@ def _start_grid_locked(cfg: dict[str, Any]) -> int:
     # OverflowError), and it answers "not alive" for a zombie or a recycled pid — both of which used
     # to read as a live server and cost a 3s health wait before falling through anyway.
     identity = _server_identity(cfg)
-    _note_unusable_pid(cfg, identity)  # `grid up` overwrites it below; say so before the evidence goes
+    _note_unusable_pid(cfg, identity)  # `grid start` overwrites it below; say so before the evidence goes
     if run_records.record_alive(identity):
         try:
             wait_for_health(cfg, timeout=3)
@@ -310,9 +435,15 @@ def _start_grid_locked(cfg: dict[str, Any]) -> int:
         "--instance-id",
         instance_id,
     ]
+    cert_file = str(cfg.get("server_tls_cert_file") or "")
+    key_file = str(cfg.get("server_tls_key_file") or "")
+    if cert_file:
+        command += ["--tls-cert", cert_file, "--tls-key", key_file]
+    launch_env = {**os.environ, **server_tls_client_env(cfg)}
     try:
         proc = subprocess.Popen(
             command,
+            env=launch_env,
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -357,7 +488,7 @@ def _note_unusable_pid(cfg: dict[str, Any], identity: dict[str, Any]) -> None:
     """Say when the config's ``server_pid`` is not a process id at all.
 
     Unusable shapes (a string, a negative, out of range, a list) signal nothing, which is correct and
-    was completely silent — so `grid down` reported success having done nothing, and `grid up`
+    was completely silent — so `grid stop` reported success having done nothing, and `grid start`
     silently overwrote the damaged value with a fresh stamp, destroying the only evidence. ``0``/absent
     is NOT this case: that is the ordinary never-started or already-stopped config, and it must stay
     quiet on both commands.
@@ -376,7 +507,7 @@ def _terminate_server(cfg: dict[str, Any], identity: dict[str, Any]) -> run_reco
     ``pid_alive`` reports EPERM as **alive** (ADR 0024: calling another user's process dead would let
     a teardown claim it reaped something still running), so a drifted ``server_pid`` can reach
     ``terminate_pid`` and raise ``PermissionError`` — which, uncaught, is a raw traceback out of
-    `grid down`. Caught here and deliberately **not** inside ``terminate_pid``:
+    `grid stop`. Caught here and deliberately **not** inside ``terminate_pid``:
     ``orphan_sweep.terminate`` depends on that exception escaping to classify a swept match as
     ``foreign`` rather than reaped, so swallowing it there would blind both modes' `grid leave` to
     another user's serve child.
@@ -407,7 +538,7 @@ def _terminate_server(cfg: dict[str, Any], identity: dict[str, Any]) -> run_reco
 
 
 class StopOutcome(NamedTuple):
-    """What one `grid down` established — and they are two different questions.
+    """What one `grid stop` established — and they are two different questions.
 
     ``teardown`` says what happened to the process the config *named*; ``serving`` says whether the
     grid is still answering on its own port. Neither alone is the answer: a teardown can be
@@ -454,7 +585,7 @@ def stop_grid(cfg: dict[str, Any]) -> StopOutcome:
 
 
 # A grid server binds `cfg["host"]`, and a wildcard bind is reachable on loopback. Anything else has
-# to be addressed as itself: `grid up --host 10.0.0.5` really does bind only that address, so probing
+# to be addressed as itself: `grid start --host 10.0.0.5` really does bind only that address, so probing
 # 127.0.0.1 would report a perfectly healthy grid as unreachable — a 30s timeout in `wait_for_health`,
 # and in `stop_grid` something worse, since "nothing answers" is promoted there to *proof* the grid
 # stopped.
@@ -510,7 +641,8 @@ def probe_url(cfg: dict[str, Any]) -> str | None:
     if target is None:
         return None
     host, port = target
-    return f"http://{f'[{host}]' if ':' in host else host}:{port}"
+    scheme = "https" if server_tls_serves_https(cfg) else "http"
+    return f"{scheme}://{f'[{host}]' if ':' in host else host}:{port}"
 
 
 def _nothing_is_listening(host: str, port: int) -> bool:
@@ -522,7 +654,7 @@ def _nothing_is_listening(host: str, port: int) -> bool:
     ``socket.gaierror``, ``ENETUNREACH`` and ``EHOSTUNREACH`` are all plain ``OSError``s — so httpcore
     maps every one of them to the same ``ConnectError`` a genuine refusal produces. Treating that as
     proof is the laundering this whole probe exists to prevent, and it is not hypothetical: a laptop
-    that roams networks between `grid up --host <lan-ip>` and `grid down` would have its live server
+    that roams networks between `grid start --host <lan-ip>` and `grid stop` would have its live server
     reported as stopped and its recorded pid — the only handle a retry has — thrown away.
 
     ``ConnectionRefusedError`` is the precise builtin (PEP 3151 gives every errno its own subclass),
@@ -559,7 +691,7 @@ def _still_serving(cfg: dict[str, Any]) -> bool | None:
         body = resp.json() if resp.status_code == 200 else None
     except Exception as exc:
         # Something is listening but would not tell us what it is. Said out loud rather than degraded
-        # in silence: it is the difference between the two failing branches of `grid down`, and the
+        # in silence: it is the difference between the two failing branches of `grid stop`, and the
         # operator is about to be told this command established nothing.
         # `!r` on the url as well as the exception: it is built from the config's `host`, so it is
         # config-controlled text reaching the terminal, and a raw control/ANSI sequence in it would be
@@ -595,7 +727,11 @@ def wait_for_health(cfg: dict[str, Any], timeout: int = 30) -> None:
     url = f"{probe}/grid/info"
     while time.time() < deadline:
         try:
-            resp = httpx.get(url, timeout=_PROBE_TIMEOUT_SECONDS)
+            resp = httpx.get(
+                url,
+                timeout=_PROBE_TIMEOUT_SECONDS,
+                verify=server_tls_ca_bundle(cfg) or True,
+            )
             if resp.status_code == 200:
                 payload = resp.json()
                 if isinstance(payload, dict) and payload.get("grid_id") == cfg["grid_id"]:
@@ -618,7 +754,8 @@ def allocator_control_url(cfg: dict[str, Any]) -> str:
     """Use loopback for secrets when the signaling server is owned by this machine."""
 
     if cfg.get("managed_server", True):
-        return f"http://127.0.0.1:{int(cfg['port'])}"
+        scheme = "https" if server_tls_serves_https(cfg) else "http"
+        return f"{scheme}://127.0.0.1:{int(cfg['port'])}"
     return grid_url(cfg)
 
 

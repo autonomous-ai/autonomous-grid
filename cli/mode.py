@@ -70,8 +70,15 @@ def _print_use_next_steps(mode: str, name: str) -> None:
     print_next_steps([
         ("grid models", "see what this grid serves"),
         ('grid chat -m <model> "hello"', "talk to a model"),
+        # The exports that point any OpenAI-dialect client (opencode, codex, Cursor) at this grid.
+        ("grid info --env", "point coding agents at it (opencode, codex, …)"),
         (f"grid join {target} --serve <model>", "optional: serve a model to it"),
     ])
+    # Set apart from the list above because it is not a fifth thing to choose between: it is the
+    # one line to paste when the answer is "a coding agent". `print_next_steps` already ended with a
+    # blank line, so this stands on its own.
+    print('To point a coding agent at this grid, run:  eval "$(grid info --env)"')
+    print("")
 
 
 def _require_local_grid(name: str) -> None:

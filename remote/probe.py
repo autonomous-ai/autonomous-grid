@@ -255,10 +255,17 @@ def _probe_ollama_caps(llm_url: str, model: str, timeout: float | httpx.Timeout 
 
     Authoritative where a live forced-tool probe stays silent: Ollama serves no ``/props``, and its
     OpenAI endpoint may ignore a forced ``tool_choice`` so a small model emits no tool call — yet
-    Ollama still *knows* the template supports tools. Best-effort: a non-Ollama engine (llama.cpp,
-    vLLM, …) 404s here and we return ``{}``, leaving the live probe + ``/props`` to decide.
+    Ollama still *knows* the template supports tools. Best-effort: most non-Ollama engines (llama.cpp,
+    vLLM, …) 404 here and we return ``{}``, leaving the live probe + ``/props`` to decide. SGLang is
+    the exception: its Ollama-compatibility route answers 200 but currently reports only
+    ``["completion"]`` even when its native ``/model_info`` says the model understands images. Its
+    response identifies itself with ``details.format == "sglang"``; that compatibility metadata is
+    not an Ollama capability verdict and must likewise fall through to the live probes.
     """
     payload = _post_json(f"{_server_root(llm_url)}/api/show", {"model": model}, timeout=timeout)
+    details = (payload or {}).get("details")
+    if isinstance(details, dict) and str(details.get("format") or "").strip().casefold() == "sglang":
+        return {}
     caps = (payload or {}).get("capabilities")
     if not isinstance(caps, list):
         return {}

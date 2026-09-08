@@ -6,7 +6,7 @@
 
 [![latest release](https://img.shields.io/github/v/release/autonomous-ai/autonomous-grid?label=version)](https://github.com/autonomous-ai/autonomous-grid/releases)
 
-[**Quickstart**](#quickstart) · [From anywhere](#working-from-anywhere) · [Inference](#inference) · [Training](#training-experimental) · [Local AI patterns](docs/local_ai_agent_patterns/README.md) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
+[**Quickstart**](#quickstart) · [Omagrid + OpenCode](docs/omagrid-quickstart.md) · [From anywhere](#working-from-anywhere) · [Inference](#inference) · [Training](#training-experimental) · [Local AI patterns](docs/local_ai_agent_patterns/README.md) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
 https://github.com/user-attachments/assets/9573e961-423f-45ae-ada6-b7a8a361f188
 
@@ -410,8 +410,7 @@ client.chat.completions.create(
 | `grid ls` / `grid use` | list grids, pick the active one |
 | `grid mode` | switch between local and remote |
 
-`grid up` and `grid down` still work — older names for `start` and `stop`. Full reference:
-[docs/cli.md](docs/cli.md).
+Full reference: [docs/cli.md](docs/cli.md).
 
 
 ## Working from anywhere
@@ -420,20 +419,19 @@ Local mode needs every computer on the same network. Remote mode drops that: eac
 out to Autonomous Relay, so it serves from behind a NAT with no inbound port and no public IP.
 
 ```bash
-# Switch this computer to remote mode — remembered until you switch back
-grid mode remote
-
-# Sign in; opens a browser
+# Sign in; opens a browser. A fresh install is already in remote mode, and signing in
+# switches this computer to it either way — `grid mode remote` first is not needed.
 grid login
 
-# Pick which grid to work with — signing in does not choose one for you.
-# `grid ls` prints a row per grid you can reach (name, id, type); `*` marks the active one.
-grid ls
+# Sign-in lists the grids you can reach and picks none of them, so pick one:
 grid use <grid-name>
 ```
 
 - The mode is remembered. `--local` / `--remote` overrides one command.
 - `grid login` opens a browser. `--no-browser` prints a code to type instead.
+- Signing in prints the grids you can reach (name and type, `*` on the active one) followed by the
+  commands that operate on them — `grid ls` prints the same list any time, and `grid sync` refreshes
+  it without signing in again.
 - Signing in never selects a grid, so `grid use` is the step that makes one active. Until then the
   other commands have nothing to talk to. `grid start <grid-name>` on a new grid still needs it too.
 - Requests pass through our relay, which local mode never does. We forward and keep nothing — no
@@ -449,6 +447,8 @@ Three commands change. `chat`, `models`, `info` and your apps are identical.
 
 Remote `--at` is `localhost` because the engine dials out; nothing reaches in.
 
+- On Omagrid with OpenCode? The [Omagrid quickstart](docs/omagrid-quickstart.md) is the whole path
+  in two commands.
 - `grid ls` — the grids your sign-in can reach
 - `grid start <grid-name> --type permissioned-providers` — restrict who may serve
 - `grid members add <grid-name> someone@example.com` — invite people ([Members](docs/cli.md#members))
@@ -720,6 +720,12 @@ grid engines
 
 # Every model, and which computer answers for it
 grid models --verbose
+
+# The grid's uptime, memory pool and answered tokens (--verbose adds a card per computer)
+grid stats
+
+# Who spent them — also --by model / --by engine
+grid usage --by member
 ```
 
 `engines` lists what each computer serves and how many requests it takes at once; `models` lists

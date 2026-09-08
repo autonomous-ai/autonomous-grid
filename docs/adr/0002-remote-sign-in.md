@@ -4,7 +4,10 @@ Status: accepted (2026-06-27); amended 2026-06-29 — added Decision 11 (`grid s
 amended 2026-07-28 — D7's "logout deletes `credentials.toml`" and D11's authoritative overwrite are
 both qualified by [ADR 0023](./0023-signing-out-with-live-serve-children.md): logout now stops this
 box's serve children **before** the delete (and keeps the store when it cannot), and sync warns about
-the ones its overwrite stranded
+the ones its overwrite stranded;
+amended 2026-09-04 — the session token D2's device flow mints now lives a **year**, not the 24 hours
+D11 was written against ([ADR 0040](./0040-a-cli-session-outlives-the-browsers.md)); the website's
+session is unchanged, and there is still no refresh route for either
 
 ## Context
 
@@ -134,5 +137,5 @@ Hard invariant: local mode stays local-only, unauthenticated, stateless — unch
 - `grid sync` (amendment) makes `REMOTE_ONLY` `{"login", "logout", "sync"}`; the classification test
   covers it. Sync is the first command to find a **session** token expired long after login, so it
   introduces the session-expiry → re-login message; the other account-level commands
-  (`up`/`down`/`ls`/`info`/`members`) still surface raw control-plane errors today, and unifying that
+  (`start`/`stop`/`ls`/`info`/`members`) still surface raw control-plane errors today, and unifying that
   is intentionally out of scope here.
