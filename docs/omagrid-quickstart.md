@@ -40,6 +40,8 @@ The first teaches OpenCode the `grid` CLI. The second picks Omagrid as your grid
 model list, and writes an Omagrid provider into your global OpenCode config at
 `~/.config/opencode/opencode.json`. Nothing is written to the project you're in.
 
+![OpenCode reporting Omagrid connected, with the config it wrote](./omagrid-connect.png)
+
 Restart OpenCode.
 
 ## 3. Pick a model
@@ -76,12 +78,7 @@ Say what you want and it will follow:
 - **"take only 2 requests at a time"** — how busy your machine gets.
 - **"give it a 128k context window"** — how much each request can read.
 
-You don't have to know the flags — it offers the choices and takes your own answer:
-
 ![OpenCode asking which name, limit and context window to join with](./omagrid-join-ask.png)
-
-Then it joins, and checks the machine really landed on the grid rather than trusting the
-command that put it there:
 
 ![OpenCode confirming the machine is serving](./omagrid-join-done.png)
 
@@ -90,6 +87,8 @@ And afterwards:
 - **"is my machine serving?"** — it shows up by name, with what it has served so far.
 - **"stop serving"** — leaves the grid. The model stays downloaded, so joining again is
   quick.
+
+![OpenCode confirming the machine is serving and idle](./omagrid-is-serving.png)
 
 Under the hood these are `grid engine install`, `grid pull`, `grid join --serve …`,
 `grid stats --verbose`, and `grid leave`.
