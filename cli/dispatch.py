@@ -29,6 +29,9 @@ from . import remote_grid, remote_overview, remote_provider, remote_request
 AGNOSTIC = frozenset({
     None,
     "version",
+    # `update` replaces the CLI binary itself — the same file in both modes, so mode cannot
+    # meaningfully gate it (and refusing it in one mode would strand that mode's users).
+    "update",
     "device-info",
     "catalog",
     "pull",

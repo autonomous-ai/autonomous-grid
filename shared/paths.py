@@ -208,6 +208,13 @@ def codex_models_cache_file() -> Path:
     return grid_home() / "codex_models_cache.json"
 
 
+def update_check_file() -> Path:
+    """Cache of the background version check (JSON): when it last ran, the newest release it
+    saw, and when the stale notice was last shown. Carries no secret — it only names version
+    numbers — so 0o600 here is consistency with the rest of the tree, not confidentiality."""
+    return grid_home() / "update-check.json"
+
+
 def seat_home(kind: str) -> Path:
     """A CLI seat's own home for the tool it drives (e.g. CODEX_HOME).
 
