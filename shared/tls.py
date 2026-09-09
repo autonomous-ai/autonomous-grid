@@ -226,6 +226,10 @@ def ensure_server_cert(
             str(ca_crt),
             "-CAkey",
             str(ca_key),
+            # LibreSSL (macOS stock) refuses to sign without a serial file and never creates one
+            # itself; OpenSSL 3 happens to tolerate the omission. The two-machine E2E died here on
+            # the LibreSSL worker — the flag is a no-op when the serial file already exists.
+            "-CAcreateserial",
             "-out",
             str(crt),
             "-days",
