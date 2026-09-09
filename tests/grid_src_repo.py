@@ -121,6 +121,22 @@ def harness_root() -> pathlib.Path | None:
     return _sibling_root(pathlib.Path("cli") / "src", "autonomous-harness", "HARNESS_REPO")
 
 
+def app_root() -> pathlib.Path | None:
+    """autonomous-grid-app's checkout — the FLUTTER APP — or ``None`` when it is not beside this one.
+
+    The fifth repository, and the only one that reaches the lockstep with **no half in this
+    repository at all**: ADR 0042 D-l's refusal sentence runs grid-src → the app, and this checkout
+    is in the path of neither. It is resolved here anyway because the pin that compares those two
+    halves has to live somewhere, and this repository is the hub.
+
+    ⚠️ The app deliberately has **no worktree** for the billing-activation feature, so the mirror
+    candidate never exists and the derivation lands on the main checkout. That is the intended
+    answer, not a fallback that went wrong: the app's half of this seam is one substring in one file
+    and it does not move per feature branch. `GRID_APP_REPO` overrides the derivation.
+    """
+    return _sibling_root(pathlib.Path("lib"), "autonomous-grid-app", "GRID_APP_REPO")
+
+
 def grid_src_root() -> pathlib.Path | None:
     """grid-src's checkout, or ``None`` when this machine does not have one beside this worktree.
 
