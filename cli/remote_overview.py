@@ -190,7 +190,8 @@ def cmd_remote_engines(args: argparse.Namespace) -> int:
 
 def cmd_remote_models(args: argparse.Namespace) -> int:
     """`grid models` (remote): the models served across the active grid's live engines, plus the
-    reserved ``auto`` model when the grid has auto-routing enabled (mirrors ``GET /relay/v1/models``).
+    reserved ``auto`` model when the grid has auto-routing enabled AND serves at least one engine
+    model (mirrors ``GET /relay/v1/models``, except the zero-engine case — see the gate below).
 
     Each engine row carries whether it serves the model via the Responses dialect (issue 10), read
     per-engine from the overview's ``responses_models``; shown in ``-v`` and ``--json`` (an older
@@ -204,17 +205,21 @@ def cmd_remote_models(args: argparse.Namespace) -> int:
         capable = _node_responses_models(node)  # resolved once per node, not per served model
         for model in _node_models(node, overview):
             rows.append((model, engine, name, model in capable))
-    # When auto routing is enabled, advertise the reserved router family FIRST — mirroring the
-    # relay's /relay/v1/models endpoint (owner `grid-router`), so it shows even when zero engines
-    # are joined. The relay lists the three effort modes under their display names
+    # When auto routing is enabled AND the grid actually serves something, advertise the reserved
+    # router family FIRST — mirroring the relay's /relay/v1/models endpoint (owner `grid-router`).
+    # The relay lists the three effort modes under their display names
     # (`effort_router.EFFORT_DISPLAY_NAMES`: "Auto", "Brute Force", "Feedback Loop"); the standard
     # one is the bare `auto` row the grid has always shown (both spellings parse the same), and
     # these two extra names are accepted request ids too — without them the CLI hid two working
     # models behind the one listing (an older master whose overview lacks router_enabled reports
     # falsy → no router rows at all: graceful degradation).
+    # Gated on `rows` (an intentional divergence from the relay): the router ranks candidates from
+    # the models the grid currently serves (ADR 0013), so with zero engine models it has nothing to
+    # pick — every request to the family fails. A zero-engine grid must not list three aliases the
+    # caller cannot run; it gets the plain "no live models" line instead.
     # `responses` is False for `auto`: dialect-reachability is a per-request routing outcome, not a
     # static property of the reserved model (no AC covers it) — a real model's badge is its engine's.
-    if overview.get("router_enabled"):
+    if overview.get("router_enabled") and rows:
         rows.insert(0, ("auto", "grid-router", "", False))
         rows[1:1] = [(name, "grid-router", "", False) for name in ("Brute Force", "Feedback Loop")]
 
