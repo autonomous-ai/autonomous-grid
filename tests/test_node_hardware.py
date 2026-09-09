@@ -35,7 +35,7 @@ def _stub(
     monkeypatch.setattr(node_hardware, "_is_apple_silicon", lambda: apple_silicon)
     monkeypatch.setattr(node_hardware.apple, "describe_chip", lambda: chip)
     monkeypatch.setattr(node_hardware.gpu, "enumerate_gpus", lambda *a, **k: list(gpus))
-    monkeypatch.setattr(node_hardware.gpu, "_sysctl_memsize_mb", lambda *a, **k: 196608.0)
+    monkeypatch.setattr(node_hardware.host, "unified_memory_mb", lambda *a, **k: 196608.0)
     monkeypatch.setattr(node_hardware.gpu, "_macos_profiler_vram_mb", lambda *a, **k: 4096.0)
     monkeypatch.setattr(node_hardware.host, "cpu_brand", lambda: cpu)
     monkeypatch.setattr(
@@ -115,15 +115,18 @@ def test_empty_fields_never_go_on_the_wire(monkeypatch):
     # The relay merges this over what it holds, so a blank would erase a good name rather than
     # leave it — a regression nobody could see from either side.
     _stub(monkeypatch, apple_silicon=True, chip=("", ""))
-    monkeypatch.setattr(node_hardware.gpu, "_sysctl_memsize_mb", lambda *a, **k: 0.0)
+    monkeypatch.setattr(node_hardware.host, "unified_memory_mb", lambda *a, **k: 0.0)
 
     assert node_hardware.describe() == {
         "device": "",
         "chip": None,
         "memory_gb": None,
         "device_class": "gpu",
+        "memory_kind": "unified",
     }
-    assert node_hardware.meta_fields() == {"device_class": "gpu"}
+    # `memory_kind` is a constant on this branch, so it survives — and belongs on the wire: it is
+    # true of the machine whether or not the chip line parsed.
+    assert node_hardware.meta_fields() == {"device_class": "gpu", "memory_kind": "unified"}
 
 
 def test_a_probe_that_throws_leaves_the_node_serving(monkeypatch):

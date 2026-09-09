@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import platform
 
-from shared.system import apple, arch, bandwidth, device, gpu, host
+from shared.system import apple, arch, asahi, bandwidth, device, gpu, host
 from shared.system.device import Budget
 
 # backend is authoritative; device_class and gpu backend both derive from it.
@@ -105,9 +105,14 @@ def collect_device_info() -> dict:
     except Exception:
         hinfo = None
 
-    # chip + model: Apple exposes both; on NVIDIA/CPU model is null and brand is
-    # the CPU brand string (passed as `chip` so bandwidth._cpu_bandwidth can read it).
-    if backend == "metal":
+    # chip + model: Apple exposes both — via `system_profiler` on macOS and via the devicetree
+    # under Asahi (`apple.describe_chip` picks the right one). On NVIDIA/CPU model is null and brand
+    # is the CPU brand string (passed as `chip` so bandwidth._cpu_bandwidth can read it).
+    #
+    # Only the READING follows the hardware onto Linux. `gpus` below stays pinned to `metal`:
+    # `consistency_ok` asserts device_class ↔ backend ↔ gpus[].backend, so an Asahi node (backend
+    # `cpu`, device_class `cpu`, no discrete GPU) must carry an empty gpus list.
+    if backend == "metal" or asahi.is_apple_linux():
         model, chip = apple.describe_chip()
         model = model or None
         cpu_brand = chip or host.cpu_brand()

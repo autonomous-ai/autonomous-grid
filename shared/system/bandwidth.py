@@ -127,12 +127,21 @@ def _nvidia_bandwidth(name: str) -> float | None:
 
 
 def _cpu_bandwidth(brand: str) -> float | None:
-    """Bandwidth for an Intel MacBook CPU by model fragment. RAM is soldered on every MacBook so each
-    model has exactly one config; non-Mac Intel machines (NUCs, hackintoshes, generic PCs) don't match
-    any fragment and fall back to the caller's per-backend default."""
+    """Bandwidth for a CPU-class box's memory. Two shapes answer here:
+
+    - **Apple silicon under Linux** (Asahi) — `device_info` reports device_class `cpu` because no
+      Metal backend exists there, yet the chip is the same SoC with the same soldered unified pool,
+      so the Apple figures apply verbatim: bandwidth is a property of the silicon, not the driver.
+      Gated on the brand *being* an Apple chip string ("Apple M2 Pro"), never on the `m\\d` pattern
+      alone — an "Intel Core m3-7Y32" matches that pattern and is a 17 GB/s laptop, not an M3.
+    - **Intel MacBooks** by CPU model fragment. RAM is soldered on every MacBook so each model has
+      exactly one config; non-Mac Intel machines (NUCs, hackintoshes, generic PCs) don't match any
+      fragment and fall back to the caller's per-backend default."""
     if not brand:
         return None
     text = brand.lower()
+    if text.startswith("apple "):
+        return _apple_bandwidth(text)
     best = None
     for fragment, gbps in _INTEL_MACBOOK_GBPS:
         if fragment in text and (best is None or len(fragment) > best[0]):

@@ -19,6 +19,8 @@ import json
 import re
 import subprocess
 
+from shared.system import asahi
+
 
 def _run(cmd: list[str], timeout: float = 10.0) -> str:
     try:
@@ -29,12 +31,20 @@ def _run(cmd: list[str], timeout: float = 10.0) -> str:
 
 
 def describe_chip() -> tuple[str, str]:
-    """Best-effort ``(model, chip)`` on Apple Silicon — e.g.
-    ``("MacBook Pro (Mac15,9)", "Apple M3 Max")``. Reads
-    ``system_profiler SPHardwareDataType`` (``machine_name`` / ``chip_type``),
-    falling back to ``sysctl machdep.cpu.brand_string`` for the chip. The full
-    "Apple " prefix is kept — it's the human-readable brand name callers display.
-    Returns ``("", "")`` off Apple or on failure."""
+    """Best-effort ``(model, chip)`` on Apple hardware — e.g.
+    ``("MacBook Pro (Mac15,9)", "Apple M3 Max")``.
+
+    Two OSes, same two facts. macOS reads ``system_profiler SPHardwareDataType``
+    (``machine_name`` / ``chip_type``), falling back to ``sysctl machdep.cpu.brand_string``
+    for the chip. Under Linux (Asahi) neither tool exists, so the devicetree answers instead
+    (`asahi`) — branched FIRST, because otherwise every Apple box running Linux forks two
+    processes for binaries that are guaranteed to be missing. The full "Apple " prefix is kept
+    either way — it's the human-readable brand name callers display.
+
+    Returns ``("", "")`` off Apple hardware or on failure."""
+    if asahi.is_apple_linux():
+        found = asahi.info()
+        return found["model"] or "", asahi.chip_name()
     model = ""
     chip = ""
     raw = _run(["system_profiler", "SPHardwareDataType", "-json"], timeout=10.0)

@@ -223,8 +223,16 @@ def node_memory_used_gb(node: dict[str, Any]) -> float | None:
 
 
 def node_memory_kind(node: dict[str, Any]) -> str:
-    """What this engine's memory should be *called*: ``RAM`` on Apple Silicon, which shares one
-    unified pool, and ``VRAM`` on a discrete GPU that has its own."""
+    """What this engine's memory should be *called*: ``RAM`` where the GPU shares one unified pool
+    with the machine, ``VRAM`` where it has a card of its own.
+
+    The node says so itself (`memory_kind`, set by the provider when the memory it advertises is
+    unified). The ``macos-arm`` platform check stays as the fallback for a provider too old to send
+    the field — but it cannot be the answer on its own: an Apple-silicon box under Linux (Asahi /
+    omarchy-mac) reports platform ``linux`` truthfully while still having no VRAM to speak of, and
+    labelling its 16 GB of RAM "VRAM" is how those nodes read as something they are not."""
+    if _text(node.get("memory_kind")).lower() == "unified":
+        return "RAM"
     return "RAM" if _text(node.get("platform")).lower().startswith("macos-arm") else "VRAM"
 
 

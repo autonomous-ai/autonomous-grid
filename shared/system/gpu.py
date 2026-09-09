@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from shared.system import apple, arch
+from shared.system import apple, arch, host
 
 
 @dataclass
@@ -124,14 +124,38 @@ def enumerate_gpus(timeout: float = 5.0) -> list[GpuInfo]:
 _MAC_VRAM_MB: float | None = None  # memoized — VRAM total is static per host, and system_profiler is slow
 
 
-def _sysctl_memsize_mb() -> float:
-    """Total unified memory (MB) via ``sysctl hw.memsize`` — on Apple Silicon the GPU shares this pool,
-    so it IS the advertised VRAM."""
-    try:
-        out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], timeout=2.0).decode().strip()
-        return int(out) / (1024 * 1024)
-    except (subprocess.SubprocessError, OSError, ValueError):
-        return 0.0
+def _macos_vram_mb(timeout: float = 5.0) -> float:
+    """VRAM (MB) for a **macOS** provider, memoized: Apple Silicon → unified memory (read through
+    `host.unified_memory_mb`, which issues the `hw.memsize` sysctl); Intel Mac → discrete/integrated
+    VRAM from ``system_profiler``. 0 when not macOS — a Linux box's pool is answered by
+    `_integrated_pool_mb`, which is what `load_snapshot` actually asks."""
+    global _MAC_VRAM_MB
+    if _MAC_VRAM_MB is not None:
+        return _MAC_VRAM_MB
+    if platform.system() != "Darwin":
+        _MAC_VRAM_MB = 0.0
+    elif arch.native_machine() == "arm64":
+        # `native_machine`, not `platform.machine()`: an x86_64 (Rosetta) Python on Apple
+        # Silicon reports "x86_64" and would wrongly take the Intel-Mac path, reading a few
+        # GB of integrated VRAM instead of the full unified-memory pool.
+        _MAC_VRAM_MB = host.unified_memory_mb()
+    else:
+        _MAC_VRAM_MB = _macos_profiler_vram_mb(timeout=timeout)
+    return _MAC_VRAM_MB
+
+
+def _integrated_pool_mb(timeout: float = 5.0) -> float:
+    """The GPU-usable memory pool (MB) on a box whose graphics have no memory of their own; 0.0 when
+    the GPU does have its own or there is no usable graphics memory at all.
+
+    One question with two OS answers: macOS reads `hw.memsize`, Apple silicon under Linux (Asahi)
+    reads `MemTotal`. Both name the machine's whole RAM, which on these parts IS the VRAM. A Linux box
+    with a discrete card must answer 0.0 here, not its system RAM — `load_snapshot` has already tried
+    the cards, and what comes next is one advertised bar, so folding system RAM into it would
+    advertise capacity the GPU cannot use."""
+    if platform.system() == "Darwin":
+        return _macos_vram_mb(timeout=timeout)
+    return host.unified_memory_mb()
 
 
 def _parse_size_to_mb(text: str) -> float:
@@ -166,24 +190,6 @@ def _macos_profiler_vram_mb(timeout: float = 5.0) -> float:
         if stripped.startswith("VRAM") and ":" in stripped:
             best = max(best, _parse_size_to_mb(stripped.split(":", 1)[1].strip()))
     return best
-
-
-def _macos_vram_mb(timeout: float = 5.0) -> float:
-    """VRAM (MB) for a Mac provider, memoized: Apple Silicon → unified memory (``hw.memsize``); Intel Mac
-    → discrete/integrated VRAM from ``system_profiler``. 0 when not macOS."""
-    global _MAC_VRAM_MB
-    if _MAC_VRAM_MB is not None:
-        return _MAC_VRAM_MB
-    if platform.system() != "Darwin":
-        _MAC_VRAM_MB = 0.0
-    elif arch.native_machine() == "arm64":
-        # `native_machine`, not `platform.machine()`: an x86_64 (Rosetta) Python on Apple
-        # Silicon reports "x86_64" and would wrongly take the Intel-Mac path, reading a few
-        # GB of integrated VRAM instead of the full unified-memory pool.
-        _MAC_VRAM_MB = _sysctl_memsize_mb()
-    else:
-        _MAC_VRAM_MB = _macos_profiler_vram_mb(timeout=timeout)
-    return _MAC_VRAM_MB
 
 
 # Substrings that identify a thermal zone / hwmon device as belonging to the GPU rather than to the
@@ -299,15 +305,16 @@ def load_snapshot(timeout: float = 3.0) -> dict[str, float]:
     ``gpu_util`` (max across cards), and — where the hardware reports them — ``gpu_temp_c``,
     ``gpu_power_w``, ``gpu_power_limit_w``.
 
-    NVIDIA first (summed/maxed across all cards). Failing that, on macOS advertise the GPU-usable memory
-    — Apple Silicon unified memory (``hw.memsize``) or an Intel Mac's discrete VRAM (``system_profiler``)
-    — so Mac providers still surface VRAM. Returns ``{}`` on a box with no detectable GPU.
+    NVIDIA first (summed/maxed across all cards). Failing that, where the graphics have no memory of
+    their own, advertise the pool they do share — Apple Silicon unified memory (``hw.memsize``), an
+    Intel Mac's discrete VRAM (``system_profiler``), or Apple silicon under Linux (`MemTotal`) — so
+    those providers still surface VRAM. Returns ``{}`` on a box with no detectable GPU.
 
     **Every key is emitted only when it was measured.** This branch used to send a hardcoded
     ``memory_used_mb: 0.0`` / ``gpu_util: 0.0`` on macOS — invented, not observed. Harmless while the
     grid page read only the total, but the moment anything renders a gauge they make every Mac look
-    like a dead node holding 128 GB it never uses. A Mac now reports what it can genuinely measure
-    (`_mac_telemetry`, which reads the IORegistry and needs no privileges) and omits the rest."""
+    like a dead node holding 128 GB it never uses. Each box now reports what it can genuinely measure
+    (`_pool_telemetry`) and omits the rest."""
     gpus = enumerate_gpus(timeout=timeout)
     if gpus:
         return {
@@ -317,37 +324,43 @@ def load_snapshot(timeout: float = 3.0) -> dict[str, float]:
             "gpu_util": max(g.utilization_pct for g in gpus),
             **_thermals(gpus),
         }
-    mac_mb = _macos_vram_mb(timeout=timeout)
-    if mac_mb:
-        return {"gpu_count": 1.0, "memory_total_mb": mac_mb, **_mac_telemetry(mac_mb, timeout)}
+    pool_mb = _integrated_pool_mb(timeout=timeout)
+    if pool_mb:
+        return {"gpu_count": 1.0, "memory_total_mb": pool_mb,
+                **_pool_telemetry(pool_mb, timeout)}
     return {}
 
 
-def _mac_telemetry(total_mb: float, timeout: float) -> dict[str, float]:
-    """A Mac's live GPU counters, in the same key names the NVIDIA branch uses.
+def _pool_telemetry(total_mb: float, timeout: float) -> dict[str, float]:
+    """Live counters for a shared-memory box, in the same key names the NVIDIA branch uses.
 
-    Utilisation, temperature and power come from the IORegistry (`apple.accelerator_stats`) and need
-    no privileges — see that function, which corrects the assumption that ``powermetrics`` and root
-    are the only way to read them on macOS.
+    **Memory occupancy is read from a different place per platform, so that `used` and `total` always
+    describe the same pool.** Getting this wrong is the failure mode worth spelling out: the two are
+    divided and drawn as one bar, so a mismatched pair renders a confident percentage of nothing.
 
-    **Memory occupancy is read from a different place per architecture, so that `used` and `total`
-    always describe the same pool.** Getting this wrong is the failure mode worth spelling out: the
-    two are divided and drawn as one bar, so a mismatched pair renders a confident percentage of
-    nothing.
-
-    - **Apple Silicon** — the advertised total is ``hw.memsize``, because the GPU shares one unified
-      pool with the CPU (the premise `_macos_vram_mb` already rests on). The matching occupancy is
-      therefore system memory in use. The IORegistry's ``inUseVidMemoryBytes`` is NOT it: on a
-      unified-memory part it tracks a driver allocation, not the pool the total names.
+    - **Apple Silicon — macOS or Linux** — the advertised total is the machine's whole RAM (macOS
+      reads ``hw.memsize``, Asahi reads ``MemTotal``) because the GPU shares one unified pool with the
+      CPU: the premise `_integrated_pool_mb` rests on. The matching occupancy is therefore system
+      memory in use. On macOS the IORegistry's ``inUseVidMemoryBytes`` is NOT it — on a unified-memory
+      part it tracks a driver allocation, not the pool the total names.
     - **Intel Mac** — the advertised total is a discrete or integrated card's own VRAM from
       ``system_profiler``, a pool entirely separate from system RAM. Here ``inUseVidMemoryBytes`` is
       exactly right and system RAM would be measuring the wrong memory.
+
+    Utilisation, temperature and power come from the macOS IORegistry (`apple.accelerator_stats`),
+    which needs no privileges — see that function, which corrects the assumption that ``powermetrics``
+    and root are the only way to read them. Under Linux that registry does not exist, so those keys
+    are simply absent: `gpu_util` and the thermal gauges stay unreported rather than borrowed from a
+    CPU sensor, which is the same discipline `_sysfs_gpu_temp_c` applies to a card it cannot identify.
 
     Clamped to ``total_mb``: the pair comes from two independent sources, and a bar past its own
     track is a worse answer than a pinned one.
     """
     if platform.system() != "Darwin":
-        return {}
+        used_mb = host.memory_used_mb()
+        if used_mb is None:
+            return {}
+        return {"memory_used_mb": round(min(used_mb, total_mb), 1)}
     stats = apple.accelerator_stats(timeout=timeout)
     out: dict[str, float] = {}
     for key in ("gpu_util", "gpu_temp_c", "gpu_power_w"):
@@ -355,8 +368,6 @@ def _mac_telemetry(total_mb: float, timeout: float) -> dict[str, float]:
             out[key] = round(stats[key], 1)
 
     if arch.native_machine() == "arm64":
-        from shared.system import host
-
         used_mb = host.memory_used_mb()
     else:
         used_bytes = stats.get("vram_used_bytes")
@@ -364,4 +375,3 @@ def _mac_telemetry(total_mb: float, timeout: float) -> dict[str, float]:
     if used_mb is not None:
         out["memory_used_mb"] = round(min(used_mb, total_mb), 1)
     return out
-
