@@ -9,7 +9,7 @@ from __future__ import annotations
 import platform
 from dataclasses import dataclass
 
-from shared.system import arch, asahi, gpu, host
+from shared.system import arch, gpu, host
 
 GIB = 1024 ** 3
 
@@ -29,12 +29,6 @@ class Budget:
 
 def _is_apple_silicon() -> bool:
     # native_machine() sees through Rosetta (x86_64 Python on Apple Silicon).
-    #
-    # Darwin-only on purpose, unlike `node_hardware._is_apple_silicon`, which also accepts Asahi
-    # Linux. This predicate picks the INFERENCE BACKEND, and there is no Metal/MPS build of
-    # llama.cpp for Linux on Apple silicon — claiming `metal` here would launch a graph the loader
-    # cannot create. The hardware is still recognised (chip name, unified pool) through
-    # `asahi.is_apple_linux()` just below.
     return platform.system() == "Darwin" and arch.native_machine() == "arm64"
 
 
@@ -54,15 +48,11 @@ def resolve_budget() -> Budget:
         detected = f"{name}, {gb:.1f} GB VRAM" if name else f"{gb:.1f} GB VRAM"
         return Budget(int(avail_mb * 1024 * 1024), "vram", detected, backend="cuda")
 
-    # Apple silicon: the GPU shares unified memory, so the pool is the machine's whole RAM
-    # (`hw.memsize` on macOS, `MemTotal` under Asahi) — but that pool is also system RAM (and the
-    # total is the machine TOTAL, not a live "available now" reading like NVIDIA/RAM below), so
-    # overcommitting it swaps the whole OS, not just failing one model load. Keep the explicit
-    # reserve here.
-    #
-    # Same pool on both OSes, different backend: macOS gets `metal`, Asahi gets `cpu` (see
-    # `_is_apple_silicon`). Either way `is_cuda` stays False, so the quant preference is right.
-    if _is_apple_silicon() or asahi.is_apple_linux():
+    # Apple Silicon: the GPU shares unified memory, so hw.memsize is the pool — but
+    # that pool is also system RAM (and hw.memsize is the machine TOTAL, not a live
+    # "available now" reading like NVIDIA/RAM below), so overcommitting it swaps the
+    # whole OS, not just failing one model load. Keep the explicit reserve here.
+    if _is_apple_silicon():
         total_mb = float(gpu.load_snapshot().get("memory_total_mb") or 0.0)
         if total_mb > 0:
             gb_total = total_mb / 1024.0
@@ -70,7 +60,7 @@ def resolve_budget() -> Budget:
             usable = max(gb_total - reserve, 0.0)
             return Budget(int(usable * GIB), "vram",
                           f"Apple Silicon, {usable:.1f} GB usable of {gb_total:.0f} GB unified memory",
-                          backend="metal" if _is_apple_silicon() else "cpu")
+                          backend="metal")
 
     # Intel Mac / AMD / no GPU: an integrated GPU's few GB of VRAM is not a useful
     # inference budget — llama.cpp runs on CPU here, so the budget is system RAM.

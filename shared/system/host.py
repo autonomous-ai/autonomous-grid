@@ -12,8 +12,6 @@ import re
 import subprocess
 from dataclasses import dataclass
 
-from shared.system import asahi
-
 
 @dataclass
 class HostInfo:
@@ -119,59 +117,7 @@ def cpu_brand() -> str:
                         return line.split(":", 1)[1].strip()
         except OSError:
             pass
-        # Apple silicon under Linux: an ARM `/proc/cpuinfo` carries no brand line at all (its
-        # per-core block says "CPU implementer: 0x61" and nothing a person could read), so the
-        # reading below would return "aarch64" — the architecture, in a field whose whole job is to
-        # name the machine. The SoC is named by the devicetree instead.
-        if asahi.is_apple_linux():
-            return asahi.chip_name()
     return platform.processor() or platform.machine() or "unknown"
-
-
-def _meminfo() -> tuple[int, int] | None:
-    """(``total_bytes``, ``available_bytes``) from `/proc/meminfo`, or None when unreadable.
-
-    `MemAvailable` is the kernel's own "what can actually be handed out without swapping" figure —
-    it counts reclaimable page cache as available, which is why subtracting `MemFree` alone would
-    overstate what is in use on a box that has been up for a week."""
-    wanted = {"MemTotal": None, "MemAvailable": None}
-    try:
-        with open("/proc/meminfo", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                key, sep, value = line.partition(":")
-                if not sep or key not in wanted:
-                    continue
-                try:
-                    wanted[key] = int(value.split()[0]) * 1024  # kB → bytes
-                except (IndexError, ValueError):
-                    return None
-                if all(v is not None for v in wanted.values()):
-                    break
-    except OSError:
-        return None
-    if wanted["MemTotal"] is None:
-        return None
-    return int(wanted["MemTotal"]), int(wanted["MemAvailable"] or 0)
-
-
-def unified_memory_mb() -> float:
-    """The size (MB) of the memory pool an integrated GPU shares with the CPU, 0.0 when there is no
-    such pool to advertise.
-
-    Two OSes, one question: macOS answers with `hw.memsize`, and Apple silicon under Linux answers
-    with `MemTotal` — both are the machine's whole RAM, which on these parts IS the GPU's memory
-    (see `asahi`). A box with a discrete card has no shared pool, and answering 0.0 there is the
-    point: the caller must not fold the card's VRAM and system RAM into one bar.
-    """
-    if platform.system() == "Darwin":
-        try:
-            return int(_sysctl("hw.memsize")) / (1024 * 1024)
-        except ValueError:
-            return 0.0
-    if asahi.is_apple_linux():
-        meminfo = _meminfo()
-        return meminfo[0] / (1024 * 1024) if meminfo else 0.0
-    return 0.0
 
 
 def _memory_snapshot() -> tuple[int, int, float]:
@@ -256,14 +202,13 @@ def _vm_stat_used_bytes() -> int | None:
 def memory_used_mb() -> float | None:
     """System memory in use, in MB — or None when this box cannot truly measure it.
 
-    psutil when present, else `/proc/meminfo` on Linux (`_meminfo`), else ``vm_stat`` on macOS
-    (`_vm_stat_used_bytes`), else nothing. What is never used is `_memory_snapshot`'s ``sysconf``
-    fallback: it reports available == total because it has no way to ask, and a caller subtracting
-    those would publish a confident "0 MB in use" for a machine it never measured. None, not 0 — the
-    distinction is the whole point.
+    psutil when present, else ``vm_stat`` on macOS (`_vm_stat_used_bytes`), else nothing. What is
+    never used is `_memory_snapshot`'s ``sysconf`` fallback: it reports available == total because
+    it has no way to ask, and a caller subtracting those would publish a confident "0 MB in use"
+    for a machine it never measured. None, not 0 — the distinction is the whole point.
 
-    Used by the unified-memory VRAM path, where the GPU shares this pool — see `gpu.load_snapshot`
-    and `unified_memory_mb`, which is where the matching total comes from."""
+    Used by the Apple Silicon VRAM path, where the GPU shares this pool — see `gpu.load_snapshot`.
+    """
     used: int | None
     try:
         import psutil
@@ -271,11 +216,7 @@ def memory_used_mb() -> float | None:
         mem = psutil.virtual_memory()
         used = int(mem.total) - int(mem.available)
     except Exception:  # noqa: BLE001 — a probe, never a failure path
-        if platform.system() == "Linux":
-            meminfo = _meminfo()
-            used = meminfo[0] - meminfo[1] if meminfo else None
-        else:
-            used = _vm_stat_used_bytes()
+        used = _vm_stat_used_bytes()
     if used is None or used <= 0:
         return None
     return used / (1024 * 1024)

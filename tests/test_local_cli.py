@@ -24017,24 +24017,6 @@ def test_remote_stats_verbose_keeps_a_measured_zero_apart_from_an_unmeasured_rea
     assert "RAM          48/192 GB (25%)" in card  # unified memory is RAM, not VRAM
 
 
-def test_remote_stats_labels_a_linux_apple_silicon_node_by_its_ram(monkeypatch, tmp_path, capsys):
-    """The label cannot come from `platform`, which answers "which binaries run here": an omarchy-mac
-    node says `linux` truthfully and still has no VRAM. The node says so itself with `memory_kind`,
-    and that is what the column heading reads."""
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    _mock_overview(monkeypatch, {"grid": {"state": "running"}, "stats": {}, "nodes": [
-        {"name": "omarchy", "chip": "Apple M2", "device": "Apple MacBook Air",
-         "platform": "linux", "memory_kind": "unified", "engine": "llama.cpp",
-         "models": ["qwen-3"], "vram_gb": 16.0, "vram_total_mb": 16384.0,
-         "vram_used_mb": 4096.0, "max_concurrency": 1, "online": True},
-    ]})
-    assert cli.main(["stats", "--verbose"]) == 0
-    card = capsys.readouterr().out.split("omarchy\n", 1)[1].split("\n\n", 1)[0]
-    assert "Apple M2 · Linux" in card
-    assert "RAM          4/16 GB (25%)" in card
-    assert "VRAM" not in card
-
-
 def test_remote_stats_json_carries_the_engines_whether_verbose_or_not(monkeypatch, tmp_path, capsys):
     """`--verbose` must not change the machine-readable shape, or every script would depend on how
     it was invoked."""

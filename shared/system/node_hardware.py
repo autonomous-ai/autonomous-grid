@@ -1,17 +1,15 @@
 """What this machine IS, in the shape the grid page reads.
 
-Produces the relay's node-meta contract — ``device`` / ``chip`` / ``device_class`` / ``memory_gb`` /
-``memory_kind`` — so a machine on the grid shows as something a person recognises instead of a
-hostname and an OS name. The relay stores these verbatim and ``build_grid_overview`` hands them to
-the app, which prints ``chip`` when there is one and ``device`` otherwise.
+Produces the relay's node-meta contract — ``device`` / ``chip`` / ``device_class`` / ``memory_gb`` —
+so a machine on the grid shows as something a person recognises instead of a hostname and an OS
+name. The relay stores these verbatim and ``build_grid_overview`` hands them to the app, which
+prints ``chip`` when there is one and ``device`` otherwise.
 
 That preference is the whole reason both fields exist, and it is not arbitrary:
 
-- **Apple silicon is named by its CHIP** ("Apple M4 Pro"), on either OS it runs. The GPU has no name
-  of its own — it is part of the SoC — so "Apple GPU" would tell a reader nothing they can act on,
-  while the chip name is exactly what they would say out loud about the machine. Under Linux (Asahi)
-  the chip comes from the devicetree — see `asahi`, which is also where the hardware half of these
-  predicates follows the silicon onto Linux and the backend half deliberately does not.
+- **Apple Silicon is named by its CHIP** ("Apple M4 Pro"). The GPU has no name of its own — it is
+  part of the SoC — so "Apple GPU" would tell a reader nothing they can act on, while the chip name
+  is exactly what they would say out loud about the machine.
 - **Everything else is named by its CARD** ("NVIDIA GeForce RTX 4090 ×2"). That is what decides what
   the box can run; its CPU brand is noise beside it, and on a rented GPU box the CPU is often
   something nobody chose.
@@ -29,7 +27,7 @@ from __future__ import annotations
 import platform
 import subprocess
 
-from shared.system import apple, arch, asahi, gpu, host
+from shared.system import apple, arch, gpu, host
 
 # Filled by the first `describe()` and reused after — see the module docstring on why this is not
 # re-probed. `None` means "not probed yet", distinct from a probe that legitimately found nothing.
@@ -37,28 +35,15 @@ _cached: dict | None = None
 
 
 def _is_apple_silicon() -> bool:
-    """Apple silicon hardware — the chip, not the OS. Two shapes, both named by their SoC:
-
-    - **macOS** — `native_machine()` sees through Rosetta (x86_64 Python on Apple Silicon), the same
-      check `device._is_apple_silicon` makes; an Intel-looking interpreter on an M-series box must
-      still be named by its chip.
-    - **Asahi Linux** — Linux on the same SoC, recognised from the devicetree (`asahi`). Its
-      `/proc/cpuinfo` has no brand line and `system_profiler` does not exist, so without this the box
-      fell through to `_cpu_only()` and the grid page called an M2 "server" with no memory.
-
-    Deliberately NOT shared with the backend selectors (`device`, `launcher`, `media_gating`,
-    `cli/parser`): those ask whether Metal/MLX can load, which is a macOS question. Only this
-    naming/topology view follows the hardware onto Linux."""
-    if platform.system() == "Darwin":
-        return arch.native_machine() == "arm64"
-    return asahi.is_apple_linux()
+    # `native_machine()` sees through Rosetta (x86_64 Python on Apple Silicon), the same check
+    # `device._is_apple_silicon` makes — an Intel-looking interpreter on an M-series box must still
+    # be named by its chip.
+    return platform.system() == "Darwin" and arch.native_machine() == "arm64"
 
 
 def _memory_gb() -> int | None:
-    """Unified memory, in whole GB, or None when it can't be read. `host.unified_memory_mb` picks the
-    OS's source (`hw.memsize` on macOS, `MemTotal` on Asahi) — the same figure `gpu.load_snapshot`
-    advertises as the pool, so the page's chip line and its memory bar cannot disagree."""
-    mb = host.unified_memory_mb()
+    """Unified memory on Apple Silicon, in whole GB, or None when it can't be read."""
+    mb = gpu._sysctl_memsize_mb()
     return int(round(mb / 1024)) if mb else None
 
 
@@ -71,13 +56,6 @@ def _apple() -> dict:
         "chip": chip or None,
         "memory_gb": _memory_gb(),
         "device_class": "gpu",
-        # What the advertised memory should be CALLED. The pool behind `memory_gb` / the heartbeat's
-        # `memory_total_mb` is the machine's RAM, which the GPU shares — so a reader sees "RAM 8/16 GB"
-        # rather than "VRAM 8/16 GB" for a machine with no VRAM. Carried as its own field instead of
-        # inferred from `platform` because the platform string is a binaries question
-        # (`host.platform_kind`, ADR 0039 D-c) and an Asahi node says "linux" truthfully while still
-        # having unified memory.
-        "memory_kind": "unified",
     }
 
 
@@ -164,8 +142,7 @@ def _probe() -> dict:
 
 
 def describe() -> dict:
-    """``{device, chip, memory_gb, device_class}`` for this machine, plus ``memory_kind`` where the
-    graphics have no memory of their own. Never raises.
+    """``{device, chip, memory_gb, device_class}`` for this machine. Never raises.
 
     A copy each call, so a caller merging it into a meta dict can't mutate the cache and change what
     every later heartbeat reports.
