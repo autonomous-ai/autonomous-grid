@@ -12116,10 +12116,11 @@ def test_control_plane_fetch_tokens_defaults_missing_networks_to_empty(monkeypat
 # machine of a given system ends up sending, and the parameter is what the control plane gates on.
 
 
-def _fetch_tokens_query(monkeypatch, tmp_path, system, os_release=None):
+def _fetch_tokens_query(monkeypatch, tmp_path, system, os_release=None, *, marker=False):
     """The query string `fetch_tokens` builds on a machine whose ``platform.system()`` is ``system``.
 
     ``os_release`` is that machine's ``/etc/os-release``, or ``None`` for a machine that has none.
+    ``marker`` is whether an Omarchy install is present on its disk (`os_grid._BY_MARKER`).
 
     ⚠️ **Both are stubbed on every call, and the second is not optional decoration.** Since `omarchy`
     landed (issue 04) a Linux machine's token is read off that file, so a test that left the real one
@@ -12127,6 +12128,10 @@ def _fetch_tokens_query(monkeypatch, tmp_path, system, os_release=None):
     green on an Ubuntu runner, and quietly wrong the day somebody runs it on Omarchy. Pointing the
     module at a path that does not exist is the deterministic *no distro signal* case, and it is what
     keeps `("Linux", "linux")` a statement about the code rather than about the machine.
+
+    The marker map is stubbed for the same reason and is the same trap one level down: it names a
+    path under ``/usr/share``, so a suite that left it alone would answer `omarchy` for every one of
+    these cases the day somebody runs it on a machine that has Omarchy installed.
     """
     import platform
 
@@ -12138,6 +12143,10 @@ def _fetch_tokens_query(monkeypatch, tmp_path, system, os_release=None):
     if os_release is not None:
         os_release_path.write_text(os_release, encoding="utf-8")
     monkeypatch.setattr(os_grid, "_OS_RELEASE", os_release_path)
+    marker_path = tmp_path / "omarchy-version"
+    if marker:
+        marker_path.write_text("4.0.2\n", encoding="utf-8")
+    monkeypatch.setattr(os_grid, "_BY_MARKER", {marker_path: os_grid.OS_OMARCHY})
     seen = {}
 
     def handler(request):
@@ -12336,6 +12345,122 @@ def test_a_gigantic_os_release_is_not_read_into_memory(monkeypatch, tmp_path):
 
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     assert os_grid.os_token() == "linux"
+
+
+# --- Omarchy on a Mac never writes `ID=omarchy`, so the install on disk is the second signal -------
+# `/etc/os-release` carries Omarchy's identity on x86 and NOWHERE ELSE. Both Apple Silicon routes
+# were read at source on 2026-09-08, and they miss it for two unrelated reasons:
+#
+# - **Bare metal** (`omacom/omarchy-mac`, Asahi + Arch Linux ARM): the package IS installed, but
+#   `omarchy-pkgs/pkgbuilds/omarchy-settings/omarchy-settings.install` opens with an
+#   `_apple_silicon()` test (aarch64 AND `apple,` in `/proc/device-tree/compatible`) and returns
+#   EARLY, after symlinking `/etc/os-release` back to Arch Linux ARM's own. The `cp -f` that would
+#   write `ID=omarchy` sits on the far side of that `return 0`. Deliberate and shipped — omarchy-pkgs
+#   PR #275: "Apple Silicon installs run on Arch Linux ARM's base with the Asahi packages, and keep
+#   that system identity".
+# - **The VM** (`omacom/try-omarchy`, ~10k `.dmg` downloads in its first fortnight): never installs
+#   `omarchy-settings` at all. Its guest is a plain Arch Linux ARM pacstrap and
+#   `guest/scripts/materialize-omarchy.sh` COPIES the Omarchy source tree in; a repository-wide
+#   search for `os-release` there finds nothing.
+#
+# Both therefore answer `ID=archarm`, and keying on that file alone left the entire Apple Silicon
+# population on the Linux grid — found because a user reported it, not because a test did.
+#
+# ⚠️ **The second signal is a MARKER, and it is deliberately not a second `os-release` to parse.**
+# `/usr/share/omarchy/version` is written by BOTH producers — the `omarchy` package installs it
+# (`pkgbuilds/omarchy/PKGBUILD:161`, `arch=('x86_64' 'aarch64')`) and the VM image copies it
+# (`materialize-omarchy.sh:130`) — so one path covers every layout there is. The nearer-looking
+# `/usr/share/omarchy/etc-overrides/os-release` really does carry an `ID=omarchy` line and really is
+# staged on Apple Silicon, but `omarchy-settings` alone writes it, so it is absent in the VM.
+
+_ALARM_OS_RELEASE = 'NAME="Arch Linux ARM"\nID=archarm\nID_LIKE=arch\n'
+
+
+def test_fetch_tokens_sends_omarchy_when_only_the_install_on_disk_says_so(monkeypatch, tmp_path):
+    """The Apple Silicon case, at the wire: ALARM's identity in the file, Omarchy on the disk.
+
+    This is what every Mac running Omarchy looks like — bare metal and VM alike — and before the
+    marker it claimed `linux`, which is a real grid, so nothing failed and nobody was told.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(
+        monkeypatch, tmp_path, "Linux", os_release=_ALARM_OS_RELEASE, marker=True)
+    assert params["os"] == "omarchy"
+
+
+@pytest.mark.parametrize(
+    "label,os_release",
+    [
+        ("Arch Linux ARM, which is what a Mac answers", _ALARM_OS_RELEASE),
+        ("stock Arch, for the x86 machine whose scriptlet has not run yet", _ARCH_OS_RELEASE),
+        ("a machine with no /etc/os-release at all", None),
+    ])
+def test_the_marker_decides_whatever_the_distro_id_failed_to_say(
+    monkeypatch, tmp_path, label, os_release
+):
+    """The marker is consulted after `ID=` and answers for every way `ID=` can fail to name Omarchy.
+
+    Written as its own parametrize because the ORDER is the whole design: `ID=omarchy` is still read
+    first and still decides on x86, and the marker only speaks where that read came back with a
+    distribution this CLI has no grid for. Nothing here narrows the Linux grid — a machine with
+    neither signal is still `linux`, which the parametrize above pins.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(
+        monkeypatch, tmp_path, "Linux", os_release=os_release, marker=True)
+    assert params["os"] == "omarchy", label
+
+
+@pytest.mark.parametrize("system,expected", [("Darwin", "macos"), ("Windows", None)])
+def test_a_machine_that_is_not_linux_never_consults_the_marker_either(
+    monkeypatch, tmp_path, system, expected
+):
+    """The marker hangs off the `linux` answer, exactly as the `/etc/os-release` read does.
+
+    Same reason, one level down: `/usr/share` is not Linux's alone. A Mac can mount, sync or unpack
+    one — `try-omarchy` ships an image containing this very path, and its `.dmg` is opened ON a Mac —
+    and a lookup done before the system is known would move that machine's grid.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(monkeypatch, tmp_path, system, marker=True)
+    assert params.get("os") == expected
+
+
+def test_an_emptied_omarchy_directory_is_not_an_omarchy_machine(monkeypatch, tmp_path):
+    """The marker is the FILE. A directory of that name is no signal, and this is why.
+
+    `pacman -R omarchy` removes the files it owns and can leave `/usr/share/omarchy` behind — an
+    uninstall is exactly when a machine stops being an Omarchy machine, and keying on the directory
+    would have it claim `omarchy` for good. `Path.is_file` also answers False rather than raising for
+    every way the path can be unreadable, so nothing here can take a sign-in down.
+    """
+    import platform
+
+    from shared.system import os_grid
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    marker = tmp_path / "omarchy-version"
+    marker.mkdir()
+    monkeypatch.setattr(os_grid, "_BY_MARKER", {marker: os_grid.OS_OMARCHY})
+    monkeypatch.setattr(os_grid, "_OS_RELEASE", tmp_path / "no-such-os-release")
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+
+    assert os_grid.os_token() == "linux"
+
+
+def test_the_marker_map_is_the_path_both_omarchy_layouts_actually_write():
+    """Pins the literal path and the fact that it is the ONLY one.
+
+    Not decoration: this path is an unwritten contract with a repository nobody here controls, and
+    the two producers agree on it by coincidence of layout rather than by any promise. A test that
+    only exercised the map through a stub would keep passing if the real path were mistyped, which is
+    the one mistake that costs the whole Apple Silicon population again and says nothing when it does.
+    """
+    from pathlib import Path
+
+    from shared.system import os_grid
+
+    assert os_grid._BY_MARKER == {Path("/usr/share/omarchy/version"): os_grid.OS_OMARCHY}
 
 
 def test_windows_is_not_a_system_this_cli_has_a_grid_for(monkeypatch, tmp_path):
@@ -41682,7 +41807,9 @@ def _refresh_body(monkeypatch, tmp_path, system, os_release=None):
     ``/etc/os-release`` is stubbed here for the same reason `_fetch_tokens_query` stubs it: since
     `omarchy` landed, a Linux machine's token is read off that file, and leaving the real one in place
     would make a `("Linux", "linux")` case a statement about the host running the suite rather than
-    about the code.
+    about the code. The install marker is stubbed to a path that does not exist for that same reason
+    — this helper's cases are all *no Omarchy on this machine*, and saying so is what keeps them true
+    on a machine that has one.
     """
     import json as _json
     import platform
@@ -41695,6 +41822,8 @@ def _refresh_body(monkeypatch, tmp_path, system, os_release=None):
     if os_release is not None:
         os_release_path.write_text(os_release, encoding="utf-8")
     monkeypatch.setattr(os_grid, "_OS_RELEASE", os_release_path)
+    monkeypatch.setattr(
+        os_grid, "_BY_MARKER", {tmp_path / "no-omarchy-install": os_grid.OS_OMARCHY})
     seen = {}
 
     def handler(request):

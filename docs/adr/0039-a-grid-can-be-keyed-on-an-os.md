@@ -72,6 +72,60 @@ signal — and `ID_LIKE=` must stay out of it.** The `omarchy-settings` package 
 copy and `cp -f`s that one over `/etc/os-release` on every install and upgrade. Identical in
 `omarchy-settings-dev`, the edge channel. Stock Arch is `ID=arch` with no `ID_LIKE`.
 
+**AMENDED 2026-09-09: that `cp -f` is x86-only, so `ID=` alone was never going to find a Mac. The
+INSTALL on disk is a second signal — `/usr/share/omarchy/version` (`os_grid._BY_MARKER`).** The
+paragraph above says "on every install and upgrade"; it is true on x86 and false on Apple Silicon,
+and the difference cost the whole Mac population their grid silently. Found because a user running
+`omarchy-mac` reported seeing **Linux** and not Omagrid — no test failed, no signal was missing, and
+the machine had a real grid, so nothing anywhere said so.
+
+Both Apple Silicon routes miss the identity, for unrelated reasons, and neither is an accident to be
+waited out:
+
+- **Bare metal** (`omacom/omarchy-mac`: Asahi + Arch Linux ARM, the m1n1 → u-boot → GRUB chain). The
+  package IS installed, but `omarchy-settings.install` opens with
+  `_apple_silicon() { [[ $(uname -m) == aarch64 ]] && grep -aq 'apple,' /proc/device-tree/compatible; }`
+  and returns EARLY on a Mac, having symlinked `/etc/os-release` back to Arch Linux ARM's own
+  (`ID=archarm`, `ID_LIKE=arch`). The `cp -f` that writes the identity sits on the far side of that
+  `return 0`. Deliberate and shipped — omarchy-pkgs PR #275 (`4ed5f14`, 2026-09-02, *one day before
+  this ADR resolved the signal*): "Apple Silicon installs run on Arch Linux ARM's base with the Asahi
+  packages, and keep that system identity."
+- **The VM** (`omacom/try-omarchy`, ~9.8k `.dmg` downloads in its first fortnight). It never installs
+  `omarchy-settings` at all: `guest/packages.lock.json` carries only `omarchy-keyring`, the guest is a
+  plain Arch Linux ARM `pacstrap` (`guest/Containerfile:26`), and `materialize-omarchy.sh` *copies*
+  the Omarchy source tree to `/usr/share/omarchy`. A repository-wide search for `os-release` there
+  returns zero hits.
+
+⚠️ **The marker is `/usr/share/omarchy/version`, and NOT the nearer-looking
+`/usr/share/omarchy/etc-overrides/os-release`.** The latter carries a real `ID=omarchy` line and is
+staged even on Apple Silicon — the early return skips only the copy into `/etc`, never the packaging
+— so it looks like the better match for a rule written about `ID=`. It is written by
+`omarchy-settings` alone, and the VM route installs no package, so it is absent exactly where the
+larger population is. `version` is written by BOTH producers: `pkgbuilds/omarchy/PKGBUILD:161`
+(`arch=('x86_64' 'aarch64')`) and `try-omarchy` `guest/scripts/materialize-omarchy.sh:130`. Two
+independent producers, one path, every layout.
+
+⚠️ **It is read as a FILE, on a SYSTEM path, and only after `ID=` has failed to name a
+distribution.** A file rather than the directory, because `pacman -R omarchy` can leave
+`/usr/share/omarchy` behind and an uninstall is precisely when a machine stops being an Omarchy
+machine. A system path rather than `~/.local/share/omarchy` (where Omarchy 3.x kept its tree, which
+is why that layout still resolves to `linux`), because a per-user path is writable by anything the
+person runs and this decides which grid a machine joins. And after `ID=`, because a distribution
+stating its own identity is the stronger claim wherever it survives — the marker speaks only where
+that read came back with a distribution this product has no grid for.
+
+⚠️ **This widens who claims `omarchy`; it narrows nothing.** A machine with neither signal is still
+`linux`. The direction that changes is Mac users moving OFF the Linux grid and onto Omagrid, which is
+D-c's own rule (`os=` is single-valued) working as decided, now on the machines it always meant.
+There is **no cross-repo half and no rollout order**: the token set is unchanged and the control
+plane has served `omarchy` since 2026-09-03 — only this CLI's reading of its own disk moves.
+
+⚠️ **Upstream has no plan to change it.** `omarchy-settings.install` has three commits in its whole
+history, none since #275, and that PR's own offer to narrow the behaviour ("If you would rather
+narrow it to just os-release, that is a one-line change and I am happy to make it") was never taken
+up. No issue or PR in `omarchy-pkgs`, `omarchy-mac` or `try-omarchy` discusses distro identity on
+Apple Silicon. So this is not a workaround waiting on a fix upstream; it is the shape of the signal.
+
 ⚠️ **`shared/engine/installer._detect_distro` is no longer the shape to follow, and this decision is
 the reason.** It reads `ID=` and `ID_LIKE=` into ONE list and matches either. Every Arch derivative
 ships `ID_LIKE=arch` — EndeavourOS, CachyOS, Manjaro — so copied here it would put all of them on the
