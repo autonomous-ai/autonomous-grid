@@ -23291,14 +23291,30 @@ def test_remote_models_json_includes_auto_first_when_router_enabled(monkeypatch,
     payload = json.loads(capsys.readouterr().out)
     assert payload[0] == {"model": "auto", "engine": "grid-router", "node": "", "responses": False}
 
-def test_remote_models_shows_auto_even_with_zero_nodes_when_enabled(monkeypatch, tmp_path, capsys):
-    # Mirrors /relay/v1/models: the router family is advertised whenever routing is on,
-    # independent of engines.
+def test_remote_models_hides_router_family_with_zero_nodes(monkeypatch, tmp_path, capsys):
+    """A grid with routing on but no engine joined lists NOTHING runnable.
+
+    `/relay/v1/models` advertises the router family whenever routing is enabled, independent of
+    engines, and the CLI mirrored that — which put three names (`auto`, `Brute Force`, `Feedback
+    Loop`) in front of an owner who had nothing serving. The router ranks candidates drawn from the
+    models the grid currently serves (ADR 0013), so with zero engines every one of those requests
+    fails: the listing promised models that could not run. Diverging from the relay here on purpose.
+    """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_overview(monkeypatch, {"nodes": [], "router_enabled": True})
     assert cli.main(["models"]) == 0
-    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-    assert lines == ["auto", "Brute Force", "Feedback Loop"]
+    out = capsys.readouterr().out
+    assert "no live models" in out
+    assert "auto" not in out and "Brute Force" not in out and "Feedback Loop" not in out
+
+
+def test_remote_models_json_empty_with_zero_nodes_even_when_enabled(monkeypatch, tmp_path, capsys):
+    # The JSON view is scripted against, so the same gate applies there: an empty list, not three
+    # aliases a loop would then try to chat with.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"nodes": [], "router_enabled": True})
+    assert cli.main(["models", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
 
 
 def test_remote_models_json_lists_effort_rows_after_auto(monkeypatch, tmp_path, capsys):
@@ -23315,15 +23331,16 @@ def test_remote_models_json_lists_effort_rows_after_auto(monkeypatch, tmp_path, 
 
 
 def test_remote_models_hint_skips_effort_names(monkeypatch, tmp_path, capsys):
-    # Zero engines + router on: every listed name is a router alias — the hint must fall back to
-    # `auto`, never suggest chat-testing an effort alias as if it were the newcomer's own model.
+    # Routing on with a real engine: the hint must name the newcomer's own model, never a router
+    # alias — the router family is listed first, so a naive `seen[0]` would suggest `auto`.
     # The hint rides stderr behind a tty check (print_models_hint), so fake the tty.
     _seed_running_remote_grid(monkeypatch, tmp_path)
-    _mock_overview(monkeypatch, {"nodes": [], "router_enabled": True})
+    _mock_overview(monkeypatch, {**_OVERVIEW_2NODES, "router_enabled": True})
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     assert cli.main(["models"]) == 0
     err = capsys.readouterr().err
-    assert "-m auto" in err and "Brute Force" not in err and "Feedback Loop" not in err
+    assert "-m glm-5.2" in err
+    assert "-m auto" not in err and "Brute Force" not in err and "Feedback Loop" not in err
 
 
 # ── responses dialect annotation on the live listing (issue 10) ──
