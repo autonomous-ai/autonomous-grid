@@ -153,6 +153,12 @@ happen.
 while the media wallet still holds `100.0`, so `100 < 500` refuses *everyone*. One code path, two
 opposite wrong answers, on either side of this ADR's own change.
 
+⚠️ **Amended 2026-09-09 — "refuses *everyone*" is wrong, and the correction is the subject of D-f's
+amendment below.** It holds only for a member whose media wallet still holds the `100.0` signup seed.
+`payments.py` adds to that wallet on a live path, so a member holding `≥ 500` media credits was
+**served free** on the same outage, from the same line. The fault was never a direction: it was
+**data-dependence**. The fallback is deleted as of issue 10 — see D-f.
+
 ⚠️ **The relay's fallback for the minimum must be the credit figure (500), never the old dollar one
 (0.5).** Carrying `0.5` across leaves the gate at a thousandth of its intended height, and nothing
 anywhere reports it. It is the single most likely copy-paste in this change, and it is the reason
@@ -245,6 +251,67 @@ options are to **drop the fallback** — refuse when the authoritative balance i
 the gate fail closed in fact rather than in prose — or to **keep it and say so in D-g**, recording
 that the inference path has a second, media-funded door. What must not stand is the present
 position, in which this ADR asserts a fence the code does not have.
+
+⚠️ **Amended 2026-09-09 (issue 10) — the fence is now closed, and the fault it left open was
+DATA-DEPENDENCE rather than a direction.** The first option above is taken: the fallback is deleted,
+and **a balance that cannot be established refuses the request**. Four things travel with that.
+
+**What the open fence actually cost.** Both this decision and D-c's amendment described the hole as
+having one direction at a time — first "serves free", then, after D-a, "refuses everyone". Neither
+is true, because the number being read belongs to a different product. `auth.py:107` seeds the media
+wallet at `100.0` and `payments.py:24,79` adds more, on a path `server.py:31` imports, so on one
+unreachable control plane:
+
+| the member's media wallet | the gate did |
+|---|---|
+| `100.0` (the signup seed) | refuse |
+| `≥ 500` (bought media credits) | **serve free** |
+
+One line, opposite outcomes, selected by a figure no part of the inference path owns or can see.
+"Serves itself away" was never closed by D-a and D-c; it was **narrowed** to the members who happen
+to have bought media credit — which is the worst shape for the failure to take, because it is
+invisible on every grid where nobody has.
+
+**The refusal is a 503 carrying a sentence, and deliberately not a 402.** Payment is not what is
+required when a grid cannot reach its own authority on money: the member's wallet may be perfectly
+funded, and D-l's `Insufficient balance` sentence would send them to top it up — somewhere that will
+fix nothing. `503` is simply the true statement. It is also free: the public CLI, which is the client
+here, prints any body at or above 400 verbatim and exits 1 (`cli/remote_request.py:103-105`), so the
+status buys no client behaviour and the **sentence is the whole contract**. It is pinned as a
+sentence and not as a refusal `code` — D-l's count of three parsed codes is deliberate, and this is
+not the fourth.
+
+**Two refusals, because there are two remedies.** *This grid was never configured to reach a control
+plane* is fixed on the box in a minute; *the control plane could not be reached* is not fixed there
+at all. `_fetch_authoritative_balance` answers `None` to both — and to a `>= 400`, which leaves it by
+a bare fall-through rather than a `return`, the path a reader misses — so the gate asks the
+configuration question **before** the read, and the `None` that comes back can then mean only one
+thing. The refused-read and dead-socket cases stay one refusal: an operator can act on neither from
+here.
+
+⚠️ **Unchanged, and the reason the rename is safe: a `200` without `balance_credits` still reads
+`0.0`.** That is a number, not a failure, so it falls through to the min-balance gate and its 402
+exactly as D-c specifies. Turning it into this decision's 503 would tell an operator their control
+plane is down while it answers perfectly.
+
+**Rejected: caching the balance locally.** Recorded here so it is not proposed again during the
+first outage. It fails on the architecture, not on cost:
+
+- the wallet is **global per person** — `grid_account`'s primary key is `google_sub`, and the table
+  has no network column — while every grid is a separate master with its own database. A per-grid
+  cache is therefore *N stale copies of one wallet that cannot see each other*, and the over-spend an
+  outage permits stops being one request and becomes one per grid the member is on;
+- the only store that could hold a **shared** copy is the control plane, which is the thing that is
+  down;
+- the relay's local state table (`grid_local_network_state`) already caches `min_balance_credits` and
+  deliberately holds **no** balance column, for the reason written at grid-apis'
+  `store.apply_usage_charge`: the master keeps no balance, so concurrent requests across grids cannot
+  desync a local copy. A cache overturns that, and the reason it was written has not changed.
+
+What a refusal costs is **availability during a control-plane outage**. Measured 2026-09-09: one grid
+on prod has billing on (121 of 122 are `local_free`), so today that is close to nothing. If it ever
+stops being nothing, the answer is a control plane that stays up or a read replica — not a cache at
+the edge.
 
 ### D-g — `_billing_on()` is the sole authority on the inference path, and always was
 
@@ -344,7 +411,7 @@ because they genuinely differ:
 | value | absent ⇒ | order |
 |---|---|---|
 | the usage-report route and `cost_credits` | a loud validation refusal — ⚠️ **but only because D-h made the relay read the status**; before that it was silent and free | control plane first |
-| the balance route and `balance_credits` | the relay's default of zero ⇒ every request refused. Fail closed for the **rename** — ⚠️ but see D-c's amendment: a control plane that *refuses* or is unreachable yields `None`, not zero, and falls through to the media wallet instead | control plane first |
+| the balance route and `balance_credits` | the relay's default of zero ⇒ every request refused. Fail closed for the **rename** — ⚠️ but see D-c's amendment: a control plane that *refuses* or is unreachable yields `None`, not zero, which since issue 10 is a **503 of its own** rather than a fall-through to the media wallet (D-f, amended 2026-09-09) | control plane first |
 | the minimum route and `min_balance_credits` | ⚠️ the relay's fallback must be the credit figure, not the old dollar one | control plane first |
 | `CREDITS_PER_USD` itself | ⚠️ **nothing degrades — the two sides simply disagree.** No missing route, no validation failure, no postcondition to check. The only value here whose failure is pure arithmetic | no order helps |
 | the refusal sentence the app matches | grid-src ↔ the app, **no half in this repository**; a reword makes the app render the relay's raw sentence, ⚠️ which prints the viewer's exact balance and the grid's threshold into their chat window | no order helps |
