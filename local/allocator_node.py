@@ -49,6 +49,31 @@ MAX_READY_CHILD_SYNC_WORKERS = 16
 _ACTIVITY_UNSET = object()
 
 
+def _poll_until_stopped(
+    cycle: Callable[[], bool],
+    stop: threading.Event,
+    *,
+    backoff_seconds: float = 2.0,
+    model_id: str = "",
+) -> None:
+    """Run poll cycles until asked to stop, surviving anything one cycle can raise.
+
+    A poll loop that dies is invisible: heartbeats keep flowing, the residency keeps reading
+    ready, and the node simply never serves again. MEASURED -- one grid restart cut an in-flight
+    long-poll, the RemoteProtocolError left an unguarded `while`, and that worker was silently
+    out of service from then on. Same contract as remote/serve.py::_poll_loop: name the error,
+    back off, keep polling.
+    """
+
+    while not stop.is_set():
+        try:
+            cycle()
+        except Exception as exc:  # one bad cycle must never end the loop
+            label = f" for {model_id}" if model_id else ""
+            print(f"allocator: poll cycle{label} failed ({exc!r}); retrying", file=sys.stderr, flush=True)
+            stop.wait(backoff_seconds)
+
+
 class AllocatorNodeAgent:
     """Publish actual host state, receive desired-state commands, and expose ready children.
 
@@ -358,14 +383,17 @@ class AllocatorNodeAgent:
             model_id = residency.model_id
 
             def _loop(grid_client=grid_client, engine_client=engine_client, model_id=model_id):
-                while not self._shutdown_requested.is_set():
-                    node_poll.run_one_cycle(
+                _poll_until_stopped(
+                    lambda: node_poll.run_one_cycle(
                         grid_client,
                         engine_client,
                         host_id=self.runtime.host_id,
                         models=(model_id,),
                         token=self.control_token,
-                    )
+                    ),
+                    self._shutdown_requested,
+                    model_id=model_id,
+                )
 
             threading.Thread(target=_loop, daemon=True).start()
 
