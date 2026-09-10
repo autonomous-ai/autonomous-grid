@@ -22921,6 +22921,64 @@ def test_remote_delete_refuses_a_grid_this_account_does_not_own(monkeypatch, tmp
     assert "delete" not in calls
 
 
+def test_remote_delete_without_a_stored_token_says_login_not_you_are_a_member(monkeypatch, tmp_path):
+    """A missing token reads as "no admin role" through the claims, and answering an owner with
+    "you are only a member" sends them to fix a thing that is not broken. The absent token has to be
+    named as itself."""
+    net = {"network_id": "n1", "name": "team", "network_type": "permissioned-public"}
+    _seed_remote(monkeypatch, tmp_path, networks=[net], active="team")
+    calls = _mock_lifecycle(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["delete", "team", "--yes"])
+    assert "grid login" in str(exc.value)
+    assert "member" not in str(exc.value)  # the wrong diagnosis for a stale bundle
+    assert "delete" not in calls
+
+
+def test_remote_delete_translates_a_403_into_the_ownership_rule(monkeypatch, tmp_path):
+    """The local check reads a token minted once; the grid can change hands after that. The control
+    plane is the authority, and its refusal has to arrive as the rule rather than as raw HTTP."""
+    from remote import control_plane
+
+    _seed_owned_grid(monkeypatch, tmp_path)
+
+    def _refuse(session_token, network_id, api_url=None):
+        raise control_plane.ControlPlaneError(
+            'DELETE https://api.example/v1/grid/managed-networks/n1 failed (403): {"detail":"nope"}',
+            status=403,
+        )
+
+    monkeypatch.setattr(control_plane, "delete_managed_network", _refuse)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["delete", "team", "--yes"])
+    assert "not its owner" in str(exc.value) and "grid login" in str(exc.value)
+
+    from remote import credentials
+    # Refused server-side means the grid still exists — forgetting it locally would hide a grid the
+    # account still has.
+    assert [n["network_id"] for n in credentials.load_credentials()["networks"]] == ["n1"]
+
+
+def test_remote_delete_lets_a_401_keep_its_wording_for_the_session_check(monkeypatch, tmp_path):
+    """`cli/auth._SESSION_EXPIRED_RE` matches the control plane's exact 401 rendering to offer a
+    re-login, so the 403 rewrite must not swallow its neighbour."""
+    from remote import control_plane
+
+    _seed_owned_grid(monkeypatch, tmp_path)
+    raw = 'POST https://api.example/v1/grid/managed-networks/n1 failed (401): {"detail":"expired"}'
+
+    def _expired(session_token, network_id, api_url=None):
+        raise control_plane.ControlPlaneError(raw, status=401)
+
+    monkeypatch.setattr(control_plane, "delete_managed_network", _expired)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["delete", "team", "--yes"])
+    assert str(exc.value) == raw
+
+
 def test_remote_delete_refuses_while_the_grid_is_running(monkeypatch, tmp_path):
     """Stopping is the reversible, visible step where service ends. Delete is only the paperwork
     afterwards, so a running grid is refused and told which command comes first."""

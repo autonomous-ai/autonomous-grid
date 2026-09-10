@@ -291,6 +291,10 @@ def cmd_remote_delete(args: argparse.Namespace) -> int:
     network_id = _network_id(rec)
     label = rec.get("name") or network_id
 
+    # Before asking whether the token says "owner", insist there IS a token: an absent one reads as
+    # "not owner" through `claims_from_token`, and answering an owner with "you are only a member"
+    # sends them to fix the wrong thing. `require_access_token` already owns that sentence.
+    require_access_token(rec, label)
     if not _is_owner(rec):
         raise SystemExit(
             f"Only the owner of {label} can delete it — this account is a member of it. "
@@ -323,7 +327,19 @@ def cmd_remote_delete(args: argparse.Namespace) -> int:
             print("Aborted — the name did not match.")
             return 1
 
-    control_plane.delete_managed_network(session, network_id)
+    try:
+        control_plane.delete_managed_network(session, network_id)
+    except SystemExit as exc:
+        # The local owner check reads a token that was minted once and can be out of date — the grid
+        # may have changed hands since. Only 403 is re-worded: 401 keeps its exact rendering because
+        # `cli/auth._SESSION_EXPIRED_RE` matches on that string to offer a re-login.
+        if getattr(exc, "status", None) == 403:
+            raise SystemExit(
+                f"The control plane refused to delete {label}: this account is not its owner. "
+                "The grid may have changed hands since you last signed in — `grid login` refreshes "
+                "what your machine believes."
+            ) from None
+        raise
     credentials.remove_network(network_id)
     # The active pointer outlives the grid it names, and every later command resolves through it —
     # so a delete that left it set would aim `grid join`, `grid chat` and the rest at a grid that is
