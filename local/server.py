@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import json
 import math
+import os
 import secrets
 import ssl
 import statistics
@@ -15,7 +16,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, AsyncGenerator, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -1017,6 +1018,8 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     model = body.get("model")
     if not isinstance(model, str) or not model:
         return _openai_error(400, "model is required", "invalid_request")
+    if os.getenv("GRID_LOCAL_PULL") == "1":
+        return await _serve_by_pull(app, endpoint_path, request, body, raw_body, model)
     features = classify_request(endpoint_path, body)
     if request.headers.get("x-grid-allocator-evaluation") == "1":
         # Canary traffic is real inference, so it should still update engine performance.
@@ -1452,6 +1455,42 @@ def _answer_text(payload: object) -> str:
     if isinstance(message, dict) and isinstance(message.get("content"), str):
         return message["content"]
     return ""
+
+
+async def _serve_by_pull(
+    app: FastAPI,
+    endpoint_path: str,
+    request: Request,
+    body: dict[str, Any],
+    raw_body: bytes,
+    model: str,
+) -> Response:
+    """Register the request and wait for a worker to take it.
+
+    Chunks are relayed verbatim -- no reframing, no injected [DONE].
+    """
+    del endpoint_path, request
+    table: InflightTable = app.state.inflight
+    if _choose_node(app, model) is None:
+        return _openai_error(
+            503, f"No active local engine for model {model!r}", "engine_unavailable"
+        )
+    txn = table.create(model=model, body=raw_body, is_stream=bool(body.get("stream")))
+    try:
+        if txn.is_stream:
+            async def relay() -> AsyncGenerator[bytes, None]:
+                async for chunk in table.stream(txn.id):
+                    yield chunk
+
+            return StreamingResponse(relay(), media_type="text/event-stream")
+        async for _chunk in table.stream(txn.id):
+            pass
+        settled = table.get(txn.id)
+        if settled is None or settled.result is None:
+            return _openai_error(504, "No worker returned a result", "engine_timeout")
+        return Response(content=settled.result, media_type="application/json")
+    finally:
+        table.cancel(txn.id, "consumer finished")
 
 
 async def _proxy_media(
