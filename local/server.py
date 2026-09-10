@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from local.inflight import InflightTable
+from local.inflight import InflightTable, TransactionState
 from local.poll import poll_router
 from local.runtime import GRID_TYPE
 from shared.allocator.auth import (
@@ -1024,7 +1024,9 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     if not isinstance(model, str) or not model:
         return _openai_error(400, "model is required", "invalid_request")
     if os.getenv("GRID_LOCAL_PUSH") != "1":
-        return await _serve_by_pull(app, endpoint_path, request, body, raw_body, model)
+        return await _serve_by_pull(
+            app, endpoint_path, request, body, raw_body, model, started_at
+        )
     features = classify_request(endpoint_path, body)
     if request.headers.get("x-grid-allocator-evaluation") == "1":
         # Canary traffic is real inference, so it should still update engine performance.
@@ -1469,18 +1471,55 @@ async def _serve_by_pull(
     body: dict[str, Any],
     raw_body: bytes,
     model: str,
+    started_at: float,
 ) -> Response:
     """Register the request and wait for a worker to take it.
 
     Chunks are relayed verbatim -- no reframing, no injected [DONE].
+
+    The allocator allocates against DEMAND, and demand rides this path -- not the heartbeat. So
+    every outcome here reports to `_observe_allocator_request` exactly as the push path does,
+    including the 503, which is the strongest demand there is: someone asked for a model and
+    nothing served it. Without these calls the allocator sees no traffic at all and can only run
+    what it was configured by hand to run.
     """
-    del endpoint_path, request
     table: InflightTable = app.state.inflight
+    features = classify_request(endpoint_path, body)
+    if request.headers.get("x-grid-allocator-evaluation") == "1":
+        # Canary traffic is real inference and still teaches performance, but it is not user
+        # demand. Same gate, same reason, as the push path.
+        _require_allocator_control(app, request)
+        features = replace(features, is_evaluation=True)
+    affinity_digest = _affinity_digest(request.headers.get("x-grid-affinity-key"))
+    workflow_key = affinity_digest.hex() if affinity_digest is not None else ""
+
     if _choose_node(app, model) is None:
+        _observe_allocator_request(
+            app,
+            model,
+            started_at,
+            features=features,
+            workflow_key=workflow_key,
+            error=True,
+            queue_depth=1,
+        )
         return _openai_error(
             503, f"No active local engine for model {model!r}", "engine_unavailable"
         )
     txn = table.create(model=model, body=raw_body, is_stream=bool(body.get("stream")))
+
+    def observe(*, error: bool, output_units: int = 0) -> None:
+        _observe_allocator_request(
+            app,
+            model,
+            started_at,
+            features=features,
+            served_model=model,
+            workflow_key=workflow_key,
+            error=error,
+            output_units=output_units,
+        )
+
     if txn.is_stream:
         async def relay() -> AsyncGenerator[bytes, None]:
             # The cleanup belongs to the GENERATOR, not to this function. This function returns
@@ -1488,10 +1527,21 @@ async def _serve_by_pull(
             # `finally` out here cancels the transaction nobody has claimed yet, and the consumer
             # is handed a 200 carrying nothing. Here it runs when the stream ends or the consumer
             # hangs up, which are the two moments the work is genuinely over.
+            usage = _StreamUsageCollector()
+            delivered = False
             try:
                 async for chunk in table.stream(txn.id):
+                    delivered = True
+                    usage.feed(chunk)
                     yield chunk
             finally:
+                settled = table.get(txn.id)
+                failed = not delivered or (
+                    settled is not None and settled.state is TransactionState.FAILED
+                )
+                # Reported from the generator for the same reason the cleanup is: out here the
+                # answer has not been served yet, so its duration and token count do not exist.
+                observe(error=failed, output_units=usage.completion_tokens or 0)
                 table.cancel(txn.id, "consumer finished")
 
         return StreamingResponse(relay(), media_type="text/event-stream")
@@ -1500,10 +1550,34 @@ async def _serve_by_pull(
             pass
         settled = table.get(txn.id)
         if settled is None or settled.result is None:
+            observe(error=True)
             return _openai_error(504, "No worker returned a result", "engine_timeout")
+        observe(error=False, output_units=_result_completion_tokens(settled.result))
         return Response(content=settled.result, media_type="application/json")
     finally:
         table.cancel(txn.id, "consumer finished")
+
+
+def _result_completion_tokens(result: bytes) -> int:
+    """`_completion_tokens` for a worker's raw result bytes, under the same bounds.
+
+    The push path reads usage off an httpx.Response; a pulled result is the body on its own, so
+    it needs its own reader. Kept deliberately identical in what it accepts -- the same size cap
+    and the same `0 < value <= MAX_COUNTER` range -- so the two paths cannot come to disagree
+    about what a token count is.
+    """
+
+    if len(result) > _MAX_PERFORMANCE_RESPONSE_BYTES:
+        return 0
+    try:
+        payload = json.loads(result)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return 0
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    value = usage.get("completion_tokens") if isinstance(usage, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= MAX_COUNTER:
+        return 0
+    return value
 
 
 async def _proxy_media(

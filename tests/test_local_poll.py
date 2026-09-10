@@ -269,3 +269,82 @@ async def test_a_streamed_request_survives_long_enough_for_a_worker_to_claim_it(
     claimed = app.state.inflight.claim(node_id="h1", models=("m1",))
     assert claimed is not None, "the transaction was cancelled before any worker could claim it"
     assert claimed.is_stream is True
+
+
+def _pull_app_with_node():
+    import time as _time
+
+    from local.server import Node, create_app
+
+    app = create_app(grid_id="g1", grid_name="grid-one")
+    app.state.nodes = {
+        "n1": Node(
+            node_id="n1", role="engine", models=["m1"], host_id="h1",
+            load={"active_tasks": 0}, last_heartbeat=_time.time(),
+        )
+    }
+    return app
+
+
+async def test_the_pull_path_reports_demand_when_no_node_serves_the_model(monkeypatch):
+    """The allocator allocates against demand, and demand rides the inference path.
+
+    Every _observe_allocator_request lives in the push branch, so once pull became the default
+    every text request became invisible to the allocator -- it could no longer see that anyone
+    had asked for a model it was not running, which is the one signal that would make it warm
+    one. A 503 is the strongest demand there is: someone wanted this model and nothing served it.
+    """
+
+    from local.server import _proxy_openai, create_app
+
+    app = create_app(grid_id="g1", grid_name="grid-one")  # no nodes at all
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        "local.server._observe_allocator_request",
+        lambda _app, model, _started, **kw: seen.append({"model": model, **kw}),
+    )
+
+    request = Request({"type": "http", "method": "POST", "headers": []})
+    request._body = b'{"model": "m1"}'
+    response = await _proxy_openai(app, "chat/completions", request)
+
+    assert response.status_code == 503
+    assert len(seen) == 1, "the allocator never heard that a model was asked for"
+    assert seen[0]["model"] == "m1"
+    assert seen[0]["error"] is True
+    assert seen[0]["queue_depth"] == 1
+
+
+async def test_the_pull_path_reports_a_served_request_with_its_token_count(monkeypatch):
+    """Latency and output volume are how the allocator sizes what it already runs."""
+
+    import asyncio
+    import json as _json
+
+    from local.server import _proxy_openai
+
+    app = _pull_app_with_node()
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        "local.server._observe_allocator_request",
+        lambda _app, model, _started, **kw: seen.append({"model": model, **kw}),
+    )
+
+    request = Request({"type": "http", "method": "POST", "headers": []})
+    request._body = b'{"model": "m1"}'
+    serving = asyncio.create_task(_proxy_openai(app, "chat/completions", request))
+    await asyncio.sleep(0)
+
+    claimed = app.state.inflight.claim(node_id="h1", models=("m1",))
+    assert claimed is not None
+    app.state.inflight.finish(
+        claimed.id,
+        _json.dumps({"choices": [], "usage": {"completion_tokens": 42}}).encode(),
+    )
+
+    response = await asyncio.wait_for(serving, timeout=2.0)
+    assert response.status_code == 200
+    assert len(seen) == 1
+    assert seen[0]["error"] is False
+    assert seen[0]["output_units"] == 42
+    assert seen[0]["served_model"] == "m1"
