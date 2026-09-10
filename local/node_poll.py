@@ -11,6 +11,12 @@ import httpx
 # reads as a transport error instead of "no work yet".
 POLL_TIMEOUT_SECONDS = 35.0
 
+# Matches the push path this replaces (server.ENGINE_TIMEOUT_SECONDS). `read=None` is the load
+# bearing half: tokens arrive whenever the model produces them, so any read deadline cancels a
+# working generation rather than catching a broken one. Without it httpx's 5s default applied.
+ENGINE_TIMEOUT_SECONDS = 600
+ENGINE_TIMEOUT = httpx.Timeout(ENGINE_TIMEOUT_SECONDS, read=None)
+
 
 def run_one_cycle(
     grid: httpx.Client,
@@ -37,6 +43,7 @@ def run_one_cycle(
             "/v1/chat/completions",
             content=json.dumps(work["body"]).encode(),
             headers={"content-type": "application/json"},
+            timeout=ENGINE_TIMEOUT,
         )
         grid.post(f"/grid/v1/result/{txn_id}", content=answered.content, headers=headers)
     except httpx.HTTPError as exc:
