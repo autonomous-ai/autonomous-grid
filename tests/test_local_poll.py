@@ -63,3 +63,15 @@ def test_result_for_a_cancelled_transaction_tells_the_worker_to_stop():
     )
     assert response.status_code == 200
     assert response.json()["cancelled"] is True
+
+
+def test_the_real_app_mounts_the_poll_routes():
+    from local.server import create_app
+
+    app = create_app(grid_id="g1", grid_name="grid-one")
+    # app.routes wraps included routers lazily on this FastAPI version, so ask the
+    # OpenAPI schema (which fully resolves them) for the flat path list instead.
+    paths = set(app.openapi()["paths"])
+    assert "/grid/v1/poll" in paths
+    assert "/grid/v1/result/{txn_id}" in paths
+    assert isinstance(app.state.inflight, InflightTable)

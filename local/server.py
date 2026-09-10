@@ -24,6 +24,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from local.inflight import InflightTable
+from local.poll import poll_router
 from local.runtime import GRID_TYPE
 from shared.allocator.auth import (
     DEFAULT_NODE_TOKEN_TTL_SECONDS,
@@ -316,6 +318,8 @@ def create_app(
         allocator_state_path
     )
     app.state.allocator = allocator
+    app.state.inflight = InflightTable()
+    app.include_router(poll_router)
     app.state.allocator_authority_ttl_seconds = max(
         45.0,
         3.0 * allocator_interval_seconds,
