@@ -95,6 +95,26 @@ This matches what local mode already does: the node registry is an in-memory dic
 `local/server.py:1642`) rebuilt from heartbeats within one interval, and only allocator policy is
 written to disk, as JSON.
 
+### This is ephemeral state, not statelessness — the grid is single-process
+
+The distinction matters, and stating it wrongly would mislead whoever reads this next. The grid is
+**not** stateless: the transaction table lives in the memory of the exact process holding the
+consumer's connection. Three consequences follow, and the first is a hard limit:
+
+1. **The grid cannot be run as two processes behind a load balancer.** A worker's poll landing on
+   instance B cannot claim a transaction registered on instance A. Horizontal scaling would require
+   shared state — and that is precisely the point at which a database returns and this design's main
+   advantage over the internal relay disappears. Anyone proposing HA for a local grid is proposing a
+   different architecture, not a deployment change.
+2. **A grid restart kills every in-flight request.** Acceptable, and not a regression: the consumer's
+   connection breaks in the same instant, so nothing recoverable is lost.
+3. **The worker holds nothing the grid needs.** Its engine process and residency record are its own
+   business. If it dies, the transaction expires at its deadline; there is no distributed cleanup.
+
+The single-process assumption is therefore load-bearing. It is true of local mode today as well — the
+registry is already in-process memory — so this change inherits the constraint rather than
+introducing it, but it makes the constraint carry real per-request weight for the first time.
+
 ## Components
 
 Three units in `local/`, each with one job and a stated dependency.
