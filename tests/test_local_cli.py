@@ -3611,6 +3611,62 @@ def test_start_llm_passes_through_an_operator_override(monkeypatch, tmp_path):
     assert cmd[cmd.index("--flash-attn") + 1] == "off"
 
 
+def test_start_llm_scales_ctx_size_by_the_slot_count(monkeypatch, tmp_path):
+    """`--ctx-size` is per REQUEST; llama.cpp's `-c` is the whole KV pool, split across slots.
+
+    `--parallel N` statically carves `-c` into N slots of `ctx/N`, and the unified KV cache that
+    would share one buffer instead is only on when the slot count is `auto` — which it never is
+    here, because `--parallel` is always passed. Forwarding the operator's number raw therefore
+    handed each request `ctx/N` tokens while `remote/serve.py` advertised the undivided `ctx` to
+    the grid as `context_window`, over-promising the window N-fold to the auto-router.
+    """
+    cmd = _launch_argv(monkeypatch, tmp_path, ctx_size=32000, parallel=4)
+    assert cmd[cmd.index("--ctx-size") + 1] == "128000"
+    assert cmd[cmd.index("--parallel") + 1] == "4"
+
+
+def test_start_llm_leaves_ctx_size_alone_on_a_single_slot(monkeypatch, tmp_path):
+    """The common case must be untouched: one slot means N is N."""
+    cmd = _launch_argv(monkeypatch, tmp_path, ctx_size=32000, parallel=1)
+    assert cmd[cmd.index("--ctx-size") + 1] == "32000"
+
+
+def test_start_llm_scaling_never_resurrects_an_unset_ctx_size(monkeypatch, tmp_path):
+    """Unset stays unset whatever the slot count — llama.cpp must keep fitting itself to the box."""
+    assert "--ctx-size" not in _launch_argv(monkeypatch, tmp_path, parallel=8)
+
+
+class _DeadProc:
+    pid = 1
+
+    def poll(self):
+        return 1
+
+
+def test_wait_for_models_explains_the_scaled_kv_allocation(monkeypatch, tmp_path):
+    """A dead bring-up must name the allocation the operator never typed.
+
+    llama.cpp's own log says only that it could not allocate 128000 tokens; nothing in it connects
+    that back to the `--ctx-size 32000` that was passed for four slots.
+    """
+    log = tmp_path / "llama.log"
+    log.write_text("ggml_backend_buffer alloc failed\n")
+    proc = launcher.LlamaProcess(proc=_DeadProc(), port=8081, log=log, ctx_size=32000, parallel=4)
+    with pytest.raises(SystemExit, match="128000 tokens of KV cache across 4 slots"):
+        launcher.wait_for_models(proc)
+
+
+def test_wait_for_models_stays_quiet_when_there_is_nothing_to_explain(monkeypatch, tmp_path):
+    """One slot, or no `--ctx-size`, means the number in the log IS the number typed."""
+    log = tmp_path / "llama.log"
+    log.write_text("boom\n")
+    for kwargs in ({"ctx_size": 32000, "parallel": 1}, {"ctx_size": None, "parallel": 4}):
+        proc = launcher.LlamaProcess(proc=_DeadProc(), port=8081, log=log, **kwargs)
+        with pytest.raises(SystemExit) as excinfo:
+            launcher.wait_for_models(proc)
+        assert "KV cache" not in str(excinfo.value)
+
+
 def test_start_llm_pins_gpu_layers_only_on_unified_memory(monkeypatch, tmp_path):
     """Apple Silicon must not let llama.cpp spill layers to "system memory" — it is the same pool."""
     monkeypatch.setattr(launcher, "runtime_profile", lambda: launcher.APPLE_SILICON_RUNTIME)

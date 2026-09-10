@@ -458,7 +458,9 @@ The `grid join` flag set is the union of both modes, gated by mode:
 
 - **Both modes:** `--at` / `--serve` / `-m,--model` / `--kind <kind>` (alias `--engine`) / `--name`
   / `--all`, `--advertise-as` (or inline `-m real=pub`), `--endpoint-port` (alias `--llama-port`),
-  the llama tuning flags (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`),
+  the llama tuning flags (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`
+  — `--ctx-size N` is the window **one request** may use, so a Grid-launched llama-server reserves
+  N × its slot count of KV cache up front),
   `--heartbeat-interval` (seconds between heartbeats, default 15), `--api-key <key>` (overrides the
   env var and the key store, and warns that it is visible in shell history), and the media flags
   `--media` / `--bundle <bundle>` / `--comfyui-port` / `--media-port`.
@@ -474,7 +476,9 @@ The `grid join` flag set is the union of both modes, gated by mode:
   default 1, or 8 when the identity serves only API engines, pinned back to **1** when any of
   them is a `codex` seat: a flat-rate subscription is never hammered four-wide by default).
   Match it to the engine's own batch width — llama.cpp `--parallel`, vLLM `max_num_seqs` — or the
-  extra slots queue behind a batch that was never widened to take them. Finally, `--respawn` (stop
+  extra slots queue behind a batch that was never widened to take them. For a Grid-launched
+  llama-server this is also the slot count (`run_records.effective_parallel`), so raising it
+  multiplies the KV cache an explicit `--ctx-size` reserves. Finally, `--respawn` (stop
   the engine already serving this grid and start a fresh one — see below).
 - **Deprecated:** `--engine-label` — the grid page now derives the engine kind automatically, so it is
   accepted but inert (still matched by `grid leave --engine <label>`); `--pricing-input` /

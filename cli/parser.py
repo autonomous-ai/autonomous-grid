@@ -282,10 +282,15 @@ def _add_engines(sub) -> None:
     tuning.add_argument("--endpoint-port", "--llama-port", type=int, default=8081)
     tuning.add_argument("--heartbeat-interval", type=float, default=15.0)
     tuning.add_argument("--ctx-size", type=int, default=None, metavar="N",
-                        help="Pin the context window to N tokens. Left unset, the engine measures "
-                             "free memory at load and takes the largest window that fits — pinning "
-                             "turns that off, so an N this machine cannot hold fails to start "
-                             "instead of shrinking. N=0 is not 'unset': it demands the model's "
+                        help="Pin EACH REQUEST's context window to N tokens — the same thing vLLM's "
+                             "--max-model-len and SGLang's --context-length mean. Left unset, the "
+                             "engine measures free memory at load and takes the largest window that "
+                             "fits — pinning turns that off, so an N this machine cannot hold fails "
+                             "to start instead of shrinking. Because N is per request, the KV cache "
+                             "reserved is N × the slot count (--parallel, else --max-concurrency): "
+                             "4 slots at --ctx-size 32000 allocate 128000 tokens up front, and "
+                             "llama.cpp reserves every slot's share whether or not it is used. "
+                             "N=0 is not 'unset': it demands the model's "
                              "full trained window and spills weights into system RAM to get it.")
     tuning.add_argument("--n-predict", type=int, default=None)
     tuning.add_argument("--parallel", type=int, default=None)

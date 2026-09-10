@@ -57,7 +57,8 @@ non-interactive shell pass `--all` or `--engine <kind>`.
 | `--advertise-host HOST` | Host other machines should reach a Grid-launched engine on. |
 | `--endpoint-port N` | Built-in llama-server port (default 8081). |
 | `--heartbeat-interval S` | Seconds between heartbeats (default 15). |
-| `--ctx-size / --n-predict / --parallel / --temp / --flash-attn / --reasoning-budget` | Passed to a Grid-launched llama-server. |
+| `--ctx-size N` | Context window **per request** (as vLLM's `--max-model-len`). KV reserved is N × the slot count. |
+| `--n-predict / --parallel / --temp / --flash-attn / --reasoning-budget` | Passed to a Grid-launched llama-server. |
 
 Inspect and stop what's live:
 
