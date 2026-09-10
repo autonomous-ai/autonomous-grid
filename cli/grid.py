@@ -46,10 +46,8 @@ def cmd_up(args: argparse.Namespace) -> int:
         cfg, _ = _apply_up_overrides(cfg, args)
     # Both paths, first run included — a busy port must never be something the reader has to
     # resolve before they can get started.
-    # A grid predating TLS defaults has no opinion stored; HTTPS is what it gets on next start.
-    # Only `server_tls: false` — written by --no-tls — keeps plain HTTP.
-    if cfg.get("server_tls") is None and not cfg.get("server_tls_cert_file"):
-        cfg["server_tls"] = True
+    if cfg.get("server_tls") is None:
+        cfg["server_tls"] = _tls_default_for(cfg)
     tls_requested = bool(cfg.get("server_tls") or cfg.get("server_tls_cert_file"))
     if tls_requested:
         # The generated pair lands after overrides (the advertise host may have just changed), and
@@ -73,7 +71,6 @@ def cmd_up(args: argparse.Namespace) -> int:
         # written down, so moving it silently takes every engine offline with nothing to read.
         print(port_notice, file=sys.stderr)
     config.save_grid_config(cfg["grid_id"], cfg)
-    runtime.apply_server_tls_client_env(cfg)
     runtime.start_grid(cfg)
     cfg, local_only = _resolve_address(cfg)
     _report_up(cfg, local_only)
@@ -128,6 +125,22 @@ def _report_up(cfg: dict[str, Any], local_only: bool) -> None:
         return
     print("\nNext:  grid engine install llama.cpp")
     print("See:   grid info")
+
+
+def _tls_default_for(cfg: dict[str, Any]) -> bool:
+    """Whether a grid nobody gave an opinion about should serve HTTPS. It should not.
+
+    HTTPS-by-default was there to protect what the grid dialled OUT with: it reached engines
+    across the LAN carrying their api keys, so it minted a private CA to do it safely. Local mode
+    dials nothing now -- workers poll in, the engine certificate is gone, and a node no longer
+    uploads an engine key at all -- so that CA is cost with nothing left on the other side of the
+    trade. It is also where five of the seven production bugs that started this work came from.
+
+    `--tls` and `--tls-cert` are untouched and still mean exactly what they say; only the case
+    where nobody chose changes. An operator who already has a certificate keeps serving HTTPS.
+    """
+
+    return bool(cfg.get("server_tls_cert_file"))
 
 
 def _resolve_port(cfg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:

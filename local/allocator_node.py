@@ -1026,9 +1026,10 @@ class AllocatorNodeAgent:
             },
             "allocator": self._engine_envelope(residency),
         }
-        engine_api_key = self.runtime.engine_api_key_for(residency.model_id)
-        if isinstance(engine_api_key, str) and engine_api_key:
-            body["engine_api_key"] = engine_api_key
+        # The engine key is deliberately NOT sent. Under pull the grid never dials this engine --
+        # the worker's own poll loop does, on loopback, carrying the key itself -- and the grid's
+        # only remaining reader of it serves media, which an allocator node never advertises. So
+        # uploading it bought nothing and put a live credential on the wire on every registration.
         if active_tasks is not None:
             body["load"] = {"active_tasks": active_tasks}
         routable_attempt = residency.state == ResidencyState.READY

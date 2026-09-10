@@ -354,7 +354,12 @@ def test_node_heartbeats_runtime_slot_activity_for_direct_requests(tmp_path):
         engine = client.get("/nodes/discover").json()["engines"][0]
         assert engine["load"]["active_tasks"] == 2
         managed_engine = app.state.nodes[engine["node_id"]]
-        assert managed_engine.engine_api_key == managed.engine_api_key
+        # The grid is deliberately NOT given the engine key any more: under pull it never dials
+        # the engine, so holding one bought nothing and put a live credential on every
+        # registration. Pinned here as well as in
+        # test_a_node_no_longer_hands_its_engine_key_to_the_grid, because this test is the one
+        # that would notice it coming back through the registration wire rather than the source.
+        assert managed_engine.engine_api_key == ""
         assert "engine_api_key" not in engine
         residency = client.get("/allocator/status").json()["nodes"][0]["residencies"][0]
         assert residency["active_requests"] == 2
@@ -2381,3 +2386,22 @@ def test_the_poll_loop_client_carries_the_engine_key():
     # No key configured is not the same as an empty Bearer, which llama-server would reject.
     assert _engine_auth_headers("") == {}
     assert _engine_auth_headers(None) == {}
+
+
+def test_a_node_no_longer_hands_its_engine_key_to_the_grid():
+    """Under pull the grid never dials the engine, so the key it used to need is now a liability.
+
+    The grid's only remaining reader of engine_api_key is `_proxy_media`, and an allocator node
+    never advertises a media_url -- so for every node this code path serves, the key was being
+    uploaded, stored, and never read. Not sending it is what makes plain HTTP on a LAN a smaller
+    question than it was: the credential the transport guard is named after stops travelling.
+    """
+
+    import inspect
+
+    from local import allocator_node
+
+    source = inspect.getsource(allocator_node.AllocatorNodeAgent._register_engine)
+    assert "engine_api_key" not in source, (
+        "the node is still uploading an engine key the grid has no use for"
+    )

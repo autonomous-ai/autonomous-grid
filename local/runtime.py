@@ -206,9 +206,9 @@ def _read_pem(path: str | None, what: str) -> str:
 
 
 def server_tls_ca_bundle(cfg: dict[str, Any]) -> str:
-    """A file path this process/child can point SSL_CERT_FILE at to trust the grid CA.
+    """A file path a caller can pass to its own client's ``verify=`` to trust the grid CA.
 
-    ``httpx``/``ssl`` read ``SSL_CERT_FILE``; it must be a file, so when only the PEM body was
+    ``httpx``/``ssl`` want a file, so when only the PEM body was
     persisted (a config hand-edited or carried without its source path) it is materialised beside
     the grid so the trust survives restarts. Returns "" for a grid that serves plain HTTP.
     """
@@ -250,19 +250,6 @@ def learned_ca_path(control_url: str) -> Path | None:
         return None
     scope = stable_digest(str(control_url).rstrip("/"))[:16]
     return paths.grid_home() / "allocator" / scope / "tls" / "learned-ca.crt"
-
-
-def server_tls_client_env(cfg: dict[str, Any]) -> dict[str, str]:
-    """Environment that lets any httpx/ssl client in a child process trust this grid's HTTPS."""
-    bundle = server_tls_ca_bundle(cfg)
-    return {"SSL_CERT_FILE": bundle} if bundle else {}
-
-
-def apply_server_tls_client_env(cfg: dict[str, Any]) -> None:
-    """Trust this grid's CA for every client in the current process (self-signed LAN servers)."""
-    env = server_tls_client_env(cfg)
-    if env:
-        os.environ["SSL_CERT_FILE"] = env["SSL_CERT_FILE"]
 
 
 def advertised_address_works(url: str, timeout: float = 3.0) -> bool:
@@ -446,7 +433,7 @@ def _start_grid_locked(cfg: dict[str, Any]) -> int:
     key_file = str(cfg.get("server_tls_key_file") or "")
     if cert_file:
         command += ["--tls-cert", cert_file, "--tls-key", key_file]
-    launch_env = {**os.environ, **server_tls_client_env(cfg)}
+    launch_env = dict(os.environ)
     try:
         proc = subprocess.Popen(
             command,

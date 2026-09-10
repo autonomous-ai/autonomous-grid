@@ -35,21 +35,16 @@ def iter_grid_configs() -> list[dict[str, Any]]:
 
 
 def select_grid(name_or_id: str | None) -> dict[str, Any]:
-    """Resolve the grid and trust its HTTPS CA for this process.
+    """Resolve the grid.
 
-    A grid started with `--tls-cert` serves HTTPS; when it is also trusted only by a private CA
-    (`--tls-ca`), every later command's client must verify against it. Setting SSL_CERT_FILE here
-    — the one boundary every grid-addressing command passes — covers health probes, allocator
-    control calls, chat, and engine joins without threading the CA through each handler.
+    This used to install the grid's CA into SSL_CERT_FILE for the whole process, on the grounds
+    that it was the one boundary every grid-addressing command passes. That is exactly why it
+    was dangerous: SSL_CERT_FILE REPLACES the platform trust store rather than adding to it, and
+    every CA this codebase minted shared one subject, so a second grid's CA silently took over
+    verification for the first. Callers that need to verify pass `server_tls_ca_bundle(cfg)` to
+    their own client instead, which trusts one grid without blinding the process to everything.
     """
-    cfg = _select_grid(name_or_id)
-    try:
-        from . import runtime
-
-        runtime.apply_server_tls_client_env(cfg)
-    except Exception:  # a malformed CA must not blind every command to its grid
-        pass
-    return cfg
+    return _select_grid(name_or_id)
 
 
 def _select_grid(name_or_id: str | None) -> dict[str, Any]:

@@ -1626,3 +1626,66 @@ def test_allocator_engine_bind_supports_ipv6_only_advertised_hostname(monkeypatc
         ],
     )
     assert main_module._allocator_bind_host("worker-v6.internal") == "::"
+
+
+def test_a_node_may_join_a_plain_http_lan_grid(monkeypatch, tmp_path):
+    """The guard's own reason is gone, so the guard goes with it.
+
+    It refused a non-HTTPS control URL because an allocator node carried "private engine
+    credentials" to it, and it said so in its message. Under pull it carries none: the grid never
+    dials the engine, the worker attaches the key itself on loopback, and the node no longer
+    uploads one at all. What still crosses the LAN is the node's own control token and the
+    prompts -- a real cost, accepted deliberately, and the same cost `--no-tls` already carried.
+
+    Loopback stays exempt for the same reason it always was, so nothing about a one-machine grid
+    changes.
+    """
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "grid-home"))
+    # A cross-machine node authenticates with its own credential, exactly as it does over HTTPS.
+    monkeypatch.setenv(
+        "GRID_ALLOCATOR_NODE_TOKEN",
+        allocator.mint_node_token("secret-token", "host-a", ttl_seconds=3600),
+    )
+    # managed=False is the case that matters: the grid lives on ANOTHER machine, so the control
+    # URL is the LAN one rather than loopback. A same-machine grid was always allowed over http
+    # and is unaffected either way.
+    cfg = grid_config(managed=False)
+    cfg["lan_signaling_url"] = "http://10.0.0.5:8299"
+    cfg["allocator_control_token"] = "secret-token"
+    monkeypatch.setattr(config, "select_grid", lambda _value: cfg)
+    monkeypatch.setattr(
+        allocator, "_request", lambda *_a, **_k: {"grid_id": cfg["grid_id"]}
+    )
+    monkeypatch.setattr(runtime, "cli_command", lambda: ["grid"])
+    monkeypatch.setattr(run_records, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(allocator, "_await_process_start_marker", lambda _pid: "birth")
+    scope = allocator._scope(cfg["grid_id"])
+    jsonio.atomic_write_json(allocator._node_state_path(scope), {"host_id": "host-a"})
+
+    class Process:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+    launched: dict[str, object] = {}
+
+    def popen(command, **_kwargs):
+        launched["command"] = command
+        return Process()
+
+    def await_start(process, startup_path, instance_id, _log_path):
+        jsonio.atomic_write_json(startup_path, {
+            "instance_id": instance_id, "pid": process.pid,
+            "host_id": "host-a", "registered_at": 1.0,
+        })
+
+    monkeypatch.setattr(allocator.subprocess, "Popen", popen)
+    monkeypatch.setattr(allocator, "_await_node_start", await_start)
+    args = cli.build_parser().parse_args(
+        ["allocator", "node", "start", "--advertise-host", "10.0.0.6"]
+    )
+
+    assert args.handler(args) == 0, "a node was refused a plain-HTTP LAN grid"
+    assert launched.get("command"), "no worker was started"

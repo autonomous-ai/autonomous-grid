@@ -42403,3 +42403,23 @@ def test_stop_names_the_way_out_when_it_cannot_prove_ownership(monkeypatch):
     message = str(excinfo.value)
     assert "33467" in message
     assert "kill" in message.lower(), "the refusal must name the command that ends this"
+
+
+def test_a_new_local_grid_serves_plain_http_by_default(monkeypatch, tmp_path):
+    """Local mode is all pull now, so it stops minting a certificate nobody asked for.
+
+    HTTPS-by-default existed to protect the engine credentials the grid used to dial out with.
+    It carries none any more -- the push path is gone, the engine certificate is gone, and the
+    node no longer uploads an engine key -- so the private CA it required is cost without a
+    matching benefit, and that CA is what five of the seven production bugs came out of.
+
+    `--tls` still works and still means what it says, for anyone who wants the LAN encrypted:
+    what changes is only what happens when nobody chooses.
+    """
+
+    from cli import grid as grid_cmd
+
+    cfg = {"grid_id": "ag-x", "name": "x", "port": 8299, "host": "0.0.0.0"}
+    assert not grid_cmd._tls_default_for(cfg), (
+        "a grid nobody asked to encrypt is still minting a certificate"
+    )
