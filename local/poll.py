@@ -59,14 +59,24 @@ async def result(request: Request, txn_id: str) -> dict:
     host_id = request.headers.get("x-grid-host-id", "")
     _require_node(request, host_id)
 
-    payload = await request.body()
     table = request.app.state.inflight
     txn = table.get(txn_id)
-    if txn is not None and txn.is_stream:
-        accepted = table.publish(txn_id, payload)
-    else:
-        accepted = table.finish(txn_id, payload)
+    if txn is None or not txn.is_stream:
+        return {"cancelled": not table.finish(txn_id, await request.body())}
 
+    # The worker sends the engine's SSE as this request's body while the engine is still
+    # writing it, so read it as it arrives. Buffering with `await request.body()` would hold
+    # every byte until the engine stopped -- the one thing a streamed answer exists to avoid.
+    accepted = True
+    async for chunk in request.stream():
+        if chunk:
+            accepted = table.publish(txn_id, chunk)
+            if not accepted:
+                break
+    # The body ending IS the end of the answer, so end the consumer's stream here rather than
+    # waiting for a separate /done the worker would have to remember to send.
+    if accepted:
+        accepted = table.finish(txn_id, None)
     return {"cancelled": not accepted}
 
 
