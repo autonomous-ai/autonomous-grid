@@ -18,13 +18,15 @@ Which grid I work on is my decision, but saying it to you *is* me deciding — d
 the command back. `grid ls` lists the names if I got one wrong. Everything after that
 acts on the grid you just selected.
 
-Three things I'll ask for, each with its own section:
+Five things I'll ask for, each with its own section:
 
     A. connect opencode to the grid, so I can chat with its models
     B. contribute this machine to the grid, so it serves a model for others
     C. show me what the grid is doing
+    D. make a grid of my own, and say who is on it
+    E. keep the CLI current
 
-Read the section for what I asked. Don't do the other two unprompted. A "use <name>" may
+Read the section for what I asked. Don't do the others unprompted. A "use <name>" may
 arrive on its own or attached to one of these — "use Omagrid and connect opencode to the
 grid" is one request, not two. Select the grid first, then do the section.
 
@@ -326,6 +328,92 @@ Two things to get right when you summarise these for me:
 
 Pick the split that answers what I asked and show me that one, rather than dumping all
 four commands.
+
+
+## D. Make a grid of my own
+
+Sections A-C act on a grid that already exists. This one brings one into being: mine, with
+my machines and my members. `start` is the whole of it — there is no separate create verb,
+so the first `grid start` makes the grid and every later one just starts it again.
+
+**This is the one place a name belongs on the command line.** The ground rule above says to
+leave the grid name off, because `grid use` has already chosen one — but a grid that does
+not exist yet cannot be the selected one, so here the name is the argument:
+
+    grid start <name>
+
+Pick the name I gave you, verbatim. If I did not give one, ask for it rather than
+inventing one: the name is what I will type from then on, it shows up in the model picker,
+and section A derives the provider id from it — so a name with dots or spaces follows the
+same slugging rules listed there.
+
+`grid ls` shows the grids I already have. Run it first when my wording suggests the grid
+may exist ("start my grid", "spin up acme again"): if the name is already in that list,
+`grid start <name>` starts it rather than creating anything, and that is fine — just tell
+me which of the two happened.
+
+**The network type is chosen once, at creation.**
+
+    grid start <name>                                 # permissioned-public (default)
+    grid start <name> --type permissioned-providers
+
+`permissioned-public` lets anyone signed in send requests, while only members I add may
+serve. `permissioned-providers` limits both sides to members. Pass `--type` only on a grid
+being created — on one that exists it is noise, and it will not change the type. When I say
+something like "make it providers-only" or "keep it to my team", that is
+`permissioned-providers`; when I say nothing about it, take the default and mention which
+one it got.
+
+**Then select it**, so everything afterwards acts on it:
+
+    grid use <name>
+
+**Members.** The grid is mine alone until I add people, by email:
+
+    grid members add <email>                     # role both (default)
+    grid members add <email> --role consumer     # may call it
+    grid members add <email> --role provider     # may serve it
+    grid members list
+    grid members remove <email>
+
+`both` is the default and is usually what I mean. Take the email from me exactly as I gave
+it — adding someone is a real invitation to a real person, so an address you guessed at or
+corrected is a mistake I cannot undo from here. If I named a person without an address,
+ask.
+
+**What usually comes next.** Creating a grid leaves it empty, so expect one of these in the
+same breath, and do them as their own sections once the grid is selected:
+
+  - "connect opencode to it" -> section A. Because the provider id comes from the grid's
+    name, this **adds** a provider alongside the ones I already have.
+  - "contribute this machine to it" -> section B. A machine can serve several grids at
+    once; joining mine takes nothing away from any other grid it already serves.
+
+**`grid stop <name>` is not the mirror of start.** It stops the grid for everyone on it,
+not just for me. Tell me what it will do and ask first, the same as starting a grid I did
+not ask you to start.
+
+
+## E. Keep the CLI current
+
+    grid update --check     # report only, install nothing
+    grid update             # upgrade in place
+
+Run `--check` first and tell me what it found. Upgrade when I ask, or when a command
+failed in a way that reads like a version gap — an option this file uses that argparse
+says is unrecognised, for example.
+
+**A machine that is serving keeps running the old version.** `grid update` replaces the
+CLI, and an engine that was already joined carries on with what it had; it picks the new
+version up when it is restarted (`grid leave`, then section B again). Say that when I am
+serving, and let me pick the moment — a restart takes the machine off the grid for as long
+as the engine takes to come back.
+
+**A stale-version line on stderr is a notice, not a failure.** Any `grid` command may print
+one after its output, at most once a day, when a newer release exists. The command still
+succeeded: report what I asked for, and mention the notice separately rather than treating
+it as an error. It stays quiet under `--json`, when the output is piped, and when
+`GRID_NO_UPDATE_CHECK=1` is set.
 
 
 ## When something fails

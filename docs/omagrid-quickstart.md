@@ -115,6 +115,45 @@ anything worth watching.
 Under the hood these are `grid stats --verbose` and `grid usage --by …`. You can run them
 yourself any time.
 
+## 6. Create your own grid
+
+Omagrid is a grid you joined. The same machinery spins up one that is yours — your machines,
+your members, your models — and OpenCode drives it exactly the same way.
+
+Ask OpenCode:
+
+```text
+create my own grid called <name>
+```
+
+Pick any name; that is how you call it from here on. It lands as `permissioned-public`: anyone
+signed in can send it requests, and the members you add bring the machines. Want it tighter? Say
+**"make it providers-only"** and membership covers both jobs. Choose once — the type is set at
+creation and stays.
+
+Then fill it:
+
+```text
+add teammate@example.com to my grid
+```
+
+```text
+contribute this machine to <name>
+```
+
+The first invites someone by email — add **"as a consumer"** or **"as a provider"** to hand them
+just that half. The second is step 4 again, aimed at your own grid: same model, same engine on
+disk. Your machine happily serves both grids at once.
+
+Point any other client at it with **"print my grid's endpoint and key"** — OpenAI-compatible,
+same as Omagrid.
+
+**"switch back to Omagrid"** moves where your own requests go. Everything your machine serves
+keeps serving.
+
+Under the hood these are `grid mode remote`, `grid start <name> [--type …]`, `grid members add
+<email> --role …`, `grid join <name> --serve …`, `grid info --env`, and `grid use <name>`.
+
 ## Where to go next
 
 - **Using another client?** Omagrid is an OpenAI-compatible endpoint. `grid info --env` prints
