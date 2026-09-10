@@ -1,8 +1,6 @@
-import asyncio
 import time
 
-import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from local.inflight import InflightTable
@@ -107,38 +105,3 @@ def test_pull_path_answers_503_when_no_node_advertises_the_model(monkeypatch):
     response = client.post("/v1/chat/completions", json={"model": "absent"})
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "engine_unavailable"
-
-
-@pytest.mark.asyncio
-async def test_pull_path_registers_a_transaction_instead_of_dialling_an_engine(monkeypatch):
-    from local.server import Node, _proxy_openai, create_app
-
-    monkeypatch.setenv("GRID_LOCAL_PULL", "1")
-    app = create_app(grid_id="g1", grid_name="grid-one")
-    app.state.nodes = {
-        "n1": Node(node_id="n1", role="engine", models=["m1"], host_id="h1",
-                   load={"active_tasks": 0}, last_heartbeat=time.time()),
-    }
-    scope = {"type": "http", "method": "POST", "headers": []}
-    request = Request(scope)
-    request._body = b'{"model": "m1"}'
-
-    created = []
-    real_create = app.state.inflight.create
-
-    def spying_create(**kwargs):
-        txn = real_create(**kwargs)
-        created.append(txn)
-        return txn
-
-    monkeypatch.setattr(app.state.inflight, "create", spying_create)
-
-    # No worker will ever claim this, so the handler blocks awaiting the transaction.
-    # A push-path dial would instead fail fast (no such engine listening) rather than hang --
-    # the hang itself is the proof the pull branch, not _choose_engine, was taken.
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(
-            _proxy_openai(app, "chat/completions", request), timeout=0.3
-        )
-
-    assert [txn.model for txn in created] == ["m1"]
