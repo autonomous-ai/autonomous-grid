@@ -1,8 +1,10 @@
-"""The five billing values that cross a repository boundary, pinned (ADR 0042 D-l).
+"""The six billing values that cross a repository boundary, pinned (ADR 0042 D-l; ADR 0043 D-h).
 
 A grid's money is counted in **credits** — a thousandth of a dollar — and four wire values plus one
-sentence carry that unit between three repositories that share no code. Each is hand-duplicated and
-kept in step by editing both sides; this file is what says so out loud.
+sentence carry that unit between three repositories that share no code. A sixth value carries
+something else entirely: *whether this grid may be charged at all*, decided where the policy lives
+and shipped to the relay as a conclusion. Each is hand-duplicated and kept in step by editing both
+sides; this file is what says so out loud.
 
 ⚠️ **Not one of the five has a half in THIS repository**, which is why they are pinned here rather
 than beside an implementation. Two run grid-src ↔ grid-apis, one is a bare number nobody sends, and
@@ -30,6 +32,12 @@ What each failure costs, because they differ and the differences are the whole d
 * the refusal sentence — a **disclosure**, not an outage: the app's substring match misses and it
   renders the relay's raw text, which prints the viewer's exact balance and the grid's threshold
   into their chat window.
+* `billing_eligible` — the odd one out: **nothing breaks in either direction**. The key absent, or
+  read under another name, leaves the relay's column `NULL`, and `NULL` falls back to the predicate
+  that was hardcoded there before (ADR 0043 D-c). So this pin does not guard a failure; it guards
+  the moment the fallback stops being equivalent — the day somebody widens the billable set and
+  discovers the fleet never read the answer. Its rollout order gates an operator's *action*, not a
+  release.
 """
 from __future__ import annotations
 
@@ -46,6 +54,10 @@ _COST_FIELD = "cost_credits"
 _BALANCE_FIELD = "balance_credits"
 _MIN_BALANCE_FIELD = "min_balance_credits"
 _CREDITS_PER_USD = 1000
+#: The verdict for ONE network, computed in grid-apis and stored by the relay (ADR 0043 D-b). Not a
+#: rename of anything, so it has no entry in `_RETIRED` below and its pin asserts presence on both
+#: sides only — there is no old spelling whose survival would make a unit error answer 200.
+_ELIGIBLE_FIELD = "billing_eligible"
 #: The app lowercases before matching, so the phrase is pinned in the relay's own capitalisation and
 #: lowered for the app's half. Only the sentence's NUMBERS became credits; these bytes did not move.
 _REFUSAL_PHRASE = "Insufficient balance"
@@ -189,6 +201,11 @@ def _relay() -> ast.Module:
     return _source(grid_src_private_server(), "relay.py")
 
 
+def _relay_sync() -> ast.Module:
+    """The relay's snapshot reader lives beside the token verifier, not in `relay.py`."""
+    return _source(grid_src_private_server(), "grid_auth.py")
+
+
 def _control_plane(module: str) -> ast.Module:
     return _source(grid_apis_root(), "grid_networks", module)
 
@@ -256,6 +273,41 @@ def test_both_repositories_convert_at_the_same_ratio():
         "grid-src converts a cost to credits at a different ratio than ADR 0042 D-a states")
     assert _module_number(_control_plane("store.py"), "CREDITS_PER_USD") == _CREDITS_PER_USD, (
         "grid-apis turns a dollar top-up into credits at a different ratio than ADR 0042 D-a states")
+
+
+# ── the verdict, which is an ADDITION rather than a rename ───────────────────────────────────────
+
+def test_the_snapshot_and_the_relay_agree_on_the_eligibility_verdict():
+    """`GET /networks/{id}/sync-snapshot` — the answer *may this grid ever be charged*.
+
+    ⚠️ **The only value in this file whose disagreement costs nothing today**, and the pin exists
+    for exactly that reason. A missing or misspelled key leaves `grid_local_network_state
+    .billing_eligible` at `NULL`, and the relay's `NULL` fallback is the hardcoded predicate the
+    verdict replaces (ADR 0043 D-c) — so both directions degrade to *current behaviour* and no
+    suite, log line or status code anywhere reports the drift. What it costs arrives later and
+    somewhere else: the first operator to widen the billable set finds the switch answering success
+    while nobody is charged, which is the first of the two disasters the billing-on preconditions
+    exist to prevent.
+
+    ⚠️ **Computed in the ROUTE, and this pin says so.** `_serialize_network` runs behind six
+    endpoints, one of which lists every network visible to a signed-in account; the verdict needs a
+    settings read (ADR 0043 D-a), so computing it there turns a listing of N networks into N
+    configuration reads for a field one consumer wants. Asserting the shared serializer stays silent
+    is the executable half of that decision — without it the cheapest way to make the first
+    assertion pass is the one D-b rules out.
+    """
+    control_plane = _control_plane("handler.py")
+    assert _ELIGIBLE_FIELD in _wire_keys(_named(control_plane, "sync_snapshot")), (
+        f"grid-apis' sync_snapshot does not name {_ELIGIBLE_FIELD!r}; the relay then stores NULL "
+        f"and keeps deciding for itself, which is invisible until the billable set is widened")
+    assert _ELIGIBLE_FIELD not in _wire_keys(_named(control_plane, "_serialize_network")), (
+        f"grid-apis computes {_ELIGIBLE_FIELD!r} in the SHARED serializer. ADR 0043 D-b puts it on "
+        f"the sync-snapshot route alone: that serializer is behind six endpoints, one of them a "
+        f"listing, and the verdict costs a settings read per network")
+
+    assert _ELIGIBLE_FIELD in _wire_keys(_named(_relay_sync(), "apply_sync_snapshot")), (
+        f"grid-src's apply_sync_snapshot does not read {_ELIGIBLE_FIELD!r}, so the control plane's "
+        f"answer is computed, shipped and thrown away — a policy nothing reads")
 
 
 # ── the sentence, which is a contract with a repository written in another language ──────────────

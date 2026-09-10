@@ -402,6 +402,29 @@ none.** Verified across all three repositories. Everything in this ADR can ship 
 a member's engine will earn credits it has no way to take out. Switching billing on before that
 exists promises people money they cannot have.
 
+⚠️ **Amended 2026-09-10 — "the ONE type that can be billed" is superseded by ADR 0043.** Condition 1
+survives intact as a *condition*; what stops being true is that there is one such type and that it
+is a constant. The billable set becomes a control-plane setting, and the predicate both doors share
+reads it instead of comparing against `permissioned-providers`. Three parts of the wording above
+must not be acted on as written:
+
+- **"the one type"** — there may be several, and which ones is an operator's decision rather than a
+  release. The refusal's own sentence and the creation door's downgrade warning both name the set
+  they read, because a refusal that states a policy no longer in force misinforms rather than
+  refuses (ADR 0043 D-g).
+- **"the relay's own predicate"** — the relay no longer holds a predicate. It receives the
+  conclusion for its own grid on the sync snapshot and reads it; the policy is never duplicated
+  across the seam (ADR 0043 D-b). Until that snapshot lands the relay falls back to exactly the
+  predicate described here, which is why this paragraph stays rather than being deleted.
+- **The disaster this condition prevents is reachable again by an operator action.** Widening the
+  set while relays still fall back means the switch stops refusing, the route answers `200`, and
+  nobody is charged. The gate is an ordering the operator controls — the relay's half lands across
+  the fleet before the set is widened past its default (ADR 0043 D-h).
+
+Unchanged by that amendment, and worth restating because the surrounding sentences move around them:
+the default stays off, a grid's own owner still cannot switch billing on, and the withdrawal-path
+paragraph directly above still holds.
+
 ### D-l — Five values enter the cross-repo lockstep register, and one of them has no half in this repository
 
 The register contains **zero** billing rows today while four live cross-repository contracts run
