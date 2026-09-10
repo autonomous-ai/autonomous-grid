@@ -160,6 +160,28 @@ class EngineOrchestratorBackend:
         query = getattr(self._for_handle(handle, model_id), "active_requests", None)
         return query(handle, model_id) if callable(query) else None
 
+    def active_requests_detail(
+        self, handle: RuntimeHandle, model_id: str
+    ) -> tuple[int | None, str]:
+        """Forward the adapter's reason for an unknowable count.
+
+        Without this the orchestrator answers a bare ``None`` and the refusal built on it names no
+        gate, which is exactly how an unobservable engine and a local ownership check became
+        indistinguishable on a live grid. An adapter that has no detailed form still answers.
+        """
+
+        adapter = self._for_handle(handle, model_id)
+        detailed = getattr(adapter, "active_requests_detail", None)
+        if callable(detailed):
+            return detailed(handle, model_id)
+        query = getattr(adapter, "active_requests", None)
+        if not callable(query):
+            return None, f"runtime {handle.runtime or self.default_runtime!r} reports no slot count"
+        count = query(handle, model_id)
+        if count is None:
+            return None, f"runtime {handle.runtime or self.default_runtime!r} could not be observed"
+        return count, ""
+
     def cancel_pending(self) -> None:
         for adapter in self.adapters.values():
             cancel = getattr(adapter, "cancel_pending", None)
