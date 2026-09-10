@@ -26,14 +26,28 @@ def run_one_cycle(
     grid: httpx.Client,
     engine: httpx.Client,
     *,
-    host_id: str,
+    host_id: str = "",
+    node_id: str = "",
     models: Iterable[str],
     token: str,
 ) -> bool:
+    """One claim-serve-report cycle for either kind of worker.
+
+    An allocator-managed node identifies by ``host_id`` and proves it with ``token``. A plain
+    `grid join` engine identifies by ``node_id``, whose proof is its registration -- it has no
+    token, because registering never needed one.
+    """
+
+    models = tuple(models)
     headers = {"x-grid-allocator-node-token": token, "x-grid-host-id": host_id}
+    if node_id and not host_id:
+        headers = {"x-grid-node-id": node_id}
     claimed = grid.get(
         "/grid/v1/poll",
-        params={"host_id": host_id, "models": ",".join(models)},
+        params={
+            **({"host_id": host_id} if host_id else {"node_id": node_id}),
+            "models": ",".join(models),
+        },
         headers=headers,
         timeout=POLL_TIMEOUT_SECONDS,
     )

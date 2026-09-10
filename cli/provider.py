@@ -1060,6 +1060,9 @@ def _run_engine(args: SimpleNamespace) -> int:
         if media_url:
             print(f"media_url={media_url}")
         print("Send SIGTERM (grid leave) to unregister.")
+        _start_join_poll_loop(
+            grid_url, node_id, endpoint_url or "", advertised_models, getattr(args, "api_key", None)
+        )
         while True:
             time.sleep(max(1.0, float(args.heartbeat_interval)))
             try:
@@ -1279,6 +1282,52 @@ def _media_capabilities(models: list[str]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # registration / state
 # ---------------------------------------------------------------------------
+
+def _start_join_poll_loop(
+    grid_url: str,
+    node_id: str,
+    endpoint_url: str,
+    models: list[str],
+    api_key: str | None = None,
+) -> None:
+    """Serve local-mode work by polling, the way an allocator node does.
+
+    A joined engine used to need no loop at all: the grid dialled the endpoint it advertised.
+    Under pull nothing dials it, so without this it registers, shows up in `grid engines`, and
+    then never receives a single request -- which is what `grid join` had become.
+
+    Daemon thread and never fatal: heartbeating is this process's actual job, and an engine that
+    stops answering is a better outcome than one that exits.
+    """
+
+    import threading
+
+    from local import node_poll
+
+    if not endpoint_url:
+        return
+    base = endpoint_url.rstrip("/")
+    for suffix in ("/v1", "/v1/"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    headers = {"authorization": f"Bearer {api_key}"} if api_key else {}
+    grid_client = httpx.Client(base_url=grid_url)
+    engine_client = httpx.Client(base_url=base, headers=headers)
+    stop = threading.Event()
+
+    def loop() -> None:
+        while not stop.is_set():
+            try:
+                node_poll.run_one_cycle(
+                    grid_client, engine_client, node_id=node_id, models=tuple(models), token=""
+                )
+            except Exception as exc:  # one bad cycle must never end the loop
+                print(f"Poll cycle failed ({exc!r}); retrying", file=sys.stderr)
+                stop.wait(2.0)
+
+    threading.Thread(target=loop, daemon=True).start()
+
 
 def _register_engine(grid_url: str, node_id: str, payload: dict[str, Any]) -> None:
     try:

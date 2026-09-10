@@ -141,3 +141,27 @@ def test_the_poll_loop_survives_a_transport_error_and_keeps_polling():
     _poll_until_stopped(cycle, stop, backoff_seconds=0.0)
 
     assert len(calls) >= 3, "the loop stopped at the first transport error"
+
+
+def test_a_joined_engine_polls_by_node_id_with_no_token():
+    """`grid join` has no allocator token, because registering never required one."""
+
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/grid/v1/poll":
+            seen["params"] = dict(request.url.params)
+            seen["node_header"] = request.headers.get("x-grid-node-id")
+            seen["token_header"] = request.headers.get("x-grid-allocator-node-token")
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+    grid = httpx.Client(base_url="http://grid.invalid", transport=transport)
+    engine = httpx.Client(base_url="http://192.168.1.9:11434", transport=transport)
+
+    assert run_one_cycle(grid, engine, node_id="joined-1", models=("m1",), token="") is False
+    assert seen["params"] == {"node_id": "joined-1", "models": "m1"}
+    assert seen["node_header"] == "joined-1"
+    # No empty allocator token: the grid reads a blank one as a failed proof, not as absence.
+    assert seen["token_header"] is None

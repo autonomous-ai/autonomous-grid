@@ -1202,7 +1202,8 @@ async def _serve_by_pull(
     affinity_digest = _affinity_digest(request.headers.get("x-grid-affinity-key"))
     workflow_key = affinity_digest.hex() if affinity_digest is not None else ""
 
-    if _choose_node(app, model) is None:
+    host_id = _choose_node(app, model)
+    if host_id is None:
         _observe_allocator_request(
             app,
             model,
@@ -1215,6 +1216,9 @@ async def _serve_by_pull(
         return _openai_error(
             503, f"No active local engine for model {model!r}", "engine_unavailable"
         )
+    upstream_model = _upstream_model_for(app, host_id, model)
+    if upstream_model != model:
+        raw_body = json.dumps({**body, "model": upstream_model}).encode()
     txn = table.create(model=model, body=raw_body, is_stream=bool(body.get("stream")))
 
     def observe(*, error: bool, output_units: int = 0) -> None:
@@ -1245,11 +1249,14 @@ async def _serve_by_pull(
             # is handed a 200 carrying nothing. Here it runs when the stream ends or the consumer
             # hangs up, which are the two moments the work is genuinely over.
             usage = _StreamUsageCollector()
+            capture = _StreamCollector(body) if _capture_enabled() else None
             delivered = False
             try:
                 async for chunk in table.stream(txn.id):
                     delivered = True
                     usage.feed(chunk)
+                    if capture is not None:
+                        capture.feed(chunk)
                     yield chunk
             finally:
                 settled = table.get(txn.id)
@@ -1259,6 +1266,10 @@ async def _serve_by_pull(
                 # Reported from the generator for the same reason the cleanup is: out here the
                 # answer has not been served yet, so its duration and token count do not exist.
                 observe(error=failed, output_units=usage.completion_tokens or 0)
+                # Stored only after the last chunk has left, never during: a training example is
+                # never worth delaying a byte of someone's answer for.
+                if capture is not None and not failed:
+                    capture.store()
                 table.cancel(txn.id, "consumer finished")
 
         return StreamingResponse(relay(), media_type="text/event-stream")
@@ -1274,6 +1285,86 @@ async def _serve_by_pull(
         return Response(content=settled.result, media_type="application/json")
     finally:
         table.cancel(txn.id, "consumer finished")
+
+
+def _capture_enabled() -> bool:
+    try:
+        from train.capture import load_policy
+
+        return load_policy().enabled
+    except Exception:  # noqa: BLE001 — never let this decide anything about serving
+        return False
+
+
+def _stream_delta(payload: dict) -> str:
+    """The text in one streamed chunk, whichever dialect it arrived in."""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, dict):
+        return ""
+    delta = first.get("delta")
+    if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+        return delta["content"]
+    if isinstance(first.get("text"), str):
+        return first["text"]
+    return ""
+
+
+class _StreamCollector:
+    """Reassembles a streamed answer so it can become a training example.
+
+    Two rules make this safe on a serving path: the buffer is bounded (a long stream stops being a
+    candidate example rather than growing without limit), and nothing is stored until after the
+    final chunk has been handed to the client.
+    """
+
+    def __init__(self, body: dict, limit: int = 16_000) -> None:
+        self.request_id = uuid.uuid4().hex[:16]
+        self._prompt = _prompt_text(body)
+        self._model = str(body.get("model") or "")
+        self._parts: list[str] = []
+        self._size = 0
+        self._limit = limit
+
+    def feed(self, chunk: bytes) -> None:
+        if self._size >= self._limit:
+            return
+        try:
+            text = chunk.decode("utf-8", errors="ignore")
+        except Exception:  # noqa: BLE001
+            return
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                delta = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            piece = _stream_delta(delta)
+            if piece:
+                self._parts.append(piece)
+                self._size += len(piece)
+
+    def store(self) -> None:
+        try:
+            from train.capture import clip, record
+
+            answer = clip("".join(self._parts))
+            if self._prompt and answer:
+                record(
+                    clip(self._prompt),
+                    answer,
+                    model=self._model,
+                    request_id=self.request_id,
+                )
+        except Exception:  # noqa: BLE001 — a capture problem costs an example, never a response
+            return
 
 
 def _result_completion_tokens(result: bytes) -> int:
@@ -1611,7 +1702,11 @@ def _node_by_host_id(app: FastAPI, host_id: str) -> Node | None:
     """The registered engine record for ``host_id``, or None once it has gone away."""
 
     return next(
-        (node for node in _nodes(app).values() if node.host_id == host_id),
+        (
+            node
+            for node in _nodes(app).values()
+            if (node.host_id or node.node_id) == host_id
+        ),
         None,
     )
 
@@ -1627,12 +1722,29 @@ def _choose_node(app: FastAPI, model: str) -> str | None:
     candidates = [
         node
         for node in _active_engines(app, model)
-        if node.host_id and not _proxy_route_is_quarantined(node, model, now=route_now)
+        if not _proxy_route_is_quarantined(node, model, now=route_now)
     ]
     if not candidates:
         return None
     best = min(candidates, key=lambda node: int(node.load.get("active_tasks") or 0))
-    return best.host_id
+    # host_id for an allocator-managed node, node_id for a plain `grid join` one. Requiring
+    # host_id excluded joined engines entirely -- they never set one -- which 503'd the
+    # documented way to lend a machine. Same fallback `_allocator_snapshots` already uses.
+    return best.host_id or best.node_id
+
+
+def _upstream_model_for(app: FastAPI, host_id: str, model: str) -> str:
+    """The name the chosen node's engine actually answers to, or ``model`` when they agree.
+
+    A consumer asks for the ADVERTISED name; an external engine (Ollama, vLLM) only knows its
+    own, and 404s on an alias it has never heard of. The push path rewrote the body before
+    forwarding; under pull the body reaches the worker verbatim, so the rewrite has to happen
+    before the transaction is created or it does not happen at all.
+    """
+
+    node = _node_by_host_id(app, host_id)
+    upstream = node.upstream.get(model) if node is not None else None
+    return upstream if upstream and upstream != model else model
 
 
 def _requested_output_tokens(body: Mapping[str, Any]) -> int:

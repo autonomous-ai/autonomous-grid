@@ -4120,40 +4120,53 @@ def test_run_engine_external_advertise_as_maps_upstream(monkeypatch, tmp_path):
     assert calls["payload"]["upstream"] == {"ollama-model": "qwen3:0.6b"}  # engine gets the real name
 
 
-def test_local_proxy_rewrites_alias_to_upstream_model(monkeypatch):
-    """The local grid proxy must forward the engine's REAL model name, not the advertised alias the
-    consumer used — else an external engine (Ollama/vLLM) 404s on the unknown alias (Issue 1, local)."""
+def test_local_grid_rewrites_alias_to_upstream_model_before_the_worker_sees_it(monkeypatch):
+    """The grid must hand the worker the engine's REAL model name, not the advertised alias --
+    else an external engine (Ollama/vLLM) 404s on a name it has never heard of (Issue 1, local).
+
+    Same requirement as the push-path version this replaces; a different moment. Push rewrote the
+    body as it forwarded. Under pull the body reaches the worker verbatim, so the rewrite has to
+    land before the transaction is created or it never happens -- which is exactly what the
+    conversion had silently lost until this test was moved rather than deleted.
+    """
+
+    import asyncio
+
+    from fastapi import Request
+
     from local import server as local_server
 
-    # This dials the mocked engine directly and asserts on the forwarded request -- the push
-    # path. Pull is the default now, and it has no engine to dial at all until Task 8 removes
-    # this path entirely, so without this the request would hang waiting for a worker.
-    monkeypatch.setenv("GRID_LOCAL_PUSH", "1")
     app = create_app(grid_id="ag-test", grid_name="test")
     client = TestClient(app)
     reg = client.put("/nodes/node-ext", json={
         "role": "engine",
         "models": ["ollama-model"],
+        # host_id is required under pull in a way it was not under push: it is how the worker
+        # names itself when it polls, so a node without one has no way to claim its own work.
+        "host_id": "host-ext",
         "endpoint_url": "http://192.168.1.9:11434/v1",
         "upstream": {"ollama-model": "qwen3:0.6b"},
     })
     assert reg.status_code == 200
+    host_id = "host-ext"
 
-    seen = {}
+    async def drive() -> str:
+        request = Request({"type": "http", "method": "POST", "headers": []})
+        request._body = json.dumps({"model": "ollama-model", "messages": []}).encode()
+        serving = asyncio.create_task(
+            local_server._proxy_openai(app, "chat/completions", request)
+        )
+        await asyncio.sleep(0)
+        claimed = app.state.inflight.claim(node_id=host_id, models=("ollama-model",))
+        assert claimed is not None, "the grid registered no work for the worker to claim"
+        app.state.inflight.finish(
+            claimed.id, json.dumps({"choices": [{"message": {"content": "hi"}}]}).encode()
+        )
+        await asyncio.wait_for(serving, timeout=2.0)
+        return json.loads(claimed.body)["model"]
 
-    def engine(request):
-        seen["path"] = request.url.path
-        seen["model"] = json.loads(request.content)["model"]
-        return httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}]})
-
-    real = httpx.AsyncClient
-    monkeypatch.setattr(local_server.httpx, "AsyncClient",
-                        lambda *a, **k: real(*a, **{**k, "transport": httpx.MockTransport(engine)}))
-
-    resp = client.post("/v1/chat/completions", json={"model": "ollama-model", "messages": []})
-    assert resp.status_code == 200
-    assert seen["path"].endswith("/chat/completions")
-    assert seen["model"] == "qwen3:0.6b"  # alias rewritten to the engine's real model name
+    # The consumer asked for the alias; what the worker is handed is the engine's own name.
+    assert asyncio.run(drive()) == "qwen3:0.6b"
 
 
 def test_run_engine_enable_media_advertises_media_models(monkeypatch, tmp_path):

@@ -227,12 +227,12 @@ async def test_the_result_route_consumes_the_body_as_a_stream():
 
     request = _Request()
     request.app = app
-    monkey = poll_module._require_node
-    poll_module._require_node = lambda *_a, **_k: None
+    monkey = poll_module._worker_id
+    poll_module._worker_id = lambda *_a, **_k: "host-1"
     try:
         result = await poll_module.result(request, txn.id)
     finally:
-        poll_module._require_node = monkey
+        poll_module._worker_id = monkey
 
     assert result == {"cancelled": False}
     assert published == [b"one", b"two", b"three"]
@@ -453,3 +453,97 @@ async def test_a_served_pull_request_is_offered_to_capture(monkeypatch):
     await asyncio.wait_for(serving, timeout=2.0)
 
     assert offered == [({"model": "m1"}, result)]
+
+
+def test_a_plain_joined_engine_can_claim_its_own_work():
+    """`grid join` is how a colleague lends a machine, and pull left it unable to serve.
+
+    Only allocator-managed nodes ever polled, so after the push path was deleted a joined engine
+    registered, appeared in /nodes/discover, and then sat there forever while its requests timed
+    out. It is the documented way to add an engine, so this is the difference between the
+    feature working and not existing.
+
+    Its credential is its registration, which is the same thing the push path trusted: on this
+    grid a plain engine registers with no token at all, and under push the grid then dialled
+    whatever endpoint it advertised. Letting it claim work for a model it advertises grants
+    exactly the exposure that already existed -- no more.
+    """
+
+    from local.server import create_app
+
+    app = create_app(grid_id="g1", grid_name="grid-one")
+    client = TestClient(app)
+    reg = client.put(
+        "/nodes/joined-1",
+        json={
+            "role": "engine",
+            "models": ["m1"],
+            "endpoint_url": "http://192.168.1.9:11434/v1",
+        },
+    )
+    assert reg.status_code == 200, reg.text
+
+    txn = app.state.inflight.create(model="m1", body=b'{"model": "m1"}', is_stream=False)
+
+    claimed = client.get("/grid/v1/poll", params={"node_id": "joined-1", "models": "m1"})
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["transaction_id"] == txn.id
+
+    done = client.post(
+        f"/grid/v1/result/{txn.id}",
+        content=b'{"choices": []}',
+        headers={"x-grid-node-id": "joined-1"},
+    )
+    assert done.status_code == 200, done.text
+    assert done.json()["cancelled"] is False
+
+
+def test_a_joined_engine_cannot_claim_a_model_it_does_not_advertise():
+    """The registration is the credential, so it has to bound what can be claimed with it."""
+
+    from local.server import create_app
+
+    app = create_app(grid_id="g1", grid_name="grid-one")
+    client = TestClient(app)
+    client.put(
+        "/nodes/joined-1",
+        json={"role": "engine", "models": ["m1"], "endpoint_url": "http://192.168.1.9:11434/v1"},
+    )
+    app.state.inflight.create(model="secret-model", body=b"{}", is_stream=False)
+
+    claimed = client.get(
+        "/grid/v1/poll", params={"node_id": "joined-1", "models": "secret-model"}
+    )
+    assert claimed.status_code in (204, 401, 403), claimed.text
+    if claimed.status_code == 200:
+        raise AssertionError("a joined engine claimed work for a model it never advertised")
+
+
+async def test_the_grid_will_dispatch_to_a_plain_joined_engine(monkeypatch):
+    """Claiming is half of it: the grid has to be willing to create the work in the first place.
+
+    `_choose_node` filtered on host_id, which only an allocator-managed node ever sets, so a
+    joined engine was refused with 503 before any worker could have claimed anything.
+    """
+
+    import asyncio
+    import time as _time
+
+    from local.server import Node, _proxy_openai, create_app
+
+    app = create_app(grid_id="g1", grid_name="grid-one")
+    app.state.nodes = {
+        "joined-1": Node(
+            node_id="joined-1", role="engine", models=["m1"], host_id="",
+            load={"active_tasks": 0}, last_heartbeat=_time.time(),
+        )
+    }
+    request = Request({"type": "http", "method": "POST", "headers": []})
+    request._body = b'{"model": "m1"}'
+    serving = asyncio.create_task(_proxy_openai(app, "chat/completions", request))
+    await asyncio.sleep(0)
+
+    claimed = app.state.inflight.claim(node_id="joined-1", models=("m1",))
+    assert claimed is not None, "the grid refused to dispatch to a joined engine"
+    app.state.inflight.finish(claimed.id, b'{"choices": []}')
+    assert (await asyncio.wait_for(serving, timeout=2.0)).status_code == 200

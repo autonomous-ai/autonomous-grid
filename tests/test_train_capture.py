@@ -232,6 +232,12 @@ def test_serving_helpers_read_both_dialects():
     assert _answer_text("not a dict") == ""
 
 
+# These three moved from `_capture_exchange` to `_capture_result` when the push proxy was
+# deleted. Each requirement is unchanged -- capture must never break serving, must hand back an
+# id the app can quote, and must refuse a body too big to be a training example. What changed is
+# only the container: a pulled answer arrives as bytes, not as an httpx.Response.
+
+
 def test_capture_failure_cannot_break_serving(monkeypatch):
     """A capture problem must be invisible to the customer's request."""
     from local import server
@@ -243,14 +249,8 @@ def test_capture_failure_cannot_break_serving(monkeypatch):
 
     monkeypatch.setattr("train.capture.record", explode)
 
-    class FakeResponse:
-        status_code = 200
-        content = b'{"choices": [{"text": "an answer"}]}'
-
-        def json(self):
-            return {"choices": [{"text": "an answer"}]}
-
-    assert server._capture_exchange({"prompt": "p", "model": "m"}, FakeResponse()) is None
+    result = b'{"choices": [{"text": "an answer"}]}'
+    assert server._capture_result({"prompt": "p", "model": "m"}, result) is None
 
 
 def test_capture_hook_returns_an_id_apps_can_quote_back():
@@ -258,15 +258,9 @@ def test_capture_hook_returns_an_id_apps_can_quote_back():
 
     _on()
 
-    class FakeResponse:
-        status_code = 200
-        content = b'{"choices": [{"message": {"content": "the answer"}}]}'
-
-        def json(self):
-            return {"choices": [{"message": {"content": "the answer"}}]}
-
-    request_id = server._capture_exchange(
-        {"messages": [{"role": "user", "content": "the work"}], "model": "m"}, FakeResponse()
+    result = b'{"choices": [{"message": {"content": "the answer"}}]}'
+    request_id = server._capture_result(
+        {"messages": [{"role": "user", "content": "the work"}], "model": "m"}, result
     )
     assert request_id and len(request_id) == 16
     assert capture.summarize().requests == 1
@@ -280,14 +274,7 @@ def test_an_enormous_answer_is_not_stored_at_all():
     _on()
     big = json.dumps({"choices": [{"text": "x" * 400_000}]}).encode()
 
-    class HugeResponse:
-        status_code = 200
-        content = big
-
-        def json(self):
-            return json.loads(big)
-
-    assert server._capture_exchange({"prompt": "p", "model": "m"}, HugeResponse()) is None
+    assert server._capture_result({"prompt": "p", "model": "m"}, big) is None
     assert capture.summarize().requests == 0
 
 
