@@ -2536,3 +2536,59 @@ def test_allocator_port_probes_use_the_bind_address_family(monkeypatch, tmp_path
 
     assert managed._port_available(18_083) is True
     assert selected == {"port": 18_083, "bind_host": "::"}
+
+
+def test_health_probe_dials_loopback_not_the_advertised_lan_address(monkeypatch):
+    """The probe is local; the advertise host exists for everyone else.
+
+    MEASURED on a second Mac whose firewall was on -- the macOS default, and off on the first
+    machine, which is why one node was enough to hide this: the same engine answered
+    127.0.0.1 with 200 and its own LAN address with an empty reply. Aimed at the advertise
+    host, the probe therefore reported a perfectly healthy engine unready and the node killed
+    it, every two minutes, forever.
+    """
+
+    backend = LlamaCppBackend(endpoint_host="172.168.20.124", api_key="engine-secret")
+    handle = RuntimeHandle(
+        4242,
+        18_081,
+        "birth:1",
+        executable_path="/opt/grid/llama-server",
+        model_path="/models/qwen.gguf",
+    )
+    monkeypatch.setattr(backend, "owns", lambda *_a, **_k: True)
+    monkeypatch.setattr(backend, "alive", lambda *_a, **_k: True)
+    monkeypatch.setattr(backend, "_secure_launch_configuration", lambda *_a, **_k: True)
+
+    seen: list[str] = []
+
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return []
+
+    class _Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        @staticmethod
+        def get(url, **_kwargs):
+            seen.append(url)
+            return _Response()
+
+    monkeypatch.setattr(runtime_module.httpx, "Client", _Client)
+
+    assert backend.ready_detail(handle, "qwen.gguf") == (True, "")
+    assert backend.active_requests_detail(handle, "qwen.gguf") == (0, "")
+    assert seen == [
+        "http://127.0.0.1:18081/v1/models",
+        "http://127.0.0.1:18081/slots",
+    ]

@@ -369,6 +369,16 @@ class LlamaCppBackend:
         self.endpoint_host = _validated_endpoint_host(
             endpoint_host or self.loopback_address
         )
+        # A health probe is this node asking its OWN engine a question; the advertise host is
+        # how everyone else reaches it. On a machine with a firewall -- which macOS ships on --
+        # those are not the same address: MEASURED, one engine answered 127.0.0.1 with 200 and
+        # its own LAN address with an empty reply. Probe where the engine is guaranteed
+        # reachable from here: loopback when the bind is a wildcard, else the address it bound.
+        self.probe_host = (
+            self.loopback_host
+            if ipaddress.ip_address(normalized_bind_host).is_unspecified
+            else _url_host(normalized_bind_host)
+        )
         self.tls_cert_file = _validated_runtime_file(
             tls_cert_file,
             "TLS certificate",
@@ -866,7 +876,7 @@ class LlamaCppBackend:
                 verify=self._tls_verify(),
             ) as client:
                 response = client.get(
-                    f"{self.endpoint_scheme}://{_url_host(self.endpoint_host)}:"
+                    f"{self.endpoint_scheme}://{self.probe_host}:"
                     f"{handle.port}/v1/models",
                     headers={"Authorization": f"Bearer {self._api_key}"},
                 )
@@ -908,7 +918,7 @@ class LlamaCppBackend:
                 verify=self._tls_verify(),
             ) as client:
                 response = client.get(
-                    f"{self.endpoint_scheme}://{_url_host(self.endpoint_host)}:"
+                    f"{self.endpoint_scheme}://{self.probe_host}:"
                     f"{handle.port}/slots",
                     headers={"Authorization": f"Bearer {self._api_key}"},
                 )
