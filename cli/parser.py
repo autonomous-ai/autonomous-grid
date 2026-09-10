@@ -685,21 +685,6 @@ def _add_allocator(sub) -> None:
     node_start.add_argument("--tls-ca", default=None,
                             help="PEM CA bundle trusting the HTTPS grid this node reports to.")
     node_start.add_argument(
-        "--engine-tls-cert",
-        default=None,
-        help="PEM certificate served by managed llama.cpp endpoints.",
-    )
-    node_start.add_argument(
-        "--engine-tls-key",
-        default=None,
-        help="Owner-only PEM private key paired with --engine-tls-cert.",
-    )
-    node_start.add_argument(
-        "--engine-tls-ca",
-        default=None,
-        help="PEM CA bundle Grid should trust for the managed endpoint.",
-    )
-    node_start.add_argument(
         "--allow-insecure-http",
         action="store_true",
         help=(

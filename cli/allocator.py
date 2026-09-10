@@ -415,9 +415,6 @@ def cmd_allocator_join(args: argparse.Namespace) -> int:
         args.provider_grid = network_id
         args.token_file = None
         args.advertise_host = None
-        args.engine_tls_cert = None
-        args.engine_tls_key = None
-        args.engine_tls_ca = None
         args.allow_insecure_http = False
         return _start_allocator_node_locked(
             args,
@@ -479,30 +476,12 @@ def _start_allocator_node_locked(
             or runtime.detect_local_ip_for_url(grid_url)
         )
     )
-    tls_cert, tls_key, tls_ca = _validated_engine_tls_files(
-        getattr(args, "engine_tls_cert", None),
-        getattr(args, "engine_tls_key", None),
-        getattr(args, "engine_tls_ca", None),
-    )
     if not secure_control_transport(control_url):
         raise SystemExit(
             "Allocator nodes carrying private engine credentials require an HTTPS Grid control "
             "URL (literal loopback HTTP is also allowed). --allow-insecure-http cannot expose "
             "managed engine keys on a LAN."
         )
-    if (
-        not provider_network_id
-        and not _literal_loopback_host(effective_advertise_host)
-        and not tls_cert
-        and os.getenv("GRID_LOCAL_PUSH") == "1"
-    ):
-        # Pull is the default: the grid never dials this engine, only the node's own poll loop
-        # does, on loopback -- no certificate needed. Only the push opt-out still reaches out
-        # over the LAN and needs one. Nobody should have to invent an openssl command line to add
-        # one machine to their own LAN: mint the engine certificate here. It lives beside the node
-        # state and is signed by a node-local CA whose public half rides up to the master inside
-        # the authenticated registration envelope (ManagedModelRuntime.report already transports it).
-        tls_cert, tls_key, tls_ca = _auto_engine_tls(state_path, effective_advertise_host, tls_ca)
     shutdown_request_path(state_path).unlink(missing_ok=True)
     startup_path = _node_startup_path(scope)
     startup_path.unlink(missing_ok=True)
@@ -528,10 +507,6 @@ def _start_allocator_node_locked(
         command.extend(["--provider-grid-id", provider_network_id])
     if getattr(args, "dedicated", False):
         command.append("--dedicated")
-    if tls_cert:
-        command.extend(["--engine-tls-cert", tls_cert, "--engine-tls-key", tls_key])
-    if tls_ca:
-        command.extend(["--engine-tls-ca", tls_ca])
     # The public compatibility spelling is deliberately not forwarded. Managed children never
     # receive permission to put their node credential on non-loopback HTTP.
     child_env = {
@@ -649,26 +624,6 @@ def _allocator_node_selector(cfg: dict[str, Any]) -> str:
     if cfg.get("managed_server", True):
         return str(cfg["grid_id"])
     return runtime.grid_url(cfg)
-
-
-def _auto_engine_tls(
-    state_path: Path, advertise_host: str, tls_ca: str | None
-) -> tuple[str, str, str]:
-    """Generate the managed-engine certificate pair a LAN node needs, in place.
-
-    Returns the ``(cert, key, ca)`` paths to forward to the detached node child. The CA argument
-    stays authoritative when the operator passed one explicitly.
-    """
-    from shared import tls
-
-    directory = state_path.parent / "tls"
-    try:
-        crt, key, ca = tls.ensure_server_cert(directory, [advertise_host])
-    except (tls.TlsToolMissing, RuntimeError, ValueError) as exc:
-        raise SystemExit(
-            f"Grid could not create the engine's LAN TLS certificate: {exc}"
-        ) from exc
-    return str(crt), str(key), str(tls_ca or ca)
 
 
 def cmd_allocator_node_stop(args: argparse.Namespace) -> int:
@@ -1185,29 +1140,6 @@ def _derive_persisted_bind_host(persisted: dict[str, Any]) -> str:
     if len(found) > 1:
         raise RuntimeError("persisted allocator children disagree on listener family")
     return next(iter(found), "0.0.0.0")
-
-
-def _validated_engine_tls_files(
-    cert_value: str | None,
-    key_value: str | None,
-    ca_value: str | None,
-) -> tuple[str, str, str]:
-    if bool(cert_value) != bool(key_value):
-        raise SystemExit("--engine-tls-cert and --engine-tls-key must be provided together.")
-    if ca_value and not cert_value:
-        raise SystemExit("--engine-tls-ca requires --engine-tls-cert and --engine-tls-key.")
-    cert = _readable_path(cert_value, "engine TLS certificate")
-    key = _readable_path(key_value, "engine TLS private key")
-    ca = _readable_path(ca_value, "engine TLS CA")
-    if key and os.name != "nt":
-        stat_result = Path(key).stat()
-        if stat_result.st_mode & 0o077:
-            raise SystemExit(
-                f"Engine TLS private key must be owner-only (chmod 600): {key}"
-            )
-        if hasattr(os, "geteuid") and stat_result.st_uid != os.geteuid():
-            raise SystemExit(f"Engine TLS private key must be owned by the current user: {key}")
-    return cert, key, ca
 
 
 def _readable_path(value: str | None, label: str) -> str:

@@ -95,9 +95,6 @@ def cmd_internal_allocator_node(
     heartbeat_interval: float,
     advertise_host: str | None,
     allow_insecure_http: bool,
-    engine_tls_cert: str | None,
-    engine_tls_key: str | None,
-    engine_tls_ca: str | None,
     provider_grid_id: str | None = None,
     dedicated: bool = False,
 ) -> int:
@@ -140,9 +137,6 @@ def cmd_internal_allocator_node(
     llama_backend = LlamaCppBackend(
         bind_host=_allocator_bind_host(effective_advertise_host),
         endpoint_host=effective_advertise_host,
-        tls_cert_file=engine_tls_cert,
-        tls_key_file=engine_tls_key,
-        tls_ca_file=engine_tls_ca,
     )
     device = collect_device_info()
     gpu_count = len(device.get("gpus") or []) if isinstance(device, dict) else 1
@@ -368,9 +362,6 @@ def _maybe_internal(argv: list[str]) -> int | None:
         parser.add_argument("--startup-path", required=True)
         parser.add_argument("--heartbeat-interval", type=float, default=15.0)
         parser.add_argument("--advertise-host", default=None)
-        parser.add_argument("--engine-tls-cert", default=None)
-        parser.add_argument("--engine-tls-key", default=None)
-        parser.add_argument("--engine-tls-ca", default=None)
         parser.add_argument("--provider-grid-id", default=None)
         parser.add_argument("--dedicated", action="store_true")
         parser.add_argument("--allow-insecure-http", action="store_true")
@@ -383,9 +374,6 @@ def _maybe_internal(argv: list[str]) -> int | None:
             heartbeat_interval=args.heartbeat_interval,
             advertise_host=args.advertise_host,
             allow_insecure_http=args.allow_insecure_http,
-            engine_tls_cert=args.engine_tls_cert,
-            engine_tls_key=args.engine_tls_key,
-            engine_tls_ca=args.engine_tls_ca,
             provider_grid_id=args.provider_grid_id,
             dedicated=args.dedicated,
         )

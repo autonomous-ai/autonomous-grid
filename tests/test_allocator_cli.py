@@ -927,15 +927,20 @@ def test_node_start_preserves_crashed_daemon_children_for_fenced_replacement_ado
     assert persisted["residencies"][0]["handle"] == {"pid": 42_001, "port": 18_081}
 
 
-def test_node_start_creates_engine_tls_automatically_for_a_lan_advertise_host(
+def test_node_start_mints_no_engine_certificate_for_a_lan_advertise_host(
     monkeypatch,
     tmp_path,
 ):
-    """A LAN node needs no hand-made certificate: Grid mints and signs one itself.
+    """Replaces test_node_start_creates_engine_tls_automatically_for_a_lan_advertise_host.
 
-    Push-only: pull mode's engine is never dialled over the LAN, so it mints nothing.
+    That test guarded a real need: the grid dialled the engine across the LAN, so the engine
+    needed a certificate, and no operator should have had to write an openssl command line to
+    join their own machine. Under pull nothing dials the engine but the node's own poll loop, on
+    loopback -- so the certificate has nobody to prove anything to, and minting one is work,
+    state and an expiry date spent on no one. This private-CA apparatus is what cost a day of
+    production bugs and is the reason the conversion happened at all.
     """
-    monkeypatch.setenv("GRID_LOCAL_PUSH", "1")
+
     monkeypatch.setenv("GRID_HOME", str(tmp_path / "grid-home"))
     cfg = grid_config()
     monkeypatch.setattr(config, "select_grid", lambda _value: cfg)
@@ -952,8 +957,6 @@ def test_node_start_creates_engine_tls_automatically_for_a_lan_advertise_host(
     jsonio.atomic_write_json(state_path, {"host_id": "host-a"})
     launched: dict[str, object] = {}
 
-    real_popen = allocator.subprocess.Popen
-
     class Process:
         pid = 1234
 
@@ -961,10 +964,8 @@ def test_node_start_creates_engine_tls_automatically_for_a_lan_advertise_host(
             return None
 
     def popen(command, **kwargs):
-        # The certificate generator shells out to openssl through the same subprocess module this
-        # test patches, so intercept only the grid child and let the real tool run.
-        if Path(str(command[0])).name == "openssl":
-            return real_popen(command, **kwargs)
+        # No openssl escape hatch here, deliberately: nothing should shell out to it any more,
+        # and if something does this test should notice by failing rather than by passing.
         launched["command"] = command
         return Process()
 
@@ -988,148 +989,9 @@ def test_node_start_creates_engine_tls_automatically_for_a_lan_advertise_host(
     assert args.handler(args) == 0
     command = launched["command"]
     assert isinstance(command, list)
-    cert = Path(command[command.index("--engine-tls-cert") + 1])
-    key = Path(command[command.index("--engine-tls-key") + 1])
-    ca = Path(command[command.index("--engine-tls-ca") + 1])
-    assert cert.is_file() and ca.is_file()
-    assert oct(key.stat().st_mode & 0o777) == "0o600"
-    # The generated certificate must cover the address peers dial, and be CA-signed (a bare
-    # self-signed certificate is what the CA transport in the registration envelope exists for).
-    # os.system, not subprocess.run: this test patches subprocess.Popen wholesale, and
-    # subprocess.run would route through that fake on its way to openssl.
-    san_out = tmp_path / "san.txt"
-    assert os.system(f"openssl x509 -in {cert} -noout -ext subjectAltName > {san_out}") == 0
-    assert "10.0.0.5" in san_out.read_text()
-    assert os.system(f"openssl verify -CAfile {ca} {cert} > /dev/null") == 0
-
-
-def test_node_start_reports_when_tls_material_cannot_be_created(monkeypatch, tmp_path):
-    """The failure stays a clear refusal — no node spawns without a certificate.
-
-    Push-only: this refusal path only triggers when a certificate was needed at all.
-    """
-    monkeypatch.setenv("GRID_LOCAL_PUSH", "1")
-    monkeypatch.setenv("GRID_HOME", str(tmp_path / "grid-home"))
-    cfg = grid_config()
-    monkeypatch.setattr(config, "select_grid", lambda _value: cfg)
-    monkeypatch.setattr(
-        allocator,
-        "_request",
-        lambda *_args, **_kwargs: {"grid_id": cfg["grid_id"]},
-    )
-    monkeypatch.setattr(
-        allocator.subprocess,
-        "Popen",
-        lambda *_args, **_kwargs: pytest.fail("unsafe node must fail before spawn"),
-    )
-    scope = allocator._scope(cfg["grid_id"])
-    jsonio.atomic_write_json(allocator._node_state_path(scope), {"host_id": "host-a"})
-
-    from shared import tls
-
-    def refuse(*_args, **_kwargs):
-        raise tls.TlsToolMissing("openssl was not found on PATH")
-
-    monkeypatch.setattr(tls, "ensure_server_cert", refuse)
-    args = cli.build_parser().parse_args(
-        [
-            "allocator",
-            "node",
-            "start",
-            "--advertise-host",
-            "10.0.0.5",
-            "--allow-insecure-http",
-        ]
-    )
-    with pytest.raises(SystemExit, match="could not create the engine"):
-        args.handler(args)
-
-
-def test_node_start_passes_validated_tls_files_to_hidden_worker(
-    monkeypatch,
-    tmp_path,
-):
-    monkeypatch.setenv("GRID_HOME", str(tmp_path / "grid-home"))
-    cfg = grid_config()
-    monkeypatch.setattr(config, "select_grid", lambda _value: cfg)
-    monkeypatch.setattr(
-        allocator,
-        "_request",
-        lambda *_args, **_kwargs: {"grid_id": cfg["grid_id"]},
-    )
-    monkeypatch.setattr(runtime, "cli_command", lambda: ["grid"])
-    monkeypatch.setattr(run_records, "pid_alive", lambda _pid: False)
-    monkeypatch.setattr(allocator, "_await_process_start_marker", lambda _pid: "birth")
-    scope = allocator._scope(cfg["grid_id"])
-    jsonio.atomic_write_json(allocator._node_state_path(scope), {"host_id": "host-a"})
-    cert = tmp_path / "engine.crt"
-    key = tmp_path / "engine.key"
-    ca = tmp_path / "ca.crt"
-    cert.write_text("certificate")
-    key.write_text("private key")
-    ca.write_text("ca")
-    key.chmod(0o600)
-    launched: dict[str, object] = {}
-
-    class Process:
-        pid = 1234
-
-        def poll(self):
-            return None
-
-    def popen(command, **kwargs):
-        launched["command"] = command
-        launched.update(kwargs)
-        return Process()
-
-    def await_start(process, startup_path, instance_id, _log_path):
-        jsonio.atomic_write_json(
-            startup_path,
-            {
-                "instance_id": instance_id,
-                "pid": process.pid,
-                "host_id": "host-a",
-                "registered_at": 1.0,
-            },
-        )
-
-    monkeypatch.setattr(allocator.subprocess, "Popen", popen)
-    monkeypatch.setattr(allocator, "_await_node_start", await_start)
-    args = cli.build_parser().parse_args(
-        [
-            "allocator",
-            "node",
-            "start",
-            "--advertise-host",
-            "10.0.0.5",
-            "--engine-tls-cert",
-            str(cert),
-            "--engine-tls-key",
-            str(key),
-            "--engine-tls-ca",
-            str(ca),
-        ]
-    )
-
-    assert args.handler(args) == 0
-    command = launched["command"]
-    assert isinstance(command, list)
-    assert command[command.index("--advertise-host") + 1] == "10.0.0.5"
-    assert command[command.index("--engine-tls-cert") + 1] == str(cert.resolve())
-    assert command[command.index("--engine-tls-key") + 1] == str(key.resolve())
-    assert command[command.index("--engine-tls-ca") + 1] == str(ca.resolve())
-
-
-def test_engine_tls_private_key_must_be_owner_only(tmp_path):
-    cert = tmp_path / "engine.crt"
-    key = tmp_path / "engine.key"
-    cert.write_text("certificate")
-    key.write_text("private key")
-    key.chmod(0o644)
-    if os.name == "nt":
-        pytest.skip("POSIX mode-bit assertion")
-    with pytest.raises(SystemExit, match="owner-only"):
-        allocator._validated_engine_tls_files(str(cert), str(key), None)
+    assert "--engine-tls-cert" not in command
+    assert "--engine-tls-key" not in command
+    assert "--engine-tls-ca" not in command
 
 
 def test_node_status_and_stop_use_non_secret_process_record(monkeypatch, tmp_path, capsys):
@@ -1604,9 +1466,6 @@ def test_internal_node_dispatch_parses_private_arguments(monkeypatch):
         "heartbeat_interval": 2.0,
         "advertise_host": "10.0.0.5",
         "allow_insecure_http": False,
-        "engine_tls_cert": None,
-        "engine_tls_key": None,
-        "engine_tls_ca": None,
         "provider_grid_id": None,
         "dedicated": False,
     }
