@@ -171,10 +171,12 @@ def _add_grid_lifecycle(sub) -> None:
     _d.set_defaults(handler=cmd_down)
 
     delete = sub.add_parser(
-        "delete", help="Delete a grid's local config for good (`grid stop` only pauses it)"
+        "delete", help="Delete a grid for good (`grid stop` only pauses it)"
     )
     delete.add_argument("name", nargs="?", default=None,
-                        help="Grid name or id (ag-…). Omit for the active grid.")
+                        help="Grid name or id (ag-…). Local: omit for the active grid. Remote: "
+                             "required — deleting a hosted grid cannot be undone, so it never "
+                             "acts on a grid you did not name.")
     delete.add_argument("--yes", action="store_true", help="Skip confirmation.")
     delete.set_defaults(handler=cmd_delete)
 

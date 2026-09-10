@@ -229,6 +229,111 @@ def cmd_remote_down(args: argparse.Namespace) -> int:
     return 0
 
 
+def _is_owner(rec: dict[str, Any]) -> bool:
+    """Whether this account created the grid, read from its own per-grid token.
+
+    The control plane is the authority and refuses a member's delete on its own; this reads the
+    ``admin`` role the token already carries so the refusal can name the reason before a round trip,
+    the way ``grid stop`` names a stopped grid rather than posting and translating a 404. A stale or
+    unreadable token answers "not owner", which costs a member nothing (they may not delete anyway)
+    and costs an owner one `grid login`.
+    """
+    from remote import credentials
+
+    roles = credentials.claims_from_token(rec.get("access_token")).get("roles")
+    return isinstance(roles, list) and "admin" in roles
+
+
+def _member_count(session: str, network_id: str) -> int | None:
+    """How many members the grid has, or ``None`` when that cannot be read. Best-effort like
+    ``_try_status``: it decorates a warning, so it must never be the thing that fails a delete."""
+    from remote import control_plane
+
+    try:
+        members = control_plane.list_members(session, network_id)
+    except SystemExit:
+        return None
+    if isinstance(members, dict):
+        members = members.get("members")
+    return len(members) if isinstance(members, list) else None
+
+
+def cmd_remote_delete(args: argparse.Namespace) -> int:
+    """`grid delete <name>` — remove a remote grid from the account for good.
+
+    The one irreversible verb in the lifecycle, so it is deliberately harder to reach than the three
+    reversible ones around it. Three gates, in the order that fails cheapest first:
+
+    1. **The name is required.** Every other remote command falls back to the active grid; this one
+       will not, because "the active grid" is not something you can misread — you have to type what
+       you are destroying.
+    2. **Owner only**, and the grid must already be **stopped**. Stopping is the loud, reversible
+       step where service actually ends and everyone on the grid sees it; delete is then only the
+       paperwork on a grid that is already dark. Splitting them means the irreversible half can
+       never happen as a surprise consequence of the reversible one.
+    3. **Confirmation is the name, not a keystroke.** `y` is what a reader types while skimming, and
+       `grid stop` and `grid delete` sit one word apart in the help. Retyping the grid name is the
+       one confirmation that cannot be given by accident.
+
+    Providers are *evicted*, not consulted: an owner cannot be made to wait on other people's
+    machines running `grid leave`, so joined engines stop being routed to rather than blocking this.
+    """
+    from remote import control_plane, credentials
+
+    session = credentials.require_session()
+    if not args.name:
+        raise SystemExit(
+            "Name the grid to delete: `grid delete <name>`. Unlike every other command, this one "
+            "will not act on the active grid — deleting cannot be undone, so it should never be "
+            "possible to do to a grid you did not name."
+        )
+    rec = _select(args.name)
+    network_id = _network_id(rec)
+    label = rec.get("name") or network_id
+
+    if not _is_owner(rec):
+        raise SystemExit(
+            f"Only the owner of {label} can delete it — this account is a member of it. "
+            "`grid leave` removes your machines from a grid you did not create."
+        )
+
+    status = _try_status(session, network_id)
+    if status.get("state") == "running":
+        raise SystemExit(
+            f"{label} is running. Stop it first, so its members see service end before it "
+            f"disappears:\n  grid stop {shlex.quote(label)}"
+        )
+
+    if not args.yes:
+        members = _member_count(session, network_id)
+        print(f"Delete grid {label} ({network_id})?")
+        print()
+        print("  `grid stop` pauses a grid and `grid start` brings it back with everything intact.")
+        print("  This is the other one: the grid leaves the account for good, its members lose")
+        print("  access, and any machine still serving it stops being routed to. There is no undo.")
+        if members is not None:
+            print()
+            print(f"  members: {members}")
+        print()
+        try:
+            typed = input(f"Type the grid name to confirm ({label}): ").strip()
+        except EOFError:
+            typed = ""
+        if typed != label:
+            print("Aborted — the name did not match.")
+            return 1
+
+    control_plane.delete_managed_network(session, network_id)
+    credentials.remove_network(network_id)
+    # The active pointer outlives the grid it names, and every later command resolves through it —
+    # so a delete that left it set would aim `grid join`, `grid chat` and the rest at a grid that is
+    # gone. Cleared by *either* spelling, because `grid use` accepts both.
+    if state.get_active("remote") in (label, network_id):
+        state.set_active("remote", None)
+    print(f"Deleted grid {label}.")
+    return 0
+
+
 def cmd_remote_ls(args: argparse.Namespace) -> int:
     from remote import credentials
 

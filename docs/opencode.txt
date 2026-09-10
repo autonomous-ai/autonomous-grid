@@ -364,9 +364,10 @@ being created — on one that exists it is noise, and it will not change the typ
 **Ask me which one before you create it, and wait for my answer.** This is the exception to
 "don't ask me to run something you can run yourself" at the top of this file. That rule is
 about commands: those you run, because I could have typed them myself and chose to ask you
-instead. This is not a command, it is a decision I cannot revisit — the type is fixed at
-creation, so changing my mind later means deleting the grid and building it again, and any
-member I added goes with it. Guessing costs me the grid; asking costs me one line.
+instead. This is not a command, it is a decision that cannot be edited — the type is fixed at
+creation, so changing my mind later means stopping the grid, deleting it and building it
+again, and every member I had added goes with it. Guessing costs me the grid; asking costs me
+one line.
 
 If I already said which I want, that is my answer — take it and go:
 
@@ -409,6 +410,22 @@ same breath, and do them as their own sections once the grid is selected:
 **`grid stop <name>` is not the mirror of start.** It stops the grid for everyone on it,
 not just for me. Tell me what it will do and ask first, the same as starting a grid I did
 not ask you to start.
+
+
+**Deleting one.** Mine to decide, and the only verb here that does not come back:
+
+    grid stop <name>            # first — service ends, and this is reversible
+    grid delete <name>          # then — the grid leaves my account for good
+
+Run `stop` and tell me it worked before you go near `delete`. Never chain them in one breath:
+they read almost alike and the second one is the one I cannot take back.
+
+`delete` names the grid because it refuses to guess one, asks me to type the name back, and
+takes `--yes` only when I have told you to skip that. **Do not pass `--yes` on your own** — the
+question is the safeguard, and answering it for me removes the only step between a typo and a
+grid that is gone. It also refuses a grid I do not own and a grid still running; both refusals
+say what to do, so read them to me rather than working around them. Members and machines
+serving the grid do not have to leave first — deleting evicts them.
 
 
 ## E. Keep the CLI current

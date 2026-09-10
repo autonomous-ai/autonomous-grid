@@ -22844,7 +22844,7 @@ def _seed_remote(monkeypatch, tmp_path, networks=None, session="sess-tok", activ
         state.set_active("remote", active)
 
 
-def _mock_lifecycle(monkeypatch, *, create=None, start=None, stop=None, status=None):
+def _mock_lifecycle(monkeypatch, *, create=None, start=None, stop=None, status=None, delete=None):
     """Stub the four control-plane lifecycle calls; record what each was invoked with."""
     from remote import control_plane
 
@@ -22866,11 +22866,98 @@ def _mock_lifecycle(monkeypatch, *, create=None, start=None, stop=None, status=N
         calls["status"] = {"session": session_token, "network_id": network_id}
         return status or {}
 
+    def _delete(session_token, network_id, api_url=None):
+        calls["delete"] = {"session": session_token, "network_id": network_id}
+        return delete or {}
+
     monkeypatch.setattr(control_plane, "create_managed_network", _create)
     monkeypatch.setattr(control_plane, "start_managed_network", _start)
     monkeypatch.setattr(control_plane, "stop_managed_network", _stop)
     monkeypatch.setattr(control_plane, "get_managed_network_status", _status)
+    monkeypatch.setattr(control_plane, "delete_managed_network", _delete)
     return calls
+
+
+def _grid_token(roles):
+    """A per-grid access token carrying ``roles`` — the only claim `cmd_remote_delete` reads.
+
+    Built rather than fixtured because the owner gate turns on it: a test that passed a plain string
+    would exercise the "unreadable token" branch and pass for the wrong reason."""
+    import base64
+
+    def seg(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+
+    return f"{seg({'alg': 'none'})}.{seg({'roles': roles})}.sig"
+
+
+def _seed_owned_grid(monkeypatch, tmp_path, *, roles=("admin", "both"), state_=None, active="team"):
+    """Signed-in remote mode with one grid this account owns, stopped unless told otherwise."""
+    net = {
+        "network_id": "n1", "name": "team", "network_type": "permissioned-public",
+        "access_token": _grid_token(list(roles)), "refresh_token": "RT",
+    }
+    _seed_remote(monkeypatch, tmp_path, networks=[net], active=active)
+    return _mock_lifecycle(monkeypatch, status={"state": state_} if state_ else {})
+
+
+def test_remote_delete_requires_an_explicit_name(monkeypatch, tmp_path):
+    """Every other remote verb falls back to the active grid. This one must not: the whole point of
+    naming it is that an irreversible command can never land on a grid the user did not type."""
+    calls = _seed_owned_grid(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["delete"])
+    assert "grid delete <name>" in str(exc.value)
+    assert "delete" not in calls  # nothing reached the control plane
+
+
+def test_remote_delete_refuses_a_grid_this_account_does_not_own(monkeypatch, tmp_path):
+    calls = _seed_owned_grid(monkeypatch, tmp_path, roles=("both",))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["delete", "team", "--yes"])
+    assert "owner" in str(exc.value) and "grid leave" in str(exc.value)
+    assert "delete" not in calls
+
+
+def test_remote_delete_refuses_while_the_grid_is_running(monkeypatch, tmp_path):
+    """Stopping is the reversible, visible step where service ends. Delete is only the paperwork
+    afterwards, so a running grid is refused and told which command comes first."""
+    calls = _seed_owned_grid(monkeypatch, tmp_path, state_="running")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["delete", "team", "--yes"])
+    assert "grid stop team" in str(exc.value)
+    assert "delete" not in calls
+
+
+def test_remote_delete_removes_the_grid_and_forgets_it_locally(monkeypatch, tmp_path, capsys):
+    calls = _seed_owned_grid(monkeypatch, tmp_path)
+
+    assert cli.main(["delete", "team", "--yes"]) == 0
+    assert calls["delete"] == {"session": "sess-tok", "network_id": "n1"}
+    assert "Deleted grid team" in capsys.readouterr().out
+
+    from remote import credentials
+    assert credentials.load_credentials()["networks"] == []  # gone from `grid ls`
+    # The active pointer named the grid that no longer exists; leaving it set would aim every later
+    # command at nothing.
+    assert state.get_active("remote") is None
+
+
+def test_remote_delete_confirmation_takes_the_name_not_a_keystroke(monkeypatch, tmp_path, capsys):
+    """`y` is what a reader types while skimming, and `stop`/`delete` sit one word apart in help."""
+    calls = _seed_owned_grid(monkeypatch, tmp_path)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+
+    assert cli.main(["delete", "team"]) == 1
+    assert "did not match" in capsys.readouterr().out
+    assert "delete" not in calls
+
+    monkeypatch.setattr("builtins.input", lambda *a: "team")
+    assert cli.main(["delete", "team"]) == 0
+    assert calls["delete"]["network_id"] == "n1"
 
 
 def test_remote_start_creates_when_name_unknown(monkeypatch, tmp_path, capsys):

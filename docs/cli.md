@@ -223,6 +223,7 @@ so a consumer comparing the whole payload shape sees one more key.
 ```
 grid start [name] [--type <t>] [--port <n>] [--host <h>] [--advertise-host <h>]
 grid stop [name]                      # stop a grid (may fail loud); the grid/config persists
+grid delete <name> [--yes]            # remove a grid for good (remote: owner only, stopped first)
 grid ls [--json]                      # saved grids (local: name, id, where, url · remote: name, id, type)
 grid info [grid] [--json]             # grid, grid_url, live engine count, live models
 grid info [grid] --env                # print OPENAI_* exports (local key, or remote relay URL + token)
@@ -240,7 +241,15 @@ server binds; `--advertise-host` overrides the host published in `grid_url` (oth
 LAN IP). Those three are local-only, and `--type` is remote-only (the grid type, set on create).
 
 No separate `create` command — `start` is the single lifecycle verb, so
-first use feels like one operation rather than infrastructure management. (`grid use` only sets
+first use feels like one operation rather than infrastructure management. `grid delete` is the
+only one that does not come back: in `local` mode it removes the grid's config (the flow `grid
+stop` deliberately does not cover, since config surviving a stop is what lets `grid start <name>`
+bring it straight back), and in `remote` mode it asks the control plane to destroy the hosted grid.
+The remote half is gated three ways — **only the owner** may run it, the grid must **already be
+stopped**, and confirmation is **the grid's name typed back**, not `y`. It also refuses to fall
+back to the active grid the way every other command does: an irreversible verb should never land
+on a grid you did not name. Members and joined engines do not block it and are not asked to leave
+first — an owner cannot be made to wait on other people's machines — so deleting evicts them. (`grid use` only sets
 which grid is *active*; it is a selection pointer, not a lifecycle step — see Modes.)
 
 In `local` mode **`grid stop` waits and can fail.** It stops the server it can prove is this grid's

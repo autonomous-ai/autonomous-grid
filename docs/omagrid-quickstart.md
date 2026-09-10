@@ -157,8 +157,13 @@ same as Omagrid.
 **"switch back to Omagrid"** moves where your own requests go. Everything your machine serves
 keeps serving.
 
+**Made one by mistake?** Say **"delete my grid <name>"**. It stops the grid first, then asks you
+to type the name back before it removes it — the one step here that stays done. A grid you joined
+rather than created stays put; that one is **"stop serving <name>"**.
+
 Under the hood these are `grid mode remote`, `grid start <name> [--type …]`, `grid members add
-<email> --role …`, `grid join <name> --serve …`, `grid info --env`, and `grid use <name>`.
+<email> --role …`, `grid join <name> --serve …`, `grid info --env`, `grid use <name>`, and
+`grid stop <name>` + `grid delete <name>`.
 
 ## Where to go next
 

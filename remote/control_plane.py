@@ -319,6 +319,18 @@ def stop_managed_network(session_token: str, network_id: str, api_url: str | Non
         return _send(client, "POST", f"/v1/grid/managed-networks/{network_id}/stop").json()
 
 
+def delete_managed_network(
+    session_token: str, network_id: str, api_url: str | None = None
+) -> dict[str, Any]:
+    """Delete a remote grid for good. The control plane owns the decision — it is the only place
+    that knows who created the grid — so this call carries the *session* token like the rest of the
+    lifecycle, and a caller who is merely a member is refused there rather than here. A successful
+    DELETE may answer ``204 No Content``, so the body is optional (``remove_member`` above answers
+    the same way)."""
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(client, "DELETE", f"/v1/grid/managed-networks/{network_id}"))
+
+
 def get_managed_network_status(session_token: str, network_id: str, api_url: str | None = None) -> dict[str, Any]:
     with _client(api_url, session_token) as client:
         return _send(client, "GET", f"/v1/grid/managed-networks/{network_id}/status").json()

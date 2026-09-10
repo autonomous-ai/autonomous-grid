@@ -65,10 +65,10 @@ GATED = (
     # dispatch" internal-error guard below.
     "start",
     "stop",
-    # No remote handler on purpose: `cmd_delete` reads LOCAL grid config only (`local.config`), never
-    # the remote grid records `remote.credentials` keeps — deleting one of those is a real
-    # server-side action against the control plane and deserves its own design, not a same-named
-    # local operation repurposed. The stub is the honest answer until that exists.
+    # Two handlers, one verb: `cmd_delete` removes a LOCAL grid's config, `cmd_remote_delete` asks
+    # the control plane to destroy a hosted one. They stayed apart until the remote half had its own
+    # design (owner-only, stopped first, name typed to confirm) rather than a same-named local
+    # operation repurposed — see `cli/remote_grid.cmd_remote_delete`.
     "delete",
     "ls",
     "list",
@@ -100,6 +100,7 @@ REMOTE_HANDLERS = {
     **_REMOTE_STUBS,
     "start": remote_grid.cmd_remote_up,
     "stop": remote_grid.cmd_remote_down,
+    "delete": remote_grid.cmd_remote_delete,
     "ls": remote_grid.cmd_remote_ls,
     "list": remote_grid.cmd_remote_ls,
     "info": remote_grid.cmd_remote_info,
