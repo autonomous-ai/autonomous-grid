@@ -349,7 +349,12 @@ class AllocatorNodeAgent:
         for residency in self._residencies_needing_poll_loop():
             self._polling_models.add(residency.model_id)
             grid_client = httpx.Client(base_url=self.grid_url)
-            engine_client = httpx.Client(base_url=f"http://127.0.0.1:{residency.handle.port}")
+            engine_key = self.runtime.engine_api_key_for(residency.model_id)
+            engine_headers = {"authorization": f"Bearer {engine_key}"} if engine_key else {}
+            engine_client = httpx.Client(
+                base_url=f"http://127.0.0.1:{residency.handle.port}",
+                headers=engine_headers,
+            )
             model_id = residency.model_id
 
             def _loop(grid_client=grid_client, engine_client=engine_client, model_id=model_id):
