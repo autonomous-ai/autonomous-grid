@@ -126,9 +126,15 @@ Ask OpenCode:
 create my own grid called <name>
 ```
 
-Pick any name; that is how you call it from here on. It lands as `permissioned-public`: anyone
-signed in can send it requests, and the members you add bring the machines. Want it tighter? Say
-**"make it providers-only"** and membership covers both jobs. Choose once — the type is set at
+Pick any name; that is how you call it from here on. Before it creates anything, OpenCode asks
+which kind of grid you want:
+
+- **permissioned-public** — anyone signed in can send it requests, and the members you add bring
+  the machines.
+- **permissioned-providers** — membership covers both jobs.
+
+Answer it there, or put the answer in the prompt itself — **"create my own grid called <name>,
+providers-only"** — and it goes straight through. Worth a moment either way: the type is set at
 creation and stays.
 
 Then fill it:
