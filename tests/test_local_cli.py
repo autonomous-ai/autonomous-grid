@@ -4141,14 +4141,13 @@ def test_local_grid_rewrites_alias_to_upstream_model_before_the_worker_sees_it(m
     reg = client.put("/nodes/node-ext", json={
         "role": "engine",
         "models": ["ollama-model"],
-        # host_id is required under pull in a way it was not under push: it is how the worker
-        # names itself when it polls, so a node without one has no way to claim its own work.
-        "host_id": "host-ext",
         "endpoint_url": "http://192.168.1.9:11434/v1",
         "upstream": {"ollama-model": "qwen3:0.6b"},
     })
-    assert reg.status_code == 200
-    host_id = "host-ext"
+    # No host_id: a plain `grid join` engine has none, and setting one needs node auth. The
+    # worker names itself by node_id instead, which is what `_choose_node` falls back to.
+    assert reg.status_code == 200, reg.text
+    host_id = "node-ext"
 
     async def drive() -> str:
         request = Request({"type": "http", "method": "POST", "headers": []})
