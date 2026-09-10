@@ -139,6 +139,8 @@ creation and stays.
 
 ![OpenCode asking which network type the new grid should be](./omagrid-create-ask.png)
 
+![OpenCode reporting the grid it created, the type it got, and what usually comes next](./omagrid-create-done.png)
+
 Then fill it:
 
 ```text
