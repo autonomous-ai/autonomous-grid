@@ -1476,13 +1476,21 @@ async def _serve_by_pull(
             503, f"No active local engine for model {model!r}", "engine_unavailable"
         )
     txn = table.create(model=model, body=raw_body, is_stream=bool(body.get("stream")))
-    try:
-        if txn.is_stream:
-            async def relay() -> AsyncGenerator[bytes, None]:
+    if txn.is_stream:
+        async def relay() -> AsyncGenerator[bytes, None]:
+            # The cleanup belongs to the GENERATOR, not to this function. This function returns
+            # the instant the response object exists -- before a worker has even polled -- so a
+            # `finally` out here cancels the transaction nobody has claimed yet, and the consumer
+            # is handed a 200 carrying nothing. Here it runs when the stream ends or the consumer
+            # hangs up, which are the two moments the work is genuinely over.
+            try:
                 async for chunk in table.stream(txn.id):
                     yield chunk
+            finally:
+                table.cancel(txn.id, "consumer finished")
 
-            return StreamingResponse(relay(), media_type="text/event-stream")
+        return StreamingResponse(relay(), media_type="text/event-stream")
+    try:
         async for _chunk in table.stream(txn.id):
             pass
         settled = table.get(txn.id)
