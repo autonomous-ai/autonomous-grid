@@ -248,7 +248,8 @@ point it at whichever one you already run. Each prints its own URL when it start
 computer on the same network, so this one needs [remote mode](#working-from-anywhere).
 
 The engine sizes itself to whatever machine it lands on: at load it measures free memory and takes
-the largest context that fits. `--ctx-size N` pins it instead. `--n-predict`, `--parallel`,
+the largest context that fits. `--ctx-size N` pins it instead — N is what one request may use, so
+serving several at once reserves N × the slot count. `--n-predict`, `--parallel`,
 `--temp`, `--flash-attn` and `--endpoint-port` are there too — see `grid join --help`.
 
 ### Stopping, leaving, deleting

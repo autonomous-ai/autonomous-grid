@@ -42,6 +42,17 @@ the two fields into ONE list and matches either; copied here it would put every 
 Omarchy grid, which is the exact mis-sorting the closed set exists to prevent. ``ID=`` is an identity,
 ``ID_LIKE=`` is a lineage, and only the first one names a community.
 
+⚠️ **On a Mac, Omarchy does not write that file, so a second signal is needed** — the INSTALL on
+disk (:data:`_BY_MARKER`). Read at source 2026-09-08, after a user on ``omarchy-mac`` reported
+landing on the Linux grid. Both Apple Silicon routes miss ``ID=omarchy``, for unrelated reasons:
+``omarchy-settings``' scriptlet opens with an ``_apple_silicon()`` test and returns EARLY on a Mac
+after symlinking ``/etc/os-release`` back to Arch Linux ARM's own (``ID=archarm``) — the ``cp -f``
+that writes the identity is on the far side of that ``return`` — while ``omacom/try-omarchy``, the VM
+most people meet Omarchy through on a Mac, never installs that package at all and copies the source
+tree in instead. Neither is an accident to be waited out: the first is upstream's stated intent
+(omarchy-pkgs PR #275, *"keep that system identity"*), and the second has no os-release handling
+anywhere in its repository.
+
 ⚠️ **Omarchy is NOT also on the Linux grid, and that is the decision rather than a gap.** ``os=`` is a
 single value and the far end's gate is an equality test against one grid's own token, so claiming
 ``omarchy`` is precisely what takes the machine off the general Linux grid. A reading that has it join
@@ -93,6 +104,28 @@ _BY_DISTRO_ID = {
     "omarchy": OS_OMARCHY,
 }
 
+#: What a distribution's INSTALL leaves on disk → OS token. A third closed set, read only when
+#: `_BY_DISTRO_ID` did not answer, for a distribution whose own `/etc/os-release` identity does not
+#: survive on every platform it ships for. See the module docstring for why Omarchy needs one.
+#:
+#: ⚠️ **`/usr/share/omarchy/version` rather than the nearer-looking
+#: `/usr/share/omarchy/etc-overrides/os-release`.** That one really does carry an `ID=omarchy` line
+#: and really is staged even on Apple Silicon (the scriptlet's early return skips only the copy INTO
+#: `/etc`, never the packaging), so it looks like the better match for a module that reads `ID=`
+#: everywhere else. It is written by `omarchy-settings` alone — and the VM route installs no package
+#: at all, so it is absent there. `version` is written by BOTH producers: the `omarchy` package
+#: installs it (`pkgbuilds/omarchy/PKGBUILD:161`, `arch=('x86_64' 'aarch64')`) and the VM image
+#: copies it (`try-omarchy` `guest/scripts/materialize-omarchy.sh:130`). Two independent producers,
+#: one path, every layout.
+#:
+#: ⚠️ **A system path, never one under `$HOME`.** Omarchy 3.x kept its tree in
+#: `~/.local/share/omarchy`, which is why that layout resolves to `linux` and must stay that way:
+#: a per-user path is writable by anything the person runs, and this map decides which grid a machine
+#: joins. `/usr/share/omarchy` is created by the Quattro upgrade and owned by a package.
+_BY_MARKER = {
+    Path("/usr/share/omarchy/version"): OS_OMARCHY,
+}
+
 
 def _distro_id() -> str:
     """The lowercased ``ID=`` of ``/etc/os-release``, or ``""`` when there is nothing to read.
@@ -113,6 +146,23 @@ def _distro_id() -> str:
         if line.startswith("ID="):
             return line.split("=", 1)[1].strip().strip("\"'").strip().lower()
     return ""
+
+
+def _marker_token() -> str | None:
+    """The token of the first install marker present on this machine, or ``None`` for no marker.
+
+    ``is_file`` and never ``exists``: `pacman -R omarchy` removes the files it owns and can leave
+    `/usr/share/omarchy` behind, and an uninstall is precisely when a machine stops being an Omarchy
+    machine — keyed on the directory it would go on claiming `omarchy` for good.
+
+    Needs no guard of its own, unlike :func:`_distro_id`: ``Path.is_file`` answers ``False`` for
+    every way the path can be missing or unreadable rather than raising, so there is no failure here
+    to keep out of ``grid login``.
+    """
+    for path, token in _BY_MARKER.items():
+        if path.is_file():
+            return token
+    return None
 
 
 def system_name() -> str:
@@ -151,8 +201,18 @@ def os_token() -> str | None:
     ⚠️ The distro read hangs off the ``linux`` answer and nothing else. ``/etc/os-release`` is not
     Linux's alone — a container image or a hand-rolled script can leave one on a Mac — and consulting
     it before the system is known would move that machine's grid.
+
+    ⚠️ **So does the marker read, for the same reason one level down.** ``/usr/share`` is not Linux's
+    alone either, and `try-omarchy` ships a 1.3 GB image containing this very path whose ``.dmg`` is
+    opened *on a Mac*. The order of the two is the design: ``ID=`` is an identity a distribution
+    states about itself and still decides wherever it survives, and the marker speaks only where that
+    read came back with a distribution this CLI has no grid for. Neither narrows the Linux grid — a
+    machine with neither signal is an ordinary Linux machine.
     """
     token = _BY_SYSTEM.get(system_name())
     if token != OS_LINUX:
         return token
-    return _BY_DISTRO_ID.get(_distro_id(), OS_LINUX)
+    distro = _BY_DISTRO_ID.get(_distro_id())
+    if distro is not None:
+        return distro
+    return _marker_token() or OS_LINUX

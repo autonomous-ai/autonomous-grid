@@ -31,6 +31,10 @@ class LlamaProcess:
     scheme: str = "http"
     probe_host: str = ""
     tls_ca_file: str = ""
+    # What the launch actually asked llama.cpp for, carried so a bring-up failure can name the KV
+    # allocation the operator never typed (see `_ctx_hint`). `None` when `--ctx-size` was left unset.
+    ctx_size: int | None = None
+    parallel: int = 1
 
 
 @dataclass(frozen=True)
@@ -305,8 +309,19 @@ def start_llm(
     # Emitted ONLY when the operator asked for one. Left unset, llama.cpp measures free device
     # memory at load and takes the largest window that fits; naming a number here turns that off,
     # which is the whole reason the old hardcoded 128000 broke small machines.
+    #
+    # SCALED BY THE SLOT COUNT, because llama.cpp's `--ctx-size` is not a per-request cap: it is the
+    # whole KV pool, and `--parallel N` statically carves it into N slots holding `ctx/N` each. The
+    # unified KV cache that would instead share one buffer is only on when the slot count is `auto`,
+    # and `--parallel` is always passed below — so the division always applies here. Forwarding the
+    # operator's number raw therefore handed each request `ctx/N` tokens while `remote/serve.py`
+    # advertised the undivided `ctx` to the grid as `context_window`: a window over-promised N-fold,
+    # which the auto-router then routed against. `--ctx-size` means per REQUEST, the same thing
+    # vLLM's `--max-model-len` and SGLang's `--context-length` mean, so the flag reads identically
+    # whichever engine Grid is fronting. The cost model does NOT carry over: those two page the KV
+    # cache and treat the number as a ceiling, while llama.cpp reserves every slot's share up front.
     if ctx_size is not None:
-        cmd.extend(["--ctx-size", str(ctx_size)])
+        cmd.extend(["--ctx-size", str(ctx_size * parallel)])
     if profile.gpu_layers is not None:
         cmd.extend(["--n-gpu-layers", profile.gpu_layers])
     if profile.min_p is not None:
@@ -349,6 +364,8 @@ def start_llm(
         scheme="https" if cert_path else "http",
         probe_host=str(probe_host or ""),
         tls_ca_file=ca_path,
+        ctx_size=ctx_size,
+        parallel=parallel,
     )
     try:
         # This hook deliberately runs in the first instructions after Popen. Allocator callers use
@@ -364,6 +381,23 @@ def start_llm(
         # to retain a second handle for the lifetime of the server.
         log_fh.close()
     return launched
+
+
+def _ctx_hint(proc: LlamaProcess) -> str:
+    """The one thing the log tail cannot say: the KV pool asked for is not the number typed.
+
+    `--ctx-size` is per request, so the launch multiplies it by the slot count — an out-of-memory
+    exit after `--ctx-size 32000` is really a 128000-token allocation failing on four slots, and
+    nothing in llama.cpp's own output connects that back to the flag the operator passed. Silent
+    only when there is nothing to explain: no `--ctx-size`, or a single slot where N is N.
+    """
+    if proc.ctx_size is None or proc.parallel <= 1:
+        return ""
+    return (
+        f" --ctx-size {proc.ctx_size} is per request, so the launch asked for "
+        f"{proc.ctx_size * proc.parallel} tokens of KV cache across {proc.parallel} slots; if this "
+        f"ran out of memory, lower --ctx-size or the slot count (--parallel / --max-concurrency)."
+    )
 
 
 def wait_for_models(
@@ -395,8 +429,8 @@ def wait_for_models(
         rc = proc.proc.poll()
         if rc is not None:
             raise SystemExit(
-                f"llama-server on port {proc.port} exited (rc={rc}) before becoming ready. "
-                f"Last lines of {proc.log}:\n{_log_tail(proc.log)}"
+                f"llama-server on port {proc.port} exited (rc={rc}) before becoming ready."
+                f"{_ctx_hint(proc)} Last lines of {proc.log}:\n{_log_tail(proc.log)}"
             )
         try:
             with httpx.Client(timeout=5.0, trust_env=False, verify=verify) as client:

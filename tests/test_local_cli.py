@@ -3653,6 +3653,62 @@ def test_start_llm_passes_through_an_operator_override(monkeypatch, tmp_path):
     assert cmd[cmd.index("--flash-attn") + 1] == "off"
 
 
+def test_start_llm_scales_ctx_size_by_the_slot_count(monkeypatch, tmp_path):
+    """`--ctx-size` is per REQUEST; llama.cpp's `-c` is the whole KV pool, split across slots.
+
+    `--parallel N` statically carves `-c` into N slots of `ctx/N`, and the unified KV cache that
+    would share one buffer instead is only on when the slot count is `auto` — which it never is
+    here, because `--parallel` is always passed. Forwarding the operator's number raw therefore
+    handed each request `ctx/N` tokens while `remote/serve.py` advertised the undivided `ctx` to
+    the grid as `context_window`, over-promising the window N-fold to the auto-router.
+    """
+    cmd = _launch_argv(monkeypatch, tmp_path, ctx_size=32000, parallel=4)
+    assert cmd[cmd.index("--ctx-size") + 1] == "128000"
+    assert cmd[cmd.index("--parallel") + 1] == "4"
+
+
+def test_start_llm_leaves_ctx_size_alone_on_a_single_slot(monkeypatch, tmp_path):
+    """The common case must be untouched: one slot means N is N."""
+    cmd = _launch_argv(monkeypatch, tmp_path, ctx_size=32000, parallel=1)
+    assert cmd[cmd.index("--ctx-size") + 1] == "32000"
+
+
+def test_start_llm_scaling_never_resurrects_an_unset_ctx_size(monkeypatch, tmp_path):
+    """Unset stays unset whatever the slot count — llama.cpp must keep fitting itself to the box."""
+    assert "--ctx-size" not in _launch_argv(monkeypatch, tmp_path, parallel=8)
+
+
+class _DeadProc:
+    pid = 1
+
+    def poll(self):
+        return 1
+
+
+def test_wait_for_models_explains_the_scaled_kv_allocation(monkeypatch, tmp_path):
+    """A dead bring-up must name the allocation the operator never typed.
+
+    llama.cpp's own log says only that it could not allocate 128000 tokens; nothing in it connects
+    that back to the `--ctx-size 32000` that was passed for four slots.
+    """
+    log = tmp_path / "llama.log"
+    log.write_text("ggml_backend_buffer alloc failed\n")
+    proc = launcher.LlamaProcess(proc=_DeadProc(), port=8081, log=log, ctx_size=32000, parallel=4)
+    with pytest.raises(SystemExit, match="128000 tokens of KV cache across 4 slots"):
+        launcher.wait_for_models(proc)
+
+
+def test_wait_for_models_stays_quiet_when_there_is_nothing_to_explain(monkeypatch, tmp_path):
+    """One slot, or no `--ctx-size`, means the number in the log IS the number typed."""
+    log = tmp_path / "llama.log"
+    log.write_text("boom\n")
+    for kwargs in ({"ctx_size": 32000, "parallel": 1}, {"ctx_size": None, "parallel": 4}):
+        proc = launcher.LlamaProcess(proc=_DeadProc(), port=8081, log=log, **kwargs)
+        with pytest.raises(SystemExit) as excinfo:
+            launcher.wait_for_models(proc)
+        assert "KV cache" not in str(excinfo.value)
+
+
 def test_start_llm_pins_gpu_layers_only_on_unified_memory(monkeypatch, tmp_path):
     """Apple Silicon must not let llama.cpp spill layers to "system memory" — it is the same pool."""
     monkeypatch.setattr(launcher, "runtime_profile", lambda: launcher.APPLE_SILICON_RUNTIME)
@@ -12366,10 +12422,11 @@ def test_control_plane_fetch_tokens_defaults_missing_networks_to_empty(monkeypat
 # machine of a given system ends up sending, and the parameter is what the control plane gates on.
 
 
-def _fetch_tokens_query(monkeypatch, tmp_path, system, os_release=None):
+def _fetch_tokens_query(monkeypatch, tmp_path, system, os_release=None, *, marker=False):
     """The query string `fetch_tokens` builds on a machine whose ``platform.system()`` is ``system``.
 
     ``os_release`` is that machine's ``/etc/os-release``, or ``None`` for a machine that has none.
+    ``marker`` is whether an Omarchy install is present on its disk (`os_grid._BY_MARKER`).
 
     ⚠️ **Both are stubbed on every call, and the second is not optional decoration.** Since `omarchy`
     landed (issue 04) a Linux machine's token is read off that file, so a test that left the real one
@@ -12377,6 +12434,10 @@ def _fetch_tokens_query(monkeypatch, tmp_path, system, os_release=None):
     green on an Ubuntu runner, and quietly wrong the day somebody runs it on Omarchy. Pointing the
     module at a path that does not exist is the deterministic *no distro signal* case, and it is what
     keeps `("Linux", "linux")` a statement about the code rather than about the machine.
+
+    The marker map is stubbed for the same reason and is the same trap one level down: it names a
+    path under ``/usr/share``, so a suite that left it alone would answer `omarchy` for every one of
+    these cases the day somebody runs it on a machine that has Omarchy installed.
     """
     import platform
 
@@ -12388,6 +12449,10 @@ def _fetch_tokens_query(monkeypatch, tmp_path, system, os_release=None):
     if os_release is not None:
         os_release_path.write_text(os_release, encoding="utf-8")
     monkeypatch.setattr(os_grid, "_OS_RELEASE", os_release_path)
+    marker_path = tmp_path / "omarchy-version"
+    if marker:
+        marker_path.write_text("4.0.2\n", encoding="utf-8")
+    monkeypatch.setattr(os_grid, "_BY_MARKER", {marker_path: os_grid.OS_OMARCHY})
     seen = {}
 
     def handler(request):
@@ -12586,6 +12651,122 @@ def test_a_gigantic_os_release_is_not_read_into_memory(monkeypatch, tmp_path):
 
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     assert os_grid.os_token() == "linux"
+
+
+# --- Omarchy on a Mac never writes `ID=omarchy`, so the install on disk is the second signal -------
+# `/etc/os-release` carries Omarchy's identity on x86 and NOWHERE ELSE. Both Apple Silicon routes
+# were read at source on 2026-09-08, and they miss it for two unrelated reasons:
+#
+# - **Bare metal** (`omacom/omarchy-mac`, Asahi + Arch Linux ARM): the package IS installed, but
+#   `omarchy-pkgs/pkgbuilds/omarchy-settings/omarchy-settings.install` opens with an
+#   `_apple_silicon()` test (aarch64 AND `apple,` in `/proc/device-tree/compatible`) and returns
+#   EARLY, after symlinking `/etc/os-release` back to Arch Linux ARM's own. The `cp -f` that would
+#   write `ID=omarchy` sits on the far side of that `return 0`. Deliberate and shipped — omarchy-pkgs
+#   PR #275: "Apple Silicon installs run on Arch Linux ARM's base with the Asahi packages, and keep
+#   that system identity".
+# - **The VM** (`omacom/try-omarchy`, ~10k `.dmg` downloads in its first fortnight): never installs
+#   `omarchy-settings` at all. Its guest is a plain Arch Linux ARM pacstrap and
+#   `guest/scripts/materialize-omarchy.sh` COPIES the Omarchy source tree in; a repository-wide
+#   search for `os-release` there finds nothing.
+#
+# Both therefore answer `ID=archarm`, and keying on that file alone left the entire Apple Silicon
+# population on the Linux grid — found because a user reported it, not because a test did.
+#
+# ⚠️ **The second signal is a MARKER, and it is deliberately not a second `os-release` to parse.**
+# `/usr/share/omarchy/version` is written by BOTH producers — the `omarchy` package installs it
+# (`pkgbuilds/omarchy/PKGBUILD:161`, `arch=('x86_64' 'aarch64')`) and the VM image copies it
+# (`materialize-omarchy.sh:130`) — so one path covers every layout there is. The nearer-looking
+# `/usr/share/omarchy/etc-overrides/os-release` really does carry an `ID=omarchy` line and really is
+# staged on Apple Silicon, but `omarchy-settings` alone writes it, so it is absent in the VM.
+
+_ALARM_OS_RELEASE = 'NAME="Arch Linux ARM"\nID=archarm\nID_LIKE=arch\n'
+
+
+def test_fetch_tokens_sends_omarchy_when_only_the_install_on_disk_says_so(monkeypatch, tmp_path):
+    """The Apple Silicon case, at the wire: ALARM's identity in the file, Omarchy on the disk.
+
+    This is what every Mac running Omarchy looks like — bare metal and VM alike — and before the
+    marker it claimed `linux`, which is a real grid, so nothing failed and nobody was told.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(
+        monkeypatch, tmp_path, "Linux", os_release=_ALARM_OS_RELEASE, marker=True)
+    assert params["os"] == "omarchy"
+
+
+@pytest.mark.parametrize(
+    "label,os_release",
+    [
+        ("Arch Linux ARM, which is what a Mac answers", _ALARM_OS_RELEASE),
+        ("stock Arch, for the x86 machine whose scriptlet has not run yet", _ARCH_OS_RELEASE),
+        ("a machine with no /etc/os-release at all", None),
+    ])
+def test_the_marker_decides_whatever_the_distro_id_failed_to_say(
+    monkeypatch, tmp_path, label, os_release
+):
+    """The marker is consulted after `ID=` and answers for every way `ID=` can fail to name Omarchy.
+
+    Written as its own parametrize because the ORDER is the whole design: `ID=omarchy` is still read
+    first and still decides on x86, and the marker only speaks where that read came back with a
+    distribution this CLI has no grid for. Nothing here narrows the Linux grid — a machine with
+    neither signal is still `linux`, which the parametrize above pins.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(
+        monkeypatch, tmp_path, "Linux", os_release=os_release, marker=True)
+    assert params["os"] == "omarchy", label
+
+
+@pytest.mark.parametrize("system,expected", [("Darwin", "macos"), ("Windows", None)])
+def test_a_machine_that_is_not_linux_never_consults_the_marker_either(
+    monkeypatch, tmp_path, system, expected
+):
+    """The marker hangs off the `linux` answer, exactly as the `/etc/os-release` read does.
+
+    Same reason, one level down: `/usr/share` is not Linux's alone. A Mac can mount, sync or unpack
+    one — `try-omarchy` ships an image containing this very path, and its `.dmg` is opened ON a Mac —
+    and a lookup done before the system is known would move that machine's grid.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    params = _fetch_tokens_query(monkeypatch, tmp_path, system, marker=True)
+    assert params.get("os") == expected
+
+
+def test_an_emptied_omarchy_directory_is_not_an_omarchy_machine(monkeypatch, tmp_path):
+    """The marker is the FILE. A directory of that name is no signal, and this is why.
+
+    `pacman -R omarchy` removes the files it owns and can leave `/usr/share/omarchy` behind — an
+    uninstall is exactly when a machine stops being an Omarchy machine, and keying on the directory
+    would have it claim `omarchy` for good. `Path.is_file` also answers False rather than raising for
+    every way the path can be unreadable, so nothing here can take a sign-in down.
+    """
+    import platform
+
+    from shared.system import os_grid
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    marker = tmp_path / "omarchy-version"
+    marker.mkdir()
+    monkeypatch.setattr(os_grid, "_BY_MARKER", {marker: os_grid.OS_OMARCHY})
+    monkeypatch.setattr(os_grid, "_OS_RELEASE", tmp_path / "no-such-os-release")
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+
+    assert os_grid.os_token() == "linux"
+
+
+def test_the_marker_map_is_the_path_both_omarchy_layouts_actually_write():
+    """Pins the literal path and the fact that it is the ONLY one.
+
+    Not decoration: this path is an unwritten contract with a repository nobody here controls, and
+    the two producers agree on it by coincidence of layout rather than by any promise. A test that
+    only exercised the map through a stub would keep passing if the real path were mistyped, which is
+    the one mistake that costs the whole Apple Silicon population again and says nothing when it does.
+    """
+    from pathlib import Path
+
+    from shared.system import os_grid
+
+    assert os_grid._BY_MARKER == {Path("/usr/share/omarchy/version"): os_grid.OS_OMARCHY}
 
 
 def test_windows_is_not_a_system_this_cli_has_a_grid_for(monkeypatch, tmp_path):
@@ -23516,14 +23697,30 @@ def test_remote_models_json_includes_auto_first_when_router_enabled(monkeypatch,
     payload = json.loads(capsys.readouterr().out)
     assert payload[0] == {"model": "auto", "engine": "grid-router", "node": "", "responses": False}
 
-def test_remote_models_shows_auto_even_with_zero_nodes_when_enabled(monkeypatch, tmp_path, capsys):
-    # Mirrors /relay/v1/models: the router family is advertised whenever routing is on,
-    # independent of engines.
+def test_remote_models_hides_router_family_with_zero_nodes(monkeypatch, tmp_path, capsys):
+    """A grid with routing on but no engine joined lists NOTHING runnable.
+
+    `/relay/v1/models` advertises the router family whenever routing is enabled, independent of
+    engines, and the CLI mirrored that — which put three names (`auto`, `Brute Force`, `Feedback
+    Loop`) in front of an owner who had nothing serving. The router ranks candidates drawn from the
+    models the grid currently serves (ADR 0013), so with zero engines every one of those requests
+    fails: the listing promised models that could not run. Diverging from the relay here on purpose.
+    """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_overview(monkeypatch, {"nodes": [], "router_enabled": True})
     assert cli.main(["models"]) == 0
-    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-    assert lines == ["auto", "Brute Force", "Feedback Loop"]
+    out = capsys.readouterr().out
+    assert "no live models" in out
+    assert "auto" not in out and "Brute Force" not in out and "Feedback Loop" not in out
+
+
+def test_remote_models_json_empty_with_zero_nodes_even_when_enabled(monkeypatch, tmp_path, capsys):
+    # The JSON view is scripted against, so the same gate applies there: an empty list, not three
+    # aliases a loop would then try to chat with.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"nodes": [], "router_enabled": True})
+    assert cli.main(["models", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
 
 
 def test_remote_models_json_lists_effort_rows_after_auto(monkeypatch, tmp_path, capsys):
@@ -23540,15 +23737,16 @@ def test_remote_models_json_lists_effort_rows_after_auto(monkeypatch, tmp_path, 
 
 
 def test_remote_models_hint_skips_effort_names(monkeypatch, tmp_path, capsys):
-    # Zero engines + router on: every listed name is a router alias — the hint must fall back to
-    # `auto`, never suggest chat-testing an effort alias as if it were the newcomer's own model.
+    # Routing on with a real engine: the hint must name the newcomer's own model, never a router
+    # alias — the router family is listed first, so a naive `seen[0]` would suggest `auto`.
     # The hint rides stderr behind a tty check (print_models_hint), so fake the tty.
     _seed_running_remote_grid(monkeypatch, tmp_path)
-    _mock_overview(monkeypatch, {"nodes": [], "router_enabled": True})
+    _mock_overview(monkeypatch, {**_OVERVIEW_2NODES, "router_enabled": True})
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     assert cli.main(["models"]) == 0
     err = capsys.readouterr().err
-    assert "-m auto" in err and "Brute Force" not in err and "Feedback Loop" not in err
+    assert "-m glm-5.2" in err
+    assert "-m auto" not in err and "Brute Force" not in err and "Feedback Loop" not in err
 
 
 # ── responses dialect annotation on the live listing (issue 10) ──
@@ -42032,7 +42230,9 @@ def _refresh_body(monkeypatch, tmp_path, system, os_release=None):
     ``/etc/os-release`` is stubbed here for the same reason `_fetch_tokens_query` stubs it: since
     `omarchy` landed, a Linux machine's token is read off that file, and leaving the real one in place
     would make a `("Linux", "linux")` case a statement about the host running the suite rather than
-    about the code.
+    about the code. The install marker is stubbed to a path that does not exist for that same reason
+    — this helper's cases are all *no Omarchy on this machine*, and saying so is what keeps them true
+    on a machine that has one.
     """
     import json as _json
     import platform
@@ -42045,6 +42245,8 @@ def _refresh_body(monkeypatch, tmp_path, system, os_release=None):
     if os_release is not None:
         os_release_path.write_text(os_release, encoding="utf-8")
     monkeypatch.setattr(os_grid, "_OS_RELEASE", os_release_path)
+    monkeypatch.setattr(
+        os_grid, "_BY_MARKER", {tmp_path / "no-omarchy-install": os_grid.OS_OMARCHY})
     seen = {}
 
     def handler(request):
