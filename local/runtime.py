@@ -531,7 +531,12 @@ def _terminate_server(cfg: dict[str, Any], identity: dict[str, Any]) -> run_reco
         pid = run_records.recorded_pid(identity) or 0
         if pid and _server_process_state(cfg) != "owned":
             raise SystemExit(
-                f"Refusing to signal PID {pid}: its Grid server ownership cannot be proven."
+                f"Refusing to signal PID {pid}: its Grid server ownership cannot be proven.\n"
+                f"  This is usually an orphan from an earlier start: the config remembers only "
+                f"the newest instance, so a pid left over from a previous one can never match.\n"
+                f"  It still holds the port, and the next `grid start` would move this grid to a "
+                f"different one -- which takes every engine pointed at the old address with it.\n"
+                f"  Check it, then end it yourself:  ps -p {pid} -o command=  &&  kill {pid}"
             )
     try:
         return run_records.terminate_recorded(identity)

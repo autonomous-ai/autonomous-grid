@@ -42345,3 +42345,62 @@ def test_the_serve_loops_own_refresh_carries_the_os_claim(monkeypatch, tmp_path)
     stored = next(n for n in credentials.load_credentials()["networks"] if n["network_id"] == "n1")
     assert stored["access_token"] == "AT-2"
     assert stored["refresh_token"] == "RT-2"
+
+
+def test_start_says_out_loud_when_it_moves_the_grid_to_another_port(monkeypatch, capsys):
+    """A grid that changes address silently takes every engine down with it.
+
+    `_resolve_port` composes the sentence -- naming the port, what holds it, and where it went --
+    and `cmd_start` threw it away with `cfg, _ =`. So a busy port produced a grid on a different
+    URL, no notice, and every provider pointed at the old one failing with nothing to read. The
+    address is the one thing about a grid that other machines have written down.
+    """
+
+    from cli import grid as grid_cmd
+
+    cfg = {"grid_id": "ag-x", "name": "x", "port": 8299, "host": "0.0.0.0"}
+    monkeypatch.setattr(grid_cmd.runtime, "port_in_use", lambda port: port == 8299)
+    monkeypatch.setattr(grid_cmd.runtime, "port_holder", lambda port: "Python (pid 33467)")
+    monkeypatch.setattr(grid_cmd.runtime, "free_port_from", lambda start: 8300)
+    monkeypatch.setattr(grid_cmd.runtime, "make_local_url", lambda *a, **k: "http://h:8300")
+    monkeypatch.setattr(grid_cmd, "_advertised_host", lambda _cfg: "h")
+
+    updated, notice = grid_cmd._resolve_port(cfg)
+
+    assert updated["port"] == 8300
+    assert notice and "8299" in notice and "8300" in notice
+    assert "33467" in notice, "the notice must name what is holding the port"
+    # And the consequence, which is the part a reader acts on.
+    assert "engine" in notice.lower() or "provider" in notice.lower(), (
+        "the notice must say that engines pointed at the old address stop working"
+    )
+
+
+def test_stop_names_the_way_out_when_it_cannot_prove_ownership(monkeypatch):
+    """A refusal with no next step strands the port, and the next start moves the grid.
+
+    The identity check is right to be strict -- it exists so a teardown never signals a process
+    it cannot prove is ours. But an orphan from an EARLIER start can never match: the config
+    remembers only the latest instance_id, so the pid holding the port is unprovable forever.
+    The reader is then told 'refusing', given no way forward, and their next `grid start` silently
+    re-addresses the grid. The refusal has to hand them the pid and the command.
+    """
+
+    from local import runtime as runtime_module
+
+    cfg = {
+        "grid_id": "ag-x",
+        "name": "x",
+        "server_pid": 33467,
+        "server_instance_id": "newer-instance",
+        "server_start_marker": "marker",
+    }
+    monkeypatch.setattr(runtime_module, "_server_process_state", lambda _cfg: "ambiguous")
+    monkeypatch.setattr(runtime_module.run_records, "recorded_pid", lambda _identity: 33467)
+
+    with pytest.raises(SystemExit) as excinfo:
+        runtime_module._terminate_server(cfg, {})
+
+    message = str(excinfo.value)
+    assert "33467" in message
+    assert "kill" in message.lower(), "the refusal must name the command that ends this"

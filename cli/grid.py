@@ -67,7 +67,11 @@ def cmd_up(args: argparse.Namespace) -> int:
             cfg["lan_signaling_url"] = runtime.make_local_url(
                 cfg["port"], _advertised_host(cfg), "http"
             )
-    cfg, _ = _resolve_port(cfg)
+    cfg, port_notice = _resolve_port(cfg)
+    if port_notice:
+        # Never swallowed: the address is the one thing about a grid that OTHER machines have
+        # written down, so moving it silently takes every engine offline with nothing to read.
+        print(port_notice, file=sys.stderr)
     config.save_grid_config(cfg["grid_id"], cfg)
     runtime.apply_server_tls_client_env(cfg)
     runtime.start_grid(cfg)
@@ -157,7 +161,11 @@ def _resolve_port(cfg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         _advertised_host(cfg),
         "https" if updated.get("server_tls_cert_file") else "http",
     )
-    return updated, f"Port {port} is in use{by} — starting on {replacement} instead."
+    return updated, (
+        f"Port {port} is in use{by} — starting on {replacement} instead.\n"
+        f"  The grid's address changed. Any engine or node still pointed at :{port} will stop "
+        f"being reachable until it is re-joined at the new URL."
+    )
 
 
 def _apply_up_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
