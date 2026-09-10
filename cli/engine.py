@@ -19,6 +19,31 @@ def cmd_engine_install(args: argparse.Namespace) -> int:
     raise SystemExit(f"Unknown engine {args.name!r}. Choose 'llama.cpp' (text) or 'comfyui' (media).")
 
 
+def ensure_allocator_llama_cpp() -> bool:
+    """Ensure an allocator node can honor the llama.cpp capability it advertises.
+
+    Allocator enrollment is an explicit opt-in to autonomous model/runtime lifecycle. Installing
+    Grid's version- and SHA-256-pinned prebuilt here prevents a fresh node from registering a
+    capability that every subsequent warm command will fail to execute. Returns whether an install
+    was needed so callers and tests can distinguish verification from bootstrap.
+    """
+    from shared.engine import launcher
+
+    try:
+        launcher.llama_server_path()
+        return False
+    except SystemExit as exc:
+        # An explicit but invalid LLAMA_SERVER override is operator configuration, not an absent
+        # runtime. Do not silently install around it and leave the broken override in force.
+        if "llama-server not found" not in str(exc):
+            raise
+    print("Allocator runtime llama.cpp is missing; installing Grid's verified pinned build ...")
+    _install_llama_cpp(argparse.Namespace(target_sm=None, from_source=False))
+    # Verify the installed path through the exact resolver the managed runtime will use.
+    launcher.llama_server_path()
+    return True
+
+
 def cmd_engine_pull(args: argparse.Namespace) -> int:
     from shared.models import download, media_bundles
 
@@ -63,7 +88,7 @@ def cmd_engine_start(args: argparse.Namespace) -> int:
 def cmd_engine_stop(args: argparse.Namespace) -> int:
     from shared.engine import comfyui
 
-    return comfyui.stop_running()
+    return comfyui.stop_running(getattr(args, "port", 8188))
 
 
 def cmd_engine_list(args: argparse.Namespace) -> int:

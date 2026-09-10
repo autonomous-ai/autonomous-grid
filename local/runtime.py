@@ -3,26 +3,28 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import httpx
 
 from local import config
 from shared import logging_setup, paths, run_records
-
+from shared.filelock import file_lock
 
 GRID_TYPE = "lan-permissionless"
 DEFAULT_PORT = 8090
 DEFAULT_HOST = "0.0.0.0"
+ALLOCATOR_STATE_FILE = "allocator.json"
 
 
 def slug_name(name: str) -> str:
@@ -31,7 +33,7 @@ def slug_name(name: str) -> str:
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def detect_local_ip() -> str:
@@ -40,12 +42,214 @@ def detect_local_ip() -> str:
             sock.connect(("8.8.8.8", 80))
             return str(sock.getsockname()[0])
     except OSError:
+        # An isolated intranet may have no default route. Hostname resolution can still expose
+        # an address assigned to a real interface without depending on public connectivity.
+        try:
+            addresses = socket.getaddrinfo(
+                socket.gethostname(),
+                None,
+                family=socket.AF_UNSPEC,
+                type=socket.SOCK_DGRAM,
+            )
+        except socket.gaierror:
+            addresses = []
+        for _family, _socktype, _proto, _canonname, sockaddr in addresses:
+            candidate = str(sockaddr[0]).strip()
+            if candidate and not _is_loopback_address(candidate):
+                return candidate
         return "127.0.0.1"
 
 
-def make_local_url(port: int, advertise_host: str | None = None) -> str:
-    host = (advertise_host or detect_local_ip()).strip()
-    return f"http://{host}:{int(port)}"
+def detect_local_ip_for_url(controller_url: str) -> str:
+    """Return the source address the OS would use to reach ``controller_url``.
+
+    A UDP ``connect`` performs only a route lookup; it sends no packet.  Unlike the historical
+    public-DNS probe, this works on an air-gapped intranet and picks the right interface on a
+    multi-homed host.  Advertising loopback to a remote controller would publish a dead engine
+    route, so that case fails closed and asks the operator for ``--advertise-host``.
+    """
+
+    parsed = urlsplit(normalize_url(controller_url))
+    controller_host = parsed.hostname
+    if not controller_host:
+        raise SystemExit("Grid URL must include a host.")
+    controller_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        destinations = socket.getaddrinfo(
+            controller_host,
+            controller_port,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_DGRAM,
+        )
+    except socket.gaierror as exc:
+        if controller_host.lower() == "localhost" or _is_loopback_address(controller_host):
+            return "127.0.0.1"
+        raise SystemExit(
+            f"Cannot resolve a route to Grid controller {controller_host!r}; "
+            "pass --advertise-host with this node's reachable intranet address."
+        ) from exc
+
+    for family, socktype, proto, _canonname, sockaddr in destinations:
+        try:
+            with socket.socket(family, socktype, proto) as sock:
+                sock.connect(sockaddr)
+                local_host = str(sock.getsockname()[0]).strip()
+        except OSError:
+            continue
+        if not local_host:
+            continue
+        destination_host = str(sockaddr[0])
+        if _is_loopback_address(local_host) and not _is_loopback_address(destination_host):
+            continue
+        return local_host
+
+    if controller_host.lower() == "localhost" or _is_loopback_address(controller_host):
+        return "127.0.0.1"
+    raise SystemExit(
+        f"Cannot determine a reachable local address for Grid controller {controller_host!r}; "
+        "pass --advertise-host with this node's intranet address."
+    )
+
+
+def url_host(host: str) -> str:
+    """Format a hostname or IP literal for interpolation into an HTTP authority."""
+
+    value = str(host).strip()
+    if not value:
+        raise SystemExit("Advertise host must not be empty.")
+    if value.startswith("[") and value.endswith("]"):
+        return value
+    address_part = value.split("%", 1)[0]
+    try:
+        address = ipaddress.ip_address(address_part)
+    except ValueError:
+        return value
+    if address.version == 6:
+        # RFC 6874 requires the zone delimiter to be percent-encoded inside a URL authority.
+        return f"[{value.replace('%', '%25')}]"
+    return value
+
+
+def _is_loopback_address(host: str) -> bool:
+    value = str(host).strip().strip("[]").split("%", 1)[0]
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return value.lower() == "localhost"
+
+
+def make_local_url(port: int, advertise_host: str | None = None, scheme: str = "http") -> str:
+    # ``scheme`` is the caller's decision, mirrored from server_tls_serves_https (or from the
+    # flags at config-creation time, before any cert file exists to ask).
+    host = url_host(advertise_host or detect_local_ip())
+    return f"{scheme}://{host}:{int(port)}"
+
+
+def auto_tls_on_config(cfg: dict[str, Any], *, advertise_host: str | None,
+                       required: bool = True) -> bool:
+    """Create (or reuse) this grid's LAN TLS material; return whether TLS is on.
+
+    ``server_tls: true`` is the durable request: the certificate is generated on every start, so
+    an address change re-signs SANs to match. Manual ``--tls-cert`` files always win over the
+    generated pair. ``required=False`` marks the silent default (TLS on, nobody asked): a machine
+    without the certificate tool falls back to plain HTTP with a warning instead of losing the
+    ability to start a grid at all.
+    """
+    if not cfg.get("server_tls"):
+        return False
+    from shared import tls
+
+    hosts = [advertise_host or "", detect_local_ip()]
+    directory = paths.grid_dir(cfg["grid_id"]) / "tls"
+    recorded = str(cfg.get("server_tls_cert_file") or "")
+    if recorded and Path(recorded).parent != directory:
+        # An operator-supplied certificate is theirs to manage; never touch it.
+        return True
+    # Otherwise fall through to ensure_server_cert even though a path is already recorded. It is
+    # idempotent for a healthy pair, and it is the ONLY place that re-mints one that is missing or
+    # no longer usable — a grid created before the leaf carried an Authority Key Identifier would
+    # otherwise serve that leaf forever and be refused by every OpenSSL 3.x client, and a deleted
+    # cert file would reach the operator as uvicorn's bare FileNotFoundError instead of healing.
+    try:
+        crt, key, ca = tls.ensure_server_cert(directory, hosts)
+    except (tls.TlsToolMissing, RuntimeError, ValueError) as exc:
+        if required:
+            raise SystemExit(str(exc)) from exc
+        print(f"Warning: HTTPS unavailable ({exc}); this grid will serve plain HTTP.")
+        cfg["server_tls"] = False
+        return False
+    cfg["server_tls_cert_file"] = str(crt)
+    cfg["server_tls_key_file"] = str(key)
+    cfg["server_tls_ca_file"] = str(ca)
+    cfg["server_tls_ca_pem"] = ca.read_text(encoding="utf-8")
+    return True
+
+
+def server_tls_serves_https(cfg: dict[str, Any]) -> bool:
+    """Whether this grid's URL scheme must be https.
+
+    The certificate file — not the `server_tls` intention — is the witness: it is what uvicorn
+    actually binds, so every URL handed to a client must agree with it or health probes and
+    allocator calls dial the wrong protocol against the same port.
+    """
+    return bool(str(cfg.get("server_tls_cert_file") or ""))
+
+
+def _read_pem(path: str | None, what: str) -> str:
+    """Read a PEM file named by ``path``; "" when unset, a clear refusal when unreadable."""
+    if not path:
+        return ""
+    try:
+        return Path(path).expanduser().read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"Cannot read {what}: {exc}") from exc
+
+
+def server_tls_ca_bundle(cfg: dict[str, Any]) -> str:
+    """A file path a caller can pass to its own client's ``verify=`` to trust the grid CA.
+
+    ``httpx``/``ssl`` want a file, so when only the PEM body was
+    persisted (a config hand-edited or carried without its source path) it is materialised beside
+    the grid so the trust survives restarts. Returns "" for a grid that serves plain HTTP.
+    """
+    ca_file = str(cfg.get("server_tls_ca_file") or "")
+    if ca_file and Path(ca_file).expanduser().is_file():
+        return ca_file
+    # A CA fetched on first contact lives beside the grid's record; any client that resolves the
+    # grid trusts it from then on, so only the very first command pays for the fetch.
+    learned = grid_dir_ca_candidate(str(cfg.get("grid_id") or ""))
+    if learned:
+        return learned
+    ca_pem = str(cfg.get("server_tls_ca_pem") or "")
+    if not ca_pem:
+        return ""
+    bundle = paths.grid_dir(cfg["grid_id"]) / "tls-ca.pem"
+    try:
+        if bundle.read_text(encoding="utf-8") != ca_pem:
+            bundle.parent.mkdir(parents=True, exist_ok=True)
+            bundle.write_text(ca_pem, encoding="utf-8")
+    except OSError:
+        return ""
+    return str(bundle)
+
+
+def grid_dir_ca_candidate(value: str) -> str:
+    """The learned-CA path for a URL-addressed grid ("" unless one was fetched before).
+
+    The file lives in the allocator node's per-grid directory, keyed by the same stable digest
+    the node record uses, so every command that resolves the grid trusts the CA it learned once.
+    """
+    path = learned_ca_path(value)
+    return str(path) if path is not None and path.is_file() else ""
+
+
+def learned_ca_path(control_url: str) -> Path | None:
+    from shared.allocator.models import stable_digest
+
+    if not str(control_url).startswith("https://"):
+        return None
+    scope = stable_digest(str(control_url).rstrip("/"))[:16]
+    return paths.grid_home() / "allocator" / scope / "tls" / "learned-ca.crt"
 
 
 def advertised_address_works(url: str, timeout: float = 3.0) -> bool:
@@ -120,20 +324,35 @@ def init_grid_config(
     host: str = DEFAULT_HOST,
     grid_id: str | None = None,
     advertise_host: str | None = None,
+    tls_cert_file: str | None = None,
+    tls_key_file: str | None = None,
+    tls_ca_file: str | None = None,
+    tls_auto: bool = False,
 ) -> dict[str, Any]:
     grid_id = grid_id or f"ag-{slug_name(name)}-{uuid.uuid4().hex[:8]}"
+    scheme = "https" if (tls_cert_file or tls_auto) else "http"
     data = {
+        "server_tls": bool(tls_auto),
+        "server_tls_cert_file": str(tls_cert_file or ""),
+        "server_tls_key_file": str(tls_key_file or ""),
+        "server_tls_ca_file": str(tls_ca_file or ""),
+        "server_tls_ca_pem": _read_pem(tls_ca_file, "allocator/grid TLS CA"),
         "grid_id": grid_id,
         "name": name,
         "grid_type": GRID_TYPE,
         "managed_server": True,
         "host": host,
         "port": int(port),
-        "lan_signaling_url": make_local_url(port, advertise_host),
+        "lan_signaling_url": make_local_url(port, advertise_host, scheme),
+        # This capability is intentionally separate from the permissionless inference/discovery
+        # surface. It authorizes model-placement mutations on the local control plane.
+        "allocator_control_token": secrets.token_urlsafe(32),
         # `_stamp_server(0)` rather than a bare `server_pid: 0`: pid 0 names no process, so the two
         # fields beside it are `None` — and writing the identity as a unit here is what keeps "never
         # one without the others" true of the config's very first write too.
         **_stamp_server(0),
+        "server_instance_id": "",
+        "server_start_marker": "",
         "created_at": utc_now(),
         "updated_at": utc_now(),
     }
@@ -141,9 +360,38 @@ def init_grid_config(
     return data
 
 
+def ensure_allocator_control_token(cfg: dict[str, Any]) -> str:
+    """Return this grid's durable allocator capability, minting it for old configs.
+
+    Configs created before the allocator existed have no token.  Upgrade them in place exactly
+    when a managed server is started, rather than leaving its mutation API permanently disabled.
+    """
+    existing = cfg.get("allocator_control_token")
+    if isinstance(existing, str) and existing:
+        return existing
+    token = secrets.token_urlsafe(32)
+    cfg["allocator_control_token"] = token
+    cfg["updated_at"] = utc_now()
+    config.save_grid_config(str(cfg["grid_id"]), cfg)
+    return token
+
+
 def start_grid(cfg: dict[str, Any]) -> int:
+    grid_id = str(cfg["grid_id"])
+    with file_lock(paths.grid_dir(grid_id) / "server-lifecycle"):
+        persisted = config.load_grid_config(grid_id)
+        if persisted:
+            cfg.clear()
+            cfg.update(persisted)
+        return _start_grid_locked(cfg)
+
+
+def _start_grid_locked(cfg: dict[str, Any]) -> int:
     if not cfg.get("managed_server", True):
         raise SystemExit(f"{cfg['name']} is a remote signaling URL; there is no local server to start.")
+
+    # Persist the upgrade before an early return for an already-running pre-allocator grid.
+    ensure_allocator_control_token(cfg)
 
     # `record_alive`, not a bare pid check: it refuses the shapes a hand-edited or corrupt config can
     # hold (`int("abc")` used to raise here, and an out-of-range value reached `os.kill` and raised
@@ -156,7 +404,14 @@ def start_grid(cfg: dict[str, Any]) -> int:
             wait_for_health(cfg, timeout=3)
             return run_records.recorded_pid(identity) or 0
         except SystemExit:
-            pass
+            # Main permits a tokenless legacy record so upgrades can still stop it. For start,
+            # however, a live pid that cannot be tied to this grid and does not answer as this grid
+            # must not be silently replaced: keep the only evidence and ask for manual inspection.
+            if run_records.record_verdict(identity) is run_records.RecordVerdict.LIVE_UNVERIFIED:
+                raise SystemExit(
+                    f"Refusing to start {cfg['name']}: its live recorded server PID cannot be "
+                    "proven to belong to this Grid instance. Stop it manually, then retry."
+                ) from None
 
     port = int(cfg["port"])
     if _tcp_port_in_use("127.0.0.1", port):
@@ -167,15 +422,54 @@ def start_grid(cfg: dict[str, Any]) -> int:
     log_path = paths.grid_dir(cfg["grid_id"]) / "server.err"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = logging_setup.cap_and_open_append(log_path, logging_setup.ERR_LOG_MAX_BYTES)
-    proc = subprocess.Popen(
-        _cli_subprocess_command() + ["__server", cfg["grid_id"]],
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-    cfg.update(_stamp_server(proc.pid))
-    cfg["updated_at"] = utc_now()
-    config.save_grid_config(cfg["grid_id"], cfg)
+    instance_id = uuid.uuid4().hex
+    command = _cli_subprocess_command() + [
+        "__server",
+        cfg["grid_id"],
+        "--instance-id",
+        instance_id,
+    ]
+    cert_file = str(cfg.get("server_tls_cert_file") or "")
+    key_file = str(cfg.get("server_tls_key_file") or "")
+    if cert_file:
+        command += ["--tls-cert", cert_file, "--tls-key", key_file]
+    launch_env = dict(os.environ)
+    try:
+        proc = subprocess.Popen(
+            command,
+            env=launch_env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        log.close()
+    # Persist both main's general process identity and the allocator branch's command nonce. The
+    # former remains the authority for teardown; the latter strengthens diagnostics and compatibility
+    # with allocator-era run records.
+    try:
+        cfg.update(_stamp_server(proc.pid))
+        cfg["server_instance_id"] = instance_id
+        cfg["server_start_marker"] = ""
+        cfg["updated_at"] = utc_now()
+        config.save_grid_config(cfg["grid_id"], cfg)
+        marker = _capture_process_start_marker(proc.pid)
+        # Main's process stamp above remains authoritative. The argv-bound allocator marker is a
+        # second fence when the platform can read it, but inability to collect redundant evidence
+        # must not turn a healthy spawn into a failed startup.
+        if marker is not None:
+            cfg["server_start_marker"] = marker
+            cfg["updated_at"] = utc_now()
+            config.save_grid_config(cfg["grid_id"], cfg)
+    except BaseException:
+        _terminate_spawned_server(proc)
+        _clear_server_identity(cfg)
+        cfg["updated_at"] = utc_now()
+        try:
+            config.save_grid_config(cfg["grid_id"], cfg)
+        except (OSError, SystemExit):
+            pass
+        raise
     wait_for_health(cfg)
     return proc.pid
 
@@ -217,6 +511,20 @@ def _terminate_server(cfg: dict[str, Any], identity: dict[str, Any]) -> run_reco
     the port still answers and the command fails loud, and if the config had merely drifted onto a
     stranger the port is silent and the grid is genuinely down.
     """
+    # Allocator-era servers carry a second, argv-bound nonce identity. If either half of that
+    # identity remains on disk, require the complete identity to match before the general mainline
+    # teardown gets any opportunity to signal the pid.
+    if cfg.get("server_instance_id") and cfg.get("server_start_marker"):
+        pid = run_records.recorded_pid(identity) or 0
+        if pid and _server_process_state(cfg) != "owned":
+            raise SystemExit(
+                f"Refusing to signal PID {pid}: its Grid server ownership cannot be proven.\n"
+                f"  This is usually an orphan from an earlier start: the config remembers only "
+                f"the newest instance, so a pid left over from a previous one can never match.\n"
+                f"  It still holds the port, and the next `grid start` would move this grid to a "
+                f"different one -- which takes every engine pointed at the old address with it.\n"
+                f"  Check it, then end it yourself:  ps -p {pid} -o command=  &&  kill {pid}"
+            )
     try:
         return run_records.terminate_recorded(identity)
     except PermissionError:
@@ -269,6 +577,7 @@ def stop_grid(cfg: dict[str, Any]) -> StopOutcome:
         # start-time token would be a record half-cleared, and `recorded_pgid` would still hand the
         # next teardown a group id to signal.
         cfg.update(_stamp_server(0))
+        _clear_server_identity(cfg)
         cfg["updated_at"] = utc_now()
         config.save_grid_config(cfg["grid_id"], cfg)
     return outcome
@@ -331,7 +640,8 @@ def probe_url(cfg: dict[str, Any]) -> str | None:
     if target is None:
         return None
     host, port = target
-    return f"http://{f'[{host}]' if ':' in host else host}:{port}"
+    scheme = "https" if server_tls_serves_https(cfg) else "http"
+    return f"{scheme}://{f'[{host}]' if ':' in host else host}:{port}"
 
 
 def _nothing_is_listening(host: str, port: int) -> bool:
@@ -416,10 +726,16 @@ def wait_for_health(cfg: dict[str, Any], timeout: int = 30) -> None:
     url = f"{probe}/grid/info"
     while time.time() < deadline:
         try:
-            resp = httpx.get(url, timeout=_PROBE_TIMEOUT_SECONDS)
+            resp = httpx.get(
+                url,
+                timeout=_PROBE_TIMEOUT_SECONDS,
+                verify=server_tls_ca_bundle(cfg) or True,
+            )
             if resp.status_code == 200:
-                return
-        except Exception:
+                payload = resp.json()
+                if isinstance(payload, dict) and payload.get("grid_id") == cfg["grid_id"]:
+                    return
+        except (httpx.HTTPError, OSError, ValueError):
             pass
         time.sleep(0.25)
     grid_dir = paths.grid_dir(cfg["grid_id"])
@@ -433,10 +749,78 @@ def grid_url(cfg: dict[str, Any]) -> str:
     return str(cfg["lan_signaling_url"]).rstrip("/")
 
 
+def allocator_control_url(cfg: dict[str, Any]) -> str:
+    """Use loopback for secrets when the signaling server is owned by this machine."""
+
+    if cfg.get("managed_server", True):
+        scheme = "https" if server_tls_serves_https(cfg) else "http"
+        return f"{scheme}://127.0.0.1:{int(cfg['port'])}"
+    return grid_url(cfg)
+
+
 def engine_endpoint_url(endpoint_url: str | None, port: int, advertise_host: str | None = None) -> str:
     if endpoint_url:
         return normalize_url(endpoint_url)
     return f"{make_local_url(port, advertise_host)}/v1"
+
+
+def _terminate_spawned_server(proc: subprocess.Popen[Any]) -> None:
+    """Contain the exact detached server tree while its authoritative Popen is available."""
+
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5.0)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        run_records.kill_group(proc.pid)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.wait(timeout=5.0)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if proc.poll() is None:
+        raise RuntimeError(f"signaling server process tree {proc.pid} survived startup cleanup")
+
+
+def _server_process_state(cfg: dict[str, Any]) -> str:
+    """Return ``dead``, ``owned``, or ``ambiguous`` for the persisted signaling child."""
+
+    pid = int(cfg.get("server_pid") or 0)
+    if not run_records.pid_alive(pid):
+        return "dead"
+    instance_id = str(cfg.get("server_instance_id") or "").strip()
+    start_marker = str(cfg.get("server_start_marker") or "").strip()
+    grid_id = str(cfg.get("grid_id") or "").strip()
+    if not (instance_id and start_marker and grid_id):
+        return "ambiguous"
+    if run_records.process_matches(
+        pid,
+        required_args=("__server", grid_id, "--instance-id", instance_id),
+        start_marker=start_marker,
+    ):
+        return "owned"
+    return "ambiguous"
+
+
+def _capture_process_start_marker(pid: int, timeout: float = 3.0) -> str | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        marker = run_records.process_start_marker(pid)
+        if marker:
+            return marker
+        if not run_records.pid_alive(pid):
+            return None
+        time.sleep(0.05)
+    return None
+
+
+def _clear_server_identity(cfg: dict[str, Any]) -> None:
+    cfg["server_pid"] = 0
+    cfg["server_instance_id"] = ""
+    cfg["server_start_marker"] = ""
 
 
 def _tcp_port_in_use(host: str, port: int) -> bool:

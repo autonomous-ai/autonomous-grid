@@ -43,22 +43,26 @@ def _os_version() -> str:
 
 def _int_gb(value) -> int:
     try:
-        return int(round(float(value)))
+        return round(float(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _optional_int(value) -> int | None:
+    return None if value is None else _int_gb(value)
 
 
 def _safe_budget() -> Budget:
     try:
         return device.resolve_budget()
-    except Exception:
+    except Exception:  # noqa: BLE001 - every vendor/OS probe is intentionally best-effort
         return Budget(0, "ram", "detection unavailable", backend="cpu")
 
 
 def _apple_gpu_entry(chip: str) -> dict:
     try:
         snap = gpu.load_snapshot()
-    except Exception:
+    except Exception:  # noqa: BLE001 - every vendor/OS probe is intentionally best-effort
         snap = {}
     return {
         "index": 0,
@@ -76,7 +80,7 @@ def _apple_gpu_entry(chip: str) -> dict:
 def _nvidia_gpu_entries() -> list[dict]:
     try:
         gpus = gpu.enumerate_gpus()
-    except Exception:
+    except Exception:  # noqa: BLE001 - every vendor/OS probe is intentionally best-effort
         gpus = []
     entries: list[dict] = []
     for g in gpus:
@@ -102,7 +106,7 @@ def collect_device_info() -> dict:
 
     try:
         hinfo = host.gather()
-    except Exception:
+    except Exception:  # noqa: BLE001 - device inventory must remain best-effort
         hinfo = None
 
     # chip + model: Apple exposes both; on NVIDIA/CPU model is null and brand is
@@ -150,8 +154,8 @@ def collect_device_info() -> dict:
         },
         "memory": {
             "total_gb": _int_gb(hinfo.memory_total_gb) if hinfo else 0,
-            "available_gb": _int_gb(hinfo.memory_available_gb) if hinfo else 0,
-            "used_percent": _int_gb(hinfo.memory_percent) if hinfo else 0,
+            "available_gb": _optional_int(hinfo.memory_available_gb) if hinfo else None,
+            "used_percent": _optional_int(hinfo.memory_percent) if hinfo else None,
         },
         "disk": {
             "total_gb": _int_gb(hinfo.disk_total_gb) if hinfo else 0,

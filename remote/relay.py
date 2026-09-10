@@ -19,6 +19,7 @@ module is the stateless wire boundary.
 """
 from __future__ import annotations
 
+import ssl
 import sys
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -74,6 +75,14 @@ _SERVE_REGISTER_TIMEOUT = httpx.Timeout(connect=10.0, read=15.0, write=15.0, poo
 # accepts the connection and then never answers is exactly the shape a connect timeout cannot see.
 _CREDENTIAL_CHECK_TIMEOUT = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
 
+# Load the platform/certifi trust store once while the provider starts. A remote provider is a
+# long-lived daemon, while `uv sync` or a Python-version validation can atomically replace the
+# virtual environment underneath it. Letting every new httpx.Client resolve certifi again would
+# leave the already-running daemon pointing at the removed environment's cacert.pem and eventually
+# kill its poll workers. SSLContext owns an in-memory X509 store, so reusing this startup snapshot
+# keeps existing relay connections trustworthy and alive across an in-place code upgrade.
+_TLS_VERIFY_CONTEXT = ssl.create_default_context()
+
 
 class RelayUnauthorized(Exception):
     """The relay rejected the access token (401) — the caller should refresh and retry."""
@@ -116,7 +125,12 @@ def _client(signaling_url: str, access_token: str, *, timeout: float | httpx.Tim
     # refuses to send at all: `httpx.LocalProtocolError: Illegal header value b'Bearer '`, raised
     # client-side before any request reaches the network. Every other caller here always has a
     # real token, so this only changes behavior for the one call site the empty string was for.
-    return httpx.Client(base_url=signaling_url.rstrip("/"), headers=headers, timeout=timeout)
+    return httpx.Client(
+        base_url=signaling_url.rstrip("/"),
+        headers=headers,
+        timeout=timeout,
+        verify=_TLS_VERIFY_CONTEXT,
+    )
 
 
 # Only `register_node` and `deregister_node` below catch `httpx.InvalidURL`, and that scoping is

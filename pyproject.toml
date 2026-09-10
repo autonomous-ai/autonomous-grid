@@ -21,6 +21,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    # Local-mode pull-path tests (tests/test_inflight.py, tests/test_local_poll.py) are async.
+    # Without this declared, they only ran under a manually-passed `--with pytest-asyncio`, so a
+    # plain `pytest tests/` -- the command CI and every other file in this repo actually use --
+    # silently failed them.
+    "pytest-asyncio>=0.24",
     "ruff>=0.6",
     # tests/test_train_adapters.py builds synthetic tensors — no torch, no mlx, no download — so it
     # is cheap enough to always run, and it covers the peft <-> MLX key mapping and transpose a
@@ -76,3 +81,4 @@ markers = [
 # spending the subscription. A later `-m canary` wins over this one.
 addopts = ["-m", "not canary"]
 pythonpath = ["."]
+asyncio_mode = "auto"

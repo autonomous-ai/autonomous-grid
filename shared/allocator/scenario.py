@@ -1,0 +1,2094 @@
+"""Deterministic heterogeneous-fleet scenario lab for allocator development.
+
+This module deliberately simulates planning time rather than model processes. The persistent
+``grid test demo`` fixture supplies the separate real-process lifecycle proof. Keeping the two
+layers explicit lets developers explore dozens of logical nodes and users on one Mac without
+claiming that modeled CUDA, MPS, disk, or VRAM telemetry is physically present.
+"""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import math
+import random
+from bisect import bisect_right
+from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
+from typing import Any, Iterable
+
+from shared.allocator.controller import AllocatorController
+from shared.allocator.intelligence import classify_request
+from shared.allocator.models import (
+    DemandForecast,
+    ModelProfile,
+    ModelResidency,
+    NodeSnapshot,
+    NodeState,
+    PlacementAssignment,
+    PlacementPlan,
+    ResidencyState,
+    UnsatisfiedConstraint,
+)
+from shared.allocator.planner import PlacementPlanner, PlannerPolicy
+from shared.allocator.scenario_oracle import (
+    MAX_ORACLE_MACHINES,
+    MAX_ORACLE_MINUTES,
+    MAX_ORACLE_MODELS,
+    OracleMinuteDemand,
+    run_small_fleet_oracle,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioConfig:
+    machines: int = 8
+    models: int = 8
+    users: int = 50
+    minutes: int = 30
+    seed: int = 42
+    workload_traces: tuple[tuple[str, str], ...] = ()
+    oracle: bool = False
+    strategy: str = "smart"
+
+    def __post_init__(self) -> None:
+        bounds = {
+            "machines": (self.machines, 1, 64),
+            "models": (self.models, 1, 32),
+            "users": (self.users, 1, 10_000),
+            "minutes": (self.minutes, 6, 1_440),
+        }
+        for name, (value, minimum, maximum) in bounds.items():
+            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+                raise ValueError(f"{name} must be in [{minimum}, {maximum}]")
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
+            raise ValueError("seed must be an integer")
+        if not isinstance(self.oracle, bool):
+            raise ValueError("oracle must be a boolean")
+        if self.strategy not in SCENARIO_STRATEGIES:
+            raise ValueError(
+                "strategy must be one of " + ", ".join(SCENARIO_STRATEGIES)
+            )
+        if self.oracle and (
+            self.machines > MAX_ORACLE_MACHINES
+            or self.models > MAX_ORACLE_MODELS
+            or self.minutes > MAX_ORACLE_MINUTES
+        ):
+            raise ValueError(
+                "oracle is bounded to "
+                f"{MAX_ORACLE_MACHINES} machines, {MAX_ORACLE_MODELS} models, and "
+                f"{MAX_ORACLE_MINUTES} minutes"
+            )
+        seen: set[str] = set()
+        for binding in self.workload_traces:
+            if not isinstance(binding, tuple) or len(binding) != 2:
+                raise ValueError("workload_traces entries must be (workload, path) pairs")
+            workload, path = binding
+            if workload not in SCENARIO_WORKLOADS:
+                raise ValueError(
+                    f"unknown trace workload {workload!r}; choose from "
+                    + ", ".join(SCENARIO_WORKLOADS)
+                )
+            if workload in seen:
+                raise ValueError(f"workload trace supplied more than once: {workload}")
+            if not isinstance(path, str) or not path.strip():
+                raise ValueError(f"trace path for {workload} must be a non-empty string")
+            seen.add(workload)
+
+
+@dataclass(frozen=True, slots=True)
+class Persona:
+    user_id: str
+    workflow_id: str
+    role: str
+    workload: str
+    requests_per_minute: float
+    service_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class LogicalMachine:
+    snapshot: NodeSnapshot
+    hardware: str
+    disk_total_mb: int
+    disk_available_mb: int
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogModel:
+    profile: ModelProfile
+    job: str
+    artifact_size_mb: int
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioReport:
+    configuration: dict[str, Any]
+    machines: tuple[dict[str, Any], ...]
+    models: tuple[dict[str, Any], ...]
+    users: tuple[dict[str, Any], ...]
+    timeline: tuple[dict[str, Any], ...]
+    metrics: dict[str, Any]
+    safety: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+_PERSONA_BLUEPRINTS = (
+    ("software-engineer", "coding", 0.80, 8.0),
+    ("researcher", "research", 0.55, 10.0),
+    ("marketer", "marketing", 0.70, 5.0),
+    ("sales", "sales", 0.75, 4.0),
+    ("designer", "design", 0.45, 8.0),
+    ("image-creator", "image", 0.20, 20.0),
+    ("video-editor", "video", 0.08, 45.0),
+    ("operations", "general", 0.65, 4.0),
+    ("data-engineer", "embedding", 1.20, 1.0),
+)
+
+_REQUESTS: dict[str, tuple[str, str]] = {
+    "coding": ("chat/completions", "Debug this Python API, refactor the function, and add tests."),
+    "research": ("chat/completions", "Research the evidence, compare sources, and cite the study."),
+    "marketing": ("chat/completions", "Write a marketing campaign headline for this audience."),
+    "sales": ("chat/completions", "Draft sales outreach for this prospect and handle objections."),
+    "design": ("chat/completions", "Design a UI wireframe with a clear layout and typography."),
+    "image": ("images/generations", "Create a product illustration for a launch."),
+    "video": ("videos/generations", "Create a short launch video from this storyboard."),
+    "general": ("chat/completions", "Summarize the meeting and identify the next actions."),
+    "embedding": ("embeddings", "Index these internal documents."),
+}
+
+SCENARIO_WORKLOADS = tuple(_REQUESTS)
+SCENARIO_STRATEGIES = ("smart", "reactive", "greedy", "static")
+_MAX_TRACE_BYTES = 5 * 1024 * 1024
+_MAX_TRACE_ROWS = 100_000
+
+_DIRECT_MODEL_BY_WORKLOAD = {"general": "general-assistant"}
+
+# Users are grouped into synthetic project workflows. Requests retain their independently sampled
+# counts, but when several roles contribute during one minute their timestamps follow a stable
+# project-stage order. This gives the production sequence learner honest repeated transitions to
+# discover without injecting forecast rows or revealing future demand directly.
+_WORKFLOW_STAGE_OFFSETS = {
+    "general": 1.0,
+    "research": 4.0,
+    "coding": 7.0,
+    "embedding": 10.0,
+    "marketing": 13.0,
+    "sales": 16.0,
+    "design": 19.0,
+    "image": 22.0,
+    "video": 25.0,
+}
+
+_MODEL_BLUEPRINTS = (
+    {
+        "model_id": "general-assistant",
+        "job": "general LLM",
+        "memory_mb": 12_000,
+        "artifact_mb": 8_000,
+        "runtimes": ("llama.cpp", "vllm"),
+        "backends": ("metal", "cuda"),
+        "scores": (("general", 1.0), ("sales", 0.55), ("marketing", 0.55)),
+        "concurrency": 4,
+        "min_replicas": 1,
+    },
+    {
+        "model_id": "code-specialist",
+        "job": "coding LLM",
+        "memory_mb": 24_000,
+        "artifact_mb": 16_000,
+        "runtimes": ("llama.cpp", "vllm"),
+        "backends": ("metal", "cuda"),
+        "scores": (("coding", 1.0), ("research", 0.45)),
+        "concurrency": 3,
+    },
+    {
+        "model_id": "research-specialist",
+        "job": "research LLM",
+        "memory_mb": 28_000,
+        "artifact_mb": 20_000,
+        "runtimes": ("llama.cpp", "vllm"),
+        "backends": ("metal", "cuda"),
+        "scores": (("research", 1.0), ("general", 0.55)),
+        "concurrency": 2,
+    },
+    {
+        "model_id": "creative-writer",
+        "job": "marketing and sales LLM",
+        "memory_mb": 16_000,
+        "artifact_mb": 11_000,
+        "runtimes": ("llama.cpp", "vllm"),
+        "backends": ("metal", "cuda"),
+        "scores": (("marketing", 1.0), ("sales", 0.85), ("design", 0.35)),
+        "concurrency": 4,
+    },
+    {
+        "model_id": "image-generator",
+        "job": "image generation",
+        "memory_mb": 20_000,
+        "artifact_mb": 12_000,
+        "runtimes": ("comfyui",),
+        "backends": ("mps", "cuda"),
+        "scores": (("image", 1.0), ("design", 0.70)),
+        "concurrency": 1,
+    },
+    {
+        "model_id": "video-generator",
+        "job": "video generation",
+        "memory_mb": 40_000,
+        "artifact_mb": 30_000,
+        "runtimes": ("comfyui",),
+        "backends": ("mps", "cuda"),
+        "scores": (("video", 1.0), ("design", 0.50)),
+        "concurrency": 1,
+    },
+    {
+        "model_id": "embedding-model",
+        "job": "embedding",
+        "memory_mb": 8_000,
+        "artifact_mb": 4_000,
+        "runtimes": ("llama.cpp", "vllm"),
+        "backends": ("metal", "cuda"),
+        "scores": (("embedding", 1.0),),
+        "concurrency": 16,
+    },
+    {
+        "model_id": "design-multimodal",
+        "job": "multimodal design",
+        "memory_mb": 32_000,
+        "artifact_mb": 22_000,
+        "runtimes": ("llama.cpp", "vllm"),
+        "backends": ("metal", "cuda"),
+        "scores": (("design", 1.0), ("image", 0.35)),
+        "concurrency": 2,
+    },
+    {
+        "model_id": "sales-specialist",
+        "job": "sales LLM",
+        "memory_mb": 14_000,
+        "artifact_mb": 9_000,
+        "runtimes": ("llama.cpp", "vllm"),
+        "backends": ("metal", "cuda"),
+        "scores": (("sales", 1.0), ("marketing", 0.60)),
+        "concurrency": 5,
+    },
+)
+
+_MACHINE_BLUEPRINTS = (
+    {
+        "hardware": "Mac Studio M2 Ultra 192 GB",
+        "capacity": 196_608,
+        "reserved": 24_576,
+        "runtimes": ("llama.cpp",),
+        "backends": ("metal",),
+        "gpu_count": 1,
+        "gpu_memory": (196_608,),
+        "disk_total": 2_000_000,
+        "disk_free": 1_100_000,
+        "concurrency": 8,
+    },
+    {
+        "hardware": "Mac Studio M2 Max 64 GB",
+        "capacity": 65_536,
+        "reserved": 8_192,
+        "runtimes": ("llama.cpp",),
+        "backends": ("metal",),
+        "gpu_count": 1,
+        "gpu_memory": (65_536,),
+        "disk_total": 1_000_000,
+        "disk_free": 180_000,
+        "concurrency": 4,
+    },
+    {
+        "hardware": "2x RTX Pro 6000 Blackwell",
+        "capacity": 196_608,
+        "reserved": 16_384,
+        "runtimes": ("vllm", "comfyui"),
+        "backends": ("cuda",),
+        "gpu_count": 2,
+        "gpu_memory": (98_304, 98_304),
+        "disk_total": 4_000_000,
+        "disk_free": 2_400_000,
+        "concurrency": 32,
+    },
+    {
+        "hardware": "RTX 4090 workstation",
+        "capacity": 24_576,
+        "reserved": 4_096,
+        "runtimes": ("vllm", "comfyui"),
+        "backends": ("cuda",),
+        "gpu_count": 1,
+        "gpu_memory": (24_576,),
+        "disk_total": 1_000_000,
+        "disk_free": 48_000,
+        "concurrency": 8,
+    },
+    {
+        "hardware": "Mac Studio media node 192 GB",
+        "capacity": 196_608,
+        "reserved": 32_768,
+        "runtimes": ("comfyui",),
+        "backends": ("mps",),
+        "gpu_count": 1,
+        "gpu_memory": (196_608,),
+        "disk_total": 2_000_000,
+        "disk_free": 620_000,
+        "concurrency": 2,
+    },
+    {
+        "hardware": "Mac mini M2 Pro 32 GB",
+        "capacity": 32_768,
+        "reserved": 6_144,
+        "runtimes": ("llama.cpp",),
+        "backends": ("metal",),
+        "gpu_count": 1,
+        "gpu_memory": (32_768,),
+        "disk_total": 500_000,
+        "disk_free": 36_000,
+        "concurrency": 2,
+    },
+)
+
+
+def run_scenario(config: ScenarioConfig) -> ScenarioReport:
+    # Independent streams make capacity sweeps comparable: changing the machine/model inventory
+    # must not silently generate different users or request arrivals for the same seed.
+    topology_rng = random.Random(config.seed ^ 0x4E4F4445)
+    persona_rng = random.Random(config.seed ^ 0x55534552)
+    rng = random.Random(config.seed ^ 0x44454D41)
+    outcome_rng = random.Random(config.seed ^ 0x4F555443)
+    catalog = _build_catalog(config.models, config.machines)
+    machines = _build_machines(config.machines, catalog, topology_rng)
+    personas = _build_personas(config.users, persona_rng)
+    trace_curves = _load_trace_curves(config)
+    planner_policy = _scenario_planner_policy(config.strategy)
+    baseline_planner = PlacementPlanner(planner_policy)
+    controller = AllocatorController(planner_policy=planner_policy)
+    profiles = tuple(item.profile for item in catalog)
+    for profile in profiles:
+        controller.put_profile(profile)
+    profile_by_id = {item.profile.model_id: item.profile for item in catalog}
+    artifact_by_id = {item.profile.model_id: item.artifact_size_mb for item in catalog}
+    nodes = tuple(item.snapshot for item in machines)
+
+    requested_by_workload: Counter[str] = Counter()
+    served_by_workload: defaultdict[str, float] = defaultdict(float)
+    requested_by_user: Counter[str] = Counter()
+    served_by_user: defaultdict[str, float] = defaultdict(float)
+    total_requests = 0
+    loads = 0
+    unloads = 0
+    migrations = 0
+    cache_loads = 0
+    cold_start_seconds = 0.0
+    artifact_download_mb = 0
+    predictive_prefetches = 0
+    predictive_prefetch_hits = 0
+    predictive_prefetch_download_mb = 0
+    predictive_prefetch_evictions = 0
+    predictive_prefetch_replacements = 0
+    predictive_prefetch_reclaimed_mb = 0
+    predictive_cold_start_seconds_avoided = 0.0
+    predictive_prefetch_lead_minutes: list[int] = []
+    predictively_cached_at: dict[tuple[str, str], int] = {}
+    overloaded_model_minutes = 0
+    peak_modeled_queue_depth = 0
+    realized_failure_observations = 0
+    unsatisfied_replica_minutes = 0
+    shortfall_by_model: Counter[str] = Counter()
+    peak_shortfall_by_model: Counter[str] = Counter()
+    catalog_gap_requests = 0
+    direct_named_requests = 0
+    joint_portfolio_ticks = 0
+    portfolio_changes = 0
+    rapid_lifecycle_reversals = 0
+    last_lifecycle_change: dict[tuple[str, str], tuple[int, str]] = {}
+    admission_state_minutes: Counter[str] = Counter()
+    admission_by_workload: defaultdict[str, Counter[str]] = defaultdict(Counter)
+    admission_blocker_minutes: defaultdict[str, Counter[str]] = defaultdict(Counter)
+    suitability_weight = 0.0
+    memory_utilization: list[float] = []
+    safety_violations: list[str] = []
+    timeline: list[dict[str, Any]] = []
+    oracle_demands: list[OracleMinuteDemand] = []
+    prior_phase = ""
+    prior_states = {node.node_id: node.state for node in nodes}
+    disk_available = {
+        machine.snapshot.node_id: machine.disk_available_mb for machine in machines
+    }
+    disk_capacity = {
+        machine.snapshot.node_id: machine.disk_total_mb for machine in machines
+    }
+
+    base_time = 1_000_000.0
+    nodes = _refresh_disk_admission(nodes, catalog, disk_available)
+    if config.strategy == "static":
+        bootstrap = baseline_planner.plan(
+            nodes,
+            profiles,
+            _static_forecasts(
+                personas,
+                nodes,
+                profiles,
+                planner=baseline_planner,
+                now=base_time - 30.0,
+            ),
+            now=base_time - 30.0,
+        )
+    elif config.strategy == "greedy":
+        bootstrap = baseline_planner.plan(
+            nodes,
+            profiles,
+            now=base_time - 30.0,
+        )
+    else:
+        controller.tick(nodes, now=base_time - 30.0)
+        bootstrap = controller.last_plan
+        assert bootstrap is not None
+    bootstrap_violations = _validate_plan(
+        bootstrap.assignments,
+        nodes,
+        profile_by_id,
+        artifact_by_id,
+        disk_available,
+        planner_policy,
+    )
+    safety_violations.extend(f"bootstrap: {item}" for item in bootstrap_violations)
+    bootstrap_loads: list[str] = []
+    for assignment in bootstrap.assignments:
+        node = next(item for item in nodes if item.node_id == assignment.node_id)
+        profile = profile_by_id[assignment.model_id]
+        cached = assignment.model_id in node.cached_models
+        loads += 1
+        cache_loads += int(cached)
+        cold_start_seconds += profile.warm_seconds + (0.0 if cached else profile.load_seconds)
+        if not cached:
+            disk_available[assignment.node_id] -= artifact_by_id[assignment.model_id]
+            artifact_download_mb += artifact_by_id[assignment.model_id]
+        bootstrap_loads.append(f"{assignment.model_id}@{assignment.node_id}")
+    nodes = _materialize(
+        bootstrap.assignments,
+        nodes,
+        base_time - 15.0,
+        profiles=profile_by_id,
+    )
+    frozen_static_plan = (
+        replace(
+            bootstrap,
+            assignments=tuple(replace(item, existing=True) for item in bootstrap.assignments),
+            artifact_prefetches=(),
+            artifact_evictions=(),
+            preemptions=(),
+        )
+        if config.strategy == "static"
+        else None
+    )
+    if bootstrap_loads:
+        timeline.append(
+            {
+                "minute": -1,
+                "phase": "bootstrap",
+                "requests": 0,
+                "workloads": {},
+                "desired_replicas": dict(bootstrap.desired_replicas),
+                "ready_replicas": {},
+                "served_equivalent": 0.0,
+                "service_rate_pct": 0.0,
+                "overloaded_models": {},
+                "prefetches": [],
+                "artifact_evictions": [],
+                "loads": sorted(bootstrap_loads),
+                "unloads": [],
+                "node_changes": [],
+                "portfolio_selection": {},
+                "portfolio_admissions": (),
+                "portfolio_changed": False,
+                "unsatisfied": [],
+            }
+        )
+    prior_phase = "bootstrap"
+    prior_states = {node.node_id: node.state for node in nodes}
+    prior_portfolio_selection: dict[str, str] = {}
+    prior_admission_states: dict[str, str] = {}
+
+    for minute in range(config.minutes):
+        now = base_time + minute * 60.0
+        phase = _phase(minute, config.minutes)
+        nodes = _evolve_nodes(nodes, phase, now)
+        nodes = _refresh_disk_admission(nodes, catalog, disk_available)
+        request_counts: Counter[str] = Counter()
+        request_counts_by_user: Counter[str] = Counter()
+        service_totals: defaultdict[str, float] = defaultdict(float)
+        current_ready = _ready_models(nodes)
+        capacity_by_model: defaultdict[str, float] = defaultdict(float)
+        ready_replicas_by_model: Counter[str] = Counter()
+        for node in nodes:
+            if node.state not in (NodeState.ACCEPTING, NodeState.THROTTLED):
+                continue
+            node_capacity_fraction = (
+                planner_policy.throttled_capacity_fraction
+                if node.state == NodeState.THROTTLED
+                else 1.0
+            )
+            for residency in node.residencies:
+                profile = profile_by_id.get(residency.model_id)
+                if (
+                    profile is None
+                    or residency.state != ResidencyState.READY
+                    or not profile.matches_artifact(residency)
+                ):
+                    continue
+                ready_replicas_by_model[residency.model_id] += 1
+                capacity_by_model[residency.model_id] += (
+                    profile.replica_concurrency
+                    * profile.target_utilization
+                    * node_capacity_fraction
+                )
+        observation_batches: list[
+            tuple[Persona, Any, tuple[float, ...], str, float]
+        ] = []
+        routed_by_workload: dict[str, str] = {}
+
+        for persona in personas:
+            multiplier = (
+                trace_curves[persona.workload][minute]
+                if persona.workload in trace_curves
+                else _demand_multiplier(phase, persona.workload)
+            )
+            expected = persona.requests_per_minute * multiplier
+            count = math.floor(expected)
+            if rng.random() < expected - count:
+                count += 1
+            if count <= 0:
+                continue
+            endpoint, prompt = _REQUESTS[persona.workload]
+            explicit_model = (
+                _DIRECT_MODEL_BY_WORKLOAD.get(persona.workload, "")
+                if _DIRECT_MODEL_BY_WORKLOAD.get(persona.workload, "") in profile_by_id
+                else ""
+            )
+            features = classify_request(
+                endpoint,
+                {
+                    "model": explicit_model or "auto",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "prompt": prompt,
+                    "max_completion_tokens": 256,
+                },
+            )
+            served_model = (
+                explicit_model
+                if explicit_model and explicit_model in current_ready
+                else (
+                    ""
+                    if explicit_model
+                    else _best_ready_model(features.workload, current_ready, profile_by_id)
+                )
+            )
+            capability = (
+                profile_by_id[served_model].workload_score(features.workload)
+                if served_model
+                else 0.0
+            )
+            routed_by_workload[features.workload] = served_model
+            observation_batches.append(
+                (
+                    persona,
+                    features,
+                    tuple(
+                        now
+                        + _WORKFLOW_STAGE_OFFSETS[features.workload]
+                        + rng.random() * 2.0
+                        for _ in range(count)
+                    ),
+                    served_model,
+                    capability,
+                )
+            )
+            request_counts[features.workload] += count
+            request_counts_by_user[persona.user_id] += count
+            service_totals[features.workload] += count * persona.service_seconds
+            direct_named_requests += count if explicit_model else 0
+
+        # Close the control loop with the capacity that was actually READY when requests arrived.
+        # Previously every routed request reported success and queue=0 even when several workloads
+        # overloaded the same residency; the report scored the shortfall afterward, but the
+        # production demand loop never got to react to it. Aggregate all routed device-time first,
+        # then feed deterministic realized failures and queue pressure into the next plan.
+        offered_by_model: defaultdict[str, float] = defaultdict(float)
+        for workload, model_id in routed_by_workload.items():
+            if model_id:
+                offered_by_model[model_id] += service_totals[workload] / 60.0
+        service_ratio_by_model = {
+            model_id: min(1.0, capacity_by_model.get(model_id, 0.0) / offered)
+            if offered > 0
+            else 1.0
+            for model_id, offered in offered_by_model.items()
+        }
+        queue_by_model = {
+            model_id: math.ceil(max(0.0, offered - capacity_by_model.get(model_id, 0.0)))
+            for model_id, offered in offered_by_model.items()
+        }
+        overloaded_models = {
+            model_id: {
+                "offered_concurrency": round(offered, 2),
+                "ready_capacity": round(capacity_by_model.get(model_id, 0.0), 2),
+                "queue_depth": queue_by_model[model_id],
+            }
+            for model_id, offered in sorted(offered_by_model.items())
+            if offered > capacity_by_model.get(model_id, 0.0)
+        }
+        overloaded_model_minutes += len(overloaded_models)
+        peak_modeled_queue_depth = max(
+            peak_modeled_queue_depth,
+            max(
+                (row["queue_depth"] for row in overloaded_models.values()),
+                default=0,
+            ),
+        )
+        chronological_observations = sorted(
+            (
+                (
+                    observation_timestamp,
+                    persona.user_id,
+                    persona,
+                    features,
+                    served_model,
+                    capability,
+                )
+                for persona, features, timestamps, served_model, capability in observation_batches
+                for observation_timestamp in timestamps
+            ),
+            key=lambda item: (item[0], item[1]),
+        )
+        for (
+            observation_timestamp,
+            _user_id,
+            persona,
+            features,
+            served_model,
+            capability,
+        ) in chronological_observations:
+            service_ratio = service_ratio_by_model.get(served_model, 0.0)
+            queue_depth = queue_by_model.get(served_model, 1 if not served_model else 0)
+            capacity = capacity_by_model.get(served_model, 0.0)
+            pressure = (
+                max(1.0, offered_by_model[served_model] / capacity)
+                if served_model and capacity > 0
+                else 1.0
+            )
+            succeeded = bool(served_model and outcome_rng.random() < service_ratio)
+            realized_failure_observations += int(not succeeded)
+            if config.strategy in {"smart", "reactive"}:
+                controller.observe_lifecycle(
+                    features,
+                    served_model=served_model,
+                    service_seconds=persona.service_seconds,
+                    latency_ms=persona.service_seconds * 1_000.0 * pressure,
+                    queue_depth=queue_depth,
+                    error=not succeeded,
+                    output_units=(
+                        128 if features.workload not in {"image", "video"} else 1
+                    ),
+                    quality=(
+                        max(0.0, min(1.0, capability * 0.95))
+                        if succeeded
+                        else None
+                    ),
+                    workflow_key=(
+                        persona.workflow_id if config.strategy == "smart" else ""
+                    ),
+                    timestamp=observation_timestamp,
+                )
+
+        if config.oracle:
+            oracle_demands.append(
+                OracleMinuteDemand(
+                    requests=tuple(sorted(request_counts.items())),
+                    service_seconds=tuple(sorted(service_totals.items())),
+                )
+            )
+
+        if config.strategy in {"smart", "reactive"}:
+            controller.tick(nodes, now=now + 30.0)
+            plan = controller.last_plan
+            assert plan is not None
+        elif config.strategy == "greedy":
+            plan = baseline_planner.plan(
+                nodes,
+                profiles,
+                _greedy_forecasts(
+                    request_counts,
+                    service_totals,
+                    nodes,
+                    profiles,
+                    planner=baseline_planner,
+                    now=now + 30.0,
+                ),
+                now=now + 30.0,
+            )
+        else:
+            assert frozen_static_plan is not None
+            plan = _available_static_plan(
+                frozen_static_plan,
+                nodes,
+                profiles=profile_by_id,
+                policy=planner_policy,
+                now=now + 30.0,
+            )
+        plan, mutation_deferrals = _apply_scenario_mutation_guards(
+            plan,
+            nodes,
+            profiles=profile_by_id,
+            now=now + 30.0,
+        )
+        violations = _validate_plan(
+            plan.assignments,
+            nodes,
+            profile_by_id,
+            artifact_by_id,
+            disk_available,
+            planner_policy,
+        )
+        safety_violations.extend(f"minute {minute}: {item}" for item in violations)
+
+        before_pairs = {
+            (node.node_id, residency.model_id)
+            for node in nodes
+            for residency in node.residencies
+            if residency.state == ResidencyState.READY
+        }
+        after_pairs = plan.desired_pairs
+        added = after_pairs - before_pairs
+        removed = before_pairs - after_pairs
+        loads += len(added)
+        unloads += len(removed)
+        for pair, direction in (
+            *((pair, "load") for pair in added),
+            *((pair, "unload") for pair in removed),
+        ):
+            prior_change = last_lifecycle_change.get(pair)
+            if (
+                prior_change is not None
+                and prior_change[1] != direction
+                and minute - prior_change[0] <= 5
+            ):
+                rapid_lifecycle_reversals += 1
+            last_lifecycle_change[pair] = (minute, direction)
+        for node_id, model_id in added:
+            node = next(item for item in nodes if item.node_id == node_id)
+            profile = profile_by_id[model_id]
+            cached = model_id in node.cached_models
+            cache_loads += int(cached)
+            if (node_id, model_id) in predictively_cached_at:
+                predictive_prefetch_hits += 1
+                predictive_cold_start_seconds_avoided += profile.load_seconds
+                predictive_prefetch_lead_minutes.append(
+                    minute - predictively_cached_at.pop((node_id, model_id))
+                )
+            cold_start_seconds += profile.warm_seconds + (0.0 if cached else profile.load_seconds)
+            if not cached:
+                disk_available[node_id] -= artifact_by_id[model_id]
+                artifact_download_mb += artifact_by_id[model_id]
+        prefetched_pairs: set[tuple[str, str]] = set()
+        prefetch_labels: list[str] = []
+        for prefetch in plan.artifact_prefetches:
+            pair = (prefetch.node_id, prefetch.model_id)
+            profile = profile_by_id[prefetch.model_id]
+            required_disk = (
+                profile.artifact_size_mb
+                + planner_policy.predictive_artifact_disk_reserve_mb
+            )
+            if required_disk > disk_available[prefetch.node_id]:
+                safety_violations.append(
+                    f"minute {minute}: predictive artifact disk overcommit for "
+                    f"{prefetch.model_id} on {prefetch.node_id}"
+                )
+                continue
+            disk_available[prefetch.node_id] -= profile.artifact_size_mb
+            artifact_download_mb += profile.artifact_size_mb
+            predictive_prefetch_download_mb += profile.artifact_size_mb
+            predictive_prefetches += 1
+            predictively_cached_at[pair] = minute
+            prefetched_pairs.add(pair)
+            prefetch_labels.append(f"{prefetch.model_id}@{prefetch.node_id}")
+        evicted_pairs: set[tuple[str, str]] = set()
+        eviction_labels: list[str] = []
+        for eviction in plan.artifact_evictions:
+            pair = (eviction.node_id, eviction.model_id)
+            node = next(item for item in nodes if item.node_id == eviction.node_id)
+            residency = node.residency(eviction.model_id)
+            profile = profile_by_id[eviction.model_id]
+            if (
+                pair in after_pairs
+                or pair in prefetched_pairs
+                or residency is None
+                or residency.state != ResidencyState.CACHED
+                or not residency.predictive_cache
+                or not profile.matches_artifact(residency)
+            ):
+                safety_violations.append(
+                    f"minute {minute}: unsafe predictive artifact eviction for "
+                    f"{eviction.model_id} on {eviction.node_id}"
+                )
+                continue
+            disk_available[eviction.node_id] = min(
+                disk_capacity[eviction.node_id],
+                disk_available[eviction.node_id] + profile.artifact_size_mb,
+            )
+            predictively_cached_at.pop(pair, None)
+            predictive_prefetch_evictions += 1
+            predictive_prefetch_replacements += int(bool(eviction.for_model_id))
+            predictive_prefetch_reclaimed_mb += profile.artifact_size_mb
+            evicted_pairs.add(pair)
+            eviction_labels.append(
+                (
+                    f"{eviction.model_id}->{eviction.for_model_id}@{eviction.node_id}"
+                    if eviction.for_model_id
+                    else f"{eviction.model_id}@{eviction.node_id}"
+                )
+            )
+        before_nodes: defaultdict[str, set[str]] = defaultdict(set)
+        after_nodes: defaultdict[str, set[str]] = defaultdict(set)
+        for node_id, model_id in before_pairs:
+            before_nodes[model_id].add(node_id)
+        for node_id, model_id in after_pairs:
+            after_nodes[model_id].add(node_id)
+        migrations += sum(
+            min(len(before_nodes[model] - after_nodes[model]), len(after_nodes[model] - before_nodes[model]))
+            for model in set(before_nodes).union(after_nodes)
+        )
+        unsatisfied_replica_minutes += sum(item.missing_replicas for item in plan.unsatisfied)
+        for item in plan.unsatisfied:
+            shortfall_by_model[item.model_id] += item.missing_replicas
+            peak_shortfall_by_model[item.model_id] = max(
+                peak_shortfall_by_model[item.model_id],
+                item.missing_replicas,
+            )
+
+        if config.strategy in {"smart", "reactive"}:
+            allocator_status = controller.status(nodes, now=now + 30.0)
+            portfolio_selection = {
+                str(workload): str(model_id)
+                for workload, model_id in allocator_status["portfolio_selection"].items()
+            }
+            portfolio_admissions = tuple(
+                dict(row) for row in allocator_status["portfolio_admissions"]
+            )
+            joint_portfolio_ticks += int(
+                allocator_status["portfolio_policy"]["joint"]
+            )
+        else:
+            portfolio_selection = dict(sorted(routed_by_workload.items()))
+            portfolio_admissions = ()
+        for admission in portfolio_admissions:
+            workload = str(admission.get("workload") or "unknown")
+            state = str(admission.get("state") or "unknown")
+            admission_state_minutes[state] += 1
+            admission_by_workload[workload][state] += 1
+            for blocker in admission.get("blocking_models") or ():
+                admission_blocker_minutes[workload][str(blocker)] += 1
+        portfolio_changed = portfolio_selection != prior_portfolio_selection
+        admission_states = {
+            str(row.get("workload") or "unknown"): str(row.get("state") or "unknown")
+            for row in portfolio_admissions
+        }
+        admission_changed = admission_states != prior_admission_states
+        portfolio_changes += int(portfolio_changed)
+        # Requests arrived before this planning tick. Score them against capacity that was READY at
+        # the start of the tick, not desired assignments whose load/warm mutations have only just
+        # been issued. Materialization below makes successful mutations available next minute. This
+        # one-tick actuation lag is deliberately conservative and is what lets the lab distinguish
+        # proactive allocation from reactive scaling.
+        chosen_by_workload = dict(routed_by_workload)
+        for workload, count in request_counts.items():
+            chosen = chosen_by_workload.get(workload, "")
+            if not chosen:
+                catalog_gap_requests += count
+                continue
+            suitability_weight += count * profile_by_id[chosen].workload_score(workload)
+        minute_served = 0.0
+        for workload, count in request_counts.items():
+            chosen = chosen_by_workload.get(workload, "")
+            served = count * service_ratio_by_model.get(chosen, 0.0)
+            minute_served += served
+            served_by_workload[workload] += served
+            requested_by_workload[workload] += count
+            total_requests += count
+        for persona in personas:
+            count = request_counts_by_user[persona.user_id]
+            if not count:
+                continue
+            chosen = chosen_by_workload.get(persona.workload, "")
+            requested_by_user[persona.user_id] += count
+            served_by_user[persona.user_id] += count * service_ratio_by_model.get(chosen, 0.0)
+
+        utilization = _memory_utilization(plan.assignments, nodes)
+        memory_utilization.append(utilization)
+
+        state_changes = [
+            f"{node.node_id}:{prior_states.get(node.node_id, node.state).value}->{node.state.value}"
+            for node in nodes
+            if prior_states.get(node.node_id) != node.state
+        ]
+        desired = dict(plan.desired_replicas)
+        if (
+            phase != prior_phase
+            or added
+            or removed
+            or plan.unsatisfied
+            or state_changes
+            or prefetch_labels
+            or eviction_labels
+            or portfolio_changed
+            or admission_changed
+            or overloaded_models
+            or mutation_deferrals
+        ):
+            timeline.append(
+                {
+                    "minute": minute,
+                    "phase": phase,
+                    "requests": sum(request_counts.values()),
+                    "workloads": dict(sorted(request_counts.items())),
+                    "desired_replicas": desired,
+                    "ready_replicas": dict(sorted(ready_replicas_by_model.items())),
+                    "served_equivalent": round(minute_served, 2),
+                    "service_rate_pct": round(
+                        100.0 * minute_served / max(1, sum(request_counts.values())),
+                        2,
+                    ),
+                    "overloaded_models": overloaded_models,
+                    "prefetches": sorted(prefetch_labels),
+                    "artifact_evictions": sorted(eviction_labels),
+                    "loads": [f"{model}@{node}" for node, model in sorted(added)],
+                    "unloads": [f"{model}@{node}" for node, model in sorted(removed)],
+                    "node_changes": state_changes,
+                    "portfolio_selection": dict(sorted(portfolio_selection.items())),
+                    "portfolio_admissions": portfolio_admissions,
+                    "admission_changed": admission_changed,
+                    "portfolio_changed": portfolio_changed,
+                    "unsatisfied": [
+                        {
+                            "model": item.model_id,
+                            "missing": item.missing_replicas,
+                            "code": item.code,
+                        }
+                        for item in plan.unsatisfied
+                    ],
+                    "mutation_deferrals": mutation_deferrals,
+                }
+            )
+        prior_phase = phase
+        prior_states = {node.node_id: node.state for node in nodes}
+        prior_portfolio_selection = portfolio_selection
+        prior_admission_states = admission_states
+        used_models = frozenset(
+            chosen
+            for workload, chosen in chosen_by_workload.items()
+            if chosen
+            and request_counts.get(workload, 0) > 0
+            and service_ratio_by_model.get(chosen, 0.0) > 0
+        )
+        nodes = _materialize(
+            plan.assignments,
+            nodes,
+            now + 45.0,
+            profiles=profile_by_id,
+            prefetched_pairs=frozenset(prefetched_pairs),
+            evicted_pairs=frozenset(evicted_pairs),
+            used_models=used_models,
+        )
+
+    total_served = sum(served_by_workload.values())
+    structural_hints = baseline_planner.portfolio_placement_hints(
+        tuple(machine.snapshot for machine in machines),
+        profiles,
+        now=base_time,
+    )
+    allocatable_workloads = {
+        workload
+        for workload in requested_by_workload
+        if any(
+            profile.workload_score(workload) > 0
+            and bool(structural_hints.get(profile.model_id, {}).get("hard_compatible"))
+            for profile in profiles
+        )
+    }
+    structurally_infeasible_workloads = sorted(
+        set(requested_by_workload) - allocatable_workloads
+    )
+    service_rates = [
+        served_by_workload[workload] / requested
+        for workload, requested in requested_by_workload.items()
+        if requested > 0
+    ]
+    user_service_rates = [
+        served_by_user[user_id] / requested
+        for user_id, requested in requested_by_user.items()
+        if requested > 0
+    ]
+    allocatable_service_rates = [
+        served_by_workload[workload] / requested_by_workload[workload]
+        for workload in sorted(allocatable_workloads)
+        if requested_by_workload[workload] > 0
+    ]
+    allocatable_user_service_rates = [
+        served_by_user[persona.user_id] / requested_by_user[persona.user_id]
+        for persona in personas
+        if persona.workload in allocatable_workloads
+        and requested_by_user[persona.user_id] > 0
+    ]
+    minimum_user_service = min(user_service_rates, default=1.0)
+    allocatable_minimum_user_service = min(
+        allocatable_user_service_rates,
+        default=1.0,
+    )
+    workload_slo_attainment = (
+        sum(rate >= 0.90 for rate in service_rates) / len(service_rates)
+        if service_rates
+        else 1.0
+    )
+    user_slo_attainment = (
+        sum(rate >= 0.90 for rate in user_service_rates) / len(user_service_rates)
+        if user_service_rates
+        else 1.0
+    )
+    allocatable_workload_slo_attainment = (
+        sum(rate >= 0.90 for rate in allocatable_service_rates)
+        / len(allocatable_service_rates)
+        if allocatable_service_rates
+        else 1.0
+    )
+    allocatable_user_slo_attainment = (
+        sum(rate >= 0.90 for rate in allocatable_user_service_rates)
+        / len(allocatable_user_service_rates)
+        if allocatable_user_service_rates
+        else 1.0
+    )
+    # A logarithmic coverage utility preserves raw throughput differences near full service while
+    # making an entirely abandoned feasible workload visible. It is normalized to [0, 1], with
+    # 10% service worth roughly half credit and 100% worth full credit.
+    workload_coverage_utility = (
+        sum(math.log1p(99.0 * rate) / math.log(100.0) for rate in allocatable_service_rates)
+        / len(allocatable_service_rates)
+        if allocatable_service_rates
+        else 1.0
+    )
+    churn = loads + unloads
+    service_rate = total_served / total_requests if total_requests else 1.0
+    suitability = suitability_weight / total_requests if total_requests else 1.0
+    churn_efficiency = max(0.0, 1.0 - churn / max(1.0, config.minutes * config.machines))
+    safety_rate = 1.0 if not safety_violations else 0.0
+    overall = 100.0 * (
+        0.20 * service_rate
+        + 0.10 * allocatable_minimum_user_service
+        + 0.10 * suitability
+        + 0.10 * allocatable_workload_slo_attainment
+        + 0.10 * allocatable_user_slo_attainment
+        + 0.15 * workload_coverage_utility
+        + 0.05 * churn_efficiency
+        + 0.20 * safety_rate
+    )
+
+    machine_rows = tuple(
+        {
+            "node_id": machine.snapshot.node_id,
+            "hardware": machine.hardware,
+            "memory_mb": machine.snapshot.capacity_mb,
+            "reserved_mb": machine.snapshot.reserved_mb,
+            "disk_total_mb": machine.disk_total_mb,
+            "disk_available_mb": machine.disk_available_mb,
+            "runtimes": machine.snapshot.runtimes,
+            "backends": machine.snapshot.backends,
+            "max_models": machine.snapshot.max_models,
+            "cached_models": machine.snapshot.cached_models,
+        }
+        for machine in machines
+    )
+    model_rows = tuple(
+        {
+            "model_id": item.profile.model_id,
+            "job": item.job,
+            "memory_mb": item.profile.memory_mb,
+            "artifact_size_mb": item.artifact_size_mb,
+            "runtimes": item.profile.runtimes,
+            "workload_scores": dict(item.profile.workload_scores),
+            "replica_concurrency": item.profile.replica_concurrency,
+        }
+        for item in catalog
+    )
+    persona_counts = Counter((item.role, item.workload) for item in personas)
+    role_requested: Counter[tuple[str, str]] = Counter()
+    role_served: defaultdict[tuple[str, str], float] = defaultdict(float)
+    for persona in personas:
+        key = (persona.role, persona.workload)
+        role_requested[key] += requested_by_user[persona.user_id]
+        role_served[key] += served_by_user[persona.user_id]
+    user_rows = tuple(
+        {
+            "role": role,
+            "workload": workload,
+            "users": count,
+            "requests": role_requested[(role, workload)],
+            "served_equivalent": round(role_served[(role, workload)], 2),
+            "service_rate_pct": (
+                round(
+                    100.0
+                    * role_served[(role, workload)]
+                    / role_requested[(role, workload)],
+                    2,
+                )
+                if role_requested[(role, workload)]
+                else 100.0
+            ),
+        }
+        for (role, workload), count in sorted(persona_counts.items())
+    )
+    per_workload = {
+        workload: {
+            "requests": requested,
+            "served_equivalent": round(served_by_workload[workload], 2),
+            "service_rate_pct": round(100.0 * served_by_workload[workload] / requested, 2),
+        }
+        for workload, requested in sorted(requested_by_workload.items())
+    }
+    configuration = asdict(config)
+    configuration["workload_traces"] = tuple(
+        {"workload": workload, "path": path}
+        for workload, path in config.workload_traces
+    )
+    configuration["demand_source"] = (
+        "external workload traces plus synthetic unbound workloads"
+        if config.workload_traces
+        else "synthetic phase schedule"
+    )
+    configuration["mode"] = "deterministic planning simulation"
+    oracle_metrics: dict[str, object] | None = None
+    if config.oracle:
+        initial_nodes = tuple(machine.snapshot for machine in machines)
+        oracle_nodes_by_minute = tuple(
+            _evolve_nodes(
+                initial_nodes,
+                _phase(minute, config.minutes),
+                base_time + minute * 60.0,
+            )
+            for minute in range(config.minutes)
+        )
+        oracle_metrics = run_small_fleet_oracle(
+            nodes_by_minute=oracle_nodes_by_minute,
+            profiles=profiles,
+            demands=tuple(oracle_demands),
+            direct_models={
+                workload: model_id
+                for workload, model_id in _DIRECT_MODEL_BY_WORKLOAD.items()
+                if model_id in profile_by_id
+            },
+            artifact_sizes=artifact_by_id,
+            actual_served=total_served,
+            policy=planner_policy,
+        )
+    return ScenarioReport(
+        configuration=configuration,
+        machines=machine_rows,
+        models=model_rows,
+        users=user_rows,
+        timeline=tuple(timeline),
+        metrics={
+            "overall_score": round(overall, 2),
+            "total_requests": total_requests,
+            "served_equivalent": round(total_served, 2),
+            "service_rate_pct": round(100.0 * service_rate, 2),
+            "minimum_user_service_pct": round(100.0 * minimum_user_service, 2),
+            "allocatable_minimum_user_service_pct": round(
+                100.0 * allocatable_minimum_user_service,
+                2,
+            ),
+            "user_slo_attainment_pct": round(100.0 * user_slo_attainment, 2),
+            "workload_slo_attainment_pct": round(100.0 * workload_slo_attainment, 2),
+            "allocatable_user_slo_attainment_pct": round(
+                100.0 * allocatable_user_slo_attainment,
+                2,
+            ),
+            "allocatable_workload_slo_attainment_pct": round(
+                100.0 * allocatable_workload_slo_attainment,
+                2,
+            ),
+            "workload_coverage_utility_pct": round(
+                100.0 * workload_coverage_utility,
+                2,
+            ),
+            "structurally_infeasible_workloads": structurally_infeasible_workloads,
+            "minimum_workload_service_pct": round(100.0 * min(service_rates, default=1.0), 2),
+            "portfolio_suitability_pct": round(100.0 * suitability, 2),
+            "average_memory_utilization_pct": round(100.0 * sum(memory_utilization) / len(memory_utilization), 2),
+            "peak_memory_utilization_pct": round(100.0 * max(memory_utilization, default=0.0), 2),
+            "loads": loads,
+            "unloads": unloads,
+            "migrations": migrations,
+            "cache_hit_rate_pct": round(100.0 * cache_loads / loads, 2) if loads else 100.0,
+            "modeled_cold_start_seconds": round(cold_start_seconds, 2),
+            "artifact_download_mb": artifact_download_mb,
+            "predictive_prefetches": predictive_prefetches,
+            "predictive_prefetch_hits": predictive_prefetch_hits,
+            "predictive_prefetch_hit_rate_pct": (
+                round(100.0 * predictive_prefetch_hits / predictive_prefetches, 2)
+                if predictive_prefetches
+                else 0.0
+            ),
+            "unused_predictive_prefetches": (
+                len(predictively_cached_at) + predictive_prefetch_evictions
+            ),
+            "resident_unused_predictive_prefetches": len(predictively_cached_at),
+            "predictive_prefetch_evictions": predictive_prefetch_evictions,
+            "predictive_prefetch_replacements": predictive_prefetch_replacements,
+            "predictive_prefetch_reclaimed_mb": predictive_prefetch_reclaimed_mb,
+            "predictive_prefetch_download_mb": predictive_prefetch_download_mb,
+            "predictive_cold_start_seconds_avoided": round(
+                predictive_cold_start_seconds_avoided,
+                2,
+            ),
+            "average_predictive_prefetch_lead_minutes": (
+                round(
+                    sum(predictive_prefetch_lead_minutes)
+                    / len(predictive_prefetch_lead_minutes),
+                    2,
+                )
+                if predictive_prefetch_lead_minutes
+                else 0.0
+            ),
+            "maximum_predictive_prefetch_lead_minutes": max(
+                predictive_prefetch_lead_minutes,
+                default=0,
+            ),
+            "overloaded_model_minutes": overloaded_model_minutes,
+            "peak_modeled_queue_depth": peak_modeled_queue_depth,
+            "realized_failure_observations": realized_failure_observations,
+            "minimum_remaining_disk_mb": min(disk_available.values(), default=0),
+            "unsatisfied_replica_minutes": unsatisfied_replica_minutes,
+            "shortfall_by_model": dict(sorted(shortfall_by_model.items())),
+            "peak_shortfall_by_model": dict(sorted(peak_shortfall_by_model.items())),
+            "catalog_gap_requests": catalog_gap_requests,
+            "direct_named_requests": direct_named_requests,
+            "joint_portfolio_ticks": joint_portfolio_ticks,
+            "portfolio_changes": portfolio_changes,
+            "rapid_lifecycle_reversals": rapid_lifecycle_reversals,
+            "lifecycle_changes_per_node_hour": round(
+                60.0 * churn / max(1.0, config.minutes * config.machines),
+                2,
+            ),
+            "admission_state_minutes": dict(sorted(admission_state_minutes.items())),
+            "admission_by_workload": {
+                workload: dict(sorted(states.items()))
+                for workload, states in sorted(admission_by_workload.items())
+            },
+            "admission_blocker_minutes": {
+                workload: dict(sorted(blockers.items()))
+                for workload, blockers in sorted(admission_blocker_minutes.items())
+            },
+            "per_workload": per_workload,
+            "oracle": oracle_metrics,
+        },
+        safety={
+            "passed": not safety_violations,
+            "violations": tuple(safety_violations),
+            "checks": (
+                "memory and headroom",
+                "runtime/backend compatibility",
+                "node lifecycle eligibility",
+                "one-model logical serving slot",
+                "modeled artifact disk admission",
+                "desired/preemption disjointness",
+            ),
+        },
+    )
+
+
+def _scenario_planner_policy(strategy: str) -> PlannerPolicy:
+    common = {
+        "memory_headroom_fraction": 0.05,
+        "node_ttl_seconds": 180,
+    }
+    if strategy == "smart":
+        return PlannerPolicy(**common)
+    # Baselines may react to demand and reuse an existing cache, but they receive no trend
+    # lookahead, workflow prediction, cache-only prefetch, or predictive eviction. This keeps the
+    # physical placement constraints identical while isolating the value of proactive control.
+    return PlannerPolicy(
+        **common,
+        max_predictive_lookahead_seconds=0.0,
+        max_predictive_artifact_prefetches=0,
+        max_predictive_artifact_evictions=0,
+    )
+
+
+def _baseline_model_by_workload(
+    nodes: tuple[NodeSnapshot, ...],
+    profiles: tuple[ModelProfile, ...],
+    *,
+    planner: PlacementPlanner,
+    now: float,
+) -> dict[str, ModelProfile]:
+    hints = planner.portfolio_placement_hints(nodes, profiles, now=now)
+    selected: dict[str, ModelProfile] = {}
+    for workload in SCENARIO_WORKLOADS:
+        candidates = [
+            profile
+            for profile in profiles
+            if profile.workload_score(workload) > 0
+            and bool(hints.get(profile.model_id, {}).get("hard_compatible"))
+        ]
+        if not candidates:
+            continue
+        # This is intentionally a transparent greedy rule, not the production joint portfolio:
+        # take configured suitability first, then the smaller artifact/model for equal quality.
+        selected[workload] = max(
+            candidates,
+            key=lambda profile: (
+                profile.workload_score(workload),
+                -profile.maximum_memory_mb,
+                -profile.artifact_size_mb,
+                profile.model_id,
+            ),
+        )
+    return selected
+
+
+def _forecasts_for_workload_totals(
+    requests_by_workload: dict[str, float],
+    service_seconds_by_workload: dict[str, float],
+    selected: dict[str, ModelProfile],
+    *,
+    now: float,
+) -> tuple[DemandForecast, ...]:
+    requests_by_model: defaultdict[str, float] = defaultdict(float)
+    concurrency_by_model: defaultdict[str, float] = defaultdict(float)
+    samples_by_model: Counter[str] = Counter()
+    for workload, requests in requests_by_workload.items():
+        profile = selected.get(workload)
+        if profile is None or requests <= 0:
+            continue
+        requests_by_model[profile.model_id] += requests
+        concurrency_by_model[profile.model_id] += (
+            service_seconds_by_workload.get(workload, 0.0) / 60.0
+        )
+        samples_by_model[profile.model_id] += max(1, math.ceil(requests))
+    return tuple(
+        DemandForecast(
+            model_id=model_id,
+            requests_per_minute=requests,
+            observed_requests_per_minute=requests,
+            offered_concurrency=concurrency_by_model[model_id],
+            confidence=1.0,
+            sample_count=samples_by_model[model_id],
+            updated_at=now,
+        )
+        for model_id, requests in sorted(requests_by_model.items())
+    )
+
+
+def _static_forecasts(
+    personas: tuple[Persona, ...],
+    nodes: tuple[NodeSnapshot, ...],
+    profiles: tuple[ModelProfile, ...],
+    *,
+    planner: PlacementPlanner,
+    now: float,
+) -> tuple[DemandForecast, ...]:
+    """Build a strong fixed baseline from declared population averages, not future arrivals."""
+
+    requests: defaultdict[str, float] = defaultdict(float)
+    service: defaultdict[str, float] = defaultdict(float)
+    for persona in personas:
+        requests[persona.workload] += persona.requests_per_minute
+        service[persona.workload] += (
+            persona.requests_per_minute * persona.service_seconds
+        )
+    selected = _baseline_model_by_workload(
+        nodes,
+        profiles,
+        planner=planner,
+        now=now,
+    )
+    return _forecasts_for_workload_totals(
+        requests,
+        service,
+        selected,
+        now=now,
+    )
+
+
+def _greedy_forecasts(
+    request_counts: Counter[str],
+    service_totals: defaultdict[str, float],
+    nodes: tuple[NodeSnapshot, ...],
+    profiles: tuple[ModelProfile, ...],
+    *,
+    planner: PlacementPlanner,
+    now: float,
+) -> tuple[DemandForecast, ...]:
+    """Map only this minute's visible demand to each workload's best feasible model."""
+
+    selected = _baseline_model_by_workload(
+        nodes,
+        profiles,
+        planner=planner,
+        now=now,
+    )
+    return _forecasts_for_workload_totals(
+        dict(request_counts),
+        dict(service_totals),
+        selected,
+        now=now,
+    )
+
+
+def _available_static_plan(
+    frozen: PlacementPlan,
+    nodes: tuple[NodeSnapshot, ...],
+    *,
+    profiles: dict[str, ModelProfile],
+    policy: PlannerPolicy,
+    now: float,
+) -> PlacementPlan:
+    """Keep a fixed host/model map, withdrawing unavailable hosts without rescheduling."""
+
+    node_by_id = {node.node_id: node for node in nodes}
+    assignments = []
+    available_by_model: Counter[str] = Counter()
+    for assignment in frozen.assignments:
+        node = node_by_id.get(assignment.node_id)
+        if node is None or node.state not in (NodeState.ACCEPTING, NodeState.THROTTLED):
+            continue
+        multiplier = (
+            policy.throttled_capacity_fraction
+            if node.state == NodeState.THROTTLED
+            else 1.0
+        )
+        if assignment.memory_mb > math.floor(node.usable_capacity_mb * multiplier):
+            continue
+        profile = profiles[assignment.model_id]
+        residency = node.residency(assignment.model_id)
+        assignments.append(
+            replace(
+                assignment,
+                existing=(
+                    residency is not None
+                    and residency.state == ResidencyState.READY
+                    and profile.matches_artifact(residency)
+                ),
+                reasons=(*assignment.reasons, "fixed static baseline"),
+            )
+        )
+        available_by_model[assignment.model_id] += 1
+    unsatisfied = list(frozen.unsatisfied)
+    for model_id, desired in frozen.desired_replicas:
+        missing = max(0, desired - available_by_model[model_id])
+        if missing:
+            unsatisfied.append(
+                UnsatisfiedConstraint(
+                    model_id=model_id,
+                    code="static_host_unavailable",
+                    message="fixed static placement does not reschedule unavailable capacity",
+                    missing_replicas=missing,
+                )
+            )
+    return replace(
+        frozen,
+        generation=f"static-{int(now)}",
+        created_at=now,
+        assignments=tuple(assignments),
+        unsatisfied=tuple(unsatisfied),
+        preemptions=(),
+        artifact_prefetches=(),
+        artifact_evictions=(),
+        input_digest="",
+    )
+
+
+def _build_catalog(count: int, machines: int) -> tuple[CatalogModel, ...]:
+    rows: list[CatalogModel] = []
+    for index in range(count):
+        source = _MODEL_BLUEPRINTS[index % len(_MODEL_BLUEPRINTS)]
+        variant = index // len(_MODEL_BLUEPRINTS)
+        model_id = str(source["model_id"])
+        if variant:
+            model_id = f"{model_id}-v{variant + 1}"
+        memory_mb = int(source["memory_mb"]) + variant * 2_000
+        artifact_size_mb = int(source["artifact_mb"]) + variant * 1_000
+        profile = ModelProfile(
+            model_id=model_id,
+            memory_mb=memory_mb,
+            runtimes=tuple(source["runtimes"]),
+            backends=tuple(source["backends"]),
+            min_replicas=int(source.get("min_replicas", 0)) if index == 0 else 0,
+            max_replicas=machines,
+            target_utilization=0.70,
+            replica_concurrency=int(source["concurrency"]),
+            expected_service_seconds=5.0,
+            priority=100,
+            load_seconds=20.0 + int(source["artifact_mb"]) / 2_000.0,
+            warm_seconds=3.0 + memory_mb / 8_000.0,
+            # One simulated minute of placement stickiness is enough to expose useful repacking
+            # while preventing adjacent-tick reversals. Production profiles default to a longer
+            # hold; the planner honors each model's configured value.
+            min_residency_seconds=300,
+            scale_down_cooldown_seconds=180,
+            min_failure_domains=1,
+            artifact_size_mb=artifact_size_mb,
+            artifact_sha256=hashlib.sha256(
+                f"scenario-artifact:{model_id}".encode()
+            ).hexdigest(),
+            artifact_source=f"scenario://artifacts/{model_id}",
+            max_colocated_models=1,
+            workload_scores=tuple(source["scores"]),
+        )
+        rows.append(
+            CatalogModel(
+                profile=profile,
+                job=str(source["job"]),
+                artifact_size_mb=artifact_size_mb,
+            )
+        )
+    return tuple(rows)
+
+
+def _build_machines(
+    count: int,
+    catalog: tuple[CatalogModel, ...],
+    rng: random.Random,
+) -> tuple[LogicalMachine, ...]:
+    result: list[LogicalMachine] = []
+    for index in range(count):
+        source = _MACHINE_BLUEPRINTS[index % len(_MACHINE_BLUEPRINTS)]
+        node_id = f"logical-{index + 1:02d}"
+        compatible = [
+            item
+            for item in catalog
+            if set(item.profile.runtimes).intersection(source["runtimes"])
+            and set(item.profile.backends).intersection(source["backends"])
+            and item.profile.memory_mb <= int(source["capacity"]) - int(source["reserved"])
+            and item.artifact_size_mb <= int(source["disk_free"])
+        ]
+        rng.shuffle(compatible)
+        cached: list[str] = []
+        cache_budget = int(source["disk_free"]) // 2
+        for item in compatible:
+            if item.artifact_size_mb <= cache_budget and len(cached) < 3:
+                cached.append(item.profile.model_id)
+                cache_budget -= item.artifact_size_mb
+        remaining_disk = int(source["disk_free"]) - sum(
+            item.artifact_size_mb for item in compatible if item.profile.model_id in cached
+        )
+        allowed = tuple(
+            item.profile.model_id
+            for item in compatible
+            if item.profile.model_id in cached or item.artifact_size_mb <= remaining_disk
+        )
+        snapshot = NodeSnapshot(
+            node_id=node_id,
+            capacity_mb=int(source["capacity"]),
+            reserved_mb=int(source["reserved"]),
+            runtimes=tuple(source["runtimes"]),
+            backends=tuple(source["backends"]),
+            state=NodeState.ACCEPTING,
+            failure_domain=f"domain-{index % 3 + 1}",
+            allowed_data_tiers=("internal", "public"),
+            allowed_models=allowed,
+            tags=("logical-scenario",),
+            max_models=1,
+            residencies=tuple(
+                ModelResidency(
+                    item.profile.model_id,
+                    item.profile.memory_for(source["runtimes"]),
+                    ResidencyState.CACHED,
+                    artifact_sha256=item.profile.artifact_sha256,
+                )
+                for item in compatible
+                if item.profile.model_id in cached
+            ),
+            cached_models=tuple(cached),
+            max_concurrency=int(source["concurrency"]),
+            actuator_capabilities=("load", "warm", "drain", "unload", "evict"),
+            memory_bandwidth_gbps=100.0 + index * 20.0,
+            compute_gflops=6_000.0 + index * 2_000.0,
+            gpu_count=int(source["gpu_count"]),
+            gpu_memory_mb=tuple(source["gpu_memory"]),
+            disk_capacity_mb=int(source["disk_total"]),
+            disk_available_mb=remaining_disk,
+            last_heartbeat=1_000_000.0,
+        )
+        result.append(
+            LogicalMachine(
+                snapshot=snapshot,
+                hardware=str(source["hardware"]),
+                disk_total_mb=int(source["disk_total"]),
+                disk_available_mb=remaining_disk,
+            )
+        )
+    return tuple(result)
+
+
+def _build_personas(count: int, rng: random.Random) -> tuple[Persona, ...]:
+    offset = rng.randrange(len(_PERSONA_BLUEPRINTS))
+    result: list[Persona] = []
+    for index in range(count):
+        role, workload, rate, service = _PERSONA_BLUEPRINTS[(index + offset) % len(_PERSONA_BLUEPRINTS)]
+        result.append(
+            Persona(
+                user_id=f"user-{index + 1:05d}",
+                workflow_id=(
+                    f"workflow-{index // len(_PERSONA_BLUEPRINTS) + 1:05d}"
+                ),
+                role=role,
+                workload=workload,
+                requests_per_minute=rate * rng.uniform(0.75, 1.25),
+                service_seconds=service * rng.uniform(0.85, 1.15),
+            )
+        )
+    return tuple(result)
+
+
+def _phase(minute: int, minutes: int) -> str:
+    fraction = minute / max(1, minutes)
+    if fraction < 0.18:
+        return "warmup"
+    if fraction < 0.38:
+        return "coding-surge"
+    if fraction < 0.56:
+        return "creative-campaign"
+    if fraction < 0.70:
+        return "node-outage"
+    if fraction < 0.88:
+        return "research-recovery"
+    return "cooldown"
+
+
+def _demand_multiplier(phase: str, workload: str) -> float:
+    base = {
+        "warmup": 0.35,
+        "coding-surge": 0.75,
+        "creative-campaign": 0.65,
+        "node-outage": 0.80,
+        "research-recovery": 0.70,
+        "cooldown": 0.08,
+    }[phase]
+    boosts = {
+        "coding-surge": {"coding": 4.0, "research": 1.5, "embedding": 1.4},
+        "creative-campaign": {"marketing": 3.0, "sales": 2.5, "design": 3.0, "image": 3.5, "video": 4.0},
+        "node-outage": {"general": 2.0, "sales": 1.5},
+        "research-recovery": {"research": 4.0, "embedding": 2.5, "coding": 1.3},
+    }
+    return base * boosts.get(phase, {}).get(workload, 1.0)
+
+
+def _load_trace_curves(config: ScenarioConfig) -> dict[str, tuple[float, ...]]:
+    """Map external timestamp/rate traces onto scenario minutes without changing demand scale.
+
+    Trace files use a deliberately small interchange format: CSV with no header, timestamp in
+    seconds in column one and request rate in column two. Additional columns are ignored, which
+    makes production trace sets such as ServeGen directly usable. Each trace replaces only the
+    *shape* of its workload's synthetic curve; normalizing to the original curve's mean keeps
+    fleet comparisons honest instead of letting an arbitrary trace unit change offered load.
+    """
+
+    curves: dict[str, tuple[float, ...]] = {}
+    for workload, raw_path in config.workload_traces:
+        samples = _read_trace(Path(raw_path), workload=workload)
+        raw_curve = _resample_trace(samples, config.minutes)
+        raw_mean = sum(raw_curve) / len(raw_curve)
+        if raw_mean <= 0:
+            raise ValueError(f"trace for {workload} has no positive demand after resampling")
+        synthetic_curve = tuple(
+            _demand_multiplier(_phase(minute, config.minutes), workload)
+            for minute in range(config.minutes)
+        )
+        target_mean = sum(synthetic_curve) / len(synthetic_curve)
+        scale = target_mean / raw_mean
+        curves[workload] = tuple(value * scale for value in raw_curve)
+    return curves
+
+
+def _read_trace(path: Path, *, workload: str) -> tuple[tuple[float, float], ...]:
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"cannot read trace for {workload}: {path}: {exc}") from exc
+    if size > _MAX_TRACE_BYTES:
+        raise ValueError(
+            f"trace for {workload} is {size} bytes; maximum is {_MAX_TRACE_BYTES}"
+        )
+
+    samples: list[tuple[float, float]] = []
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            for line_number, row in enumerate(csv.reader(handle), start=1):
+                if not row or all(not field.strip() for field in row):
+                    continue
+                if len(samples) >= _MAX_TRACE_ROWS:
+                    raise ValueError(
+                        f"trace for {workload} exceeds {_MAX_TRACE_ROWS} non-empty rows"
+                    )
+                if len(row) < 2:
+                    raise ValueError(
+                        f"trace for {workload} line {line_number} needs timestamp,request_rate"
+                    )
+                try:
+                    timestamp = float(row[0])
+                    rate = float(row[1])
+                except ValueError as exc:
+                    raise ValueError(
+                        f"trace for {workload} line {line_number} has non-numeric "
+                        "timestamp or request rate (files must not have a header)"
+                    ) from exc
+                if not math.isfinite(timestamp) or timestamp < 0:
+                    raise ValueError(
+                        f"trace for {workload} line {line_number} has invalid timestamp"
+                    )
+                if not math.isfinite(rate) or rate < 0:
+                    raise ValueError(
+                        f"trace for {workload} line {line_number} has invalid request rate"
+                    )
+                if samples and timestamp <= samples[-1][0]:
+                    raise ValueError(
+                        f"trace for {workload} timestamps must be strictly increasing"
+                    )
+                samples.append((timestamp, rate))
+    except UnicodeError as exc:
+        raise ValueError(f"trace for {workload} must be UTF-8 CSV: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"cannot read trace for {workload}: {path}: {exc}") from exc
+    if not samples:
+        raise ValueError(f"trace for {workload} is empty")
+    if not any(rate > 0 for _, rate in samples):
+        raise ValueError(f"trace for {workload} has no positive request rate")
+    return tuple(samples)
+
+
+def _resample_trace(
+    samples: tuple[tuple[float, float], ...],
+    minutes: int,
+) -> tuple[float, ...]:
+    if len(samples) == 1:
+        return (samples[0][1],) * minutes
+    timestamps = tuple(timestamp for timestamp, _ in samples)
+    start = timestamps[0]
+    span = timestamps[-1] - start
+    result: list[float] = []
+    for minute in range(minutes):
+        source_time = start + span * minute / (minutes - 1)
+        index = max(0, bisect_right(timestamps, source_time) - 1)
+        result.append(samples[index][1])
+    return tuple(result)
+
+
+def _evolve_nodes(
+    nodes: tuple[NodeSnapshot, ...],
+    phase: str,
+    now: float,
+) -> tuple[NodeSnapshot, ...]:
+    result: list[NodeSnapshot] = []
+    for index, node in enumerate(nodes):
+        state = NodeState.ACCEPTING
+        if phase == "creative-campaign" and index == 0:
+            state = NodeState.THROTTLED
+        if phase == "node-outage" and index == min(2, len(nodes) - 1):
+            state = NodeState.PAUSED
+        result.append(replace(node, state=state, last_heartbeat=now + 30.0))
+    return tuple(result)
+
+
+def _ready_models(nodes: Iterable[NodeSnapshot]) -> frozenset[str]:
+    return frozenset(
+        residency.model_id
+        for node in nodes
+        if node.state in (NodeState.ACCEPTING, NodeState.THROTTLED)
+        for residency in node.residencies
+        if residency.state == ResidencyState.READY
+    )
+
+
+def _best_ready_model(
+    workload: str,
+    ready_models: Iterable[str],
+    profiles: dict[str, ModelProfile],
+) -> str:
+    candidates = [
+        profiles[model_id]
+        for model_id in ready_models
+        if model_id in profiles and profiles[model_id].workload_score(workload) > 0
+    ]
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda item: (item.workload_score(workload), item.model_id)).model_id
+
+
+def _apply_scenario_mutation_guards(
+    plan: PlacementPlan,
+    nodes: tuple[NodeSnapshot, ...],
+    *,
+    profiles: dict[str, ModelProfile],
+    now: float,
+) -> tuple[PlacementPlan, tuple[str, ...]]:
+    """Model reconciler residency deferrals before materializing desired state."""
+
+    assignments = list(plan.assignments)
+    desired_pairs = {(item.node_id, item.model_id) for item in assignments}
+    guarded_pairs: set[tuple[str, str]] = set()
+    deferrals: list[str] = []
+    for node in nodes:
+        if node.state not in (NodeState.ACCEPTING, NodeState.THROTTLED):
+            continue
+        for residency in node.residencies:
+            pair = (node.node_id, residency.model_id)
+            profile = profiles.get(residency.model_id)
+            if (
+                pair in desired_pairs
+                or profile is None
+                or residency.state != ResidencyState.READY
+                or not residency.managed
+            ):
+                continue
+            age = (
+                now - residency.loaded_at
+                if 0 < residency.loaded_at <= now
+                else 0.0
+            )
+            if age >= profile.min_residency_seconds:
+                continue
+            guarded_pairs.add(pair)
+            # Desired-state planning stages preemption before replacement, so this normally has no
+            # competing assignment. If a future planner does propose one, retain physical truth:
+            # the guarded process still owns this one-model logical slot.
+            assignments = [
+                item
+                for item in assignments
+                if item.node_id != node.node_id or item.model_id == residency.model_id
+            ]
+            assignments.append(
+                PlacementAssignment(
+                    model_id=residency.model_id,
+                    node_id=node.node_id,
+                    memory_mb=residency.memory_mb,
+                    replica_index=sum(
+                        item.model_id == residency.model_id for item in assignments
+                    ),
+                    score=0.0,
+                    existing=True,
+                    reasons=("minimum residency deferred physical removal",),
+                )
+            )
+            remaining = max(0.0, profile.min_residency_seconds - age)
+            deferrals.append(
+                f"{residency.model_id}@{node.node_id} minimum-residency {remaining:.0f}s"
+            )
+    if not guarded_pairs:
+        return plan, ()
+    assignments.sort(key=lambda item: (item.model_id, item.replica_index, item.node_id))
+    return (
+        replace(
+            plan,
+            assignments=tuple(assignments),
+            preemptions=tuple(
+                item
+                for item in plan.preemptions
+                if (item.node_id, item.model_id) not in guarded_pairs
+            ),
+            artifact_evictions=tuple(
+                item
+                for item in plan.artifact_evictions
+                if (item.node_id, item.model_id) not in guarded_pairs
+            ),
+            input_digest="",
+        ),
+        tuple(sorted(deferrals)),
+    )
+
+
+def _materialize(
+    assignments: Iterable[Any],
+    nodes: tuple[NodeSnapshot, ...],
+    now: float,
+    *,
+    profiles: dict[str, ModelProfile],
+    prefetched_pairs: frozenset[tuple[str, str]] = frozenset(),
+    evicted_pairs: frozenset[tuple[str, str]] = frozenset(),
+    used_models: frozenset[str] = frozenset(),
+) -> tuple[NodeSnapshot, ...]:
+    by_node: defaultdict[str, list[ModelResidency]] = defaultdict(list)
+    prior_by_pair = {
+        (node.node_id, residency.model_id): residency
+        for node in nodes
+        for residency in node.residencies
+    }
+    for assignment in assignments:
+        prior = prior_by_pair.get((assignment.node_id, assignment.model_id))
+        profile = profiles[assignment.model_id]
+        by_node[assignment.node_id].append(
+            ModelResidency(
+                model_id=assignment.model_id,
+                memory_mb=assignment.memory_mb,
+                state=ResidencyState.READY,
+                loaded_at=(
+                    prior.loaded_at
+                    if assignment.existing and prior is not None and prior.loaded_at
+                    else now
+                ),
+                # A planning tick is not evidence that a model served traffic. Preserve the
+                # engine-reported timestamp for an incumbent and advance it only when this
+                # scenario minute actually routed work to the model. Otherwise the modeled node
+                # would refresh every residency forever and defeat the production scale-down
+                # cooldown, making a demand-responsive allocator look artificially static.
+                last_used_at=(
+                    now
+                    if assignment.model_id in used_models
+                    else (prior.last_used_at if prior is not None else 0.0)
+                ),
+                artifact_sha256=profile.artifact_sha256,
+            )
+        )
+    result: list[NodeSnapshot] = []
+    for node in nodes:
+        cached_models = {
+            *node.cached_models,
+            *(item.model_id for item in by_node[node.node_id]),
+            *(
+                model_id
+                for node_id, model_id in prefetched_pairs
+                if node_id == node.node_id
+            ),
+        }
+        cached_models.difference_update(
+            model_id
+            for node_id, model_id in evicted_pairs
+            if node_id == node.node_id
+        )
+        ready_models = {item.model_id for item in by_node[node.node_id]}
+        cached_residencies = []
+        for model_id in sorted(cached_models - ready_models):
+            profile = profiles.get(model_id)
+            if profile is None:
+                continue
+            prior = prior_by_pair.get((node.node_id, model_id))
+            predictively_prefetched = (node.node_id, model_id) in prefetched_pairs
+            cached_residencies.append(
+                ModelResidency(
+                    model_id,
+                    profile.memory_for(node.runtimes),
+                    ResidencyState.CACHED,
+                    loaded_at=(
+                        now
+                        if predictively_prefetched
+                        else prior.loaded_at
+                        if prior is not None
+                        else 0.0
+                    ),
+                    last_used_at=prior.last_used_at if prior is not None else 0.0,
+                    artifact_sha256=profile.artifact_sha256,
+                    predictive_cache=(
+                        predictively_prefetched
+                        or bool(prior and prior.predictive_cache)
+                    ),
+                )
+            )
+        result.append(
+            replace(
+                node,
+                residencies=tuple(
+                    [*by_node[node.node_id], *cached_residencies]
+                ),
+                cached_models=tuple(sorted(cached_models)),
+                last_heartbeat=now,
+            )
+        )
+    return tuple(result)
+
+
+def _refresh_disk_admission(
+    nodes: tuple[NodeSnapshot, ...],
+    catalog: tuple[CatalogModel, ...],
+    disk_available: dict[str, int],
+) -> tuple[NodeSnapshot, ...]:
+    return tuple(
+        replace(
+            node,
+            disk_available_mb=disk_available[node.node_id],
+            allowed_models=tuple(
+                item.profile.model_id
+                for item in catalog
+                if set(item.profile.runtimes).intersection(node.runtimes)
+                and set(item.profile.backends).intersection(node.backends)
+                and item.profile.memory_for(node.runtimes) <= node.usable_capacity_mb
+                and (
+                    item.profile.model_id in node.cached_models
+                    or item.artifact_size_mb <= disk_available[node.node_id]
+                )
+            ),
+        )
+        for node in nodes
+    )
+
+
+def _memory_utilization(assignments: Iterable[Any], nodes: tuple[NodeSnapshot, ...]) -> float:
+    node_by_id = {node.node_id: node for node in nodes}
+    used = sum(item.memory_mb for item in assignments)
+    available = sum(
+        node.usable_capacity_mb
+        for node in nodes
+        if node.state in (NodeState.ACCEPTING, NodeState.THROTTLED)
+    )
+    if not available:
+        return 0.0
+    # Referencing the index also ensures every assignment names a current node before scoring.
+    assert all(item.node_id in node_by_id for item in assignments)
+    return min(1.0, used / available)
+
+
+def _validate_plan(
+    assignments: Iterable[Any],
+    nodes: tuple[NodeSnapshot, ...],
+    profiles: dict[str, ModelProfile],
+    artifact_sizes: dict[str, int],
+    disk_available: dict[str, int],
+    policy: PlannerPolicy,
+) -> tuple[str, ...]:
+    violations: list[str] = []
+    node_by_id = {node.node_id: node for node in nodes}
+    assigned_by_node: defaultdict[str, list[Any]] = defaultdict(list)
+    artifact_download_by_node: Counter[str] = Counter()
+    for assignment in assignments:
+        assigned_by_node[assignment.node_id].append(assignment)
+    for node_id, rows in assigned_by_node.items():
+        node = node_by_id.get(node_id)
+        if node is None:
+            violations.append(f"assignment references missing node {node_id}")
+            continue
+        if node.state not in (NodeState.ACCEPTING, NodeState.THROTTLED):
+            violations.append(f"assignment placed on {node.state.value} node {node_id}")
+        if node.max_models is not None and len(rows) > node.max_models:
+            violations.append(f"model-slot overcommit on {node_id}")
+        used_memory = sum(item.memory_mb for item in rows)
+        multiplier = policy.throttled_capacity_fraction if node.state == NodeState.THROTTLED else 1.0
+        budget = math.floor(node.usable_capacity_mb * multiplier)
+        if used_memory > budget:
+            violations.append(f"memory overcommit on {node_id}: {used_memory}>{budget}")
+        for assignment in rows:
+            profile = profiles[assignment.model_id]
+            if not set(profile.runtimes).intersection(node.runtimes):
+                violations.append(f"runtime mismatch for {assignment.model_id} on {node_id}")
+            if not set(profile.backends).intersection(node.backends):
+                violations.append(f"backend mismatch for {assignment.model_id} on {node_id}")
+            if node.allowed_models and assignment.model_id not in node.allowed_models:
+                violations.append(f"disk/admission mismatch for {assignment.model_id} on {node_id}")
+            if assignment.model_id not in node.cached_models:
+                artifact_download_by_node[node_id] += artifact_sizes[assignment.model_id]
+    for node_id, required in artifact_download_by_node.items():
+        if required > disk_available[node_id]:
+            violations.append(
+                f"cumulative artifact disk overcommit on {node_id}: "
+                f"{required}>{disk_available[node_id]}"
+            )
+    return tuple(violations)

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import sys
 
-
 def print_next_steps(steps: list[tuple[str, str]]) -> None:
     """Print ``steps`` as an indented, blank-line-separated block; comments share one column."""
     width = max(len(cmd) for cmd, _ in steps)

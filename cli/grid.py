@@ -12,8 +12,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from local import config
-from local import runtime
+from local import config, runtime
 from shared import paths, run_records, shell, state
 from shared._version import __version__
 
@@ -35,12 +34,43 @@ def cmd_up(args: argparse.Namespace) -> int:
             port=args.port if args.port is not None else runtime.DEFAULT_PORT,
             host=args.host if args.host is not None else runtime.DEFAULT_HOST,
             advertise_host=args.advertise_host,
+            tls_cert_file=args.tls_cert,
+            tls_key_file=args.tls_key,
+            tls_ca_file=args.tls_ca,
+            # Only when asked. This used to default on, to protect what the grid dialled OUT
+            # with; local mode dials nothing now, so the private CA it required is cost with
+            # nothing on the other side of the trade -- and is where five of the seven bugs
+            # behind this work came from. `--tls` still turns it on and still fails loudly.
+            tls_auto=bool(args.tls),
         )
     else:
         cfg, _ = _apply_up_overrides(cfg, args)
     # Both paths, first run included — a busy port must never be something the reader has to
     # resolve before they can get started.
-    cfg, _ = _resolve_port(cfg)
+    if cfg.get("server_tls") is None:
+        cfg["server_tls"] = _tls_default_for(cfg)
+    tls_requested = bool(cfg.get("server_tls") or cfg.get("server_tls_cert_file"))
+    if tls_requested:
+        # The generated pair lands after overrides (the advertise host may have just changed), and
+        # the advertised URL must carry the scheme the cert will actually serve. An explicit
+        # --tls fails loudly when the material cannot be made; the silent default degrades to
+        # plain HTTP with a warning so a machine without openssl can still start a local grid.
+        tls_on = runtime.auto_tls_on_config(
+            cfg, advertise_host=_advertised_host(cfg), required=bool(args.tls)
+        )
+        if tls_on:
+            cfg["lan_signaling_url"] = runtime.make_local_url(
+                cfg["port"], _advertised_host(cfg), "https"
+            )
+        else:
+            cfg["lan_signaling_url"] = runtime.make_local_url(
+                cfg["port"], _advertised_host(cfg), "http"
+            )
+    cfg, port_notice = _resolve_port(cfg)
+    if port_notice:
+        # Never swallowed: the address is the one thing about a grid that OTHER machines have
+        # written down, so moving it silently takes every engine offline with nothing to read.
+        print(port_notice, file=sys.stderr)
     config.save_grid_config(cfg["grid_id"], cfg)
     runtime.start_grid(cfg)
     cfg, local_only = _resolve_address(cfg)
@@ -64,7 +94,9 @@ def _resolve_address(cfg: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     if runtime.advertised_address_works(url):
         return cfg, False
 
-    loopback = runtime.make_local_url(cfg["port"], "127.0.0.1")
+    loopback = runtime.make_local_url(
+        cfg["port"], "127.0.0.1", "https" if cfg.get("server_tls_cert_file") else "http"
+    )
     if not runtime.advertised_address_works(loopback):
         return cfg, True
 
@@ -84,8 +116,32 @@ def _report_up(cfg: dict[str, Any], local_only: bool) -> None:
     """
     scope = "  (this computer only)" if local_only else ""
     print(f"\n✓ Grid '{cfg['name']}' running — {runtime.grid_url(cfg)}{scope}")
+    if str(cfg.get("server_tls_cert_file") or ""):
+        # The join command is the very next thing every other machine runs; the CA path is shown
+        # because the copy-to-peer route still exists for machines behind a captured-first TLS pin.
+        ca_file = str(cfg.get("server_tls_ca_file") or "")
+        if ca_file:
+            print(f"CA:    {ca_file}")
+        print(f"Next:  grid allocator node start --grid {runtime.grid_url(cfg)}")
+        return
     print("\nNext:  grid engine install llama.cpp")
     print("See:   grid info")
+
+
+def _tls_default_for(cfg: dict[str, Any]) -> bool:
+    """Whether a grid nobody gave an opinion about should serve HTTPS. It should not.
+
+    HTTPS-by-default was there to protect what the grid dialled OUT with: it reached engines
+    across the LAN carrying their api keys, so it minted a private CA to do it safely. Local mode
+    dials nothing now -- workers poll in, the engine certificate is gone, and a node no longer
+    uploads an engine key at all -- so that CA is cost with nothing left on the other side of the
+    trade. It is also where five of the seven production bugs that started this work came from.
+
+    `--tls` and `--tls-cert` are untouched and still mean exactly what they say; only the case
+    where nobody chose changes. An operator who already has a certificate keeps serving HTTPS.
+    """
+
+    return bool(cfg.get("server_tls_cert_file"))
 
 
 def _resolve_port(cfg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
@@ -114,8 +170,16 @@ def _resolve_port(cfg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         )
     updated = dict(cfg)
     updated["port"] = replacement
-    updated["lan_signaling_url"] = runtime.make_local_url(replacement, _advertised_host(cfg))
-    return updated, f"Port {port} is in use{by} — starting on {replacement} instead."
+    updated["lan_signaling_url"] = runtime.make_local_url(
+        replacement,
+        _advertised_host(cfg),
+        "https" if updated.get("server_tls_cert_file") else "http",
+    )
+    return updated, (
+        f"Port {port} is in use{by} — starting on {replacement} instead.\n"
+        f"  The grid's address changed. Any engine or node still pointed at :{port} will stop "
+        f"being reachable until it is re-joined at the new URL."
+    )
 
 
 def _apply_up_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
@@ -135,6 +199,10 @@ def _apply_up_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> tuple[
             ("port", args.port),
             ("host", args.host),
             ("advertise_host", args.advertise_host),
+            ("tls", getattr(args, "tls", None)),
+            ("tls_cert", getattr(args, "tls_cert", None)),
+            ("tls_key", getattr(args, "tls_key", None)),
+            ("tls_ca", getattr(args, "tls_ca", None)),
         )
         if value is not None
     }
@@ -146,10 +214,23 @@ def _apply_up_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> tuple[
         updated["port"] = int(changes["port"])
     if "host" in changes:
         updated["host"] = changes["host"]
+    if "tls" in changes:
+        updated["server_tls"] = bool(changes["tls"])
+    tls_cert = changes.get("tls_cert", cfg.get("server_tls_cert_file"))
+    tls_key = changes.get("tls_key", cfg.get("server_tls_key_file"))
+    tls_ca = changes.get("tls_ca", cfg.get("server_tls_ca_file"))
+    if changes.get("tls_cert") is not None or changes.get("tls_key") is not None:
+        updated["server_tls_cert_file"] = str(tls_cert or "")
+        updated["server_tls_key_file"] = str(tls_key or "")
+        updated["server_tls_ca_file"] = str(tls_ca or "")
+        updated["server_tls_ca_pem"] = runtime._read_pem(str(tls_ca or ""), "grid TLS CA")
+    # server_tls without a cert yet still means https: the material is generated at start,
+    # and the URL must already carry the scheme that start will serve.
+    scheme = "https" if (updated.get("server_tls_cert_file") or updated.get("server_tls")) else "http"
     # Rebuilt from the new port whether or not `--advertise-host` was given, since the URL carries
     # the port too — otherwise a port change would leave the old one advertised.
     updated["lan_signaling_url"] = runtime.make_local_url(
-        updated["port"], changes.get("advertise_host") or _advertised_host(cfg)
+        updated["port"], changes.get("advertise_host") or _advertised_host(cfg), scheme
     )
     # Port is announced by the caller after the free-port check, so only host is reported here.
     notes = [
@@ -169,6 +250,11 @@ def cmd_down(args: argparse.Namespace) -> int:
     if not cfg.get("managed_server", True):
         print(f"{cfg['name']} is hosted by another box; nothing to stop here.")
         return 0
+    # A managed allocator node may own llama.cpp children. Stop it while the signaling server is
+    # still reachable so it can unregister and release those processes before Grid goes down.
+    from .allocator import stop_allocator_node_for_grid
+
+    stop_allocator_node_for_grid(cfg)
     outcome = runtime.stop_grid(cfg)
     if not outcome.stopped():
         _refuse_false_stop(cfg, outcome)

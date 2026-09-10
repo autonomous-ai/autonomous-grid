@@ -24,3 +24,4 @@ local/CONTEXT.md
 guides/
 CLAUDE.md
 .venv-test/
+.worktrees/

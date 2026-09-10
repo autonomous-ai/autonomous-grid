@@ -35,6 +35,19 @@ def iter_grid_configs() -> list[dict[str, Any]]:
 
 
 def select_grid(name_or_id: str | None) -> dict[str, Any]:
+    """Resolve the grid.
+
+    This used to install the grid's CA into SSL_CERT_FILE for the whole process, on the grounds
+    that it was the one boundary every grid-addressing command passes. That is exactly why it
+    was dangerous: SSL_CERT_FILE REPLACES the platform trust store rather than adding to it, and
+    every CA this codebase minted shared one subject, so a second grid's CA silently took over
+    verification for the first. Callers that need to verify pass `server_tls_ca_bundle(cfg)` to
+    their own client instead, which trusts one grid without blinding the process to everything.
+    """
+    return _select_grid(name_or_id)
+
+
+def _select_grid(name_or_id: str | None) -> dict[str, Any]:
     """Resolve the grid to act on.
 
     Honors the CLI convention: when a name is given, look it up; when omitted,

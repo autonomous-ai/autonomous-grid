@@ -2,29 +2,53 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
+import socket
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 
-from local import config
-from local import runtime
+from local import config, runtime
 from shared import logging_setup, paths
 from . import json_error, update
 from .dispatch import dispatch, resolve_override, split_forwarded
 from .parser import build_parser
 
 
-def cmd_internal_server(grid_id: str) -> int:
+def cmd_internal_server(
+    grid_id: str,
+    instance_id: str | None = None,
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
+) -> int:
     import uvicorn
 
+    if instance_id is not None and not instance_id.strip():
+        raise SystemExit("Grid server instance id must not be empty.")
     cfg = config.load_grid_config(grid_id)
     if not cfg:
         raise SystemExit(f"Grid config not found: {grid_id}")
     from local.server import create_app
 
-    app = create_app(grid_id=cfg["grid_id"], grid_name=cfg["name"])
+    allocator_control_token = runtime.ensure_allocator_control_token(cfg)
+    app = create_app(
+        grid_id=cfg["grid_id"],
+        grid_name=cfg["name"],
+        tls_ca_pem=(
+            runtime._read_pem(str(cfg.get("server_tls_ca_file") or ""), "grid TLS CA")
+            or str(cfg.get("server_tls_ca_pem") or "")
+        ),
+        allocator_state_path=paths.grid_dir(grid_id) / runtime.ALLOCATOR_STATE_FILE,
+        allocator_control_token=allocator_control_token,
+    )
     host = cfg.get("host") or runtime.DEFAULT_HOST
     port = int(cfg["port"])
+    # Cert files are passed on the command line (argv is visible to `ps`), but the key must
+    # survive the grid's persisted record; reading here lets a hand-edited key path still boot.
+    cert_file = str(tls_cert or cfg.get("server_tls_cert_file") or "")
+    key_file = str(tls_key or cfg.get("server_tls_key_file") or "")
+    if bool(cert_file) != bool(key_file):
+        raise SystemExit("TLS requires both a certificate and a private key.")
     level = os.getenv("UVICORN_LOG_LEVEL", "info").upper()
     if level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}:
         level = "INFO"  # a typo'd level would otherwise crash dictConfig at boot
@@ -39,6 +63,18 @@ def cmd_internal_server(grid_id: str) -> int:
     if old_size is not None:
         _note_server_log_truncation(log_path, old_size, max_bytes)
     # Pass ONLY log_config (no log_level=/use_colors=) so our dictConfig is the single source of truth.
+    if cert_file:
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            ssl_certfile=cert_file,
+            ssl_keyfile=key_file,
+            log_config=logging_setup.build_uvicorn_log_config(
+                log_path, max_bytes=max_bytes, backup_count=backup_count, level=level
+            ),
+        )
+        return 0
     uvicorn.run(
         app,
         host=host,
@@ -50,11 +86,156 @@ def cmd_internal_server(grid_id: str) -> int:
     return 0
 
 
+def cmd_internal_allocator_node(
+    grid_selector: str,
+    *,
+    state_path: str,
+    instance_id: str,
+    startup_path: str,
+    heartbeat_interval: float,
+    advertise_host: str | None,
+    allow_insecure_http: bool,
+    provider_grid_id: str | None = None,
+    dedicated: bool = False,
+) -> int:
+    import signal
+    from pathlib import Path
+
+    from local.allocator_node import AllocatorNodeAgent
+    from shared.allocator.auth import decode_node_token, secure_control_transport
+    from shared.allocator.runtime import (
+        LlamaCppBackend,
+        ManagedModelRuntime,
+        engine_api_key_path,
+    )
+    from shared.allocator.orchestrator import build_engine_orchestrator
+    from shared.system.device_info import collect_device_info
+    from shared.allocator.local import HostPolicy, LocalHostProtectionLoop
+    from remote.allocator_routes import RemoteProviderRoutePublisher
+
+    cfg = config.select_grid(grid_selector)
+    # Consume and remove the credential before constructing any model runtime. llama-server inherits
+    # this process's environment, and has no reason to receive a control-plane capability.
+    token = os.environ.pop("GRID_ALLOCATOR_NODE_TOKEN", "").strip()
+    if not token:
+        raise SystemExit("GRID_ALLOCATOR_NODE_TOKEN is required for an allocator node.")
+    try:
+        credential = decode_node_token(token)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("GRID_ALLOCATOR_NODE_TOKEN is not a valid node credential.") from exc
+
+    effective_advertise_host = advertise_host or runtime.detect_local_ip_for_url(
+        runtime.grid_url(cfg)
+    )
+    control_url = runtime.allocator_control_url(cfg)
+    if not secure_control_transport(control_url):
+        # The parent already said this to the operator; the child says it to the log, because
+        # these are two processes and only one of them has a terminal. Allowed for the same
+        # reason the parent allows it: an allocator node carries no engine credential here any
+        # more -- the grid never dials the engine, so it has no use for one.
+        print(
+            f"Note: {control_url} is plain HTTP; this node's control token and the prompts it "
+            "serves cross the LAN in the clear. To encrypt it, restart the grid with "
+            "`grid start <grid> --tls` and rejoin at its https URL.",
+            file=sys.stderr,
+        )
+    state_file = Path(state_path)
+    llama_backend = LlamaCppBackend(
+        bind_host=_allocator_bind_host(effective_advertise_host),
+        endpoint_host=effective_advertise_host,
+    )
+    device = collect_device_info()
+    gpu_count = len(device.get("gpus") or []) if isinstance(device, dict) else 1
+    managed = ManagedModelRuntime(
+        state_file,
+        host_id=credential.host_id,
+        backend=build_engine_orchestrator(
+            state_path=state_file,
+            llama_backend=llama_backend,
+            dedicated=dedicated,
+            gpu_count=max(1, gpu_count),
+            local_proxy=bool(provider_grid_id),
+        ),
+        protection_loop=(
+            LocalHostProtectionLoop(
+                HostPolicy(
+                    pause_for_user_activity=False,
+                    accelerator_memory_is_managed=True,
+                    compute_load_is_managed=True,
+                    cpu_throttle_percent=100.0,
+                    load_per_cpu_throttle=4.0,
+                    activity_debounce_seconds=0.0,
+                    activity_recovery_seconds=0.0,
+                    recovery_cooldown_seconds=5.0,
+                )
+            )
+            if dedicated
+            else None
+        ),
+        allow_stopped_host_rebind=bool(provider_grid_id),
+    )
+    agent = AllocatorNodeAgent(
+        grid_url=runtime.allocator_control_url(cfg),
+        control_token=token,
+        runtime=managed,
+        instance_id=instance_id,
+        startup_path=Path(startup_path),
+        advertise_host=effective_advertise_host,
+        heartbeat_interval=heartbeat_interval,
+        allow_insecure_http=allow_insecure_http,
+        route_publisher=(
+            RemoteProviderRoutePublisher(
+                provider_grid_id,
+                credential.host_id,
+                engine_api_key_file=engine_api_key_path(Path(state_path)),
+            )
+            if provider_grid_id
+            else None
+        ),
+    )
+
+    def _on_term(_signum, _frame):
+        agent.request_shutdown()
+
+    signal.signal(signal.SIGTERM, _on_term)
+    return agent.run_forever()
+
+
+def _allocator_bind_host(advertise_host: str) -> str:
+    """Bind the managed engine on the same address family its registry URL advertises."""
+
+    value = str(advertise_host).strip()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    # A scoped IPv6 advertise address binds through the wildcard; the zone belongs in the URL, not
+    # in llama.cpp's listener argument. RFC 6874 URLs may have an encoded percent delimiter.
+    address = value.replace("%25", "%").split("%", 1)[0]
+    try:
+        version = ipaddress.ip_address(address).version
+    except ValueError:
+        try:
+            families = {
+                family
+                for family, _kind, _proto, _name, _sockaddr in socket.getaddrinfo(
+                    value,
+                    None,
+                    family=socket.AF_UNSPEC,
+                    type=socket.SOCK_STREAM,
+                )
+            }
+        except socket.gaierror:
+            families = set()
+        # Dual-stack hostnames preserve the established IPv4 wildcard. An explicitly IPv6-only
+        # hostname must not advertise a family on which llama.cpp is not listening.
+        version = 6 if families == {socket.AF_INET6} else 4
+    return "::" if version == 6 else "0.0.0.0"
+
+
 def _note_server_log_truncation(log_path, old_size: int, max_bytes: int) -> None:
     """Write the boot-time truncation warning as the first line of the fresh server.log (the file the
     user tails), since it must happen before uvicorn configures its own logging."""
     # Local time (no tz) to match uvicorn's %(asctime)s, which uses time.localtime.
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = datetime.now(UTC).astimezone().strftime("%Y-%m-%d %H:%M:%S")
     try:
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(
@@ -174,8 +355,34 @@ def _maybe_internal(argv: list[str]) -> int | None:
     if argv[0] == "__server":
         parser = argparse.ArgumentParser(prog="grid __server")
         parser.add_argument("grid_id")
+        parser.add_argument("--instance-id", required=True)
+        parser.add_argument("--tls-cert", default=None)
+        parser.add_argument("--tls-key", default=None)
         args = parser.parse_args(argv[1:])
-        return cmd_internal_server(args.grid_id)
+        return cmd_internal_server(args.grid_id, args.instance_id, args.tls_cert, args.tls_key)
+    if argv[0] == "__allocator-node":
+        parser = argparse.ArgumentParser(prog="grid __allocator-node")
+        parser.add_argument("grid_selector")
+        parser.add_argument("--state-path", required=True)
+        parser.add_argument("--instance-id", required=True)
+        parser.add_argument("--startup-path", required=True)
+        parser.add_argument("--heartbeat-interval", type=float, default=15.0)
+        parser.add_argument("--advertise-host", default=None)
+        parser.add_argument("--provider-grid-id", default=None)
+        parser.add_argument("--dedicated", action="store_true")
+        parser.add_argument("--allow-insecure-http", action="store_true")
+        args = parser.parse_args(argv[1:])
+        return cmd_internal_allocator_node(
+            args.grid_selector,
+            state_path=args.state_path,
+            instance_id=args.instance_id,
+            startup_path=args.startup_path,
+            heartbeat_interval=args.heartbeat_interval,
+            advertise_host=args.advertise_host,
+            allow_insecure_http=args.allow_insecure_http,
+            provider_grid_id=args.provider_grid_id,
+            dedicated=args.dedicated,
+        )
     if argv[0] == "__media-server":
         parser = argparse.ArgumentParser(prog="grid __media-server")
         parser.add_argument("--port", type=int, required=True)
@@ -223,5 +430,3 @@ def _maybe_internal(argv: list[str]) -> int | None:
         args = parser.parse_args(argv[1:])
         return run_remote_engine_from_record(args.grid_id, args.engine_id)
     return None
-
-
