@@ -226,6 +226,64 @@ The bulk route's own shape:
 today holds a number where that matters. It is recorded as the property to revisit first if one ever
 does.
 
+⚠️ **Amended in implementation (2026-09-10): the body says which of the two it means, and refuses
+every key it does not accept.** Two properties this decision did not name, both about the same thing
+— that the *shape* of the request is the last fence in front of the widest money operation here:
+
+- **`dry_run` has no default.** Both possible defaults are a real mistake on a route whose omission
+  costs money in one direction and credibility in the other: defaulted off, a body that forgot the
+  field switches a whole class of grids on; defaulted on, the same body is a no-op answering 200,
+  which a script reads as done. Neither is reachable if the caller has to say.
+- **Unknown keys are refused (422), unlike every other request model in `handler.py`**, which take
+  pydantic's default and ignore them. The per-grid switch's body *is* `{"billing_mode": …}`, so an
+  operator adapting that call to this route sends the field they already know — and ignored, it
+  would silently do the exact **opposite** of what the body says, on every grid of a class. This is
+  the one place in the money surface where an ignored key inverts the action rather than losing it.
+
+⚠️ **Amended in implementation: a write that does not land is its own outcome, and every row repeats
+`dry_run`.** Two more the decision did not name, both about the report being honest on its own:
+
+- **A failed write is reported per grid as `failed`, kept distinct from `skipped`.** Without it,
+  `set_network_billing_mode` raising on grid 7 of 20 answers 500 with six grids already switched on
+  and nothing saying which — the exact partial write this decision's report exists to prevent. It is
+  not the swallow ADR 0042 D-i refused: there two halves had to roll back together, here it is one
+  row with nothing paired to it and the call is idempotent, and the failure is loud twice over (an
+  ERROR carrying the traceback, and a counted row in the answer). It stays distinct from `skipped`
+  because the two send an operator to two different places — a policy to edit, or a database to look
+  at. The sentence on the wire says *could not confirm*, never *its row is unchanged*: a commit that
+  landed and whose acknowledgement was lost leaves the row changed, and only the remedy is true in
+  both cases.
+- **Every per-grid row carries `dry_run`, redundantly with the envelope.** A preview's row says
+  `switched_on` — it must, or the preview would stop being comparable field-for-field with the action
+  it previews, which is the whole reason `dry_run` is a field on the route. So the row says for
+  itself which of the two it is, and one lifted out of its envelope cannot be read as a fact.
+
+⚠️ **Amended in implementation: the per-grid precondition run is unreachable by construction today,
+and it stays.** The whole call already refused unless the type is billable and the operator key is
+set, and every grid on the work list has that type — so no per-grid run can fail. It is not dead
+code, it is the seam: a third condition added to `BILLING_ON_PRECONDITIONS` that varies BY GRID
+arrives here already skipping the grid rather than failing the call. The report's own vocabulary is
+built for it — `already_on` describes the *switch* and deliberately claims nothing about whether the
+grid charges, and the precondition is asked **before** it, because a skip's reason is the only thing
+that tells an operator what to fix.
+
+*Two things this decision touches and deliberately does not fix*, written down so that neither is
+rediscovered as a regression of it:
+
+- **The gate and the settlement can disagree, and the bulk switch widens the window.** A request
+  consults the billing verdict three times independently, and the settlement arrives later as a
+  separate request from the provider — so a switch thrown in between makes the two differ. One
+  direction loses money silently: billable at the gate and free at settlement records no cost and
+  reports no usage. The reverse is harmless, because the gate has already zeroed the rates the
+  settlement uses. This predates every ticket in this decision and no single request gets worse; what
+  changes is that many grids can now move at once. The fix in shape is to record the gate's verdict
+  **on the transaction** and have the settlement read it rather than re-ask — a schema change, and
+  its own decision.
+- **The media path is outside all of this.** It gates on the relay's own environment value, read at
+  import, in several places, and never consults the inference path's billing verdict — so it already
+  ignores the type predicate today, before any of this work. "Billing by grid type" does not cover
+  it, and a reader who assumes the billable set governs it will be wrong.
+
 ### D-f — The bulk switch takes the credential of the switch it multiplies, and reaches only what that switch reaches
 
 **Credential.** The policy route is system-admin (`X-Admin-Key`): choosing which classes of grid may
