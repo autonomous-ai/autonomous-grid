@@ -3184,3 +3184,30 @@ def test_internal_server_wires_private_token_and_grid_scoped_state(
     assert captured["allocator_state_path"] == (
         runtime.paths.grid_dir(cfg["grid_id"]) / runtime.ALLOCATOR_STATE_FILE
     )
+
+
+def test_a_plaintext_lan_media_url_is_still_refused_in_pull_mode(tmp_path, monkeypatch):
+    """Pull retired the TEXT dial. `_proxy_media` still dials, so its guard must stay.
+
+    The skip added when text moved to pull was reasoned as "nothing dials this URL any more".
+    That is true of `endpoint_url` and false of `media_url`: media was never converted, and
+    `_proxy_media` still builds a request against `engine.media_url` over the LAN carrying the
+    engine key. Skipping the check for it let a plaintext media endpoint register and be dialled.
+    """
+
+    monkeypatch.delenv("GRID_LOCAL_PUSH", raising=False)
+    _, client, _ = _app(tmp_path)
+    response = client.put(
+        f"/nodes/{engine_node_id('host-1', 'qwen')}",
+        headers=_node_auth("host-1"),
+        json={
+            "role": "engine",
+            "host_id": "host-1",
+            "models": ["qwen"],
+            "endpoint_url": "http://10.0.0.5:9000/v1",
+            "media_url": "http://10.0.0.5:9001",
+            "allocator": {"managed": True},
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "end-to-end HTTPS" in response.text

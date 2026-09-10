@@ -425,7 +425,12 @@ def create_app(
             if req.engine_api_key is not None:
                 _validate_engine_api_key(req.engine_api_key)
             if req.endpoint_url:
-                _validate_managed_endpoint_transport(req.endpoint_url, request=request)
+                _validate_managed_endpoint_transport(
+                    req.endpoint_url,
+                    request=request,
+                    # Under pull nothing here dials the text endpoint; under push it still does.
+                    still_dialled=os.getenv("GRID_LOCAL_PUSH") == "1",
+                )
             if req.media_url:
                 _validate_managed_endpoint_transport(req.media_url, request=request)
         elif req.engine_api_key is not None:
@@ -2382,14 +2387,20 @@ def _bounded_model_age(value: Any) -> float | None:
     return age
 
 
-def _validate_managed_endpoint_transport(value: str, *, request: Request) -> None:
+def _validate_managed_endpoint_transport(
+    value: str, *, request: Request, still_dialled: bool = True
+) -> None:
     """Require authenticated managed traffic to be TLS or same-machine loopback.
 
-    Pull mode never dials this URL at all -- the node's own poll loop reaches its engine on
-    loopback, and this field is now advertisement only. The threat this guards (the grid
-    carrying a bearer key over plaintext LAN) only exists while this grid's own serving code can
-    still dial an engine directly, i.e. while GRID_LOCAL_PUSH=1. Skip the check entirely
-    otherwise, so a node need not lie about a URL nobody will ever connect to.
+    The guard exists because THIS grid may carry a bearer key to that URL over a plaintext LAN.
+    So what decides whether it applies is whether this grid still dials the URL -- not which
+    mode the grid is in, and never what the registering node claims.
+
+    ``still_dialled=False`` is for a field that has become advertisement only: the text
+    ``endpoint_url`` under pull, which nothing here connects to any more (the node's own poll
+    loop reaches its engine on loopback). ``media_url`` is NOT that field -- media was never
+    converted and ``_proxy_media`` still builds a LAN request against it -- so it keeps the
+    default and keeps the guard.
     """
 
     try:
@@ -2404,7 +2415,7 @@ def _validate_managed_endpoint_transport(value: str, *, request: Request) -> Non
             status_code=400,
             detail="managed endpoint URL must not contain user information",
         )
-    if os.getenv("GRID_LOCAL_PUSH") != "1":
+    if not still_dialled:
         return
     if parsed.scheme == "https" and host:
         return
