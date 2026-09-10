@@ -2375,7 +2375,14 @@ def _bounded_model_age(value: Any) -> float | None:
 
 
 def _validate_managed_endpoint_transport(value: str, *, request: Request) -> None:
-    """Require authenticated managed traffic to be TLS or same-machine loopback."""
+    """Require authenticated managed traffic to be TLS or same-machine loopback.
+
+    Pull mode never dials this URL at all -- the node's own poll loop reaches its engine on
+    loopback, and this field is now advertisement only. The threat this guards (the grid
+    carrying a bearer key over plaintext LAN) only exists while this grid's own serving code can
+    still dial an engine directly, i.e. while GRID_LOCAL_PUSH=1. Skip the check entirely
+    otherwise, so a node need not lie about a URL nobody will ever connect to.
+    """
 
     try:
         parsed = urlsplit(str(value))
@@ -2389,6 +2396,8 @@ def _validate_managed_endpoint_transport(value: str, *, request: Request) -> Non
             status_code=400,
             detail="managed endpoint URL must not contain user information",
         )
+    if os.getenv("GRID_LOCAL_PUSH") != "1":
+        return
     if parsed.scheme == "https" and host:
         return
     peer_host = request.client.host if request.client is not None else ""
