@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import json
 import math
+import os
 import secrets
 import ssl
 import statistics
@@ -15,7 +16,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, AsyncGenerator, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -24,6 +25,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from local.inflight import InflightTable
+from local.poll import poll_router
 from local.runtime import GRID_TYPE
 from shared.allocator.auth import (
     DEFAULT_NODE_TOKEN_TTL_SECONDS,
@@ -316,6 +319,8 @@ def create_app(
         allocator_state_path
     )
     app.state.allocator = allocator
+    app.state.inflight = InflightTable()
+    app.include_router(poll_router)
     app.state.allocator_authority_ttl_seconds = max(
         45.0,
         3.0 * allocator_interval_seconds,
@@ -1013,6 +1018,8 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     model = body.get("model")
     if not isinstance(model, str) or not model:
         return _openai_error(400, "model is required", "invalid_request")
+    if os.getenv("GRID_LOCAL_PUSH") != "1":
+        return await _serve_by_pull(app, endpoint_path, request, body, raw_body, model)
     features = classify_request(endpoint_path, body)
     if request.headers.get("x-grid-allocator-evaluation") == "1":
         # Canary traffic is real inference, so it should still update engine performance.
@@ -1450,6 +1457,42 @@ def _answer_text(payload: object) -> str:
     return ""
 
 
+async def _serve_by_pull(
+    app: FastAPI,
+    endpoint_path: str,
+    request: Request,
+    body: dict[str, Any],
+    raw_body: bytes,
+    model: str,
+) -> Response:
+    """Register the request and wait for a worker to take it.
+
+    Chunks are relayed verbatim -- no reframing, no injected [DONE].
+    """
+    del endpoint_path, request
+    table: InflightTable = app.state.inflight
+    if _choose_node(app, model) is None:
+        return _openai_error(
+            503, f"No active local engine for model {model!r}", "engine_unavailable"
+        )
+    txn = table.create(model=model, body=raw_body, is_stream=bool(body.get("stream")))
+    try:
+        if txn.is_stream:
+            async def relay() -> AsyncGenerator[bytes, None]:
+                async for chunk in table.stream(txn.id):
+                    yield chunk
+
+            return StreamingResponse(relay(), media_type="text/event-stream")
+        async for _chunk in table.stream(txn.id):
+            pass
+        settled = table.get(txn.id)
+        if settled is None or settled.result is None:
+            return _openai_error(504, "No worker returned a result", "engine_timeout")
+        return Response(content=settled.result, media_type="application/json")
+    finally:
+        table.cancel(txn.id, "consumer finished")
+
+
 async def _proxy_media(
     app: FastAPI,
     endpoint_path: str,
@@ -1757,6 +1800,19 @@ def _node_allocator_state(node: Node) -> NodeState:
         return NodeState(str(value or NodeState.ACCEPTING))
     except ValueError:
         return NodeState.UNHEALTHY
+
+
+def _choose_node(app: FastAPI, model: str) -> str | None:
+    """The host_id of the least-loaded live node advertising ``model``, or None."""
+    candidates = [
+        node
+        for node in _active_engines(app, model)
+        if node.host_id
+    ]
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda node: int(node.load.get("active_tasks") or 0))
+    return best.host_id
 
 
 def _choose_engine(
@@ -2319,7 +2375,14 @@ def _bounded_model_age(value: Any) -> float | None:
 
 
 def _validate_managed_endpoint_transport(value: str, *, request: Request) -> None:
-    """Require authenticated managed traffic to be TLS or same-machine loopback."""
+    """Require authenticated managed traffic to be TLS or same-machine loopback.
+
+    Pull mode never dials this URL at all -- the node's own poll loop reaches its engine on
+    loopback, and this field is now advertisement only. The threat this guards (the grid
+    carrying a bearer key over plaintext LAN) only exists while this grid's own serving code can
+    still dial an engine directly, i.e. while GRID_LOCAL_PUSH=1. Skip the check entirely
+    otherwise, so a node need not lie about a URL nobody will ever connect to.
+    """
 
     try:
         parsed = urlsplit(str(value))
@@ -2333,6 +2396,8 @@ def _validate_managed_endpoint_transport(value: str, *, request: Request) -> Non
             status_code=400,
             detail="managed endpoint URL must not contain user information",
         )
+    if os.getenv("GRID_LOCAL_PUSH") != "1":
+        return
     if parsed.scheme == "https" and host:
         return
     peer_host = request.client.host if request.client is not None else ""

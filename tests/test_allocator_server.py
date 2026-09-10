@@ -27,6 +27,14 @@ AUTH = {"X-Grid-Allocator-Token": TOKEN}
 CONTROL_NODE_ID = control_node_id("host-1")
 
 
+@pytest.fixture(autouse=True)
+def _push_mode(monkeypatch):
+    # This file dials mocked engines directly and asserts on the forwarded request -- that is
+    # the push path. Pull is the default now; without this every /v1/chat/completions call here
+    # would register a transaction and hang forever waiting for a worker that never exists.
+    monkeypatch.setenv("GRID_LOCAL_PUSH", "1")
+
+
 def _node_auth(host_id: str) -> dict[str, str]:
     return {"X-Grid-Allocator-Node-Token": mint_node_token(TOKEN, host_id)}
 
@@ -1361,6 +1369,26 @@ def test_managed_transport_rejects_plaintext_lan_endpoint(tmp_path):
     )
     assert response.status_code == 400
     assert "end-to-end HTTPS" in response.text
+
+
+def test_managed_transport_accepts_plaintext_lan_endpoint_in_pull_mode(
+    tmp_path, monkeypatch
+):
+    # Pull is this grid's own default; nothing here will ever dial this URL, only advertise it.
+    monkeypatch.delenv("GRID_LOCAL_PUSH", raising=False)
+    _, client, _ = _app(tmp_path)
+    response = client.put(
+        f"/nodes/{engine_node_id('host-1', 'qwen')}",
+        headers=_node_auth("host-1"),
+        json={
+            "role": "engine",
+            "host_id": "host-1",
+            "models": ["qwen"],
+            "endpoint_url": "http://10.0.0.5:9000/v1",
+            "allocator": {"managed": True},
+        },
+    )
+    assert response.status_code == 200, response.text
 
 
 def test_remote_registration_cannot_claim_central_loopback_plaintext():

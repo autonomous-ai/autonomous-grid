@@ -167,7 +167,12 @@ def test_internal_server_cli_requires_and_forwards_instance_nonce(monkeypatch):
     monkeypatch.setattr(
         cli_main,
         "cmd_internal_server",
-        lambda grid_id, instance_id=None: calls.append((grid_id, instance_id)) or 0,
+        # __server also forwards the auto-TLS pair now; this test is about the nonce, so the
+        # certificate arguments are accepted and ignored rather than asserted on.
+        lambda grid_id, instance_id=None, tls_cert=None, tls_key=None: calls.append(
+            (grid_id, instance_id)
+        )
+        or 0,
     )
 
     assert (

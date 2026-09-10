@@ -67,6 +67,18 @@ MAX_HEALTH_PROBE_WORKERS = 16
 DEFAULT_HEALTH_PROBE_WORKERS = 8
 RECOVERY_HEALTH_DEADLINE_SECONDS = 30.0
 MAX_MODEL_AGE_SECONDS = 10 * 365 * 24 * 60 * 60
+# Ceiling on the unknown-activity fail-safe. Refusing to stop a child whose direct in-flight count
+# cannot be read is right — but with no exit it is not fail-safe, it is fail-stuck: the node can
+# neither use, unload, nor replace the child, and every retry re-observes the same nothing. Once a
+# residency has been unobservable for as long as recovery is allowed to spend proving a process
+# healthy at all, the observation boundary is broken rather than busy, and continuing to refuse
+# protects no work. Deliberately the SAME budget as the health plane's, not a second number to
+# tune. Only the UNKNOWN case escalates: a KNOWN non-zero count is real work and still blocks a
+# non-forced stop, and a known zero still returns immediately.
+UNKNOWN_ACTIVITY_ESCALATION_SECONDS = RECOVERY_HEALTH_DEADLINE_SECONDS
+# ...or this many consecutive unknown observations of the same residency, whichever comes first.
+# A caller that retries faster than the clock still reaches an exit rather than looping forever.
+UNKNOWN_ACTIVITY_ESCALATION_OBSERVATIONS = 3
 LOCAL_OVERRIDE_SUFFIX = ".override.json"
 SHUTDOWN_REQUEST_SUFFIX = ".shutdown"
 ENGINE_API_KEY_SUFFIX = ".engine-api-key"
@@ -744,7 +756,7 @@ class LlamaCppBackend:
             spawned = self._spawned.get(handle.pid)
         if spawned is not None:
             launched, spawned_model, spawned_handle = spawned
-            return (
+            if (
                 launched.proc.poll() is None
                 and launched.port == handle.port
                 and spawned_model == model_id
@@ -759,7 +771,25 @@ class LlamaCppBackend:
                         and not handle.process_birth_marker
                     )
                 )
-            )
+            ):
+                return True
+            # DELIBERATE FALLTHROUGH — do NOT restore an early ``return False`` here.
+            # The in-memory record and the caller's handle can disagree without either being
+            # wrong. ``publish_provisional`` records the weak pid+port handle first and the
+            # enriched one (birth marker, executable path, model path) second, so a caller
+            # holding the enriched handle can meet a record still holding the provisional one —
+            # and the narrow provisional fallback above cannot rescue it precisely because the
+            # caller's marker is present. Returning False there is permanent and catastrophic:
+            # ``owns`` gates ``ready`` and ``active_requests``, so the residency can never be
+            # admitted READY, its activity becomes unknowable, and the unload fail-safe then
+            # refuses to stop the child. Measured in production as a node that could neither use,
+            # unload, nor shut down its own engine until an operator ran ``pkill``.
+            # Falling through cannot loosen the PID-reuse protection the strict comparison exists
+            # to provide, because the durable proof below is STRONGER evidence, not weaker: it
+            # re-reads the live process's birth marker and its argv from the OS rather than
+            # comparing two records in this process. A reused PID fails it, a zombie has no argv
+            # to prove, and a handle carrying no marker at all still fails closed on the next
+            # line. Both paths failing still means not owned.
         if not handle.process_birth_marker:
             return False
         if _process_birth_marker(handle.pid) != handle.process_birth_marker:
@@ -808,10 +838,27 @@ class LlamaCppBackend:
         )
 
     def ready(self, handle: RuntimeHandle, model_id: str) -> bool:
+        ok, reason = self.ready_detail(handle, model_id)
+        if not ok:
+            # A readiness probe that only answers False turns every health cycle into a guess:
+            # a residency drops to FAILED and the receipt names no gate to look at. One line here
+            # is the difference between "the engine is unhealthy" and "this node cannot prove it
+            # owns a process that is answering perfectly well".
+            self.last_ready_reason = reason
+            print(
+                f"allocator: {model_id} not ready on port {handle.port}: {reason}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return ok
+
+    def ready_detail(self, handle: RuntimeHandle, model_id: str) -> tuple[bool, str]:
+        """``ready`` plus the gate that refused it."""
+
         if not self.owns(handle, model_id):
-            return False
+            return False, f"pid {handle.pid} could not be proven to be this node's {model_id}"
         if not self._secure_launch_configuration(handle):
-            return False
+            return False, f"pid {handle.pid} was not launched with this node's api-key/TLS files"
         try:
             with httpx.Client(
                 timeout=2.0,
@@ -823,19 +870,37 @@ class LlamaCppBackend:
                     f"{handle.port}/v1/models",
                     headers={"Authorization": f"Bearer {self._api_key}"},
                 )
-        except httpx.RequestError:
-            return False
-        return response.status_code == 200
+        except httpx.RequestError as exc:
+            return False, f"/v1/models could not be read: {exc!r}"[:200]
+        if response.status_code != 200:
+            return False, f"/v1/models answered {response.status_code}"
+        return True, ""
 
     def active_requests(self, handle: RuntimeHandle, model_id: str) -> int | None:
         """Return llama.cpp's direct in-flight slot count, or ``None`` when unknowable."""
 
+        return self.active_requests_detail(handle, model_id)[0]
+
+    def active_requests_detail(
+        self, handle: RuntimeHandle, model_id: str
+    ) -> tuple[int | None, str]:
+        """``active_requests`` plus the gate that made it unknowable.
+
+        Five independent conditions collapse into the same ``None``, and the refusal built on it
+        used to reach the operator as a bare "activity is unknown" — which reads as an engine
+        problem even when the engine is healthy and the real gate is a local ownership or launch
+        check. Diagnosing one of these on a live two-machine grid cost hours precisely because the
+        message named no gate. Every ``None`` below therefore carries the reason with it.
+        """
+
         if not self.alive(handle):
-            return 0
+            return 0, ""
         if not self.owns(handle, model_id):
-            return None
+            return None, f"pid {handle.pid} could not be proven to be this node's {model_id}"
         if not self._secure_launch_configuration(handle):
-            return None
+            return None, (
+                f"pid {handle.pid} was not launched with this node's api-key/TLS files"
+            )
         try:
             with httpx.Client(
                 timeout=1.0,
@@ -848,27 +913,36 @@ class LlamaCppBackend:
                     headers={"Authorization": f"Bearer {self._api_key}"},
                 )
             if response.status_code != 200:
-                return None
+                return None, f"/slots on port {handle.port} answered {response.status_code}"
             payload = response.json()
-        except (httpx.HTTPError, OSError, TypeError, ValueError):
-            return None
+        except (httpx.HTTPError, OSError, TypeError, ValueError) as exc:
+            return None, f"/slots on port {handle.port} could not be read: {exc!r}"[:200]
         if not isinstance(payload, list):
-            return None
+            return None, f"/slots on port {handle.port} did not answer with a slot list"
         active = 0
         for slot in payload:
             if not isinstance(slot, Mapping) or not isinstance(
                 slot.get("is_processing"), bool
             ):
-                return None
+                return None, f"/slots on port {handle.port} returned a malformed slot row"
             active += int(slot["is_processing"] is True)
-        return active
+        return active, ""
 
     def _tls_verify(self) -> ssl.SSLContext | bool:
         if not self.tls_ca_pem:
             return True
-        context = ssl.create_default_context()
-        context.load_verify_locations(cadata=self.tls_ca_pem)
-        return context
+        # Pass the CA to the CONSTRUCTOR. Doing so is what makes Python skip load_default_certs(),
+        # and skipping it is the whole point: the allocator node runs with SSL_CERT_FILE pointing
+        # at the CA it learned for the GRID, and every CA this codebase mints carries the identical
+        # subject (CN=autonomous-grid local CA). Building the default store first therefore put two
+        # different keys under one subject in the same context, and OpenSSL — which looks an issuer
+        # up BY SUBJECT — picked the grid's CA to verify an engine leaf and failed the signature.
+        # MEASURED: that produced "certificate verify failed: certificate signature failure" on a
+        # healthy engine whose certificate `openssl verify -CAfile` accepted, roughly every other
+        # health cycle, which read as an engine fault and cost a very long trace. The launcher's
+        # readiness probe never hit it because it already passes cafile= to the constructor.
+        # A private engine CA must be the ONLY trust anchor here; ambient trust is never wanted.
+        return ssl.create_default_context(cadata=self.tls_ca_pem)
 
     def _secure_launch_configuration(self, handle: RuntimeHandle) -> bool:
         """Reject adoption of pre-hardening children that exposed or omitted the key."""
@@ -986,6 +1060,12 @@ class ManagedModelRuntime:
         self._active_action_id: str | None = None
         self._active_action_started_at: float | None = None
         self._shutting_down = False
+        # model_id -> (consecutive unknown observations, monotonic time of the first of them).
+        # Cleared the moment activity becomes observable again; see the escalation ceiling above.
+        self._unknown_activity: dict[str, tuple[int, float]] = {}
+        # Why the last action had to escalate past the fail-safe, carried into its receipt so the
+        # controller sees a forced stop as a forced stop rather than as an ordinary success.
+        self._escalation_note = ""
         self._latest_plan_generation = ""
         self._superseded_plan_epochs: set[str] = set()
         self._highest_controller_term = 0
@@ -1608,6 +1688,20 @@ class ManagedModelRuntime:
         timeout = None
         if deadline is not None:
             timeout = max(0.0, float(deadline) - time.monotonic())
+        # A cycle deadline that is ALREADY spent when reconciliation begins grants no probe any
+        # time at all, and silence from a probe that was never given a second is not evidence of
+        # anything. This is not the fence below: that one requires a positive budget to have been
+        # granted and then burned, which is a real report that the process would not answer
+        # ``ps``/``/v1/models`` in the time the cycle had. With zero budget, "started" only ever
+        # meant that a pool thread had picked the work item up before ``wait`` returned, so
+        # ``future.cancel()`` failed — which it reliably does, the pool being faster than a
+        # zero-second wait. EVERY healthy READY residency therefore flipped to FAILED on a spent
+        # cycle, ``load_failures`` climbed, and ``_warm`` then tried to REPLACE an engine that was
+        # never broken; its unload met a slot table it could not read and refused. Measured on
+        # a live node: ``heartbeat_once`` renews the control lease against this same deadline
+        # before handing it here, so one slow control-plane round trip is all it takes to arrive
+        # with nothing left. Do not "simplify" this back into an unconditional ``started=True``.
+        budget_granted = timeout is None or timeout > 0.0
         completed, pending = wait(futures, timeout=timeout)
         observations: dict[str, _ProcessHealth] = {}
         for future in completed:
@@ -1630,7 +1724,18 @@ class ManagedModelRuntime:
                     started=False,
                 )
             else:
-                observations[futures[future]] = _ProcessHealth(None, False, False)
+                # This probe BEGAN and has not returned. When it was granted a positive budget and
+                # burned it, that IS negative evidence and must stay distinct from the never-ran
+                # case above — the fence
+                # `test_health_deadline_fences_running_probe_but_preserves_never_started_queue`
+                # holds it. When the budget was already zero it was given no chance to speak, so
+                # it reports nothing at all; see `budget_granted` above.
+                observations[futures[future]] = _ProcessHealth(
+                    None,
+                    False,
+                    False,
+                    started=budget_granted,
+                )
         executor.shutdown(wait=False, cancel_futures=True)
         return observations
 
@@ -1889,6 +1994,8 @@ class ManagedModelRuntime:
             return
         handle = residency.handle
         assert handle is not None
+        unknown_since: float | None = None
+        unknown_observations = 0
         while True:
             try:
                 count = query(handle, residency.model_id)
@@ -1903,11 +2010,32 @@ class ManagedModelRuntime:
             if count is None:
                 alive = self._backend_alive(handle, residency.model_id)
                 owned = alive and self.backend.owns(handle, residency.model_id)
-                if alive and owned:
-                    raise RuntimeError(
-                        "direct engine activity is unknown; refusing non-force shutdown"
+                if not (alive and owned):
+                    return
+                now = time.monotonic()
+                if unknown_since is None:
+                    unknown_since = now
+                unknown_observations += 1
+                # BOUNDED fail-safe — this used to raise on the first unknown observation and
+                # never let go. `stop_all` turns that into "allocator-owned process cleanup was
+                # incomplete" every time, so a node whose engine was merely UNOBSERVABLE could not
+                # shut itself down at all. Re-observe instead, for the caller's own shutdown
+                # budget and never longer than the escalation ceiling, then stop the child anyway
+                # and say why. Escalating is not a bypass of the ownership proof: `owned` is True
+                # on this branch and the stop still re-proves it. And it is not a bypass of the
+                # drain either — a KNOWN non-zero count never reaches here.
+                if (
+                    now >= min(deadline, unknown_since + UNKNOWN_ACTIVITY_ESCALATION_SECONDS)
+                    or unknown_observations >= UNKNOWN_ACTIVITY_ESCALATION_OBSERVATIONS
+                ):
+                    self._note_escalation(
+                        residency.model_id,
+                        "direct engine activity stayed unknown for the whole shutdown budget; "
+                        "stopped the process anyway",
                     )
-                return
+                    return
+                time.sleep(min(0.05, max(0.0, deadline - now)))
+                continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise RuntimeError(
@@ -1931,22 +2059,72 @@ class ManagedModelRuntime:
                     "direct engine activity cannot be observed; refusing to replace the model"
                 )
             return
+        # Prefer the detailed form when the backend offers it: the refusal below is otherwise a
+        # dead end for whoever reads the receipt, naming no gate to go and look at.
+        detail = ""
+        detailed = getattr(self.backend, "active_requests_detail", None)
         try:
-            count = query(handle, model_id)
-        except Exception:  # noqa: BLE001 - observation failure is treated as unknown, not idle
+            if callable(detailed):
+                count, detail = detailed(handle, model_id)
+            else:
+                count = query(handle, model_id)
+        except Exception as exc:  # noqa: BLE001 - observation failure is unknown, not idle
+            # Record the raise too: a bare "unknown" that came from an exception used to be
+            # indistinguishable from one that came from a gate, and the two lead to different files.
             count = None
+            detail = f"observing activity raised {exc!r}"[:200]
         if count is not None and (
             isinstance(count, bool) or not isinstance(count, int) or count < 0
         ):
             count = None
         if count is None:
+            # BOUNDED fail-safe. Refusing is right while the boundary may still come back, but an
+            # UNLOAD that can only ever be retried is how a residency became permanently stuck:
+            # `_warm` replaces a FAILED child, the replacement needs this unload, the unload
+            # refuses on unknown activity, and the loop repeats forever. After the ceiling above,
+            # the honest reading is that the boundary is broken rather than busy, so proceed and
+            # record WHY on the receipt. The caller's stop still re-proves ownership, so this
+            # neither bypasses the ownership proof nor stops a process with KNOWN work on it.
+            if self._unknown_activity_exhausted(model_id):
+                self._note_escalation(
+                    model_id,
+                    "direct engine activity stayed unknown past the fail-safe ceiling; "
+                    "stopped the process anyway",
+                )
+                return
             raise RuntimeError(
                 "direct engine activity is unknown; refusing to unload the model"
+                + (f" ({detail})" if detail else "")
             )
+        with self._lock:
+            self._unknown_activity.pop(model_id, None)
         if count:
             raise RuntimeError(
                 f"refusing to unload model with {count} direct engine request(s) active"
             )
+
+    def _unknown_activity_exhausted(self, model_id: str) -> bool:
+        """Record one unknown observation; report whether the fail-safe's ceiling is spent."""
+
+        now = time.monotonic()
+        with self._lock:
+            observations, first_seen = self._unknown_activity.get(model_id, (0, now))
+            observations += 1
+            exhausted = (
+                observations >= UNKNOWN_ACTIVITY_ESCALATION_OBSERVATIONS
+                or now - first_seen >= UNKNOWN_ACTIVITY_ESCALATION_SECONDS
+            )
+            if exhausted:
+                self._unknown_activity.pop(model_id, None)
+            else:
+                self._unknown_activity[model_id] = (observations, first_seen)
+        return exhausted
+
+    def _note_escalation(self, model_id: str, reason: str) -> None:
+        """Carry a forced stop's reason into the receipt of the action that forced it."""
+
+        with self._lock:
+            self._escalation_note = f"{model_id}: {reason}"
 
     def wait_idle(self, timeout: float = 10.0) -> bool:
         deadline = time.monotonic() + timeout
@@ -1976,6 +2154,8 @@ class ManagedModelRuntime:
 
     def _execute(self, action: MutationAction) -> None:
         artifact_fetched = False
+        with self._lock:
+            self._escalation_note = ""
         try:
             prepare = getattr(self.backend, "prepare", None)
             if callable(prepare):
@@ -1997,10 +2177,17 @@ class ManagedModelRuntime:
             # actuator that is an action failure, not a reason to terminate the node loop.
             self._fail(action, exc)
         else:
+            with self._lock:
+                note = self._escalation_note
+                self._escalation_note = ""
             self._finish(
                 action,
                 MutationStatus.SUCCEEDED,
-                f"{action.kind.value} complete",
+                f"{action.kind.value} complete"
+                # A stop that had to escalate past the fail-safe succeeded, but the controller
+                # must not read it as an ordinary one — the sentence is the only record that a
+                # child was stopped without its activity ever being observed.
+                + (f" ({note})" if note else ""),
                 artifact_fetched=artifact_fetched,
             )
 

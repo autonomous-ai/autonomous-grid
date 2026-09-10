@@ -1172,6 +1172,85 @@ def test_health_deadline_fences_running_probe_but_preserves_never_started_queue(
     backend.release.set()
 
 
+def test_exhausted_cycle_budget_does_not_oscillate_a_healthy_residency(tmp_path):
+    """READY -> FAILED -> refused unload -> re-warm, driven by nothing but a spent deadline.
+
+    `heartbeat_once` renews the control lease against the same cycle deadline it then hands to
+    health reconciliation, so one slow control-plane round trip arrives here with zero budget.
+    Every probe is then unfinished, and whether it counts as "started" is decided by a race with
+    the worker pool — so a healthy residency flipped to FAILED, `_warm` tried to replace an engine
+    that was never broken, and its unload met an unobservable slot table and refused. Observed
+    live as a permanent oscillation with `load_failures` climbing. A budget that was never granted
+    is not evidence, whichever side of the race wins.
+    """
+
+    class UnobservableBlockingBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.block = False
+
+        def ready(self, handle, model_id):
+            if self.block:
+                self.entered.set()
+                self.release.wait(2)
+            return super().ready(handle, model_id)
+
+        def active_requests(self, _handle, _model_id):
+            # The engine is healthy; only its slot table is unobservable from here — the state the
+            # live node was in, and what turned the replacement into a refusal loop.
+            return None
+
+    backend = UnobservableBlockingBackend()
+    managed = runtime(tmp_path, backend=backend)
+    managed.begin(action(ActionKind.WARM, action_id="warm"))
+    wait(managed)
+    assert managed.residencies[0].state == ResidencyState.READY
+    handle = managed.residencies[0].handle
+    assert handle is not None
+    failures = managed.residencies[0].load_failures
+
+    backend.block = True
+    try:
+        # Whichever side of the race wins, a spent budget yields no observation at all.
+        observations = managed._probe_process_health(
+            (("qwen.gguf", managed.residencies[0]),),
+            deadline=time.monotonic(),
+            max_workers=16,
+        )
+        assert observations["qwen.gguf"].started is False
+
+        assert (
+            managed.reconcile_process_health(
+                deadline=time.monotonic(),
+                max_workers=16,
+            )
+            is False
+        )
+    finally:
+        backend.release.set()
+
+    residency = managed.residencies[0]
+    assert residency.state == ResidencyState.READY
+    assert residency.handle == handle
+    assert residency.load_failures == failures
+
+    # Never having gone FAILED, the warm the controller keeps issuing re-admits the proven-live
+    # child instead of entering the recovery path whose unload cannot be observed.
+    backend.block = False
+    managed.begin(
+        action(ActionKind.WARM, action_id="rewarm", generation="0000000000200-plan")
+    )
+    wait(managed)
+    assert receipt_status(managed, "rewarm") == MutationStatus.SUCCEEDED
+    assert managed.residencies[0].state == ResidencyState.READY
+    assert managed.residencies[0].handle == handle
+    assert managed.residencies[0].load_failures == failures
+    assert len(backend.starts) == 1
+    assert backend.stops == []
+
+
 def test_ambiguous_live_handle_is_retained_and_blocks_duplicate(tmp_path):
     backend = FakeBackend()
     managed = runtime(tmp_path, backend=backend)
@@ -1728,12 +1807,113 @@ def test_stop_all_waits_for_direct_requests_and_force_can_bypass_unknown(tmp_pat
     )
     unknown.begin(action(ActionKind.WARM))
     wait(unknown)
-    with pytest.raises(RuntimeError, match="activity is unknown"):
-        unknown.stop_all(wait_timeout=0.1)
-    assert unknown_backend.live
-
-    unknown.stop_all(wait_timeout=0, force=True)
+    # Unknown activity is a BOUNDED refusal, not a permanent one: once the shutdown budget is
+    # spent with the boundary still silent, the child is stopped anyway. Raising here forever is
+    # what made a node with an unobservable engine impossible to shut down.
+    unknown.stop_all(wait_timeout=0.1)
     assert not unknown_backend.live
+
+    forced_backend = ActivityBackend()
+    forced_backend.activity = [None]
+    forced = ManagedModelRuntime(
+        tmp_path / "forced.json",
+        host_id="host-a",
+        backend=forced_backend,
+        clock=Clock(),
+        port_available=lambda _port: True,
+    )
+    forced.begin(action(ActionKind.WARM))
+    wait(forced)
+    forced.stop_all(wait_timeout=0, force=True)
+    assert not forced_backend.live
+    assert forced_backend.activity_checks == 0
+
+
+def test_unknown_direct_activity_fail_safe_escalates_instead_of_refusing_forever(
+    tmp_path,
+):
+    """An engine nobody can observe must not become an engine nobody can unload.
+
+    Refusing once is the fail-safe; refusing forever is fail-stuck — the residency can never be
+    replaced, `_warm` retries into the same refusal, and the node cannot shut down. Only the
+    UNKNOWN case escalates: a known non-zero count is real work and keeps blocking.
+    """
+
+    class UnknownActivityBackend(FakeBackend):
+        def active_requests(self, _handle, _model_id):
+            return None
+
+    backend = UnknownActivityBackend()
+    managed = runtime(tmp_path, backend=backend)
+    managed.begin(action(ActionKind.WARM, action_id="warm"))
+    wait(managed)
+    handle = managed.residencies[0].handle
+    assert handle is not None
+    managed.begin(
+        action(ActionKind.DRAIN, action_id="drain", generation="0000000000200-plan")
+    )
+    wait(managed)
+
+    ceiling = runtime_module.UNKNOWN_ACTIVITY_ESCALATION_OBSERVATIONS
+    for attempt in range(1, ceiling):
+        managed.begin(
+            action(
+                ActionKind.UNLOAD,
+                action_id=f"unload-{attempt}",
+                generation=f"00000000003{attempt:02d}-plan",
+            )
+        )
+        wait(managed)
+        assert receipt_status(managed, f"unload-{attempt}") == MutationStatus.FAILED
+        assert managed.residencies[0].state == ResidencyState.DRAINING
+        assert backend.stops == []
+
+    managed.begin(
+        action(
+            ActionKind.UNLOAD,
+            action_id="unload-final",
+            generation="0000000000400-plan",
+        )
+    )
+    wait(managed)
+    assert receipt_status(managed, "unload-final") == MutationStatus.SUCCEEDED
+    assert managed.residencies[0].state == ResidencyState.CACHED
+    assert managed.residencies[0].handle is None
+    assert backend.stops == [(handle.pid, "qwen.gguf")]
+    message = next(
+        item
+        for item in managed.acknowledgements()
+        if item["action_id"] == "unload-final"
+    )["message"]
+    assert "activity stayed unknown" in message
+
+    busy_backend = FakeBackend()
+    busy_backend.active_requests = lambda _handle, _model_id: 2  # type: ignore[method-assign]
+    busy = ManagedModelRuntime(
+        tmp_path / "busy.json",
+        host_id="host-a",
+        backend=busy_backend,
+        clock=Clock(),
+        port_available=lambda _port: True,
+    )
+    busy.begin(action(ActionKind.WARM, action_id="warm"))
+    wait(busy)
+    busy.begin(
+        action(ActionKind.DRAIN, action_id="drain", generation="0000000000200-plan")
+    )
+    wait(busy)
+    for attempt in range(1, ceiling + 3):
+        busy.begin(
+            action(
+                ActionKind.UNLOAD,
+                action_id=f"busy-{attempt}",
+                generation=f"00000000005{attempt:02d}-plan",
+            )
+        )
+        wait(busy)
+        assert receipt_status(busy, f"busy-{attempt}") == MutationStatus.FAILED
+    assert busy_backend.stops == []
+    assert busy.residencies[0].state == ResidencyState.DRAINING
 
 
 def test_stop_all_reports_arbitrary_and_missing_worker_outcomes(monkeypatch, tmp_path):
@@ -2136,6 +2316,67 @@ def test_llama_backend_rejects_pid_reuse_and_requires_exact_argv(monkeypatch, tm
         "18081",
     )
     assert backend.owns(handle, "qwen.gguf") is False
+
+
+def test_llama_backend_owns_falls_through_a_disagreeing_spawn_record(
+    monkeypatch,
+    tmp_path,
+):
+    """A provisional in-memory record must not veto the stronger OS-level ownership proof.
+
+    `publish_provisional` records the weak pid+port handle first, so a caller holding the enriched
+    handle meets a record that cannot match it strictly. Answering False there is permanent: it
+    gates `ready` and `active_requests`, and the child becomes unusable AND unstoppable.
+    """
+
+    model_path = tmp_path / "qwen.gguf"
+    model_path.write_bytes(b"model")
+    monkeypatch.setattr(
+        runtime_module.model_store,
+        "list_all",
+        lambda: (SimpleNamespace(name="qwen.gguf", path=model_path),),
+    )
+    backend = LlamaCppBackend()
+    enriched = RuntimeHandle(
+        62_345,
+        18_081,
+        "birth:original",
+        executable_path="/opt/grid/llama-server",
+        model_path=str(model_path),
+    )
+    marker = {"value": "birth:original"}
+    monkeypatch.setattr(
+        runtime_module,
+        "_process_birth_marker",
+        lambda _pid: marker["value"],
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "_process_argv",
+        lambda _pid: (
+            "/opt/grid/llama-server",
+            "-m",
+            str(model_path),
+            "--alias",
+            "qwen.gguf",
+            "--port",
+            "18081",
+        ),
+    )
+    provisional = RuntimeHandle(enriched.pid, enriched.port)
+    assert provisional != enriched
+    backend._spawned[enriched.pid] = (
+        SimpleNamespace(proc=SimpleNamespace(poll=lambda: None), port=enriched.port),
+        "qwen.gguf",
+        provisional,
+    )
+
+    assert backend.owns(enriched, "qwen.gguf") is True
+
+    # The fallthrough is not a loosening: a reused PID is still refused even though the in-memory
+    # record names exactly this pid, port and model.
+    marker["value"] = "birth:replacement"
+    assert backend.owns(enriched, "qwen.gguf") is False
 
 
 def test_llama_backend_counts_direct_slots_without_environment_proxies(monkeypatch):

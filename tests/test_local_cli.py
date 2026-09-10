@@ -4069,6 +4069,10 @@ def test_local_proxy_rewrites_alias_to_upstream_model(monkeypatch):
     consumer used — else an external engine (Ollama/vLLM) 404s on the unknown alias (Issue 1, local)."""
     from local import server as local_server
 
+    # This dials the mocked engine directly and asserts on the forwarded request -- the push
+    # path. Pull is the default now, and it has no engine to dial at all until Task 8 removes
+    # this path entirely, so without this the request would hang waiting for a worker.
+    monkeypatch.setenv("GRID_LOCAL_PUSH", "1")
     app = create_app(grid_id="ag-test", grid_name="test")
     client = TestClient(app)
     reg = client.put("/nodes/node-ext", json={

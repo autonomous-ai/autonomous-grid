@@ -23,6 +23,17 @@ def test_server_cert_signing_passes_cacreateserial(monkeypatch, tmp_path: Path) 
         for flag in ("-keyout", "-out"):
             if flag in command:
                 Path(str(command[command.index(flag) + 1])).write_text("material\n", encoding="utf-8")
+        if "-text" in command:  # the AKI read-back; answer as a leaf that carries one
+            return subprocess.CompletedProcess(
+                command, 0, "        X509v3 Authority Key Identifier:\n            keyid:AA\n", ""
+            )
+        if "-subject" in command:  # the post-signing identity read-back; answer as a sound leaf
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                f"subject=CN={tls.SERVER_COMMON_NAME}\nissuer=CN={tls.CA_COMMON_NAME}\n",
+                "",
+            )
         return subprocess.CompletedProcess(command, 0, "", "")
     monkeypatch.setattr(tls.subprocess, "run", fake_run)
 

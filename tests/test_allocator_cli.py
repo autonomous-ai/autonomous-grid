@@ -931,7 +931,11 @@ def test_node_start_creates_engine_tls_automatically_for_a_lan_advertise_host(
     monkeypatch,
     tmp_path,
 ):
-    """A LAN node needs no hand-made certificate: Grid mints and signs one itself."""
+    """A LAN node needs no hand-made certificate: Grid mints and signs one itself.
+
+    Push-only: pull mode's engine is never dialled over the LAN, so it mints nothing.
+    """
+    monkeypatch.setenv("GRID_LOCAL_PUSH", "1")
     monkeypatch.setenv("GRID_HOME", str(tmp_path / "grid-home"))
     cfg = grid_config()
     monkeypatch.setattr(config, "select_grid", lambda _value: cfg)
@@ -1000,7 +1004,11 @@ def test_node_start_creates_engine_tls_automatically_for_a_lan_advertise_host(
 
 
 def test_node_start_reports_when_tls_material_cannot_be_created(monkeypatch, tmp_path):
-    """The failure stays a clear refusal — no node spawns without a certificate."""
+    """The failure stays a clear refusal — no node spawns without a certificate.
+
+    Push-only: this refusal path only triggers when a certificate was needed at all.
+    """
+    monkeypatch.setenv("GRID_LOCAL_PUSH", "1")
     monkeypatch.setenv("GRID_HOME", str(tmp_path / "grid-home"))
     cfg = grid_config()
     monkeypatch.setattr(config, "select_grid", lambda _value: cfg)

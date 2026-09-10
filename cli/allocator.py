@@ -494,11 +494,14 @@ def _start_allocator_node_locked(
         not provider_network_id
         and not _literal_loopback_host(effective_advertise_host)
         and not tls_cert
+        and os.getenv("GRID_LOCAL_PUSH") == "1"
     ):
-        # Nobody should have to invent an openssl command line to add one machine to their own
-        # LAN: mint the engine certificate here. It lives beside the node state and is signed by
-        # a node-local CA whose public half rides up to the master inside the authenticated
-        # registration envelope (ManagedModelRuntime.report already transports it).
+        # Pull is the default: the grid never dials this engine, only the node's own poll loop
+        # does, on loopback -- no certificate needed. Only the push opt-out still reaches out
+        # over the LAN and needs one. Nobody should have to invent an openssl command line to add
+        # one machine to their own LAN: mint the engine certificate here. It lives beside the node
+        # state and is signed by a node-local CA whose public half rides up to the master inside
+        # the authenticated registration envelope (ManagedModelRuntime.report already transports it).
         tls_cert, tls_key, tls_ca = _auto_engine_tls(state_path, effective_advertise_host, tls_ca)
     shutdown_request_path(state_path).unlink(missing_ok=True)
     startup_path = _node_startup_path(scope)
