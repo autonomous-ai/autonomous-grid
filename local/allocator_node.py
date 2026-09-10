@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from local import node_poll
 from local import runtime as local_runtime
 from shared import jsonio
 from shared.allocator.auth import (
@@ -156,6 +157,7 @@ class AllocatorNodeAgent:
         self._resources: dict[str, Any] | None = None
         self._shutdown_complete = False
         self._shutdown_requested = threading.Event()
+        self._polling_models: set[str] = set()
         self.last_error = ""
         self.route_publisher = route_publisher
 
@@ -324,9 +326,48 @@ class AllocatorNodeAgent:
 
         self._shutdown_requested.set()
 
+    def _residencies_needing_poll_loop(self) -> list[ManagedResidency]:
+        """Ready residencies that don't have a poll loop yet."""
+
+        return [
+            residency
+            for residency in self.runtime.residencies
+            if residency.handle is not None and residency.model_id not in self._polling_models
+        ]
+
+    def _reconcile_poll_loops(self) -> None:
+        """Start a long-poll thread for each ready residency that doesn't have one yet.
+
+        Behind GRID_LOCAL_PULL — off by default, changes nothing until flipped. Called once
+        per heartbeat cycle, since a model only becomes ready partway through the node's life
+        (after a WARM command), not before the first heartbeat. No slot concept exists yet for
+        local pull, so this is one loop per model, not per configured concurrency; revisit once
+        a real concurrency knob lands. A residency that later disappears keeps its thread
+        polling for a model that's no longer loaded — a known limitation, not handled here.
+        """
+
+        for residency in self._residencies_needing_poll_loop():
+            self._polling_models.add(residency.model_id)
+            grid_client = httpx.Client(base_url=self.grid_url)
+            engine_client = httpx.Client(base_url=f"http://127.0.0.1:{residency.handle.port}")
+            model_id = residency.model_id
+
+            def _loop(grid_client=grid_client, engine_client=engine_client, model_id=model_id):
+                while not self._shutdown_requested.is_set():
+                    node_poll.run_one_cycle(
+                        grid_client,
+                        engine_client,
+                        host_id=self.runtime.host_id,
+                        models=(model_id,),
+                        token=self.control_token,
+                    )
+
+            threading.Thread(target=_loop, daemon=True).start()
+
     def run_forever(self) -> int:
         exit_code = 0
         credential_rejected = False
+        local_pull = os.getenv("GRID_LOCAL_PULL") == "1"
         try:
             while True:
                 if self._shutdown_requested.is_set() or self._consume_shutdown_request():
@@ -334,6 +375,8 @@ class AllocatorNodeAgent:
                 cycle_started = self._monotonic()
                 try:
                     self.heartbeat_once()
+                    if local_pull:
+                        self._reconcile_poll_loops()
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code in (401, 403):
                         self.last_error = str(exc)

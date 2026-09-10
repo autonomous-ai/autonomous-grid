@@ -188,6 +188,35 @@ def test_node_loop_warms_and_advertises_only_ready_model(tmp_path):
         ]
         engine = client.get("/nodes/discover").json()["engines"][0]
         assert engine["endpoint_url"].startswith("https://10.0.0.5:")
+
+
+def test_poll_loop_reconciliation_only_finds_work_once_a_model_is_actually_ready(tmp_path):
+    app = create_app(
+        grid_id="grid",
+        grid_name="test",
+        allocator_control_token="secret",
+        allocator_interval_seconds=3_600,
+    )
+    with TestClient(app) as client:
+        enable_automatic(client)
+        agent, managed, _, _ = make_agent(tmp_path, client)
+
+        # Nothing is ready yet on a freshly started node — a heartbeat hasn't run, so
+        # reconciling before the loop starts (the old, buggy call site) would find nothing.
+        assert agent._residencies_needing_poll_loop() == []
+
+        agent.heartbeat_once()
+        assert managed.wait_idle(1)
+
+        # Now that a heartbeat warmed a model, reconciling finds it.
+        needing = agent._residencies_needing_poll_loop()
+        assert [r.model_id for r in needing] == ["qwen.gguf"]
+
+        # Idempotent: once it's marked as polling, it isn't offered again.
+        agent._polling_models.add("qwen.gguf")
+        assert agent._residencies_needing_poll_loop() == []
+
+
 def test_node_command_authority_uses_relative_ttl_despite_wall_clock_skew(tmp_path):
     app = create_app(
         grid_id="grid",
