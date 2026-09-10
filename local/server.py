@@ -1763,6 +1763,19 @@ def _node_allocator_state(node: Node) -> NodeState:
         return NodeState.UNHEALTHY
 
 
+def _choose_node(app: FastAPI, model: str) -> str | None:
+    """The host_id of the least-loaded live node advertising ``model``, or None."""
+    candidates = [
+        node
+        for node in _active_engines(app, model)
+        if node.host_id
+    ]
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda node: int(node.load.get("active_tasks") or 0))
+    return best.host_id
+
+
 def _choose_engine(
     app: FastAPI,
     model: str,

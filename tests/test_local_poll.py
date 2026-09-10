@@ -1,3 +1,5 @@
+import time
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -75,3 +77,20 @@ def test_the_real_app_mounts_the_poll_routes():
     assert "/grid/v1/poll" in paths
     assert "/grid/v1/result/{txn_id}" in paths
     assert isinstance(app.state.inflight, InflightTable)
+
+
+def test_choose_node_prefers_the_least_loaded_node_serving_the_model():
+    from local.server import Node, _choose_node, create_app
+
+    app = create_app(grid_id="g1", grid_name="grid-one")
+    now = time.time()
+    app.state.nodes = {
+        "busy": Node(node_id="busy", role="engine", models=["m1"], host_id="h-busy",
+                     load={"active_tasks": 5}, last_heartbeat=now),
+        "idle": Node(node_id="idle", role="engine", models=["m1"], host_id="h-idle",
+                     load={"active_tasks": 0}, last_heartbeat=now),
+        "other": Node(node_id="other", role="engine", models=["m2"], host_id="h-other",
+                      load={"active_tasks": 0}, last_heartbeat=now),
+    }
+    assert _choose_node(app, "m1") == "h-idle"
+    assert _choose_node(app, "absent") is None
