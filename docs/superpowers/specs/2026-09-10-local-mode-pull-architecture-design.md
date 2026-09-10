@@ -65,6 +65,12 @@ Both live entirely inside the machinery this change deletes.
   rejected for now — see Alternatives.
 - **Encrypting the control-plane hop.** Decided separately; see Security posture.
 - **Task, project, or Git planes.** Inference only.
+- **Resumable streams.** A consumer that drops mid-response loses the request, exactly as it does
+  today. See "Why there is no database" for what taking this on would cost and when to revisit.
+- **The allocator's own storage.** It keeps a 15 KB JSON checkpoint plus a lease file
+  (`allocator.json`, `.authority`, `.lock`) and is untouched by this change. It writes once a tick
+  from a single lease-holding controller and loads wholesale — a shape a database would not improve.
+  The allocator and the inference queue are separate planes and this spec moves only the second.
 
 ## Architecture
 
@@ -81,15 +87,37 @@ AFTER — pull
 
 The worker's only network act is outbound. The grid never initiates a connection to a worker.
 
-### Why there is no database
+### Why there is no database — and what the relay does instead
 
-The internal relay uses PostgreSQL because it carries work that must outlive a process: tasks with
-leases that survive a provider's death, projects, Git objects, billing, conversation logs.
+The internal relay splits this three ways, and its own comment (`private_server/relay.py:124-132`)
+is the clearest statement of the reasoning:
 
-An inference request has none of that shape. It exists only while a consumer holds an HTTP connection
-open. If the grid restarts, that connection breaks and the request is dead whether or not it was
-persisted. **The client connection is the durability boundary.** Persisting it would add a dependency
+| | Relay | Here |
+|---|---|---|
+| Queue of requests awaiting pickup | **memory** — *"high frequency, no need for durability"* | memory |
+| Authoritative transaction state | **DB** (`transactions.state`) | memory |
+| Streamed chunks | **DB** (`relay_chunks`) | memory |
+
+The third row is a decision taken against us, not an omission: the relay **used to** hold chunks in
+memory and deliberately removed that design — *"The old `_response_channels` and `ResponseChannel`
+class are gone."* The reason is visible at `relay.py:3676`, which yields chunks past an `after_seq`
+cursor: a DB-backed chunk log lets a consumer whose connection drops mid-stream **reconnect and
+resume**. Rows live 24 hours (`expires_at`). The relay also needs durable transaction state for
+escrow and settlement, which is real money.
+
+**Local mode declines both, knowingly.** It has no escrow and no settlement — a self-hosted grid runs
+`GRID_BILLING_MODE=local_free` — so there is no accounting to make durable. And it does not offer
+resumable streams today: a consumer that disconnects loses the request under the current push design
+too, so declining resumption is not a regression, only a decision not to gain something.
+
+That leaves the client connection as the durability boundary, and persistence would add a dependency
 to protect state that cannot survive anyway.
+
+**What would change this:** the moment local mode wants a consumer to resume a dropped stream, or
+wants any per-request accounting, this decision is wrong and a chunk log with a cursor is the answer.
+SQLite would be the right size for it — the same SQLAlchemy layer the relay uses already supports it,
+and it needs no container. That is a feature decision, not a scaling one, and it should be revisited
+on that basis rather than by measuring load.
 
 This matches what local mode already does: the node registry is an in-memory dict (`app.state.nodes`,
 `local/server.py:1642`) rebuilt from heartbeats within one interval, and only allocator policy is
