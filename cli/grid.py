@@ -37,10 +37,11 @@ def cmd_up(args: argparse.Namespace) -> int:
             tls_cert_file=args.tls_cert,
             tls_key_file=args.tls_key,
             tls_ca_file=args.tls_ca,
-            # HTTPS unless --no-tls: every consumer of a LAN grid (allocator nodes, chat from
-            # other machines) needs encrypted transport, and asking before granting it is a
-            # footgun that reads as a hang, not a choice.
-            tls_auto=args.tls is not False,
+            # Only when asked. This used to default on, to protect what the grid dialled OUT
+            # with; local mode dials nothing now, so the private CA it required is cost with
+            # nothing on the other side of the trade -- and is where five of the seven bugs
+            # behind this work came from. `--tls` still turns it on and still fails loudly.
+            tls_auto=bool(args.tls),
         )
     else:
         cfg, _ = _apply_up_overrides(cfg, args)

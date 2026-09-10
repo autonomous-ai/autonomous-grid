@@ -129,9 +129,14 @@ def cmd_internal_allocator_node(
     )
     control_url = runtime.allocator_control_url(cfg)
     if not secure_control_transport(control_url):
-        raise SystemExit(
-            "Allocator nodes carrying private engine credentials require HTTPS Grid control "
-            "transport (literal loopback HTTP is also allowed)."
+        # The parent already said this to the operator; the child says it to the log, because
+        # these are two processes and only one of them has a terminal. Allowed for the same
+        # reason the parent allows it: an allocator node carries no engine credential here any
+        # more -- the grid never dials the engine, so it has no use for one.
+        print(
+            f"Note: {control_url} is plain HTTP; this node's control token and the prompts it "
+            "serves cross the LAN in the clear.",
+            file=sys.stderr,
         )
     state_file = Path(state_path)
     llama_backend = LlamaCppBackend(

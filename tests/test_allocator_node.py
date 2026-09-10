@@ -1814,7 +1814,20 @@ def test_deferred_recovered_child_on_new_port_fences_stale_ready_route(
         assert client.get("/v1/models").json()["data"]
 
 
-def test_non_loopback_plain_http_requires_explicit_opt_in(tmp_path):
+def test_non_loopback_plain_http_needs_no_opt_in(tmp_path):
+    """Replaces test_non_loopback_plain_http_requires_explicit_opt_in.
+
+    That refusal named its own reason -- a node "carrying private engine credentials" -- and
+    under pull it carries none: the grid never dials the engine, the worker attaches the engine
+    key itself over loopback, and the node stopped uploading one at all. What still crosses a
+    plain LAN is this node's control token and the prompts it is handed. That is a real cost,
+    `--tls` is how an operator declines to pay it, and all three copies of this rule (the parent
+    command, the child process, and this validator) now say so where it can be read.
+
+    Kept rather than deleted because the validator still has work: an absolute HTTP(S) URL is
+    still required, and that half is asserted below.
+    """
+
     managed = ManagedModelRuntime(
         tmp_path / "transport.json",
         host_id="host-a",
@@ -1822,20 +1835,22 @@ def test_non_loopback_plain_http_requires_explicit_opt_in(tmp_path):
         port_available=lambda _port: True,
     )
     token = mint_node_token("secret", "host-a")
-    with pytest.raises(ValueError, match="non-loopback HTTP"):
-        AllocatorNodeAgent(
-            grid_url="http://10.0.0.9:8080",
-            control_token=token,
-            runtime=managed,
-        )
     agent = AllocatorNodeAgent(
         grid_url="http://10.0.0.9:8080",
         control_token=token,
         runtime=managed,
         advertise_host="10.0.0.5",
-        allow_insecure_http=True,
     )
     assert agent.grid_url == "http://10.0.0.9:8080"
+
+    for rejected in ("", "not-a-url", "ftp://10.0.0.9:8080"):
+        with pytest.raises(ValueError):
+            AllocatorNodeAgent(
+                grid_url=rejected,
+                control_token=token,
+                runtime=managed,
+                advertise_host="10.0.0.5",
+            )
 
 
 def test_heartbeat_timing_must_fit_lease_and_runs_on_fixed_start_period(

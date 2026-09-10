@@ -22,7 +22,6 @@ from shared import jsonio
 from shared.allocator.auth import (
     control_node_id,
     engine_node_id,
-    secure_control_transport,
 )
 from shared.allocator.models import (
     ActionKind,
@@ -1568,12 +1567,13 @@ def _validated_grid_url(value: str, *, allow_insecure_http: bool) -> str:
         raise ValueError("allocator grid URL is invalid") from exc
     if not host or parsed.scheme not in ("http", "https"):
         raise ValueError("allocator grid URL must be an absolute HTTP(S) URL")
-    if secure_control_transport(url) or (allow_insecure_http and parsed.scheme == "http"):
-        return url
-    raise ValueError(
-        "refusing to send an allocator node credential over non-loopback HTTP; "
-        "use HTTPS or explicitly allow insecure HTTP"
-    )
+    # Plain HTTP on a LAN is accepted. It was refused because a node put its ENGINE's api key on
+    # this wire, and that is what the refusal named; under pull it sends none, because the grid
+    # never dials the engine and so has no use for one. The node's own control token does still
+    # travel, which is a real cost -- `--tls` is how an operator declines to pay it, and the
+    # third copy of this rule (parent, child, here) prints that where it can be read.
+    del allow_insecure_http
+    return url
 
 
 def _allocator_resources(

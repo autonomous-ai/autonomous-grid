@@ -42423,3 +42423,35 @@ def test_a_new_local_grid_serves_plain_http_by_default(monkeypatch, tmp_path):
     assert not grid_cmd._tls_default_for(cfg), (
         "a grid nobody asked to encrypt is still minting a certificate"
     )
+
+
+def test_creating_a_grid_mints_no_certificate_unless_asked(monkeypatch, tmp_path):
+    """The creation path, which is the one a first-time reader actually takes.
+
+    Caught on hardware, not here: `grid start httptest` still came up on https with a CA after
+    the default was changed, because creation sets server_tls from its own `tls_auto` argument
+    before the default is ever consulted. A unit test that only exercised the second path would
+    have gone on passing while every new grid kept minting the CA this work exists to remove.
+    """
+
+    from cli import grid as grid_cmd
+
+    seen: dict = {}
+
+    class _Stop(BaseException):
+        """Ends the run at the point of interest; bringing a real server up is not the subject."""
+
+    def record(**kwargs):
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr(grid_cmd, "_grid_by_name", lambda _name: None)
+    monkeypatch.setattr(grid_cmd, "_reject_foreign_grid", lambda _name: None)
+    monkeypatch.setattr(grid_cmd.runtime, "init_grid_config", record)
+
+    args = cli.build_parser().parse_args(["start", "brand-new"])
+    with pytest.raises(_Stop):
+        grid_cmd.cmd_up(args)
+
+    assert seen, "the creation path was never reached, so this test asserted nothing"
+    assert seen.get("tls_auto") is False, "a new grid still asks for an auto-minted certificate"
