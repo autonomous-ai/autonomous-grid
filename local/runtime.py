@@ -157,13 +157,20 @@ def auto_tls_on_config(cfg: dict[str, Any], *, advertise_host: str | None,
     """
     if not cfg.get("server_tls"):
         return False
-    if str(cfg.get("server_tls_cert_file") or ""):
-        return True
     from shared import tls
 
     hosts = [advertise_host or "", detect_local_ip()]
+    directory = paths.grid_dir(cfg["grid_id"]) / "tls"
+    recorded = str(cfg.get("server_tls_cert_file") or "")
+    if recorded and Path(recorded).parent != directory:
+        # An operator-supplied certificate is theirs to manage; never touch it.
+        return True
+    # Otherwise fall through to ensure_server_cert even though a path is already recorded. It is
+    # idempotent for a healthy pair, and it is the ONLY place that re-mints one that is missing or
+    # no longer usable — a grid created before the leaf carried an Authority Key Identifier would
+    # otherwise serve that leaf forever and be refused by every OpenSSL 3.x client, and a deleted
+    # cert file would reach the operator as uvicorn's bare FileNotFoundError instead of healing.
     try:
-        directory = paths.grid_dir(cfg["grid_id"]) / "tls"
         crt, key, ca = tls.ensure_server_cert(directory, hosts)
     except (tls.TlsToolMissing, RuntimeError, ValueError) as exc:
         if required:
