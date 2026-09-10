@@ -27,6 +27,14 @@ AUTH = {"X-Grid-Allocator-Token": TOKEN}
 CONTROL_NODE_ID = control_node_id("host-1")
 
 
+@pytest.fixture(autouse=True)
+def _push_mode(monkeypatch):
+    # This file dials mocked engines directly and asserts on the forwarded request -- that is
+    # the push path. Pull is the default now; without this every /v1/chat/completions call here
+    # would register a transaction and hang forever waiting for a worker that never exists.
+    monkeypatch.setenv("GRID_LOCAL_PUSH", "1")
+
+
 def _node_auth(host_id: str) -> dict[str, str]:
     return {"X-Grid-Allocator-Node-Token": mint_node_token(TOKEN, host_id)}
 

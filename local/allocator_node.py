@@ -338,7 +338,7 @@ class AllocatorNodeAgent:
     def _reconcile_poll_loops(self) -> None:
         """Start a long-poll thread for each ready residency that doesn't have one yet.
 
-        Behind GRID_LOCAL_PULL — off by default, changes nothing until flipped. Called once
+        Pull is the default; GRID_LOCAL_PUSH=1 opts back into the old push path. Called once
         per heartbeat cycle, since a model only becomes ready partway through the node's life
         (after a WARM command), not before the first heartbeat. No slot concept exists yet for
         local pull, so this is one loop per model, not per configured concurrency; revisit once
@@ -367,7 +367,7 @@ class AllocatorNodeAgent:
     def run_forever(self) -> int:
         exit_code = 0
         credential_rejected = False
-        local_pull = os.getenv("GRID_LOCAL_PULL") == "1"
+        local_pull = os.getenv("GRID_LOCAL_PUSH") != "1"
         try:
             while True:
                 if self._shutdown_requested.is_set() or self._consume_shutdown_request():

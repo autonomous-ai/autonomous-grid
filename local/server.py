@@ -1018,7 +1018,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     model = body.get("model")
     if not isinstance(model, str) or not model:
         return _openai_error(400, "model is required", "invalid_request")
-    if os.getenv("GRID_LOCAL_PULL") == "1":
+    if os.getenv("GRID_LOCAL_PUSH") != "1":
         return await _serve_by_pull(app, endpoint_path, request, body, raw_body, model)
     features = classify_request(endpoint_path, body)
     if request.headers.get("x-grid-allocator-evaluation") == "1":
