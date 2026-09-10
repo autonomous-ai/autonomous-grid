@@ -68,8 +68,38 @@ indistinguishable from a key nobody ever set.
 
 | what is stored | what the reader does |
 |---|---|
-| unset, or unparseable as a whole | the default `{permissioned-providers}`, logged at ERROR |
+| unset | the default `{permissioned-providers}`, **silently** |
+| stored but unparseable as a whole | the default `{permissioned-providers}`, logged at ERROR |
 | parses, but holds an element the vocabulary no longer knows | **drop that element, keep the rest**, logged at WARNING |
+
+⚠️ **Amended in implementation (2026-09-10): the unset key is silent, and is its own row.** This
+decision first grouped it with the unparseable one, at ERROR. That is wrong for the only reason that
+matters here — unset is the state of *every* control plane that has never touched this setting, so
+an ERROR per read puts one on every sync snapshot and every grid creation, everywhere, for ever. A
+warning nobody can act on is how the ones that matter stop being read, which this repository already
+decided once: `_billing_mode_a_new_grid_is_born_with`'s downgrade warning is gated on the operator
+having actually asked for charging, and a test says so in those words. The distinction the two
+failure answers exist to draw is between *nobody wrote one* and *somebody wrote one that does not
+work* — and it is drawn better by silence versus ERROR than by two identical ERRORs.
+
+⚠️ **The unparseable fallback is the DEFAULT set and deliberately not the empty one, and that is the
+direction a reviewer will want reversed.** It looks wrong: an operator who wrote `[]`, or a set
+excluding `permissioned-providers`, has their narrowing undone by a row that later becomes
+unreadable, which is the *charging-somebody-who-should-not-be* direction. Three things decide it the
+other way. The write is the only writer and cannot produce an unparseable value, so reaching this
+state needs out-of-band access to the table rather than anything on the API. It is not silent — an
+ERROR names the raw value, and the read endpoint reports `configured: true` beside a set the operator
+never wrote, so both surfaces disagree with what they were told. And it is the same choice D-c makes
+one decision down for the same reason: on a charging gate the *accident* answer should be **today's
+behaviour**, not "off", because "off" means giving the compute away and is the failure this area has
+already spent two amendments closing. A corrupted row that charges the class that was always charged
+is recoverable in one write; one that silently stops every grid charging is discovered in a revenue
+report.
+
+⚠️ **A blank or non-string element is a shape error, not a retired word.** `normalize_network_type`
+turns `None` and `""` into `permissioned` — a real type — so dropping-and-continuing there would
+silently widen the billable set to a type nobody named. It takes the unparseable row, and the write
+refuses it outright.
 
 ⚠️ **One unrecognised element must not discard the whole value.** A type retired from the vocabulary
 in a later release leaves rows and settings spelling it; treating that as "unparseable" would revert
