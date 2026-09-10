@@ -547,3 +547,36 @@ async def test_the_grid_will_dispatch_to_a_plain_joined_engine(monkeypatch):
     assert claimed is not None, "the grid refused to dispatch to a joined engine"
     app.state.inflight.finish(claimed.id, b'{"choices": []}')
     assert (await asyncio.wait_for(serving, timeout=2.0)).status_code == 200
+
+
+async def test_work_in_flight_is_counted_against_the_node_serving_it():
+    """`_choose_node` balances on active_tasks, and under pull nothing ever moved it.
+
+    Push incremented the counter as it dialled and decremented as it finished. Pull never
+    touched it, so every node read as load 0 forever: the picker's "least loaded" was a
+    coin toss, and offered_concurrency -- the input scale-up is computed from -- stayed near
+    zero no matter how many callers were waiting.
+    """
+
+    import asyncio
+    import time as _time
+
+    from local.server import Node, _proxy_openai, create_app
+
+    app = create_app(grid_id="g1", grid_name="grid-one")
+    node = Node(node_id="n1", role="engine", models=["m1"], host_id="h1",
+                load={"active_tasks": 0}, last_heartbeat=_time.time())
+    app.state.nodes = {"n1": node}
+
+    request = Request({"type": "http", "method": "POST", "headers": []})
+    request._body = b'{"model": "m1"}'
+    serving = asyncio.create_task(_proxy_openai(app, "chat/completions", request))
+    await asyncio.sleep(0)
+
+    assert int(node.load.get("active_tasks") or 0) == 1, "in-flight work was not counted"
+
+    claimed = app.state.inflight.claim(node_id="h1", models=("m1",))
+    app.state.inflight.finish(claimed.id, b'{"choices": []}')
+    await asyncio.wait_for(serving, timeout=2.0)
+
+    assert int(node.load.get("active_tasks") or 0) == 0, "the counter was never given back"

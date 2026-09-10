@@ -1216,12 +1216,27 @@ async def _serve_by_pull(
         return _openai_error(
             503, f"No active local engine for model {model!r}", "engine_unavailable"
         )
+    serving_node = _node_by_host_id(app, host_id)
+    if serving_node is not None:
+        # The picker balances on this counter and scale-up is computed from it, so work that is
+        # in flight has to be visible while it IS in flight -- not only once it has finished.
+        _change_active_tasks(serving_node, 1)
     upstream_model = _upstream_model_for(app, host_id, model)
     if upstream_model != model:
         raw_body = json.dumps({**body, "model": upstream_model}).encode()
     txn = table.create(model=model, body=raw_body, is_stream=bool(body.get("stream")))
 
+    released = False
+
+    def release() -> None:
+        # Exactly once, on whichever path finishes first.
+        nonlocal released
+        if not released and serving_node is not None:
+            released = True
+            _change_active_tasks(serving_node, -1)
+
     def observe(*, error: bool, output_units: int = 0) -> None:
+        release()
         # The circuit is per (node, model), so a fault has to be recorded against the node that
         # actually took the work -- which under pull is whoever claimed it, not whoever was
         # picked. Read it off the transaction we hold rather than looking it up: `cancel` pops
