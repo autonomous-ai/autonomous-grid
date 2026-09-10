@@ -419,3 +419,37 @@ async def test_a_worker_that_errors_opens_the_circuit_against_its_own_node():
     request = Request({"type": "http", "method": "POST", "headers": []})
     request._body = b'{"model": "m1"}'
     assert (await _proxy_openai(app, "chat/completions", request)).status_code == 503
+
+
+async def test_a_served_pull_request_is_offered_to_capture(monkeypatch):
+    """Capture turns real traffic into training data; it lived only on the push branch.
+
+    Opt-in and off by default, which is why nothing noticed -- and why deleting the push path
+    with it still only there would have removed the only place the feature worked.
+    """
+
+    import asyncio
+    import json as _json
+
+    from local import server as server_module
+    from local.server import _proxy_openai
+
+    app = _pull_app_with_node()
+    offered: list[tuple[dict, bytes]] = []
+    monkeypatch.setattr(
+        server_module,
+        "_capture_result",
+        lambda body, result, ref="": offered.append((body, result)),
+        raising=False,
+    )
+
+    request = Request({"type": "http", "method": "POST", "headers": []})
+    request._body = b'{"model": "m1"}'
+    serving = asyncio.create_task(_proxy_openai(app, "chat/completions", request))
+    await asyncio.sleep(0)
+    claimed = app.state.inflight.claim(node_id="h1", models=("m1",))
+    result = _json.dumps({"choices": [{"message": {"content": "hi"}}]}).encode()
+    app.state.inflight.finish(claimed.id, result)
+    await asyncio.wait_for(serving, timeout=2.0)
+
+    assert offered == [({"model": "m1"}, result)]

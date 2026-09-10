@@ -27,14 +27,6 @@ AUTH = {"X-Grid-Allocator-Token": TOKEN}
 CONTROL_NODE_ID = control_node_id("host-1")
 
 
-@pytest.fixture(autouse=True)
-def _push_mode(monkeypatch):
-    # This file dials mocked engines directly and asserts on the forwarded request -- that is
-    # the push path. Pull is the default now; without this every /v1/chat/completions call here
-    # would register a transaction and hang forever waiting for a worker that never exists.
-    monkeypatch.setenv("GRID_LOCAL_PUSH", "1")
-
-
 def _node_auth(host_id: str) -> dict[str, str]:
     return {"X-Grid-Allocator-Node-Token": mint_node_token(TOKEN, host_id)}
 
@@ -1273,10 +1265,15 @@ def test_managed_runtime_and_proxy_activity_are_combined_without_double_counting
     assert engine.load["active_tasks"] == 0
 
 
-def test_managed_engine_key_is_private_and_forwarded_only_by_grid(
-    tmp_path,
-    monkeypatch,
-):
+def test_a_managed_engine_key_is_never_exposed_by_the_grid(tmp_path):
+    """Half of what this test used to assert; the other half moved with the push path.
+
+    The grid holding the key and never showing it is unchanged and still checked here. The grid
+    FORWARDING it to an engine is gone with the proxy -- under pull the worker attaches it on
+    loopback, and that half is asserted where it now lives, in
+    test_allocator_node.py::test_the_poll_loop_client_carries_the_engine_key.
+    """
+
     app, client, _ = _app(tmp_path)
     child_id = engine_node_id("host-1", "qwen")
     engine_key = "managed-engine-key-0123456789abcdef"
@@ -1297,34 +1294,6 @@ def test_managed_engine_key_is_private_and_forwarded_only_by_grid(
     assert "engine_api_key" not in client.get("/nodes/discover").json()["engines"][0]
     assert "engine_api_key" not in client.get("/allocator/status").text
     assert app.state.nodes[child_id].engine_api_key == engine_key
-
-    seen: list[tuple[str | None, str | None]] = []
-
-    def upstream(request: httpx.Request) -> httpx.Response:
-        seen.append(
-            (
-                request.headers.get("authorization"),
-                request.headers.get("x-grid-affinity-key"),
-            )
-        )
-        return httpx.Response(200, json={"id": "completion"})
-
-    real_async_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        server_module.httpx,
-        "AsyncClient",
-        lambda *args, **kwargs: real_async_client(
-            *args,
-            **{**kwargs, "transport": httpx.MockTransport(upstream)},
-        ),
-    )
-    proxied = client.post(
-        "/v1/chat/completions",
-        headers={"X-Grid-Affinity-Key": "private-session"},
-        json={"model": "qwen", "messages": []},
-    )
-    assert proxied.status_code == 200
-    assert seen == [(f"Bearer {engine_key}", None)]
 
 
 @pytest.mark.parametrize(
@@ -1354,7 +1323,16 @@ def test_managed_transport_accepts_https_and_same_process_loopback(
     assert response.status_code == 200, response.text
 
 
-def test_managed_transport_rejects_plaintext_lan_endpoint(tmp_path):
+def test_a_plaintext_lan_text_endpoint_is_accepted_now_that_nothing_dials_it(tmp_path):
+    """Replaces test_managed_transport_rejects_plaintext_lan_endpoint, which asserted the
+    opposite for a reason that no longer holds: the grid dialled endpoint_url and would have
+    carried the engine key there in the clear. With the push path gone it dials nothing, and a
+    node that reaches its own engine on loopback should not have to invent an https URL for a
+    field that is now pure advertisement. The refusal itself is not gone -- it moved to the
+    field that IS still dialled, in
+    test_a_plaintext_lan_media_url_is_still_refused_in_pull_mode.
+    """
+
     _, client, _ = _app(tmp_path)
     response = client.put(
         f"/nodes/{engine_node_id('host-1', 'qwen')}",
@@ -1367,8 +1345,7 @@ def test_managed_transport_rejects_plaintext_lan_endpoint(tmp_path):
             "allocator": {"managed": True},
         },
     )
-    assert response.status_code == 400
-    assert "end-to-end HTTPS" in response.text
+    assert response.status_code == 200, response.text
 
 
 def test_managed_transport_accepts_plaintext_lan_endpoint_in_pull_mode(
@@ -2143,101 +2120,6 @@ def test_route_circuit_breaker_is_bounded_per_model_and_recovers(tmp_path, monke
         now=20,
     )
     assert server_module._proxy_route_is_quarantined(selected, "qwen", now=20.5)
-
-
-def test_proxy_routes_away_after_repeated_server_failures(tmp_path, monkeypatch):
-    app, client, _ = _app(tmp_path)
-    for index, host_id in enumerate(("one", "two"), start=1):
-        _managed_node(client, host_id=host_id)
-        _managed_engine(client, host_id=host_id, model_id="qwen")
-        engine = app.state.nodes[engine_node_id(host_id, "qwen")]
-        engine.endpoint_url = f"http://127.0.0.1:900{index}/v1"
-    preferred = server_module._choose_engine(app, "qwen")
-    assert preferred is not None
-    preferred_port = 9001 if preferred.endpoint_url.endswith("9001/v1") else 9002
-    fallback_port = 9002 if preferred_port == 9001 else 9001
-    calls: list[int] = []
-
-    def upstream(request: httpx.Request) -> httpx.Response:
-        port = request.url.port
-        assert port is not None
-        calls.append(port)
-        return httpx.Response(
-            500 if port == preferred_port else 200,
-            json={"id": "completion"},
-        )
-
-    real_async_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        server_module.httpx,
-        "AsyncClient",
-        lambda *args, **kwargs: real_async_client(
-            *args,
-            **{**kwargs, "transport": httpx.MockTransport(upstream)},
-        ),
-    )
-
-    responses = [
-        client.post(
-            "/v1/chat/completions",
-            json={"model": "qwen", "messages": []},
-        )
-        for _ in range(3)
-    ]
-
-    assert [response.status_code for response in responses] == [500, 500, 200]
-    assert calls == [preferred_port, preferred_port, fallback_port]
-
-
-def test_broken_success_stream_opens_circuit_without_learning_performance(
-    tmp_path,
-    monkeypatch,
-):
-    app, client, _ = _app(tmp_path)
-    _managed_node(client)
-    _managed_engine(client, model_id="qwen")
-    assert (
-        client.put("/allocator/models/qwen", json=_profile(), headers=AUTH).status_code
-        == 200
-    )
-    engine = app.state.nodes[engine_node_id("host-1", "qwen")]
-
-    class BrokenStream(httpx.AsyncByteStream):
-        async def __aiter__(self):
-            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
-            raise httpx.ReadError("upstream disconnected")
-
-    def upstream(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            stream=BrokenStream(),
-            headers={"content-type": "text/event-stream"},
-        )
-
-    real_async_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        server_module.httpx,
-        "AsyncClient",
-        lambda *args, **kwargs: real_async_client(
-            *args,
-            **{**kwargs, "transport": httpx.MockTransport(upstream)},
-        ),
-    )
-
-    for _ in range(2):
-        with pytest.raises(httpx.ReadError, match="disconnected"):
-            client.post(
-                "/v1/chat/completions",
-                json={"model": "qwen", "messages": [], "stream": True},
-            )
-
-    assert engine.proxy_performance_samples == 0
-    assert engine.proxy_model_performance == {}
-    health = engine.proxy_route_health["qwen"]
-    assert health.consecutive_failures == 2
-    assert health.quarantine_until > time.monotonic()
-    demand = app.state.allocator.demand.to_dict()["models"]["qwen"]
-    assert sum(bucket["errors"] for bucket in demand) == 2
 
 
 @pytest.mark.parametrize(

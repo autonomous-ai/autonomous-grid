@@ -5,7 +5,6 @@ import hashlib
 import ipaddress
 import json
 import math
-import os
 import secrets
 import ssl
 import statistics
@@ -428,8 +427,10 @@ def create_app(
                 _validate_managed_endpoint_transport(
                     req.endpoint_url,
                     request=request,
-                    # Under pull nothing here dials the text endpoint; under push it still does.
-                    still_dialled=os.getenv("GRID_LOCAL_PUSH") == "1",
+                    # Nothing here dials the text endpoint any more: the push path is gone and
+                    # the node's own poll loop reaches its engine on loopback. media_url below
+                    # keeps the guard, because _proxy_media still dials that one.
+                    still_dialled=False,
                 )
             if req.media_url:
                 _validate_managed_endpoint_transport(req.media_url, request=request)
@@ -1023,218 +1024,8 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     model = body.get("model")
     if not isinstance(model, str) or not model:
         return _openai_error(400, "model is required", "invalid_request")
-    if os.getenv("GRID_LOCAL_PUSH") != "1":
-        return await _serve_by_pull(
-            app, endpoint_path, request, body, raw_body, model, started_at
-        )
-    features = classify_request(endpoint_path, body)
-    if request.headers.get("x-grid-allocator-evaluation") == "1":
-        # Canary traffic is real inference, so it should still update engine performance.
-        # It is not user demand, however, and its bounded quality evidence is submitted through
-        # /allocator/evaluations. Requiring the control token prevents arbitrary callers from
-        # suppressing their own demand signal with this header.
-        _require_allocator_control(app, request)
-        features = replace(features, is_evaluation=True)
-
-    affinity_digest = _affinity_digest(request.headers.get("x-grid-affinity-key"))
-    workflow_key = affinity_digest.hex() if affinity_digest is not None else ""
-    engine = _choose_engine(
-        app,
-        model,
-        requested_output_tokens=_requested_output_tokens(body),
-        affinity_digest=affinity_digest,
-    )
-    if not engine:
-        _observe_allocator_request(
-            app,
-            model,
-            started_at,
-            features=features,
-            workflow_key=workflow_key,
-            error=True,
-            queue_depth=1,
-        )
-        return _openai_error(
-            503, f"No active local engine for model {model!r}", "engine_unavailable"
-        )
-    _mark_engine_used(engine, model)
-    _change_active_tasks(engine, 1)
-    served_artifact_sha256 = _node_model_artifact_sha256(engine, model)
-
-    # An external engine advertised under `--advertise-as` only knows its real model name; rewrite the
-    # body's model alias→real before forwarding. Re-serialise only when it differs — otherwise forward
-    # the original bytes untouched (no mapping / built-in / no alias, where advertised == real).
-    upstream_model = engine.upstream.get(model)
-    if upstream_model and upstream_model != model:
-        raw_body = json.dumps({**body, "model": upstream_model}).encode()
-
-    url = f"{engine.endpoint_url.rstrip('/')}/{endpoint_path}"
-    headers = {"content-type": request.headers.get("content-type", "application/json")}
-    if engine.engine_api_key:
-        headers["authorization"] = f"Bearer {engine.engine_api_key}"
-    timeout = httpx.Timeout(
-        ENGINE_TIMEOUT_SECONDS,
-        read=None if body.get("stream") else ENGINE_TIMEOUT_SECONDS,
-    )
-
-    if body.get("stream"):
-        client = httpx.AsyncClient(
-            timeout=timeout,
-            trust_env=False,
-            verify=_engine_tls_verify(engine),
-        )
-        engine_request = client.build_request(
-            "POST", url, content=raw_body, headers=headers
-        )
-        try:
-            engine_response = await client.send(engine_request, stream=True)
-        except httpx.RequestError as exc:
-            await client.aclose()
-            _change_active_tasks(engine, -1)
-            _record_proxy_route_outcome(engine, model, transport_error=True)
-            _observe_allocator_request(
-                app,
-                model,
-                started_at,
-                features=features,
-                served_model=model,
-                served_artifact_sha256=served_artifact_sha256,
-                workflow_key=workflow_key,
-                error=True,
-            )
-            return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
-
-        # Streamed answers are captured too. Every chat interface streams, so skipping this branch
-        # meant the autopilot never saw the traffic that matters most. The accumulator is bounded
-        # and the store happens after the last chunk has already reached the client, so nothing
-        # here can slow a stream down.
-        collector = _StreamCollector(body) if _capture_enabled() else None
-        usage_collector = _StreamUsageCollector()
-
-        async def stream_response():
-            stream_transport_error = False
-            try:
-                async for chunk in engine_response.aiter_raw():
-                    usage_collector.feed(chunk)
-                    if collector is not None:
-                        collector.feed(chunk)
-                    yield chunk
-            except httpx.HTTPError:
-                stream_transport_error = True
-                raise
-            finally:
-                usage_collector.finish()
-                await engine_response.aclose()
-                await client.aclose()
-                _change_active_tasks(engine, -1)
-                _record_proxy_route_outcome(
-                    engine,
-                    model,
-                    status_code=engine_response.status_code,
-                    transport_error=stream_transport_error,
-                )
-                _observe_allocator_request(
-                    app,
-                    model,
-                    started_at,
-                    features=features,
-                    served_model=model,
-                    served_artifact_sha256=served_artifact_sha256,
-                    workflow_key=workflow_key,
-                    error=(
-                        stream_transport_error
-                        or _allocator_capacity_error(engine_response.status_code)
-                    ),
-                    output_units=usage_collector.completion_tokens or 0,
-                )
-                if not stream_transport_error:
-                    _record_engine_performance(
-                        engine,
-                        started_at,
-                        model=model,
-                        status_code=engine_response.status_code,
-                        completion_tokens=usage_collector.completion_tokens,
-                    )
-                if collector is not None:
-                    collector.store()
-
-        headers_stream = {}
-        if collector is not None:
-            headers_stream["X-Grid-Request-Id"] = collector.request_id
-
-        return StreamingResponse(
-            stream_response(),
-            status_code=engine_response.status_code,
-            media_type=engine_response.headers.get("content-type", "text/event-stream"),
-            headers=headers_stream or None,
-        )
-
-    try:
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            trust_env=False,
-            verify=_engine_tls_verify(engine),
-        ) as client:
-            engine_response = await client.post(url, content=raw_body, headers=headers)
-    except httpx.RequestError as exc:
-        _change_active_tasks(engine, -1)
-        _record_proxy_route_outcome(engine, model, transport_error=True)
-        _observe_allocator_request(
-            app,
-            model,
-            started_at,
-            features=features,
-            served_model=model,
-            served_artifact_sha256=served_artifact_sha256,
-            workflow_key=workflow_key,
-            error=True,
-        )
-        return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
-    _change_active_tasks(engine, -1)
-    _record_proxy_route_outcome(
-        engine,
-        model,
-        status_code=engine_response.status_code,
-    )
-    _observe_allocator_request(
-        app,
-        model,
-        started_at,
-        features=features,
-        served_model=model,
-        served_artifact_sha256=served_artifact_sha256,
-        workflow_key=workflow_key,
-        error=_allocator_capacity_error(engine_response.status_code),
-        output_units=_completion_tokens(engine_response),
-    )
-    _record_engine_performance(
-        engine,
-        started_at,
-        model=model,
-        status_code=engine_response.status_code,
-        response=engine_response,
-    )
-
-    headers_out = {}
-    if engine_response.status_code == 200:
-        # Learning from the work the grid is already doing (train/capture.py). Off unless the owner
-        # turned it on, local-file-only, and wrapped so that nothing about it can fail a customer's
-        # request — a capture problem must cost an example, never an answer.
-        # X-Grid-Ref ties this answer to the record it is about (a ticket, a deal), so the
-        # nightly cycle can ask that system what happened instead of waiting to be told.
-        captured = _capture_exchange(
-            body, engine_response, request.headers.get("x-grid-ref", "")
-        )
-        if captured:
-            # The id an app quotes back on POST /v1/feedback to say what the human did with this
-            # answer — the signal that makes unattended training honest.
-            headers_out["X-Grid-Request-Id"] = captured
-
-    return Response(
-        content=engine_response.content,
-        status_code=engine_response.status_code,
-        media_type=engine_response.headers.get("content-type", "application/json"),
-        headers=headers_out or None,
+    return await _serve_by_pull(
+        app, endpoint_path, request, body, raw_body, model, started_at
     )
 
 
@@ -1243,15 +1034,6 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
 _MAX_CAPTURE_BODY = 256 * 1024
 _MAX_STREAM_USAGE_EVENT_BYTES = 64 * 1024
 _MAX_STREAM_USAGE_DATA_LINES = 256
-
-
-def _capture_enabled() -> bool:
-    try:
-        from train.capture import load_policy
-
-        return load_policy().enabled
-    except Exception:  # noqa: BLE001 — never let this decide anything about serving
-        return False
 
 
 class _StreamUsageCollector:
@@ -1333,104 +1115,6 @@ class _StreamUsageCollector:
         self._discard_event = False
 
 
-class _StreamCollector:
-    """Reassembles a streamed answer so it can become a training example.
-
-    Two rules make this safe on a serving path: the buffer is bounded (a long stream stops being a
-    candidate example rather than growing without limit), and nothing is stored until after the
-    final chunk has been handed to the client.
-    """
-
-    def __init__(self, body: dict, limit: int = 16_000) -> None:
-        self.request_id = uuid.uuid4().hex[:16]
-        self._prompt = _prompt_text(body)
-        self._model = str(body.get("model") or "")
-        self._parts: list[str] = []
-        self._size = 0
-        self._limit = limit
-
-    def feed(self, chunk: bytes) -> None:
-        if self._size >= self._limit:
-            return
-        try:
-            text = chunk.decode("utf-8", errors="ignore")
-        except Exception:  # noqa: BLE001
-            return
-        for line in text.splitlines():
-            line = line.strip()
-            if not line.startswith("data:"):
-                continue
-            payload = line[5:].strip()
-            if not payload or payload == "[DONE]":
-                continue
-            try:
-                delta = json.loads(payload)
-            except json.JSONDecodeError:
-                continue
-            piece = _stream_delta(delta)
-            if piece:
-                self._parts.append(piece)
-                self._size += len(piece)
-
-    def store(self) -> None:
-        try:
-            from train.capture import clip, record
-
-            answer = clip("".join(self._parts))
-            if self._prompt and answer:
-                record(
-                    clip(self._prompt),
-                    answer,
-                    model=self._model,
-                    request_id=self.request_id,
-                )
-        except Exception:  # noqa: BLE001 — a capture problem costs an example, never a response
-            return
-
-
-def _stream_delta(payload: dict) -> str:
-    """The text in one streamed chunk, whichever dialect it arrived in."""
-    choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return ""
-    first = choices[0]
-    if not isinstance(first, dict):
-        return ""
-    delta = first.get("delta")
-    if isinstance(delta, dict) and isinstance(delta.get("content"), str):
-        return delta["content"]
-    if isinstance(first.get("text"), str):
-        return first["text"]
-    return ""
-
-
-def _capture_exchange(
-    body: dict, engine_response: httpx.Response, ref: str = ""
-) -> str | None:
-    """Best-effort: store this prompt/answer pair if capture is enabled. Never raises, never waits.
-
-    The expensive parts (redaction, the append) happen on capture's own writer thread; what runs
-    here is a policy check, one JSON parse of a bounded body, and two string clips.
-    """
-    try:
-        from train.capture import clip, load_policy, record
-
-        policy = load_policy()
-        if not policy.enabled:
-            return None
-        if len(engine_response.content) > _MAX_CAPTURE_BODY:
-            return None
-        prompt = clip(_prompt_text(body))
-        answer = clip(_answer_text(engine_response.json()))
-        if not prompt or not answer:
-            return None
-        return record(
-            prompt, answer, model=str(body.get("model") or ""), policy=policy, ref=ref
-        )
-    except Exception:  # noqa: BLE001 — serving must be unaffected by anything in here
-        return None
-
-
 def _prompt_text(body: dict) -> str:
     """The request's text, whichever dialect it arrived in."""
     prompt = body.get("prompt")
@@ -1462,6 +1146,31 @@ def _answer_text(payload: object) -> str:
     if isinstance(message, dict) and isinstance(message.get("content"), str):
         return message["content"]
     return ""
+
+
+def _capture_result(body: dict, result: bytes, ref: str = "") -> str | None:
+    """`_capture_exchange` for a worker's raw result bytes.
+
+    Same contract in every respect that matters -- policy first, the same body cap, never
+    raises, never waits -- because a pulled answer is the same answer; only its container
+    differs (bytes on their own rather than an httpx.Response).
+    """
+
+    try:
+        from train.capture import clip, load_policy, record
+
+        policy = load_policy()
+        if not policy.enabled or len(result) > _MAX_CAPTURE_BODY:
+            return None
+        prompt = clip(_prompt_text(body))
+        answer = clip(_answer_text(json.loads(result)))
+        if not prompt or not answer:
+            return None
+        return record(
+            prompt, answer, model=str(body.get("model") or ""), policy=policy, ref=ref
+        )
+    except Exception:  # noqa: BLE001 -- serving must be unaffected by anything in here
+        return None
 
 
 async def _serve_by_pull(
@@ -1561,6 +1270,7 @@ async def _serve_by_pull(
             observe(error=True)
             return _openai_error(504, "No worker returned a result", "engine_timeout")
         observe(error=False, output_units=_result_completion_tokens(settled.result))
+        _capture_result(body, settled.result)
         return Response(content=settled.result, media_type="application/json")
     finally:
         table.cancel(txn.id, "consumer finished")
@@ -1923,6 +1633,22 @@ def _choose_node(app: FastAPI, model: str) -> str | None:
         return None
     best = min(candidates, key=lambda node: int(node.load.get("active_tasks") or 0))
     return best.host_id
+
+
+def _requested_output_tokens(body: Mapping[str, Any]) -> int:
+    """Read a bounded generation-length hint without inspecting prompt content."""
+
+    for field_name in ("max_completion_tokens", "max_tokens"):
+        value = body.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        try:
+            tokens = int(value)
+        except (OverflowError, ValueError):
+            continue
+        if tokens == value and 0 < tokens <= MAX_COUNTER:
+            return tokens
+    return 0
 
 
 def _choose_engine(
@@ -2291,22 +2017,6 @@ def _route_expected_completion_score(
         else (active + queued + 1.0) / max(1, limit)
     )
     return estimated_latency * service_waves
-
-
-def _requested_output_tokens(body: Mapping[str, Any]) -> int:
-    """Read a bounded generation-length hint without inspecting prompt content."""
-
-    for field_name in ("max_completion_tokens", "max_tokens"):
-        value = body.get(field_name)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            continue
-        try:
-            tokens = int(value)
-        except (OverflowError, ValueError):
-            continue
-        if tokens == value and 0 < tokens <= MAX_COUNTER:
-            return tokens
-    return 0
 
 
 def _node_concurrency_limit(node: Node) -> int | None:

@@ -49,6 +49,17 @@ MAX_READY_CHILD_SYNC_WORKERS = 16
 _ACTIVITY_UNSET = object()
 
 
+def _engine_auth_headers(engine_key: str | None) -> dict[str, str]:
+    """The worker's own Authorization for its engine, or nothing when there is no key.
+
+    Under push the grid attached this; under pull the grid never dials the engine, so the
+    worker's client must carry it. llama-server is still launched with --api-key-file and still
+    answers 401 without one -- which is exactly how the first real pull request failed.
+    """
+
+    return {"authorization": f"Bearer {engine_key}"} if engine_key else {}
+
+
 def _poll_until_stopped(
     cycle: Callable[[], bool],
     stop: threading.Event,
@@ -374,8 +385,9 @@ class AllocatorNodeAgent:
         for residency in self._residencies_needing_poll_loop():
             self._polling_models.add(residency.model_id)
             grid_client = httpx.Client(base_url=self.grid_url)
-            engine_key = self.runtime.engine_api_key_for(residency.model_id)
-            engine_headers = {"authorization": f"Bearer {engine_key}"} if engine_key else {}
+            engine_headers = _engine_auth_headers(
+                self.runtime.engine_api_key_for(residency.model_id)
+            )
             engine_client = httpx.Client(
                 base_url=f"http://127.0.0.1:{residency.handle.port}",
                 headers=engine_headers,

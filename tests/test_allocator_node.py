@@ -2364,3 +2364,20 @@ def test_local_safety_fence_is_published_even_when_its_state_write_fails(
         control = app.state.nodes[agent.node_id]
         assert control.allocator["decision"]["state"] == "unhealthy"
         assert "disk full" in agent.last_error
+
+
+def test_the_poll_loop_client_carries_the_engine_key():
+    """The other half of the old grid-side forwarding test, where it now lives.
+
+    Under push the grid attached the engine key on every proxied request. Under pull the grid
+    never dials the engine, so the worker's own client has to carry it -- llama-server is still
+    launched with --api-key-file and still answers 401 without one, which is exactly how the
+    first real pull request on hardware failed.
+    """
+
+    from local.allocator_node import _engine_auth_headers
+
+    assert _engine_auth_headers("engine-secret") == {"authorization": "Bearer engine-secret"}
+    # No key configured is not the same as an empty Bearer, which llama-server would reject.
+    assert _engine_auth_headers("") == {}
+    assert _engine_auth_headers(None) == {}
