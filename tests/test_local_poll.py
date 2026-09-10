@@ -348,3 +348,74 @@ async def test_the_pull_path_reports_a_served_request_with_its_token_count(monke
     assert seen[0]["error"] is False
     assert seen[0]["output_units"] == 42
     assert seen[0]["served_model"] == "m1"
+
+
+async def test_a_repeatedly_failing_node_stops_being_picked(monkeypatch):
+    """Recording faults is half of it; the picker has to act on them.
+
+    `_choose_engine` skips a quarantined route, `_choose_node` did not -- so under pull a node
+    whose engine had died kept winning every pick and failing every request, forever.
+    """
+
+    import time as _time
+
+    from local.server import (
+        Node, _choose_node, _proxy_route_is_quarantined, _record_proxy_route_outcome,
+        create_app,
+    )
+
+    app = create_app(grid_id="g1", grid_name="grid-one")
+    sick = Node(node_id="sick", role="engine", models=["m1"], host_id="h-sick",
+                load={"active_tasks": 0}, last_heartbeat=_time.time())
+    well = Node(node_id="well", role="engine", models=["m1"], host_id="h-well",
+                load={"active_tasks": 5}, last_heartbeat=_time.time())
+    app.state.nodes = {"sick": sick, "well": well}
+
+    # Least-loaded wins while both are healthy.
+    assert _choose_node(app, "m1") == "h-sick"
+
+    for _ in range(10):
+        _record_proxy_route_outcome(sick, "m1", transport_error=True)
+    assert _proxy_route_is_quarantined(sick, "m1", now=_time.monotonic())
+
+    assert _choose_node(app, "m1") == "h-well", "a quarantined node was still picked"
+
+
+async def test_a_worker_that_errors_opens_the_circuit_against_its_own_node():
+    """The fault must land on whoever CLAIMED the work, not on whoever was picked.
+
+    Under push those are the same node. Under pull they need not be -- the picker only suggests,
+    and the transaction records who actually took it -- so blaming the pick would open a circuit
+    against a node that never saw the request.
+    """
+
+    import asyncio
+    import time as _time
+
+    from local.server import Node, _proxy_route_is_quarantined, _proxy_openai, create_app
+
+    app = create_app(grid_id="g1", grid_name="grid-one")
+    node = Node(node_id="n1", role="engine", models=["m1"], host_id="h1",
+                load={"active_tasks": 0}, last_heartbeat=_time.time())
+    app.state.nodes = {"n1": node}
+
+    from local.server import _ROUTE_FAILURE_THRESHOLD
+
+    for _ in range(_ROUTE_FAILURE_THRESHOLD):
+        request = Request({"type": "http", "method": "POST", "headers": []})
+        request._body = b'{"model": "m1"}'
+        serving = asyncio.create_task(_proxy_openai(app, "chat/completions", request))
+        await asyncio.sleep(0)
+        claimed = app.state.inflight.claim(node_id="h1", models=("m1",))
+        assert claimed is not None
+        app.state.inflight.cancel(claimed.id, "engine blew up")
+        await asyncio.wait_for(serving, timeout=2.0)
+
+    assert _proxy_route_is_quarantined(node, "m1", now=_time.monotonic()), \
+        "consecutive worker failures opened no circuit"
+
+    # And the consequence the circuit exists for: the next caller is refused up front rather
+    # than parked on a transaction that the same broken node would claim and fail again.
+    request = Request({"type": "http", "method": "POST", "headers": []})
+    request._body = b'{"model": "m1"}'
+    assert (await _proxy_openai(app, "chat/completions", request)).status_code == 503

@@ -1509,6 +1509,14 @@ async def _serve_by_pull(
     txn = table.create(model=model, body=raw_body, is_stream=bool(body.get("stream")))
 
     def observe(*, error: bool, output_units: int = 0) -> None:
+        # The circuit is per (node, model), so a fault has to be recorded against the node that
+        # actually took the work -- which under pull is whoever claimed it, not whoever was
+        # picked. Read it off the transaction we hold rather than looking it up: `cancel` pops
+        # the row, and the failure path this exists for is precisely the one that cancels.
+        # A transaction nobody claimed has no node to blame and opens no circuit.
+        node = _node_by_host_id(app, txn.node_id) if txn.node_id else None
+        if node is not None:
+            _record_proxy_route_outcome(node, model, transport_error=error)
         _observe_allocator_request(
             app,
             model,
@@ -1889,12 +1897,27 @@ def _node_allocator_state(node: Node) -> NodeState:
         return NodeState.UNHEALTHY
 
 
+def _node_by_host_id(app: FastAPI, host_id: str) -> Node | None:
+    """The registered engine record for ``host_id``, or None once it has gone away."""
+
+    return next(
+        (node for node in _nodes(app).values() if node.host_id == host_id),
+        None,
+    )
+
+
 def _choose_node(app: FastAPI, model: str) -> str | None:
-    """The host_id of the least-loaded live node advertising ``model``, or None."""
+    """The host_id of the least-loaded live node advertising ``model``, or None.
+
+    Quarantined routes are skipped exactly as `_choose_engine` skips them: recording a fault is
+    only half a circuit breaker, and without this half a node whose engine had died kept winning
+    every pick -- it is the least loaded precisely BECAUSE it serves nothing.
+    """
+    route_now = time.monotonic()
     candidates = [
         node
         for node in _active_engines(app, model)
-        if node.host_id
+        if node.host_id and not _proxy_route_is_quarantined(node, model, now=route_now)
     ]
     if not candidates:
         return None
