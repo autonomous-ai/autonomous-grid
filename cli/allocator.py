@@ -445,9 +445,15 @@ def _start_allocator_node_locked(
         # loopback, and the node stopped uploading one at all. What does still cross a plain-HTTP
         # LAN is this node's control token and the prompts it is handed, which is the same cost
         # `--no-tls` has always carried and is a deliberate choice rather than an oversight.
+        # Naming the command matters more than naming the problem: "use an https URL" leaves a
+        # reader knowing something is wrong and not what to type, which is the state this whole
+        # CLI is meant to keep people out of.
         print(
             f"Note: {control_url} is plain HTTP, so this node's control token and the prompts it "
-            "serves cross the LAN in the clear. Use an https Grid URL to avoid that.",
+            "serves cross the LAN in the clear.\n"
+            "  To encrypt it, restart the grid with TLS and rejoin:\n"
+            "    on the grid machine:  grid stop <grid> && grid start <grid> --tls\n"
+            "    then here:            grid allocator node start --grid https://<host>:<port>",
             file=sys.stderr,
         )
     shutdown_request_path(state_path).unlink(missing_ok=True)

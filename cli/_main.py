@@ -135,7 +135,8 @@ def cmd_internal_allocator_node(
         # more -- the grid never dials the engine, so it has no use for one.
         print(
             f"Note: {control_url} is plain HTTP; this node's control token and the prompts it "
-            "serves cross the LAN in the clear.",
+            "serves cross the LAN in the clear. To encrypt it, restart the grid with "
+            "`grid start <grid> --tls` and rejoin at its https URL.",
             file=sys.stderr,
         )
     state_file = Path(state_path)
