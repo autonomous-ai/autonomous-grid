@@ -137,6 +137,8 @@ Answer it there, or put the answer in the prompt itself — **"create my own gri
 providers-only"** — and it goes straight through. Worth a moment either way: the type is set at
 creation and stays.
 
+![OpenCode asking which network type the new grid should be](./omagrid-create-ask.png)
+
 Then fill it:
 
 ```text
@@ -150,6 +152,8 @@ contribute this machine to <name>
 The first invites someone by email — add **"as a consumer"** or **"as a provider"** to hand them
 just that half. The second is step 4 again, aimed at your own grid: same model, same engine on
 disk. Your machine happily serves both grids at once.
+
+![OpenCode confirming the member it added and the role they got](./omagrid-add-member.png)
 
 Point any other client at it with **"print my grid's endpoint and key"** — OpenAI-compatible,
 same as Omagrid.
