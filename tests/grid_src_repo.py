@@ -17,6 +17,52 @@ from __future__ import annotations
 import os
 import pathlib
 
+FEATS_DIR_NAME = "autonomous-grid-feats"
+
+#: The directory suffix the `new-grid-worktree` skill gives a feature's parallel-ticket root
+#: (`<repo>-feats/<feat>_parallel/<ticket>`). Hand-duplicated with that skill's
+#: `scripts/parallel-worktree.sh` (`PARALLEL_SUFFIX`), and kept in step by editing both: renamed on
+#: one side alone, every ticket worktree still resolves its exact mirror and only the fallback to
+#: the feature worktree is lost -- silently, as a skip.
+PARALLEL_SUFFIX = "_parallel"
+
+
+def _mirror_candidates(here: pathlib.Path, repo: str) -> list[pathlib.Path]:
+    """Where a checkout of ``repo`` could sit beside the checkout at ``here``, best guess first.
+
+    Split out of `_sibling_root` so the layouts can be pinned as data: this function is the whole
+    of the derivation, and the derivation is what decides whether the lockstep suites run at all.
+
+    Three layouts, and the fallbacks are ordered by how close they are to the code this checkout
+    is actually working on:
+
+    * a MAIN checkout (`<projects>/autonomous-grid`) looks for `<projects>/<repo>`;
+    * a FEATURE worktree (`<projects>/autonomous-grid-feats/<slug>`) mirrors the slug into
+      `<projects>/<repo>-feats/<slug>`, then falls back to the main checkout;
+    * a PARALLEL TICKET worktree (`…-feats/<slug>_parallel/<ticket>`) mirrors the WHOLE path below
+      the feats directory, so ticket `t12` reads ticket `t12`. Only then does it fall back to the
+      feature worktree the ticket was cut from, and last to the main checkout. The exact mirror has
+      to come first: two agents working two tickets have moved the same seam in two different
+      directions, and reading the sibling's feature branch would compare against neither.
+
+    The middle candidate is the one piece of the parallel layout this module knows about; a nested
+    directory that is not `<something>_parallel` gets the exact mirror and the main checkout only,
+    because inventing a checkout out of an arbitrary directory name is how a resolver starts
+    answering confidently about the wrong tree.
+    """
+    for ancestor in here.parents:
+        if ancestor.name != FEATS_DIR_NAME:
+            continue
+        projects = ancestor.parent
+        rel = here.relative_to(ancestor)
+        candidates = [projects / f"{repo}-feats" / rel]
+        feature = rel.parts[0][: -len(PARALLEL_SUFFIX)]
+        if len(rel.parts) > 1 and rel.parts[0].endswith(PARALLEL_SUFFIX) and feature:
+            candidates.append(projects / f"{repo}-feats" / feature)
+        candidates.append(projects / repo)
+        return candidates
+    return [here.parent / repo]
+
 
 def _sibling_root(
     marker: pathlib.Path, repo: str, env_var: str, *, hint: str = ""
@@ -27,7 +73,8 @@ def _sibling_root(
     worktree they are checked out into instead of skipping everywhere but one. The convention is
     `<repo>-feats/<slug>` beside `<repo>`, so a worktree of `autonomous-grid` at
     `…/autonomous-grid-feats/<slug>` looks for `…/<repo>-feats/<slug>` first and falls back to the
-    main `…/<repo>` checkout.
+    main `…/<repo>` checkout. `_mirror_candidates` holds the full rule, including the
+    parallel-ticket layout, and `tests/test_sibling_root.py` pins it.
 
     ``marker`` is a directory that must exist under a candidate for it to count as that repository —
     the difference between "found it" and "found a directory with the right name".
@@ -48,14 +95,7 @@ def _sibling_root(
         return root
 
     here = pathlib.Path(__file__).resolve().parent.parent  # the autonomous-grid checkout
-    projects = here.parent
-    candidates = []
-    if projects.name == "autonomous-grid-feats":
-        candidates.append(projects.parent / f"{repo}-feats" / here.name)
-        candidates.append(projects.parent / repo)
-    else:
-        candidates.append(projects / repo)
-    for candidate in candidates:
+    for candidate in _mirror_candidates(here, repo):
         if (candidate / marker).is_dir():
             return candidate
     return None
@@ -79,6 +119,22 @@ def harness_root() -> pathlib.Path | None:
     way a wire constant is. `HARNESS_REPO` overrides the derivation.
     """
     return _sibling_root(pathlib.Path("cli") / "src", "autonomous-harness", "HARNESS_REPO")
+
+
+def app_root() -> pathlib.Path | None:
+    """autonomous-grid-app's checkout — the FLUTTER APP — or ``None`` when it is not beside this one.
+
+    The fifth repository, and the only one that reaches the lockstep with **no half in this
+    repository at all**: ADR 0042 D-l's refusal sentence runs grid-src → the app, and this checkout
+    is in the path of neither. It is resolved here anyway because the pin that compares those two
+    halves has to live somewhere, and this repository is the hub.
+
+    ⚠️ The app deliberately has **no worktree** for the billing-activation feature, so the mirror
+    candidate never exists and the derivation lands on the main checkout. That is the intended
+    answer, not a fallback that went wrong: the app's half of this seam is one substring in one file
+    and it does not move per feature branch. `GRID_APP_REPO` overrides the derivation.
+    """
+    return _sibling_root(pathlib.Path("lib"), "autonomous-grid-app", "GRID_APP_REPO")
 
 
 def grid_src_root() -> pathlib.Path | None:
