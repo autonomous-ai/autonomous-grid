@@ -223,6 +223,7 @@ so a consumer comparing the whole payload shape sees one more key.
 ```
 grid start [name] [--type <t>] [--port <n>] [--host <h>] [--advertise-host <h>]
 grid stop [name]                      # stop a grid (may fail loud); the grid/config persists
+grid delete <name> [--yes]            # remove a grid for good (remote: owner only, stopped first)
 grid ls [--json]                      # saved grids (local: name, id, where, url · remote: name, id, type)
 grid info [grid] [--json]             # grid, grid_url, live engine count, live models
 grid info [grid] --env                # print OPENAI_* exports (local key, or remote relay URL + token)
@@ -240,7 +241,15 @@ server binds; `--advertise-host` overrides the host published in `grid_url` (oth
 LAN IP). Those three are local-only, and `--type` is remote-only (the grid type, set on create).
 
 No separate `create` command — `start` is the single lifecycle verb, so
-first use feels like one operation rather than infrastructure management. (`grid use` only sets
+first use feels like one operation rather than infrastructure management. `grid delete` is the
+only one that does not come back: in `local` mode it removes the grid's config (the flow `grid
+stop` deliberately does not cover, since config surviving a stop is what lets `grid start <name>`
+bring it straight back), and in `remote` mode it asks the control plane to destroy the hosted grid.
+The remote half is gated three ways — **only the owner** may run it, the grid must **already be
+stopped**, and confirmation is **the grid's name typed back**, not `y`. It also refuses to fall
+back to the active grid the way every other command does: an irreversible verb should never land
+on a grid you did not name. Members and joined engines do not block it and are not asked to leave
+first — an owner cannot be made to wait on other people's machines — so deleting evicts them. (`grid use` only sets
 which grid is *active*; it is a selection pointer, not a lifecycle step — see Modes.)
 
 In `local` mode **`grid stop` waits and can fail.** It stops the server it can prove is this grid's
@@ -458,7 +467,9 @@ The `grid join` flag set is the union of both modes, gated by mode:
 
 - **Both modes:** `--at` / `--serve` / `-m,--model` / `--kind <kind>` (alias `--engine`) / `--name`
   / `--all`, `--advertise-as` (or inline `-m real=pub`), `--endpoint-port` (alias `--llama-port`),
-  the llama tuning flags (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`),
+  the llama tuning flags (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`
+  — `--ctx-size N` is the window **one request** may use, so a Grid-launched llama-server reserves
+  N × its slot count of KV cache up front),
   `--heartbeat-interval` (seconds between heartbeats, default 15), `--api-key <key>` (overrides the
   env var and the key store, and warns that it is visible in shell history), and the media flags
   `--media` / `--bundle <bundle>` / `--comfyui-port` / `--media-port`.
@@ -474,7 +485,9 @@ The `grid join` flag set is the union of both modes, gated by mode:
   default 1, or 8 when the identity serves only API engines, pinned back to **1** when any of
   them is a `codex` seat: a flat-rate subscription is never hammered four-wide by default).
   Match it to the engine's own batch width — llama.cpp `--parallel`, vLLM `max_num_seqs` — or the
-  extra slots queue behind a batch that was never widened to take them. Finally, `--respawn` (stop
+  extra slots queue behind a batch that was never widened to take them. For a Grid-launched
+  llama-server this is also the slot count (`run_records.effective_parallel`), so raising it
+  multiplies the KV cache an explicit `--ctx-size` reserves. Finally, `--respawn` (stop
   the engine already serving this grid and start a fresh one — see below).
 - **Deprecated:** `--engine-label` — the grid page now derives the engine kind automatically, so it is
   accepted but inert (still matched by `grid leave --engine <label>`); `--pricing-input` /

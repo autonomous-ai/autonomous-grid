@@ -3611,6 +3611,62 @@ def test_start_llm_passes_through_an_operator_override(monkeypatch, tmp_path):
     assert cmd[cmd.index("--flash-attn") + 1] == "off"
 
 
+def test_start_llm_scales_ctx_size_by_the_slot_count(monkeypatch, tmp_path):
+    """`--ctx-size` is per REQUEST; llama.cpp's `-c` is the whole KV pool, split across slots.
+
+    `--parallel N` statically carves `-c` into N slots of `ctx/N`, and the unified KV cache that
+    would share one buffer instead is only on when the slot count is `auto` — which it never is
+    here, because `--parallel` is always passed. Forwarding the operator's number raw therefore
+    handed each request `ctx/N` tokens while `remote/serve.py` advertised the undivided `ctx` to
+    the grid as `context_window`, over-promising the window N-fold to the auto-router.
+    """
+    cmd = _launch_argv(monkeypatch, tmp_path, ctx_size=32000, parallel=4)
+    assert cmd[cmd.index("--ctx-size") + 1] == "128000"
+    assert cmd[cmd.index("--parallel") + 1] == "4"
+
+
+def test_start_llm_leaves_ctx_size_alone_on_a_single_slot(monkeypatch, tmp_path):
+    """The common case must be untouched: one slot means N is N."""
+    cmd = _launch_argv(monkeypatch, tmp_path, ctx_size=32000, parallel=1)
+    assert cmd[cmd.index("--ctx-size") + 1] == "32000"
+
+
+def test_start_llm_scaling_never_resurrects_an_unset_ctx_size(monkeypatch, tmp_path):
+    """Unset stays unset whatever the slot count — llama.cpp must keep fitting itself to the box."""
+    assert "--ctx-size" not in _launch_argv(monkeypatch, tmp_path, parallel=8)
+
+
+class _DeadProc:
+    pid = 1
+
+    def poll(self):
+        return 1
+
+
+def test_wait_for_models_explains_the_scaled_kv_allocation(monkeypatch, tmp_path):
+    """A dead bring-up must name the allocation the operator never typed.
+
+    llama.cpp's own log says only that it could not allocate 128000 tokens; nothing in it connects
+    that back to the `--ctx-size 32000` that was passed for four slots.
+    """
+    log = tmp_path / "llama.log"
+    log.write_text("ggml_backend_buffer alloc failed\n")
+    proc = launcher.LlamaProcess(proc=_DeadProc(), port=8081, log=log, ctx_size=32000, parallel=4)
+    with pytest.raises(SystemExit, match="128000 tokens of KV cache across 4 slots"):
+        launcher.wait_for_models(proc)
+
+
+def test_wait_for_models_stays_quiet_when_there_is_nothing_to_explain(monkeypatch, tmp_path):
+    """One slot, or no `--ctx-size`, means the number in the log IS the number typed."""
+    log = tmp_path / "llama.log"
+    log.write_text("boom\n")
+    for kwargs in ({"ctx_size": 32000, "parallel": 1}, {"ctx_size": None, "parallel": 4}):
+        proc = launcher.LlamaProcess(proc=_DeadProc(), port=8081, log=log, **kwargs)
+        with pytest.raises(SystemExit) as excinfo:
+            launcher.wait_for_models(proc)
+        assert "KV cache" not in str(excinfo.value)
+
+
 def test_start_llm_pins_gpu_layers_only_on_unified_memory(monkeypatch, tmp_path):
     """Apple Silicon must not let llama.cpp spill layers to "system memory" — it is the same pool."""
     monkeypatch.setattr(launcher, "runtime_profile", lambda: launcher.APPLE_SILICON_RUNTIME)
@@ -22788,7 +22844,7 @@ def _seed_remote(monkeypatch, tmp_path, networks=None, session="sess-tok", activ
         state.set_active("remote", active)
 
 
-def _mock_lifecycle(monkeypatch, *, create=None, start=None, stop=None, status=None):
+def _mock_lifecycle(monkeypatch, *, create=None, start=None, stop=None, status=None, delete=None):
     """Stub the four control-plane lifecycle calls; record what each was invoked with."""
     from remote import control_plane
 
@@ -22810,11 +22866,156 @@ def _mock_lifecycle(monkeypatch, *, create=None, start=None, stop=None, status=N
         calls["status"] = {"session": session_token, "network_id": network_id}
         return status or {}
 
+    def _delete(session_token, network_id, api_url=None):
+        calls["delete"] = {"session": session_token, "network_id": network_id}
+        return delete or {}
+
     monkeypatch.setattr(control_plane, "create_managed_network", _create)
     monkeypatch.setattr(control_plane, "start_managed_network", _start)
     monkeypatch.setattr(control_plane, "stop_managed_network", _stop)
     monkeypatch.setattr(control_plane, "get_managed_network_status", _status)
+    monkeypatch.setattr(control_plane, "delete_managed_network", _delete)
     return calls
+
+
+def _grid_token(roles):
+    """A per-grid access token carrying ``roles`` — the only claim `cmd_remote_delete` reads.
+
+    Built rather than fixtured because the owner gate turns on it: a test that passed a plain string
+    would exercise the "unreadable token" branch and pass for the wrong reason."""
+    import base64
+
+    def seg(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+
+    return f"{seg({'alg': 'none'})}.{seg({'roles': roles})}.sig"
+
+
+def _seed_owned_grid(monkeypatch, tmp_path, *, roles=("admin", "both"), state_=None, active="team"):
+    """Signed-in remote mode with one grid this account owns, stopped unless told otherwise."""
+    net = {
+        "network_id": "n1", "name": "team", "network_type": "permissioned-public",
+        "access_token": _grid_token(list(roles)), "refresh_token": "RT",
+    }
+    _seed_remote(monkeypatch, tmp_path, networks=[net], active=active)
+    return _mock_lifecycle(monkeypatch, status={"state": state_} if state_ else {})
+
+
+def test_remote_delete_requires_an_explicit_name(monkeypatch, tmp_path):
+    """Every other remote verb falls back to the active grid. This one must not: the whole point of
+    naming it is that an irreversible command can never land on a grid the user did not type."""
+    calls = _seed_owned_grid(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["delete"])
+    assert "grid delete <name>" in str(exc.value)
+    assert "delete" not in calls  # nothing reached the control plane
+
+
+def test_remote_delete_refuses_a_grid_this_account_does_not_own(monkeypatch, tmp_path):
+    calls = _seed_owned_grid(monkeypatch, tmp_path, roles=("both",))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["delete", "team", "--yes"])
+    assert "owner" in str(exc.value) and "grid leave" in str(exc.value)
+    assert "delete" not in calls
+
+
+def test_remote_delete_without_a_stored_token_says_login_not_you_are_a_member(monkeypatch, tmp_path):
+    """A missing token reads as "no admin role" through the claims, and answering an owner with
+    "you are only a member" sends them to fix a thing that is not broken. The absent token has to be
+    named as itself."""
+    net = {"network_id": "n1", "name": "team", "network_type": "permissioned-public"}
+    _seed_remote(monkeypatch, tmp_path, networks=[net], active="team")
+    calls = _mock_lifecycle(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["delete", "team", "--yes"])
+    assert "grid login" in str(exc.value)
+    assert "member" not in str(exc.value)  # the wrong diagnosis for a stale bundle
+    assert "delete" not in calls
+
+
+def test_remote_delete_translates_a_403_into_the_ownership_rule(monkeypatch, tmp_path):
+    """The local check reads a token minted once; the grid can change hands after that. The control
+    plane is the authority, and its refusal has to arrive as the rule rather than as raw HTTP."""
+    from remote import control_plane
+
+    _seed_owned_grid(monkeypatch, tmp_path)
+
+    def _refuse(session_token, network_id, api_url=None):
+        raise control_plane.ControlPlaneError(
+            'DELETE https://api.example/v1/grid/managed-networks/n1 failed (403): {"detail":"nope"}',
+            status=403,
+        )
+
+    monkeypatch.setattr(control_plane, "delete_managed_network", _refuse)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["delete", "team", "--yes"])
+    assert "not its owner" in str(exc.value) and "grid login" in str(exc.value)
+
+    from remote import credentials
+    # Refused server-side means the grid still exists — forgetting it locally would hide a grid the
+    # account still has.
+    assert [n["network_id"] for n in credentials.load_credentials()["networks"]] == ["n1"]
+
+
+def test_remote_delete_lets_a_401_keep_its_wording_for_the_session_check(monkeypatch, tmp_path):
+    """`cli/auth._SESSION_EXPIRED_RE` matches the control plane's exact 401 rendering to offer a
+    re-login, so the 403 rewrite must not swallow its neighbour."""
+    from remote import control_plane
+
+    _seed_owned_grid(monkeypatch, tmp_path)
+    raw = 'POST https://api.example/v1/grid/managed-networks/n1 failed (401): {"detail":"expired"}'
+
+    def _expired(session_token, network_id, api_url=None):
+        raise control_plane.ControlPlaneError(raw, status=401)
+
+    monkeypatch.setattr(control_plane, "delete_managed_network", _expired)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["delete", "team", "--yes"])
+    assert str(exc.value) == raw
+
+
+def test_remote_delete_refuses_while_the_grid_is_running(monkeypatch, tmp_path):
+    """Stopping is the reversible, visible step where service ends. Delete is only the paperwork
+    afterwards, so a running grid is refused and told which command comes first."""
+    calls = _seed_owned_grid(monkeypatch, tmp_path, state_="running")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["delete", "team", "--yes"])
+    assert "grid stop team" in str(exc.value)
+    assert "delete" not in calls
+
+
+def test_remote_delete_removes_the_grid_and_forgets_it_locally(monkeypatch, tmp_path, capsys):
+    calls = _seed_owned_grid(monkeypatch, tmp_path)
+
+    assert cli.main(["delete", "team", "--yes"]) == 0
+    assert calls["delete"] == {"session": "sess-tok", "network_id": "n1"}
+    assert "Deleted grid team" in capsys.readouterr().out
+
+    from remote import credentials
+    assert credentials.load_credentials()["networks"] == []  # gone from `grid ls`
+    # The active pointer named the grid that no longer exists; leaving it set would aim every later
+    # command at nothing.
+    assert state.get_active("remote") is None
+
+
+def test_remote_delete_confirmation_takes_the_name_not_a_keystroke(monkeypatch, tmp_path, capsys):
+    """`y` is what a reader types while skimming, and `stop`/`delete` sit one word apart in help."""
+    calls = _seed_owned_grid(monkeypatch, tmp_path)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+
+    assert cli.main(["delete", "team"]) == 1
+    assert "did not match" in capsys.readouterr().out
+    assert "delete" not in calls
+
+    monkeypatch.setattr("builtins.input", lambda *a: "team")
+    assert cli.main(["delete", "team"]) == 0
+    assert calls["delete"]["network_id"] == "n1"
 
 
 def test_remote_start_creates_when_name_unknown(monkeypatch, tmp_path, capsys):

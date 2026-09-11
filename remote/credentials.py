@@ -94,6 +94,23 @@ def add_network(record: dict[str, Any]) -> None:
     save_credentials({**data, "networks": [*others, record]})
 
 
+def remove_network(network_id: str) -> bool:
+    """Forget a remote grid locally — the other half of ``add_network``, for a grid that no longer
+    exists on the account.
+
+    Returns whether anything was dropped, so a caller can tell "removed" from "was not there"
+    without reading the file twice. Idempotent, and it preserves the rest of the credential file the
+    same way ``add_network`` does: a fresh dict is written, never the loaded one mutated.
+    """
+    data = load_credentials()
+    nets = list(data.get("networks") or [])
+    kept = [n for n in nets if n.get("network_id") != network_id]
+    if len(kept) == len(nets):
+        return False
+    save_credentials({**data, "networks": kept})
+    return True
+
+
 def update_network_tokens(
     network_id: str, *, access_token: str, refresh_token: str | None = None
 ) -> None:

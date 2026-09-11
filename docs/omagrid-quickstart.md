@@ -115,6 +115,58 @@ anything worth watching.
 Under the hood these are `grid stats --verbose` and `grid usage --by …`. You can run them
 yourself any time.
 
+## 6. Create your own grid
+
+Omagrid is a grid you joined. The same machinery spins up one that is yours — your machines,
+your members, your models — and OpenCode drives it exactly the same way.
+
+Ask OpenCode:
+
+```text
+create my own grid called <name>
+```
+
+Pick any name; that is how you call it from here on. Before it creates anything, OpenCode asks
+which kind of grid you want:
+
+- **permissioned-public** — anyone signed in can send it requests, and the members you add bring
+  the machines.
+- **permissioned-providers** — membership covers both jobs.
+
+Answer it there, or put the answer in the prompt itself — **"create my own grid called <name>,
+providers-only"** — and it goes straight through. Worth a moment either way: the type is set at
+creation and stays.
+
+![OpenCode answering the network-type question, creating the grid and selecting it](./omagrid-create-done.png)
+
+Then fill it:
+
+```text
+add teammate@example.com to my grid
+```
+
+```text
+contribute this machine to <name>
+```
+
+The first invites someone by email — add **"as a consumer"** or **"as a provider"** to hand them
+just that half. The second is step 4 again, aimed at your own grid: same model, same engine on
+disk. Your machine happily serves both grids at once.
+
+Point any other client at it with **"print my grid's endpoint and key"** — OpenAI-compatible,
+same as Omagrid.
+
+**"switch back to Omagrid"** moves where your own requests go. Everything your machine serves
+keeps serving.
+
+**Made one by mistake?** Say **"delete my grid <name>"**. It stops the grid first, then asks you
+to type the name back before it removes it — the one step here that stays done. A grid you joined
+rather than created stays put; that one is **"stop serving <name>"**.
+
+Under the hood these are `grid mode remote`, `grid start <name> [--type …]`, `grid members add
+<email> --role …`, `grid join <name> --serve …`, `grid info --env`, `grid use <name>`, and
+`grid stop <name>` + `grid delete <name>`.
+
 ## Where to go next
 
 - **Using another client?** Omagrid is an OpenAI-compatible endpoint. `grid info --env` prints
