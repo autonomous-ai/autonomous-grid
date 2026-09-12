@@ -156,6 +156,105 @@ def test_a_stray_file_beside_the_projects_does_not_warn_that_the_bound_has_stopp
         f"it correctly in the same call (ND-18):\n{err}")
 
 
+def test_a_relay_bare_repo_sharing_the_task_root_is_not_eaten_by_the_sweep(
+        tmp_path, short_task_root, monkeypatch):
+    """⚠️ A provider and a relay on ONE box share `/var/grid/projects` **by default**, and the
+    sweep would delete the relay's git objects.
+
+    Measured on the dev VM 2026-08-25, both halves of the collision, neither of them exotic:
+
+      * this repo's `task_agent.default_workspace_root()` is `/var/grid` on Linux, so a provider
+        started with no `GRID_TASK_ROOT` puts workspaces in `/var/grid/projects/<p>/<m>/<c>/`;
+      * grid-src's `config.task_repo_root` defaults to `/var/grid/projects`, where the relay keeps
+        one bare repo per project as `<project_id>.git` — 2.1 GB of them on that machine.
+
+    `_conversations` then reads every directory under `projects/` as a project, its children as
+    members and THEIR children as conversations. A relay repo is a directory, so `<p>.git/objects/`
+    becomes a "member" and `<p>.git/objects/pack/` a "conversation" — an ordinary eviction
+    candidate that `_evict` removes with `shutil.rmtree`. The LRU order makes it worse rather than
+    better: a pack nobody has written to lately sorts OLDEST, so the history goes first.
+
+    ⚠️ **`_evict`'s docstring argues, correctly, that junk under the task root SHOULD be
+    collectable** — *"the one thing the bound most needs to remove would be the one thing it could
+    not"*. That reasoning assumed the task root is this provider's alone. It is not, by default, on
+    the operating system the fleet runs. So the rule becomes: collect anything shaped like a
+    workspace, and nothing else.
+
+    ⚠️ **What stands between the two today is an accident**: `_require_a_private_directory` refuses
+    a 755 root, and `/var/grid` is 755 on that box. Its refusal tells the operator to
+    `chmod 700 /var/grid` — which does not just touch the relay's store, it removes the only thing
+    holding this sweep off it.
+
+    A CONTROL is not optional here: the guard must still collect a real workspace, or "nothing was
+    deleted" would pass with eviction switched off entirely.
+    """
+    from remote import task_evict
+
+    monkeypatch.setenv(task_agent_root_env(), str(short_task_root))
+    monkeypatch.setenv(task_evict.MAX_WORKSPACES_ENV, "1")
+    # The relay's, beside the provider's — the exact shape `TASK_REPO_ROOT` produces.
+    relay_repo = short_task_root / "projects" / "b3f1c0de-0000-4000-8000-000000000001.git"
+    _git_init_bare(relay_repo)
+    objects = sorted(p.name for p in (relay_repo / "objects").iterdir())
+    # Two real workspaces against a cap of one, so the sweep genuinely has work to do.
+    for conversation in _CONVERSATIONS[:2]:
+        _real_workspace(tmp_path, short_task_root, conversation)
+
+    task_evict.sweep(short_task_root, keep=None,
+                     reserve=_never_reserved, release=_released)
+
+    assert (relay_repo / "objects").is_dir() and (relay_repo / "refs").is_dir(), (
+        "the sweep deleted the relay's bare repository — a provider and a relay share "
+        "/var/grid/projects by default, so this is the fleet's own configuration")
+    assert sorted(p.name for p in (relay_repo / "objects").iterdir()) == objects, (
+        "the sweep ate part of the relay's object store")
+    # THE CONTROL. Without it this passes with the bound switched off.
+    assert _conversation_dirs(short_task_root) == [_CONVERSATIONS[1]], (
+        "the guard stopped the sweep collecting real workspaces too, so the bound is gone")
+
+
+def test_a_relay_repo_whose_branch_names_collide_with_our_markers_is_still_safe(
+        tmp_path, short_task_root, monkeypatch):
+    """The second guard, and it is NOT redundant — the marker check alone loses to a branch name.
+
+    An imported repository brings whatever branch names its author gave it, and `cache/…` is an
+    entirely ordinary prefix. Git stores `refs/heads/cache/x` as a DIRECTORY, so walking a relay
+    repo as if it were a project makes `refs` a member, `refs/heads` a conversation, and
+    `refs/heads/cache` a marker — the candidate then looks exactly like one of ours and `_evict`
+    takes `refs/heads` with it. **Every branch in the project, gone.**
+
+    So the `.git` suffix check is load-bearing rather than belt-and-braces, and this is the test
+    that says so: delete it and the marker check hands this repository to `rmtree`.
+    """
+    from remote import task_evict
+
+    monkeypatch.setenv(task_agent_root_env(), str(short_task_root))
+    monkeypatch.setenv(task_evict.MAX_WORKSPACES_ENV, "1")
+    relay_repo = short_task_root / "projects" / "b3f1c0de-0000-4000-8000-000000000002.git"
+    _git_init_bare(relay_repo)
+    # A branch whose first segment is one of our marker names. Nothing exotic: it arrived through
+    # `import`, from a repository this grid does not get to rename.
+    (relay_repo / "refs" / "heads" / "cache").mkdir(parents=True)
+    (relay_repo / "refs" / "heads" / "cache" / "x").write_text("0" * 40 + "\n")
+    for conversation in _CONVERSATIONS[:2]:
+        _real_workspace(tmp_path, short_task_root, conversation)
+
+    task_evict.sweep(short_task_root, keep=None,
+                     reserve=_never_reserved, release=_released)
+
+    assert (relay_repo / "refs" / "heads" / "cache" / "x").is_file(), (
+        "the sweep deleted the relay's refs — a branch named `cache/…` made its ref directory look "
+        "like one of this provider's workspaces")
+    assert _conversation_dirs(short_task_root) == [_CONVERSATIONS[1]], (
+        "the guard stopped the sweep collecting real workspaces too, so the bound is gone")
+
+
+def _git_init_bare(path):
+    """A bare repository shaped the way grid-src's `project_trunk` leaves one."""
+    path.mkdir(parents=True)
+    _git(path, "init", "--bare", "-q", ".")
+
+
 def test_eviction_skips_a_workspace_a_worker_is_holding_rather_than_waiting_for_it(
         tmp_path, short_task_root, monkeypatch):
     """Criterion 3, and the mechanism matters as much as the outcome.
