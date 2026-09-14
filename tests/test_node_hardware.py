@@ -33,6 +33,9 @@ def _stub(
     the OS, so a test that leaves it alone silently exercises whatever box runs the suite."""
     monkeypatch.setattr(node_hardware.platform, "system", lambda: system)
     monkeypatch.setattr(node_hardware, "_is_apple_silicon", lambda: apple_silicon)
+    # A Mac booted into Linux has its own branch (tests/test_apple_linux.py); pinned off here so
+    # these drive the machine they name rather than whatever runs the suite.
+    monkeypatch.setattr(node_hardware.apple_linux, "is_apple_silicon_linux", lambda: False)
     monkeypatch.setattr(node_hardware.apple, "describe_chip", lambda: chip)
     monkeypatch.setattr(node_hardware.gpu, "enumerate_gpus", lambda *a, **k: list(gpus))
     monkeypatch.setattr(node_hardware.gpu, "_sysctl_memsize_mb", lambda *a, **k: 196608.0)

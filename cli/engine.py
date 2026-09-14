@@ -7,6 +7,9 @@ from ._constants import VALID_MEDIA_BUNDLES
 
 
 def cmd_engine_install(args: argparse.Namespace) -> int:
+    version = getattr(args, "engine_version", None)
+    if version and args.name != "mlx-omarchy":
+        raise SystemExit("--version applies to `grid engine install mlx-omarchy` only; the others are pinned in Grid.")
     if args.name == "llama.cpp":
         return _install_llama_cpp(args)
     if args.name == "comfyui":
@@ -16,7 +19,18 @@ def cmd_engine_install(args: argparse.Namespace) -> int:
         print("Done. Now download the model files for what you want to make:")
         print("  grid engine pull image_generation     # also: z_image, image_editing, i2v")
         return 0
-    raise SystemExit(f"Unknown engine {args.name!r}. Choose 'llama.cpp' (text) or 'comfyui' (media).")
+    if args.name == "mlx-omarchy":
+        from shared.engine import mlx_omarchy
+
+        device = mlx_omarchy.install(version)
+        print(f"\n✓ {mlx_omarchy.ENGINE} {mlx_omarchy.installed_version() or ''} installed — "
+              f"it uses this Mac's GPU ({device}).")
+        print("\nNext:  grid join <grid> --serve mlx-community/Qwen2.5-7B-Instruct-4bit --engine mlx-omarchy")
+        return 0
+    raise SystemExit(
+        f"Unknown engine {args.name!r}. Choose 'llama.cpp' (text), 'comfyui' (media), "
+        "or 'mlx-omarchy' (text, Apple Silicon Mac running Linux)."
+    )
 
 
 def cmd_engine_pull(args: argparse.Namespace) -> int:
@@ -99,7 +113,7 @@ def _install_llama_cpp(args: argparse.Namespace) -> int:
         print("\nNext:  grid catalog")
         return 0
 
-    from shared.system import gpu
+    from shared.system import apple_linux, gpu
 
     gpus = gpu.enumerate_gpus()
     sm_required = (args.target_sm,) if args.target_sm else tuple(item.compute_cap_sm for item in gpus)
@@ -121,6 +135,14 @@ def _install_llama_cpp(args: argparse.Namespace) -> int:
     # with no toolchain, and is told plainly how to get CUDA instead. This used to be two pinned
     # entries with PLACEHOLDER urls that could never be filled, so the command simply dead-ended.
     kind = "vulkan" if gpus else "cpu"
+
+    # An M-series Mac booted into Linux (Omarchy M) has no nvidia-smi and so read as "no GPU" —
+    # and got the CPU build on a machine whose GPU runs the same Vulkan engine through Asahi's
+    # driver. Checked only once NVIDIA came back empty: no Mac carries an NVIDIA card, and the
+    # ordering keeps every other Linux box on the branch it was on.
+    if not gpus and apple_linux.is_apple_silicon_linux():
+        return _install_llama_cpp_on_apple_linux()
+
     installer.install_linux_prebuilt(kind)
     if not gpus:
         print("\n✓ Engine installed — no GPU detected, so it runs on the CPU.")
@@ -133,5 +155,30 @@ def _install_llama_cpp(args: argparse.Namespace) -> int:
     ready, _ = installer.cuda_build_readiness(sm_required[0].removeprefix("sm_"))
     faster = "  (a faster CUDA build is possible: add --from-source)" if ready else ""
     print(f"\n✓ Engine installed — it uses your GPUs via Vulkan.{faster}")
+    print("\nNext:  grid catalog")
+    return 0
+
+
+def _install_llama_cpp_on_apple_linux() -> int:
+    """`grid engine install llama.cpp` on an M-series Mac running Linux (Omarchy M).
+
+    The GPU is driven through Vulkan — Asahi's Honeykrisp driver, which Omarchy Mac installs as
+    `vulkan-asahi` — so the machine gets the same `linux-vulkan-arm64` build an NVIDIA box gets,
+    and is named the way a Mac is: by chip. With no driver in place the CPU build is installed
+    instead and the person is told the one command that changes that, rather than the bare "no
+    GPU detected" a box with no GPU gets — there IS one, and it is one package away.
+    """
+    from shared.engine import installer
+    from shared.system import apple_linux
+
+    _, chip = apple_linux.describe_chip()
+    what = chip or "Apple Silicon"
+    if apple_linux.vulkan_ready():
+        installer.install_linux_prebuilt("vulkan")
+        print(f"\n✓ Engine installed — it uses this Mac's GPU ({what}) via Vulkan.")
+    else:
+        installer.install_linux_prebuilt("cpu")
+        print(f"\n✓ Engine installed — {what}, but no Vulkan driver was found, so it runs on the CPU.")
+        print("  To use the GPU:  sudo pacman -S vulkan-asahi vulkan-icd-loader  and re-run this command.")
     print("\nNext:  grid catalog")
     return 0

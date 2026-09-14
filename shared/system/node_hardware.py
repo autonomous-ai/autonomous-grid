@@ -27,7 +27,7 @@ from __future__ import annotations
 import platform
 import subprocess
 
-from shared.system import apple, arch, gpu, host
+from shared.system import apple, apple_linux, arch, gpu, host
 
 # Filled by the first `describe()` and reused after — see the module docstring on why this is not
 # re-probed. `None` means "not probed yet", distinct from a probe that legitimately found nothing.
@@ -120,6 +120,22 @@ def _macos_gpu() -> dict | None:
     }
 
 
+def _apple_on_linux() -> dict:
+    """An M-series Mac booted into Linux (Omarchy M). Named by its CHIP like a Mac on macOS, because
+    it is the same machine — a person should see "Apple M1 Pro" on the grid page whichever OS they
+    booted, not "aarch64". The memory is the same unified pool, read from the device tree instead of
+    `hw.memsize`. `device_class` follows whether the GPU is actually reachable: with Asahi's Vulkan
+    driver in place the engine runs on it, without one the node genuinely serves from the CPU."""
+    model, chip = apple_linux.describe_chip()
+    mb = apple_linux.memory_total_mb()
+    return {
+        "device": model or "",
+        "chip": chip or None,
+        "memory_gb": int(round(mb / 1024)) if mb else None,
+        "device_class": "gpu" if apple_linux.vulkan_ready() else "server",
+    }
+
+
 def _cpu_only() -> dict:
     # `host.cpu_brand()`, not `platform.processor()`: the latter answers "i386" on macOS and
     # "x86_64" on Linux — the architecture, not the processor, and useless on a page whose job is to
@@ -138,6 +154,8 @@ def _probe() -> dict:
     if platform.system() == "Darwin":
         # An Intel Mac: no NVIDIA card exists for it, so ask macOS directly before falling back.
         return _macos_gpu() or _cpu_only()
+    if apple_linux.is_apple_silicon_linux():
+        return _apple_on_linux()
     return _nvidia() or _cpu_only()
 
 
