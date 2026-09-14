@@ -379,11 +379,14 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
                 print(f"Unregister failed (ignoring): {exc}", file=sys.stderr)
         if launcher is not None:  # stop only the built-in servers we launched (external engines stay up)
             for proc in launched:
+                # Named by the module that launched it: `launcher` is llama.cpp's for a .gguf and
+                # `mlx_omarchy` for an MLX model, and both expose `stop` and `ENGINE`.
+                engine_name = getattr(launcher, "ENGINE", "llama-server")
                 try:
                     launcher.stop(proc)
-                    print(f"Stopped llama-server (pid={proc.proc.pid}).")
+                    print(f"Stopped {engine_name} (pid={proc.proc.pid}).")
                 except Exception as exc:  # best-effort teardown; never mask the real exit
-                    print(f"Stopping llama-server failed (ignoring): {exc}", file=sys.stderr)
+                    print(f"Stopping {engine_name} failed (ignoring): {exc}", file=sys.stderr)
         for kind, proc in seat_procs:
             from local.cli_seat_runtime import stop_seat_server
 
@@ -567,6 +570,22 @@ def _bring_up_one(
             )
         print(f"Port {port} is in use{f' by {holder}' if holder else ''} — starting on {replacement} instead.")
         port = replacement
+    if spec.get("engine") == "mlx-omarchy":
+        # The other built-in: MLX on the Apple GPU under Linux. Its server is asked for the repo id
+        # it loaded — an alias reaching `mlx_lm.server` is taken for a Hugging Face repo to fetch —
+        # so upstream is the real name and the loop rewrites the alias, exactly as for an external
+        # Ollama. Nothing from the llama.cpp tuning group applies (no ctx/parallel/mmproj flags).
+        from shared.engine import mlx_omarchy
+
+        launched = mlx_omarchy.start(models[0], port=port)
+        print(f"Spawned {mlx_omarchy.ENGINE} pid={launched.proc.pid}, log={launched.log}")
+        try:
+            mlx_omarchy.wait_ready(launched)
+        except BaseException:
+            mlx_omarchy.stop(launched)
+            raise
+        return f"http://127.0.0.1:{port}/v1", launched, mlx_omarchy, advertised, list(models)
+
     launcher_mod.assert_supported_build()
     launched = launcher_mod.start_llm(
         models[0],

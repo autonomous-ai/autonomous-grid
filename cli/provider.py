@@ -29,6 +29,8 @@ from shared.handlers import HANDLERS
 from shared.models import api_catalog
 from local import runtime
 
+from ._constants import BUILTIN_TEXT_ENGINES, DEFAULT_TEXT_ENGINE
+
 
 # ---------------------------------------------------------------------------
 # grid join
@@ -72,6 +74,30 @@ def _reject_remote_only_flags(args: argparse.Namespace) -> None:
             f"`--api {kind}` only applies in remote mode. Switch with `grid mode remote` "
             f"(or pass --remote). Locally, --api supports: {', '.join(sorted(local_kinds))}."
         )
+
+
+def builtin_engine(args: argparse.Namespace) -> str:
+    """Which built-in text engine a ``--serve`` join launches — ``--engine``, else llama.cpp.
+
+    ``--engine`` is one flag with two meanings, decided by ``--serve``: with it, the built-in to
+    run; without it, the auto-detect filter it always was (``--kind ollama``). So this validates
+    only the first reading, and refuses the one combination that is neither — a built-in name with
+    nothing to serve — rather than letting ``--engine mlx-omarchy`` fall through to detection and
+    report "no detected engine of kind mlx-omarchy", which is true and useless.
+    """
+    kind = getattr(args, "kind", None)
+    if not getattr(args, "serve", None):
+        if kind in BUILTIN_TEXT_ENGINES:
+            raise SystemExit(f"--engine {kind} names a built-in engine; pair it with --serve <model>.")
+        return DEFAULT_TEXT_ENGINE
+    if kind is None:
+        return DEFAULT_TEXT_ENGINE
+    if kind not in BUILTIN_TEXT_ENGINES:
+        raise SystemExit(
+            f"--engine {kind!r} is not a built-in engine. With --serve, choose one of: "
+            f"{', '.join(BUILTIN_TEXT_ENGINES)}."
+        )
+    return kind
 
 
 def _apply_inline_aliases(args: argparse.Namespace) -> None:
@@ -133,7 +159,10 @@ def cmd_join(args: argparse.Namespace) -> int:
         return _spawn_engine(cfg, args, endpoint_url=args.at, models=list(args.models), media=args.media)
 
     if args.serve:
-        return _spawn_engine(cfg, args, endpoint_url=None, models=[args.serve], media=args.media)
+        return _spawn_engine(
+            cfg, args, endpoint_url=None, models=[args.serve], media=args.media,
+            engine=builtin_engine(args),
+        )
 
     if args.media and not args.models:
         return _spawn_engine(cfg, args, endpoint_url=None, models=[], media=True)
@@ -410,6 +439,7 @@ def _spawn_engine(
     api_kind: str | None = None,
     api_base_url: str | None = None,
     api_key: str | None = None,
+    engine: str = DEFAULT_TEXT_ENGINE,
 ) -> int:
     grid_id = cfg["grid_id"]
     engine_id = engine_id or getattr(args, "name", None) or f"engine-{uuid.uuid4().hex[:8]}"
@@ -423,6 +453,9 @@ def _spawn_engine(
         "pid": 0,
         "endpoint_url": endpoint_url,
         "models": models,
+        # Which built-in a `--serve` record launches. Absent for llama.cpp (the default and the
+        # only value older records could mean), so the key's absence and its default agree.
+        **({"engine": engine} if engine != DEFAULT_TEXT_ENGINE else {}),
         "advertise_as": list(getattr(args, "advertise_as", []) or []),
         "media": bool(media),
         "media_bundles": list(getattr(args, "bundles", []) or []),
@@ -794,6 +827,7 @@ def run_engine_from_record(grid_id: str, engine_id: str) -> int:
         models=list(record.get("models") or []),
         advertise_as=list(record.get("advertise_as") or []),
         endpoint_url=record.get("endpoint_url"),
+        engine=record.get("engine") or DEFAULT_TEXT_ENGINE,
         endpoint_port=record.get("endpoint_port", 8081),
         advertise_host=record.get("advertise_host"),
         enable_media=bool(record.get("media")),
@@ -882,7 +916,10 @@ def _run_engine(args: SimpleNamespace) -> int:
             endpoint_url = runtime.engine_endpoint_url(None, args.endpoint_port, args.advertise_host)
             if len(args.models) != 1:
                 raise SystemExit("Built-in engine launch supports exactly one model. Use --at for custom engines.")
-            from shared.engine import launcher as launcher_mod
+            if getattr(args, "engine", DEFAULT_TEXT_ENGINE) == "mlx-omarchy":
+                from shared.engine import mlx_omarchy as launcher_mod
+            else:
+                from shared.engine import launcher as launcher_mod
 
             launcher = launcher_mod
             if runtime.port_in_use(args.endpoint_port):
@@ -910,22 +947,29 @@ def _run_engine(args: SimpleNamespace) -> int:
                 run_records.update_record(
                     args.grid, args.name, endpoint_port=replacement, endpoint_url=endpoint_url
                 )
-            launcher.assert_supported_build()
-            launched = launcher.start_llm(
-                args.models[0],
-                port=args.endpoint_port,
-                ctx_size=args.ctx_size,
-                n_predict=args.n_predict,
-                parallel=args.parallel,
-                flash_attn=args.flash_attn,
-                mmproj=getattr(args, "mmproj", None),
-                temp=args.temp,
-                reasoning_budget=args.reasoning_budget,
-                alias=text_advertised_models[0],
-            )
-            print(f"Spawned llama-server pid={launched.proc.pid}, log={launched.log}")
-            launcher.wait_for_models(launched)
-            print(f"llama-server is ready on :{args.endpoint_port}")
+            if launcher.ENGINE == "mlx-omarchy":
+                # MLX on the Apple GPU under Linux. No alias: `mlx_lm.server` must be asked for
+                # the repo id it loaded, so the proxy rewrites the advertised name (below).
+                launched = launcher.start(args.models[0], port=args.endpoint_port)
+                print(f"Spawned {launcher.ENGINE} pid={launched.proc.pid}, log={launched.log}")
+                launcher.wait_ready(launched)
+            else:
+                launcher.assert_supported_build()
+                launched = launcher.start_llm(
+                    args.models[0],
+                    port=args.endpoint_port,
+                    ctx_size=args.ctx_size,
+                    n_predict=args.n_predict,
+                    parallel=args.parallel,
+                    flash_attn=args.flash_attn,
+                    mmproj=getattr(args, "mmproj", None),
+                    temp=args.temp,
+                    reasoning_budget=args.reasoning_budget,
+                    alias=text_advertised_models[0],
+                )
+                print(f"Spawned llama-server pid={launched.proc.pid}, log={launched.log}")
+                launcher.wait_for_models(launched)
+            print(f"{launcher.ENGINE} is ready on :{args.endpoint_port}")
             endpoint_url = _fixed_up_endpoint(endpoint_url, args, grid_url)
 
         advertised_models = list(text_advertised_models)
@@ -933,7 +977,7 @@ def _run_engine(args: SimpleNamespace) -> int:
         # answers to, so the local proxy can rewrite the model before forwarding: the real model for
         # an external `--at` engine, the alias itself for a built-in (llama-server is launched with
         # `--alias`, so it *is* the alias). Media models keep their fixed `comfyui:*` names — no rewrite.
-        if args.endpoint_url:
+        if args.endpoint_url or (launcher is not None and launcher.ENGINE == "mlx-omarchy"):
             upstream = dict(zip(text_advertised_models, args.models))
         else:
             upstream = {name: name for name in text_advertised_models}
@@ -993,7 +1037,7 @@ def _run_engine(args: SimpleNamespace) -> int:
                 print(f"Unregister failed (ignoring): {exc}", file=sys.stderr)
         if launched is not None and launcher is not None:
             launcher.stop(launched)
-            print(f"Stopped llama-server on :{args.endpoint_port}")
+            print(f"Stopped {launcher.ENGINE} on :{args.endpoint_port}")
         if media_proc is not None:
             from local import media_runtime
 

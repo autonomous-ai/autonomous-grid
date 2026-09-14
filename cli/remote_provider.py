@@ -31,6 +31,8 @@ from shared import logging_setup, orphan_sweep, paths, run_records
 from shared.filelock import file_lock
 from shared.models import api_catalog
 
+from ._constants import DEFAULT_TEXT_ENGINE
+
 if TYPE_CHECKING:  # runtime imports of remote.* stay lazy (see the module docstring)
     from remote.codex_oauth import CodexBundle
     from remote.codex_probe import CodexModel, SeatRejected
@@ -1425,8 +1427,15 @@ def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, obj
         if not args.models:
             raise SystemExit("--at requires at least one -m/--model naming what that engine serves.")
         return [{"endpoint_url": args.at, "models": list(args.models), "engine_label": None}], False
+    engine = provider.builtin_engine(args)  # validates --engine against --serve either way
     if args.serve:
-        return [{"endpoint_url": None, "models": [args.serve], "engine_label": None}], False
+        # `engine` names WHICH built-in the serve loop launches (`remote/serve._bring_up_one`); it
+        # rides the spec so a re-join inherits it with the model, and is absent for llama.cpp so
+        # every record written before this key existed still reads as the engine it always was.
+        spec: dict[str, object] = {"endpoint_url": None, "models": [args.serve], "engine_label": None}
+        if engine != DEFAULT_TEXT_ENGINE:
+            spec["engine"] = engine
+        return [spec], False
     if args.models:
         raise SystemExit("-m/--model names models for an engine; pair it with --at <url>, or use --serve <model>.")
     if getattr(args, "media", False):

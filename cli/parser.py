@@ -233,7 +233,11 @@ def _add_engines(sub) -> None:
     choose.add_argument("-m", "--model", action="append", dest="models", default=[],
                         help="A model an engine serves; pair with --at, or use --serve for the built-in.")
     choose.add_argument("--at", default=None, help="URL of an existing OpenAI-compatible engine.")
-    choose.add_argument("--serve", default=None, help="Start the built-in engine for this model, then join.")
+    choose.add_argument("--serve", default=None,
+                        help="Start the built-in engine for this model, then join. Which built-in: "
+                             "llama.cpp for a .gguf file (the default), or add --engine mlx-omarchy "
+                             "for an MLX model (a Hugging Face repo id such as "
+                             "mlx-community/Qwen2.5-7B-Instruct-4bit).")
     choose.add_argument("--media", action="store_true", help="Join this box as a media (ComfyUI) engine.")
     choose.add_argument(
         "--bundle",
@@ -245,7 +249,9 @@ def _add_engines(sub) -> None:
     )
     choose.add_argument("--all", action="store_true", help="Join every detected engine.")
     choose.add_argument("--kind", "--engine", dest="kind", default=None,
-                        help="Join only the detected engine of this kind (e.g. ollama, vllm).")
+                        help="With --serve: which built-in engine runs the model (llama.cpp, the "
+                             "default, or mlx-omarchy). Without --serve: join only the detected "
+                             "engine of this kind (e.g. ollama, vllm).")
     choose.add_argument(
         "--api",
         metavar="KIND",
@@ -1512,8 +1518,15 @@ def _add_engine_setup(sub) -> None:
     engine = sub.add_parser("engine", help="Set up built-in engines and list live ones")
     engine_sub = engine.add_subparsers(dest="subcommand", required=True)
 
-    install = engine_sub.add_parser("install", help="Install an engine: llama.cpp (text) or comfyui (media)")
-    install.add_argument("name", choices=("llama.cpp", "comfyui"))
+    install = engine_sub.add_parser(
+        "install",
+        help="Install an engine: llama.cpp (text), comfyui (media), "
+             "or mlx-omarchy (text, Apple Silicon Mac running Linux)",
+    )
+    install.add_argument("name", choices=("llama.cpp", "comfyui", "mlx-omarchy"))
+    install.add_argument("--version", dest="engine_version", default=None, metavar="TAG",
+                         help="mlx-omarchy only: install this upstream release (e.g. v0.4.2) "
+                              "instead of the latest one.")
     install.add_argument(
         "--from-source",
         action="store_true",

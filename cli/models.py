@@ -354,6 +354,17 @@ def _catalog_shipped(args: argparse.Namespace) -> int:
     print("Any other GGUF on Hugging Face works too — search huggingface.co, then just pull the")
     print("repository. It shows you the repo's quantized files and asks you to pick one:")
     print("  grid pull unsloth/gemma-3-4b-it-GGUF")
+    mlx = catalog.mlx_entries()
+    if mlx:
+        # A second section, never rows in the list above: that list is parsed positionally as
+        # `<pull spec> <path>` and these have no pull spec — the engine fetches the repo itself.
+        print()
+        print("This Mac can also serve MLX models with the mlx-omarchy engine — nothing to pull,")
+        print("the engine downloads the repo on first join:")
+        for entry in mlx:
+            print(catalog.format_mlx_entry(entry))
+        print("  grid engine install mlx-omarchy")
+        print(f"  grid join <grid> --serve {mlx[0].hf_repo} --engine mlx-omarchy")
     return 0
 
 

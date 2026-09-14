@@ -42,8 +42,51 @@ CATALOG: tuple[CatalogEntry, ...] = (
 )
 
 
+@dataclass(frozen=True)
+class MlxEntry:
+    """A model in MLX format, served by the mlx-omarchy engine — a Hugging Face repo, not a file.
+
+    Kept apart from :data:`CATALOG` on purpose: those rows are parsed POSITIONALLY by tools as
+    `<pull spec> <path>`, and an MLX model has no pull spec — `mlx_lm.server` downloads the repo
+    itself on first start, and `grid pull` (which fetches one GGUF file) has nothing to fetch.
+    """
+
+    hf_repo: str
+    min_memory_gb: int
+    notes: str = ""
+
+
+#: What to recommend on an Apple Silicon Mac running Linux, where mlx-omarchy is the second
+#: built-in. 4-bit `mlx-community` conversions, sized so the whole machine's unified memory is
+#: the budget the way the Apple Silicon GGUF rows above are.
+MLX_CATALOG: tuple[MlxEntry, ...] = (
+    MlxEntry("mlx-community/Qwen2.5-7B-Instruct-4bit", 16, "Qwen 2.5 7B, the one mlx-omarchy's own demo scales up to."),
+    MlxEntry("mlx-community/Qwen2.5-14B-Instruct-4bit", 24),
+    MlxEntry("mlx-community/Qwen2.5-32B-Instruct-4bit", 36),
+)
+
+
+def mlx_entries() -> tuple[MlxEntry, ...]:
+    """The MLX rows, on the one machine that can run them; empty everywhere else."""
+    from shared.system import apple_linux
+
+    return MLX_CATALOG if apple_linux.is_apple_silicon_linux() else ()
+
+
+def format_mlx_entry(entry: MlxEntry) -> str:
+    """One row: the join command's model argument, then the memory it needs."""
+    return f"  {entry.hf_repo}  (min {entry.min_memory_gb} GB unified memory)"
+
+
 def current_target() -> str | None:
     if platform.system() == "Darwin" and platform.machine() in ("arm64", "aarch64"):
+        return TARGET_APPLE_SILICON
+    # The same chip and the same unified memory when it boots Linux (Omarchy M), so the same
+    # entries fit it. Imported here rather than at the top: `shared.system` pulls in the whole
+    # device-info probe chain, which nothing else in this module needs.
+    from shared.system import apple_linux
+
+    if apple_linux.is_apple_silicon_linux():
         return TARGET_APPLE_SILICON
     if shutil.which("nvidia-smi"):
         return TARGET_NVIDIA

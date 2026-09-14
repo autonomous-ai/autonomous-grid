@@ -19,6 +19,10 @@ from shared.models import gguf
 
 MIN_LLAMA_SERVER_BUILD = 9240
 
+#: What this module launches, for teardown messages shared with the other built-in engine
+#: (`shared/engine/mlx_omarchy.py` carries the same attribute).
+ENGINE = "llama-server"
+
 
 @dataclass
 class LlamaProcess:

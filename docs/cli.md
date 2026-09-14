@@ -278,6 +278,7 @@ grid join [grid]                                      # auto-detect local engine
 grid join [grid] --all                                # join every detected engine
 grid join [grid] --at <url> -m <model>... [--name <id>]
 grid join [grid] --serve <model> [--name <id>]
+grid join [grid] --serve <hf-repo> --engine mlx-omarchy   # MLX model on an Apple Silicon Mac running Linux
 grid join [grid] --media [--bundle <bundle>]... [--name <id>]
 grid join [grid] --api <kind> [-m <model>...]         # join a third-party API engine (openai, codex, doggi)
 grid leave [grid] [--engine <sel>] [--all]            # <sel>: engine id, endpoint URL, served model, or :port fragment
@@ -309,6 +310,20 @@ Join them:
   grid join --all
   grid join --kind <kind>
 ```
+
+`--engine` has two readings, decided by `--serve`. With `--serve` it names the built-in engine
+that runs the model: `llama.cpp` (the default; the model is a `.gguf` file `grid pull` saved) or
+`mlx-omarchy` (the model is a Hugging Face repo in MLX format, e.g.
+`mlx-community/Qwen2.5-7B-Instruct-4bit`, which the engine downloads on first join). Without
+`--serve` it is the detection filter above (`--kind` is the same flag). `mlx-omarchy` installs and
+runs only on an Apple Silicon Mac booted into Linux (Omarchy M) with Asahi's Vulkan driver; on
+that machine llama.cpp's Vulkan build is still the default and runs the same GPU — the MLX engine
+is for MLX-format models, and for the Neural Engine once its driver lands upstream.
+
+Unlike llama.cpp, whose release Grid pins, `grid engine install mlx-omarchy` installs upstream's
+**latest** GitHub release each time it runs (verified against that release's `SHA256SUMS`), and
+re-running it upgrades an older install. `--version v0.4.2` pins one release for a machine that
+needs to stay put. Full walkthrough: [docs/mlx-omarchy-quickstart.md](mlx-omarchy-quickstart.md).
 
 Engine IDs are local names shown by `grid engine ls`, `grid info`, and `grid models --verbose`.
 `grid leave --engine <sel>` takes an exact engine id, or — tried in that order — an endpoint URL,
@@ -2592,6 +2607,7 @@ fixed-priority-chain decisions.
 ```
 grid engine install llama.cpp [--from-source] [--target-sm <sm_XX>]   # default text engine
 grid engine install comfyui                    # default media engine
+grid engine install mlx-omarchy [--version <tag>]   # second text engine: MLX on the Apple GPU under Linux (Omarchy M only)
 grid engine pull <bundle>                      # ComfyUI media bundle: image_generation, image_editing, i2v
 grid engine status [--port 8188]               # ComfyUI: installed, its venv, output dir, bundles, running?
 grid engine start [--port 8188] [--detach]     # start ComfyUI (blocks unless --detach)
