@@ -3547,6 +3547,9 @@ def _ineligible_reason(
                 f"requires {required_devices} GPU(s) with at least "
                 f"{model.min_gpu_memory_mb} MB each"
             )
+    topology_reason = _gpu_topology_violation(node, model)
+    if topology_reason:
+        return topology_reason
     if not set(model.required_tags).issubset(node.tags):
         return "required node tags are missing"
     if set(model.forbidden_tags).intersection(node.tags):
@@ -3588,6 +3591,58 @@ def _artifact_cached_residency(
         )
         and model.matches_artifact(residency)
     )
+
+
+def _gpu_topology_violation(node: NodeSnapshot, model: ModelProfile) -> str | None:
+    """Prove that one schedulable GPU subset satisfies advanced shard constraints.
+
+    Legacy count/VRAM profiles remain compatible with nodes that predate topology reporting.
+    Once a profile asks for link or NUMA guarantees, missing topology fails closed.
+    """
+
+    advanced = bool(
+        model.min_gpu_interconnect_gbps or model.require_single_numa_node or not model.allow_mig
+    )
+    if not advanced:
+        return None
+    if not node.gpu_devices:
+        return "GPU topology is unknown"
+    required = max(
+        model.min_gpu_count,
+        2 if model.min_gpu_interconnect_gbps else 1,
+        1 if model.min_gpu_memory_mb or model.require_single_numa_node else 0,
+    )
+    devices = tuple(
+        item
+        for item in node.gpu_devices
+        if (not model.min_gpu_memory_mb or item.memory_mb >= model.min_gpu_memory_mb)
+        and (model.allow_mig or not item.is_mig)
+    )
+    if len(devices) < required:
+        if not model.allow_mig and any(item.is_mig for item in node.gpu_devices):
+            return f"requires {required} non-MIG GPU(s)"
+        return f"GPU topology has no eligible {required}-device shard set"
+    links = {
+        frozenset((item.device_a, item.device_b)): item for item in node.gpu_links
+    }
+    for selected in combinations(devices, required):
+        if model.require_single_numa_node:
+            numa_nodes = {item.numa_node for item in selected}
+            if -1 in numa_nodes or len(numa_nodes) != 1:
+                continue
+        if model.min_gpu_interconnect_gbps and any(
+            (link := links.get(frozenset((first.device_id, second.device_id)))) is None
+            or link.bandwidth_gbps < model.min_gpu_interconnect_gbps
+            for first, second in combinations(selected, 2)
+        ):
+            continue
+        return None
+    requirements: list[str] = []
+    if model.min_gpu_interconnect_gbps:
+        requirements.append(f"{model.min_gpu_interconnect_gbps:g} GB/s all-peer links")
+    if model.require_single_numa_node:
+        requirements.append("one known NUMA node")
+    return "no GPU shard set satisfies " + " and ".join(requirements)
 
 
 def _artifact_load_disk_mb(node: NodeSnapshot, model: ModelProfile) -> int:
@@ -4189,6 +4244,16 @@ def _candidate_score(
         score += 20_000.0 - min(warm_seconds, 1_000_000_000_000.0) * 20.0
         reasons.append("weights cached locally")
     else:
+        if model.artifact_size_mb and node.transfer_bandwidth_mbps:
+            transfer_seconds = (
+                model.artifact_size_mb
+                * 8.0
+                / node.transfer_bandwidth_mbps
+                * (1.0 + node.active_transfers)
+            )
+            if transfer_seconds > artifact_load_seconds:
+                artifact_load_seconds = transfer_seconds
+                reasons.append("transfer-bandwidth cold-load estimate")
         cold_seconds = artifact_load_seconds + warm_seconds
         score -= min(cold_seconds, 1_000_000_000_000.0) * 20.0
         reasons.append("cold load required")
@@ -4337,6 +4402,12 @@ def _candidate_score(
             * performance_value_weight
         )
         reasons.append("hardware performance estimate")
+    if hardware_weight and model.min_gpu_count > 1 and node.gpu_links:
+        # A fast all-peer fabric improves tensor-parallel collectives. The hard compatibility gate
+        # above proves the required clique; this small prior only breaks otherwise cold ties.
+        fabric_bandwidth = max(item.bandwidth_gbps for item in node.gpu_links)
+        score += min(fabric_bandwidth, 2_000.0) * 5.0 * hardware_weight
+        reasons.append("GPU fabric bandwidth")
     if measured_latency_ms:
         latency_weight = model_latency_weight if model_performance is not None else 1.0
         score -= (

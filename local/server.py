@@ -2524,6 +2524,11 @@ def _node_allocator_safety_digest(node: Node) -> str:
             "allowed_data_tiers",
             "tags",
             "model_memory_mb",
+            "gpu_count",
+            "gpu_memory_mb",
+            "gpu_devices",
+            "gpu_links",
+            "transfer_bandwidth_mbps",
         )
         if key in resources
     }
@@ -2974,6 +2979,22 @@ def _allocator_snapshots(app: FastAPI) -> tuple[NodeSnapshot, ...]:
                         ),
                     ),
                     gpu_memory_mb=gpu_memory_mb,
+                    gpu_devices=tuple(
+                        item
+                        for item in resources.get("gpu_devices") or ()
+                        if isinstance(item, Mapping)
+                    ),
+                    gpu_links=tuple(
+                        item
+                        for item in resources.get("gpu_links") or ()
+                        if isinstance(item, Mapping)
+                    ),
+                    transfer_bandwidth_mbps=_nonnegative_float(
+                        resources.get("transfer_bandwidth_mbps")
+                    ),
+                    active_transfers=_first_nonnegative_int(
+                        resources.get("active_transfers")
+                    ),
                     disk_capacity_mb=_optional_nonnegative_int(
                         resources.get("disk_capacity_mb")
                     ),
@@ -3193,6 +3214,18 @@ def _merge_allocator_hosts(
                     (member.gpu_memory_mb for member in members),
                     key=lambda values: (len(values), sum(values), values),
                 ),
+                gpu_devices=max(
+                    (member.gpu_devices for member in members),
+                    key=len,
+                ),
+                gpu_links=max(
+                    (member.gpu_links for member in members),
+                    key=len,
+                ),
+                transfer_bandwidth_mbps=max(
+                    member.transfer_bandwidth_mbps for member in members
+                ),
+                active_transfers=max(member.active_transfers for member in members),
                 disk_capacity_mb=max(
                     (
                         member.disk_capacity_mb
