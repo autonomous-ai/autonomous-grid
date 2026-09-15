@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 
@@ -16,8 +17,10 @@ DOWNLOAD_ATTEMPTS = 8
 DOWNLOAD_READ_TIMEOUT_SECONDS = 30.0
 
 
-def hf_url(repo: str, quantized_file: str) -> str:
-    return f"{HF_BASE}/{repo}/resolve/main/{quantized_file}"
+def hf_url(repo: str, quantized_file: str, revision: str = "main") -> str:
+    """An exact Hub resolve URL; callers may pin a full commit instead of following ``main``."""
+
+    return f"{HF_BASE}/{repo}/resolve/{quote(revision, safe='')}/{quantized_file}"
 
 
 DEFAULT_QUANT = "Q4_K_M"
@@ -144,6 +147,7 @@ def download(
     out: Path | None = None,
     on_progress=None,
     max_bytes: int | None = None,
+    revision: str = "main",
 ) -> Path:
     if max_bytes is not None and (
         isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0
@@ -162,7 +166,7 @@ def download(
         return target
     part = target.with_suffix(target.suffix + ".part")
     target.parent.mkdir(parents=True, exist_ok=True)
-    url = hf_url(repo, quantized_file)
+    url = hf_url(repo, quantized_file, revision)
 
     have = part.stat().st_size if part.exists() else 0
     if max_bytes is not None and have > max_bytes:

@@ -634,8 +634,8 @@ failed destructive actions remain backoff-protected.
 
 `load` never infers a mutable download source from a display name. It verifies an existing GGUF, or
 the authenticated profile may provide all three autonomous-transfer fields: an exact
-`hf://owner/repo/path.gguf` source, an immutable SHA-256, and a maximum artifact size. The llama.cpp
-adapter downloads under an artifact-addressed staging name, resumes bounded partial transfers,
+`hf://owner/repo[@commit]/path.gguf` source, an immutable SHA-256, and a maximum artifact size. The
+llama.cpp adapter downloads under an artifact-addressed staging name, resumes bounded partial transfers,
 rejects streams above the size ceiling, hashes the complete file, and atomically publishes it only
 after verification. A wrong digest never replaces the prior cache. When a profile declares
 `artifact_sha256`, both `load` and `warm` hash the exact cached file before process launch. A
@@ -867,7 +867,7 @@ grid --local allocator model set <model.gguf> \
   --grid allocator-control \
   --memory-mb <resident-mb> \
   --artifact-sha256 <64-hex-digest> \
-  --artifact-source hf://owner/repo/path/to/model.gguf \
+  --artifact-source hf://owner/repo@<commit>/path/to/model.gguf \
   --artifact-size-mb <download-mb> \
   --runtime llama.cpp \
   --min-replicas 0 \
@@ -935,7 +935,7 @@ budget for one replica, not the file's compressed size:
 grid allocator model set <model.gguf> \
   --memory-mb 12000 \
   --artifact-sha256 <64-hex-digest> \
-  --artifact-source hf://owner/repo/path/to/model.gguf \
+  --artifact-source hf://owner/repo@<commit>/path/to/model.gguf \
   --artifact-size-mb 9000 \
   --workload-score coding=1 \
   --workload-score research=.8 \
@@ -978,6 +978,52 @@ multi-model engine's shared node-wide limit is never credited independently to e
 latency, or error pressure still requests at least one replica beyond the current ready set.
 If `--runtime` is omitted, it defaults to `llama.cpp`. Once the flag is present, only the listed
 runtimes are eligible.
+
+### Open-weight model scout
+
+The allocator can continuously look for newer open-weight releases without treating a trending
+name as proof that it is better. The scout queries public Hugging Face metadata, permits only
+configured publishers and licenses, resolves a full repository commit, obtains the LFS SHA-256 for
+an exact non-sharded GGUF (or a deterministic immutable vLLM snapshot identity), and rejects an
+artifact whose size is unknown. It downloads no model bytes during discovery.
+
+Run one discovery cycle against the controller's current node inventory:
+
+```bash
+grid --local allocator scout run --grid allocator-control --search coder
+grid --local allocator scout status --grid allocator-control
+```
+
+Each proposal explains whether any accepting node has the runtime, free memory, and free disk to
+host it, and identifies configured models serving an overlapping workload for later comparison.
+Popularity and release recency affect only which candidates are inspected first. They never count
+as quality evidence.
+
+Qualification is deliberately a separate real-inference step:
+
+```bash
+grid --local allocator scout benchmark <proposal-id> \
+  --grid allocator-control \
+  --inference-grid <remote-grid> \
+  --deploy-canary
+```
+
+The command creates an immutable `min_replicas=0`, `max_replicas=1` profile, waits for the allocator
+to place and warm it, sends the bounded coding/research/general cases through the normal Grid route,
+and records the outputs' quality, error, latency, and size through the authenticated evaluation API.
+It never drains or deletes an incumbent. The scout state is written owner-only below
+`~/.grid/allocator-scout/`, so discovery can be reviewed or resumed without trusting terminal text.
+
+For periodic discovery, run:
+
+```bash
+grid --local allocator scout watch --grid allocator-control --interval 21600
+```
+
+`watch` refreshes proposals every six hours and remains discovery-only. Canary deployment is
+explicit because it consumes real fleet capacity. A production replacement should require the
+candidate's recorded benchmark evidence plus a warm-before-drain allocator plan; mutable `main`
+revisions are never emitted by the scout.
 
 Use the three modes as a rollout sequence:
 
