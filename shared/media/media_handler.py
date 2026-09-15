@@ -257,7 +257,7 @@ class MediaHandler:
             completed_node_steps = 0
             last_node = None
             last_max = 0
-            ws_url = self.comfyui_url.replace("http://", "ws://").replace("/api", "/ws")
+            ws_url = self._websocket_url(self.comfyui_url)
             try:
                 import websocket
                 ws = websocket.create_connection(ws_url, timeout=600)
@@ -353,6 +353,17 @@ class MediaHandler:
         yield "data: [DONE]"
         self._cleanup_files(collected)
 
+    @staticmethod
+    def _websocket_url(comfyui_url: str) -> str:
+        base = comfyui_url.rstrip("/")
+        if base.endswith("/api"):
+            base = base[:-4]
+        if base.startswith("https://"):
+            base = f"wss://{base[8:]}"
+        elif base.startswith("http://"):
+            base = f"ws://{base[7:]}"
+        return f"{base}/ws"
+
     def _get_output_dir(self) -> str:
         """Locate ComfyUI's output directory.
 
@@ -370,8 +381,8 @@ class MediaHandler:
         except Exception:
             pass
         candidates = [
-            str(paths.home() / "public" / "temp_comfy_output"),
             str(paths.home() / "services" / "ComfyUI" / "output"),
+            str(paths.home() / "public" / "temp_comfy_output"),
         ]
         for path in candidates:
             if os.path.isdir(path):

@@ -12,6 +12,7 @@ from shared.allocator.orchestrator import (
     EngineOrchestratorBackend,
     OllamaBackend,
     _parse_hf_snapshot_source,
+    _vllm_process_env,
 )
 from shared.allocator.runtime import ManagedModelRuntime, RuntimeHandle
 
@@ -172,8 +173,29 @@ def test_ollama_start_failure_never_returns_a_routable_handle() -> None:
     backend.client.close()
     backend.client = httpx.Client(transport=httpx.MockTransport(handler))
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(RuntimeError, match="Ollama warm failed with HTTP 500"):
         backend.start("broken", 18_100)
+
+
+def test_ollama_fetch_never_replaces_a_preexisting_different_digest() -> None:
+    existing = "a" * 64
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "tiny", "digest": existing, "size": 4}]},
+            )
+        raise AssertionError(request.url)
+
+    backend = OllamaBackend()
+    backend.client.close()
+    backend.client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError, match="refusing to replace"):
+        backend.fetch_artifact("tiny", "ollama://tiny", "b" * 64, 10)
+    assert calls == ["/api/tags", "/api/tags"]
 
 
 def test_comfyui_advertises_only_configured_bundle_and_unloads_native_memory() -> None:
@@ -212,3 +234,23 @@ def test_vllm_snapshot_sources_require_full_commit_identity() -> None:
         _parse_hf_snapshot_source("hf://Qwen/Qwen3.8@main")
     with pytest.raises(RuntimeError, match="full immutable"):
         _parse_hf_snapshot_source("hf://Qwen/Qwen3.8@abc123")
+
+
+def test_vllm_environment_activates_wheel_packaged_cuda_compiler(
+    tmp_path, monkeypatch
+) -> None:
+    binary = tmp_path / "bin" / "vllm"
+    binary.parent.mkdir(parents=True)
+    binary.touch()
+    cuda_bin = tmp_path / "lib" / "python3.12" / "site-packages" / "nvidia" / "cu13" / "bin"
+    cuda_bin.mkdir(parents=True)
+    (cuda_bin / "nvcc").touch()
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    env = _vllm_process_env(binary, use_flashinfer_sampler=False)
+
+    assert env["CUDA_HOME"] == str(cuda_bin.parent)
+    assert env["PATH"].split(":", 1)[0] == str(cuda_bin)
+    assert str(binary.parent) in env["PATH"].split(":")
+    assert env["VLLM_USE_FLASHINFER_SAMPLER"] == "0"
