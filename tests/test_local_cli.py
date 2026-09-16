@@ -3564,10 +3564,11 @@ def test_launcher_start_llm_adds_alias_flag(monkeypatch, tmp_path):
     launched = launcher.start_llm("your-model.gguf", port=8081, alias="your-model", mmproj=None)
 
     assert launched.port == 8081
-    assert calls["cmd"][:5] == [
+    assert calls["cmd"][:6] == [
         "/usr/local/bin/llama-server",
         "-m",
         str(model_path),
+        "--jinja",
         "--alias",
         "your-model",
     ]
@@ -3592,17 +3593,25 @@ def _launch_argv(monkeypatch, tmp_path, **kwargs):
 
 
 def test_start_llm_leaves_the_fit_flags_unset_by_default(monkeypatch, tmp_path):
-    """The launch must NOT name a context size, a flash-attn mode, or a jinja toggle.
+    """The launch must NOT name a context size, a flash-attn mode, or a projector.
 
     llama.cpp fits the context to free device memory on its own, but only for arguments still
     holding their default — naming one takes that dimension away from the fitter. The old launch
     hardcoded `--ctx-size 128000` and so allocated a 128k KV cache for a 4k model.
     """
     cmd = _launch_argv(monkeypatch, tmp_path)
-    for flag in ("--ctx-size", "--flash-attn", "--jinja", "--mmproj"):
+    for flag in ("--ctx-size", "--flash-attn", "--mmproj"):
         assert flag not in cmd, f"{flag} must stay unset so llama.cpp can fit the model itself"
     # Still ours to impose: one slot, and never silently drop the head of a conversation.
     assert "--parallel" in cmd and "--no-context-shift" in cmd
+
+
+def test_start_llm_always_passes_jinja(monkeypatch, tmp_path):
+    # Not a tuning knob, unlike the flags above — always on so llama.cpp renders the GGUF's own
+    # chat template through a real Jinja2 engine instead of heuristically matching it against its
+    # small set of hardcoded templates (which silently misrenders tool-calling / reasoning models).
+    cmd = _launch_argv(monkeypatch, tmp_path)
+    assert "--jinja" in cmd
 
 
 def test_start_llm_passes_through_an_operator_override(monkeypatch, tmp_path):
