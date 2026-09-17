@@ -216,6 +216,13 @@ def start_llm(
     log_fh.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} grid starting llm on :{port} ===\n")
 
     cmd = [llama_server_path(), "-m", str(model_path)]
+    # Always on, not a tuning knob: without it, llama.cpp matches the model's chat_template
+    # against its own small set of hardcoded templates by heuristic, which silently misrenders
+    # anything that doesn't match — tool-calling templates and reasoning start/end tokens on newer
+    # models (Qwen3, DeepSeek, …) in particular. `--jinja` runs the GGUF's own embedded template
+    # through a real Jinja2 engine (llama.cpp's bundled `minja`) instead, so the model gets the
+    # exact prompt its template author wrote.
+    cmd.append("--jinja")
     if alias:
         cmd.extend(["--alias", alias])
     # Vision turns itself on. A vision GGUF is text-only until its projector is loaded, and the
