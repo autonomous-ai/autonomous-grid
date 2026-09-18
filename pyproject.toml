@@ -28,6 +28,11 @@ dev = [
     # have numpy ran these, CI did not, and the whole gap hid in that difference.
     "numpy>=1.26",
     "safetensors>=0.4",
+    # pairing_relay/ (host_proof.py and its tests) does X25519 + HKDF + ChaCha20-Poly1305. The
+    # relay is its own service, not part of the packaged CLI, so this lives here rather than in
+    # `dependencies`. It landed undeclared once: the author's machine had it, CI did not, and
+    # the whole suite stopped at collection — 3562 tests never ran.
+    "cryptography>=42",
 ]
 # The RL training plane (`grid train`) — the torch trainer wants a CUDA box; Apple Silicon runs
 # the same GRPO loop on MLX (`--backend mlx`). The rest of the CLI never needs
