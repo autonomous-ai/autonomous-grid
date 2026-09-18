@@ -19,7 +19,7 @@ stack, small enough to read in one sitting.
 
 ```sh
 python -m pairing_relay --port 8787
-pytest pairing_relay          # 37 tests, ~2.5s, no network
+pytest pairing_relay          # 42 tests, ~4s, no network
 ```
 
 To see the whole thing work — a desktop proving a host id, a phone dialling in
