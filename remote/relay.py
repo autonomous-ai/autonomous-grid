@@ -566,8 +566,9 @@ def stream_task_events(
 # framework 404. Its own sentence rather than `_OLD_RELAY`, for `_OLD_RELAY_NO_CANCEL`'s reason, and
 # it names what still works — following one turn at a time is the whole of what that relay can do.
 _OLD_RELAY_NO_STREAM = (
-    "This grid's relay cannot follow a whole conversation — it only knows how to follow one turn at "
-    "a time. Ask its operator to update it. In the meantime, watch a single turn with:\n"
+    "This grid's relay cannot follow a whole conversation — either it only knows how to follow one "
+    "turn at a time, or this grid has projects and tasks switched off. Ask its operator. In the "
+    "meantime, watch a single turn with:\n"
     "  grid task follow <turn-id>"
 )
 
@@ -964,8 +965,9 @@ def create_task(
 # Every project endpoint arrived together (ADR 0033 issue 10), so a relay missing one is missing
 # all of them, and one sentence covers the lot.
 _OLD_RELAY = (
-    "This grid's relay does not have projects yet — it predates project membership. "
-    "Ask its operator to update it, or use a grid that has."
+    "This grid does not serve projects — either its relay predates project membership, or this "
+    "grid has projects and tasks switched off. From here the two answer the same. Ask its operator "
+    "which, or use a grid that serves them."
 )
 
 
@@ -999,8 +1001,8 @@ _DOWNLOAD_TIMEOUT = 900.0
 # would send somebody to check a feature that is working perfectly. The same distinction
 # `_OLD_RELAY_NO_CANCEL` draws, for the same reason.
 _OLD_RELAY_NO_ARCHIVE = (
-    "This grid's relay cannot archive or delete a project — it predates those routes. Ask its "
-    "operator to update it. Nothing was changed."
+    "This grid's relay cannot archive or delete a project — either it predates those routes, or "
+    "this grid has projects and tasks switched off. Ask its operator. Nothing was changed."
 )
 
 
@@ -1049,9 +1051,10 @@ def delete_project(signaling_url: str, access_token: str, project_id: str) -> di
 # `private` was asking for. Saying so is the difference between "your project is exposed and you
 # cannot fix it" and "it is already as private as this relay can make it".
 _OLD_RELAY_NO_VISIBILITY = (
-    "This grid's relay cannot change a project's visibility — it predates that route. On a relay "
-    "this old a project is reachable by its members alone, which is what `private` asks for, so "
-    "nothing is exposed. Ask its operator to update it if you want to share projects grid-wide."
+    "This grid's relay cannot change a project's visibility — either it predates that route, or "
+    "this grid has projects and tasks switched off. Either way a project is reachable by its "
+    "members alone, which is what `private` asks for, so nothing is exposed. Ask its operator if "
+    "you want to share projects grid-wide."
 )
 
 
@@ -1086,10 +1089,10 @@ def set_project_visibility(signaling_url: str, access_token: str, project_id: st
 # empty project — the silent fork this whole command exists to prevent. So the sentence names the id
 # as the thing that still works.
 _OLD_RELAY_NO_RENAME = (
-    "This grid's relay cannot rename a project — it predates that route. Ask its operator to "
-    "update it. Nothing was changed, and the project's id still reaches it. Do NOT use "
-    "`grid project create` with the new name: that creates a second, empty project and leaves your "
-    "work in this one."
+    "This grid's relay cannot rename a project — either it predates that route, or this grid has "
+    "projects and tasks switched off. Ask its operator. Nothing was changed and the project still "
+    "exists under its id. Do NOT use `grid project create` with the new name: that creates a "
+    "second, empty project and leaves your work in this one."
 )
 
 
@@ -1127,9 +1130,10 @@ def rename_project(signaling_url: str, access_token: str, project_id: str,
 # the only way off a project is the one this command was written to replace, which is somebody else
 # running `grid project member remove`. Saying so is what stops a member assuming they are out.
 _OLD_RELAY_NO_LEAVE = (
-    "This grid's relay cannot take you off a project — it predates that route. Nothing was "
-    "changed and you are still a member. Ask its operator to update it, or ask the project's "
-    "owner to remove you with `grid project member remove`."
+    "This grid's relay cannot take you off a project — either it predates that route, or this "
+    "grid has projects and tasks switched off. Nothing was changed and you are still a member. Ask "
+    "its operator; if this grid serves projects at all, its owner can remove you with "
+    "`grid project member remove`."
 )
 
 
@@ -1370,8 +1374,9 @@ def commit_project(signaling_url: str, access_token: str, conversation_id: str, 
 # (`_OLD_RELAY_NO_CANCEL`'s reasoning). Naming the older route would be worse than saying nothing —
 # it still exists there, and using it would put the files on a branch nothing in this release reads.
 _OLD_RELAY_NO_COMMIT = (
-    "This grid's relay cannot commit into a conversation — it predates conversation branches. Ask "
-    "its operator to update it. Nothing was committed."
+    "This grid's relay cannot commit into a conversation — either it predates conversation "
+    "branches, or this grid has projects and tasks switched off. Ask its operator. Nothing was "
+    "committed."
 )
 
 
@@ -1380,8 +1385,9 @@ _OLD_RELAY_NO_COMMIT = (
 # `_OLD_RELAY`: that one says the relay has no projects, which is both wrong here and would send
 # somebody to check a feature that is working perfectly.
 _OLD_RELAY_NO_CANCEL = (
-    "This grid's relay cannot cancel a task — it predates the cancel route. Ask its operator to "
-    "update it. The task will still end at its own deadline."
+    "This grid's relay cannot cancel a task — either it predates the cancel route, or this grid "
+    "has projects and tasks switched off. Ask its operator. The task will still end at its own "
+    "deadline."
 )
 
 
@@ -1413,8 +1419,9 @@ def cancel_task(signaling_url: str, access_token: str, task_id: str) -> dict[str
 # that one says the relay has no projects, which is plainly false of a relay that has been serving
 # `grid task create` — and it says what did NOT happen, as all four of its siblings do.
 _OLD_RELAY_NO_SEND = (
-    "This grid's relay cannot continue a conversation — every message it accepts starts a new one. "
-    "Ask its operator to update it. Nothing was sent; the conversation is unchanged."
+    "This grid's relay cannot continue a conversation — either every message it accepts starts a "
+    "new one, or this grid has projects and tasks switched off. Ask its operator. Nothing was "
+    "sent; the conversation is unchanged."
 )
 
 
@@ -1427,8 +1434,9 @@ _OLD_RELAY_NO_SEND = (
 # more work than usual: undo's whole subject is a change that is already in the project, so somebody
 # told only "this did not work" would reasonably go and look for a half-undone one. There is no half.
 _OLD_RELAY_NO_UNDO = (
-    "This grid's relay cannot undo a change — it predates the undo route. Ask its operator to "
-    "update it. Nothing was changed; the project is exactly as it was."
+    "This grid's relay cannot undo a change — either it predates the undo route, or this grid has "
+    "projects and tasks switched off. Ask its operator. Nothing was changed; the project is "
+    "exactly as it was."
 )
 
 
@@ -1504,9 +1512,10 @@ def send_turn(
 # the whole point of the slice is the person who CANNOT use it. `clone` is offered as the answer for
 # a reader who happens to have git, not as the answer.
 _OLD_RELAY_NO_READS = (
-    "This grid's relay cannot show a project's files over the network — it predates that. Ask its "
-    "operator to update it. If you have git on this machine, `grid project clone <project-id>` "
-    "still gets you a copy in the meantime."
+    "This grid's relay cannot show a project's files over the network — either it predates that, "
+    "or this grid has projects and tasks switched off. Ask its operator. If it is only the reads "
+    "that are missing, `grid project clone <project-id>` still gets you a copy; a grid with "
+    "projects switched off refuses the clone too."
 )
 
 

@@ -882,8 +882,9 @@ def test_the_commit_route_this_cli_posts_to_is_the_one_the_relay_serves():
     **200** for a commit that landed on a different branch. A new PATH answers a bare 404 instead.
 
     Which makes a typo here worse than usual: this CLI would post to a path no relay serves, get
-    FastAPI's bare 404, and `_OLD_RELAY_NO_COMMIT` would turn it into "ask your operator to update
-    the relay" about a relay that is perfectly up to date.
+    FastAPI's bare 404, and `_OLD_RELAY_NO_COMMIT` would turn it into "either the relay predates
+    conversation branches, or projects are switched off — ask its operator" about a relay that is
+    perfectly up to date and serving them.
     """
     from remote import relay
 
@@ -929,9 +930,9 @@ def test_promote_and_integrate_are_gone_from_BOTH_repositories():
 
     ⚠️ **The failure this catches is a half-deletion, and it is silent in the direction that
     matters.** A CLI that kept `grid project promote` against a relay that dropped the route gets
-    FastAPI's bare 404, which `_OLD_RELAY` renders as *"this grid's relay does not have projects
-    yet — ask its operator to update it"* — sending a member to chase an operator over a command
-    this repository was supposed to have removed. Keeping the relay half instead is the milder
+    FastAPI's bare 404, which `_OLD_RELAY` renders as *"this grid does not serve projects — either
+    its relay predates project membership, or … switched off. Ask its operator which"* — sending a
+    member to chase an operator over a command this repository was supposed to have removed. Keeping the relay half instead is the milder
     failure and is still wrong: it leaves a second, unreachable writer of `main`.
     """
     from remote import relay
