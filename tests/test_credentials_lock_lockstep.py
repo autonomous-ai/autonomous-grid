@@ -258,3 +258,120 @@ def test_the_cli_asks_before_every_exchange_that_spends_one():
         f"grid-src guards {sorted(guarded)}, this pin expects {sorted(GUARDED_CLI_EXCHANGES)}. "
         f"Every exchange grid-apis answers by rotating must ask BEFORE the round trip — refusing "
         f"afterwards leaves the dead token on disk, which is the loss the guard exists to prevent")
+
+
+# --- what the critical section is allowed to contain --------------------------------------------
+
+#: Every call a locked read-modify-write of the credential store may make, across all three
+#: repositories, as `ast.unparse` spells it.
+#:
+#: ⚠️ **This list is what makes "no timeout" a safe rule rather than a hope.** `file_lock` blocks
+#: with no deadline, and the argument for that is sound only in one direction: `flock` is released by
+#: the kernel when a holder EXITS, so a crash never strands it — but a holder that stops making
+#: progress while still alive holds it forever, and nothing rescues the waiter. What keeps that from
+#: mattering is that every critical section is a few milliseconds of local filesystem work: no
+#: network round trip, no subprocess, no second lock, no wait on another thread. That is a property
+#: of today's code and nothing but this test stops tomorrow's edit from ending it — `cmd_sync` was
+#: already one such edit away, and for a while it WAS one (its merge used to span an HTTP fetch).
+#:
+#: So the list is deliberately EXACT rather than a denylist of dangerous-looking names. A denylist
+#: has to guess the next way somebody blocks; this way, anything new inside the block fails until a
+#: person writes it down — which is the moment to ask whether it belongs inside the lock at all.
+#: Adding a local helper here is a one-line edit. Adding `client.post` is not, and should not be.
+#:
+#: ⚠️ Normalising these to their last attribute (`get`, `post`, …) would shorten the list and put a
+#: hole in it: `httpx.get` would then be indistinguishable from `data.get`.
+CRITICAL_SECTION_CALLS = frozenset({
+    # raising the refusal itself
+    "SystemExit",
+    # the unlocked load/save primitives the lock exists to wrap, by each repo's spelling
+    "load_credentials", "save_credentials",
+    "config.load_credentials", "config.save_credentials",
+    "credentials.load_credentials", "credentials.save_credentials",
+    "_load_creds_preserving", "_atomic_write_toml",
+    # local bookkeeping on data already in hand
+    "_reject_none", "control_plane_self_url",
+    "api_url.rstrip", "current.get", "data.get", "data.pop", "n.get", "net.get",
+    "networks.append", "record.get", "len", "list", "sorted",
+    # the logout, which is a writer too
+    "paths.credentials_file", "paths.credentials_file().unlink",
+})
+
+#: How many locked blocks each repository has today. A **minimum**, and the asymmetry is the point:
+#: adding a locked writer is free, deleting one is a regression this catches. Zero is never the
+#: answer — a scan that finds nothing has been defeated by a rename, and would otherwise pass.
+LOCKED_BLOCKS = {"grid-src": 3, "grid-apis": 1, "autonomous-grid": 7}
+
+#: Directories that hold no production critical section. `tests` is here because a test may
+#: legitimately take the lock and then do anything at all inside it.
+_SKIP_DIRS = frozenset({".venv", "tests", "build", "dist", ".git", "__pycache__", "node_modules"})
+
+
+def _production_sources(root: pathlib.Path):
+    for path in sorted(root.rglob("*.py")):
+        if not any(part in _SKIP_DIRS for part in path.relative_to(root).parts):
+            yield path
+
+
+def _is_credentials_lock(item) -> bool:
+    """Whether a `with` item is one of the three repositories' credential locks.
+
+    Matched on the call's NAME ending in `credentials_lock`, so it catches grid-apis' private
+    `_credentials_lock` and both the bare and module-qualified spellings of the other two without
+    a per-repo table that could fall behind a rename.
+    """
+    expr = item.context_expr
+    if not isinstance(expr, ast.Call):
+        return False
+    name = getattr(expr.func, "attr", None) or getattr(expr.func, "id", "") or ""
+    return name.endswith("credentials_lock")
+
+
+def _repo_root(repo: str):
+    if repo == "autonomous-grid":
+        return pathlib.Path(__file__).resolve().parent.parent
+    root = grid_src_root() if repo == "grid-src" else grid_apis_root()
+    if root is None:
+        pytest.skip(f"{repo} worktree is not beside this one; the lockstep cannot be checked here")
+    return root
+
+
+@pytest.mark.parametrize("repo", ["grid-src", "grid-apis", "autonomous-grid"])
+def test_no_critical_section_can_block_on_anything_but_the_local_disk(repo):
+    """⚠️ The invariant the no-timeout rule rests on, checked instead of assumed.
+
+    `autonomous-grid`'s case needs no sibling, so that one runs in CI; the other two skip there, as
+    every cross-repo assertion in this repository does.
+    """
+    root = _repo_root(repo)
+    blocks = 0
+    offenders = []
+    for path in _production_sources(root):
+        try:
+            tree = ast.parse(path.read_text())
+        except (SyntaxError, UnicodeDecodeError):  # a fixture, or source for another interpreter
+            continue
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.With) and any(_is_credentials_lock(i) for i in node.items)):
+                continue
+            blocks += 1
+            lock_exprs = {id(i.context_expr) for i in node.items}
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call) or id(call) in lock_exprs:
+                    continue
+                spelling = ast.unparse(call.func)
+                if spelling not in CRITICAL_SECTION_CALLS:
+                    offenders.append(f"{path.relative_to(root)}:{call.lineno} {spelling}()")
+
+    assert blocks >= LOCKED_BLOCKS[repo], (
+        f"{repo} has {blocks} locked credential blocks, expected at least "
+        f"{LOCKED_BLOCKS[repo]}. Either a writer lost its lock, or the lock was renamed and this "
+        f"scan now matches nothing — which would let it pass empty forever")
+    assert not offenders, (
+        f"{repo} calls something new inside a credential critical section:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nThe lock blocks with NO timeout, which is only safe while every holder finishes in "
+          "milliseconds of local disk work — a holder that merely stalls keeps it forever and "
+          "nothing rescues the waiter. If this call can wait on a network, a subprocess, another "
+          "lock or a person, move it OUTSIDE the block. If it is ordinary local work, add it to "
+          "CRITICAL_SECTION_CALLS.")
