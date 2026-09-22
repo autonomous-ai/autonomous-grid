@@ -827,7 +827,6 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "cryptography" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pytest" },
@@ -846,7 +845,6 @@ train = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cryptography", marker = "extra == 'dev'", specifier = ">=42" },
     { name = "datasets", marker = "extra == 'train'", specifier = ">=3.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
