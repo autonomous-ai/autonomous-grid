@@ -27591,7 +27591,7 @@ def test_project_create_empty_on_a_relay_that_drops_the_key_refuses_and_names_th
     assert "grid project init P1" in message, message
     # NOT `relay._OLD_RELAY`, which says the relay has no projects — it plainly does, it just
     # answered, and sending somebody to check a working feature is its own bug.
-    assert "does not have projects yet" not in message, message
+    assert "does not serve projects" not in message, message
     assert "Not Found" not in message, message
     # The id still reached stdout: the project exists and that is the thing they need.
     assert "P1" in capsys.readouterr().out
@@ -35992,7 +35992,10 @@ def test_project_import_against_an_old_relay_names_the_relay(monkeypatch, tmp_pa
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["project", "import", str(work), "P1"])
 
-    assert "does not have projects yet" in str(exit_info.value)
+    assert "does not serve projects" in str(exit_info.value)
+    # ⚠️ and it no longer asserts the relay is OLD: a bare 404 is what an old relay and a
+    # deliberately frozen one both answer, so the sentence names both and asserts neither.
+    assert "switched off" in str(exit_info.value)
 
 
 def test_project_import_does_not_mask_a_real_404_from_a_relay_that_has_the_route(
@@ -38820,7 +38823,7 @@ def test_the_new_project_routes_on_an_old_relay_say_the_relay_is_old(monkeypatch
     # ⚠️ NOT `_OLD_RELAY`'s sentence. This relay HAS projects — it is missing these three routes —
     # and telling somebody their relay "does not have projects yet" sends them to check a feature
     # that is working perfectly. The same reason `_OLD_RELAY_NO_CANCEL` exists.
-    assert "does not have projects yet" not in message, caught.value
+    assert "does not serve projects" not in message, caught.value
 
 
 @pytest.mark.parametrize("verb", ["archive", "unarchive", "delete"])
@@ -39640,7 +39643,7 @@ def test_the_visibility_route_on_an_old_relay_says_the_relay_is_old(monkeypatch,
     message = str(caught.value).lower()
     assert "relay" in message, caught.value
     # ⚠️ NOT `_OLD_RELAY`'s sentence: this relay HAS projects and is missing one route.
-    assert "does not have projects yet" not in message, caught.value
+    assert "does not serve projects" not in message, caught.value
     # And it says what the silence MEANS — on a relay this old a project is members-only already,
     # so somebody who reached for `private` has what they asked for and must not be left thinking
     # their work is exposed with no way to fix it.
@@ -40202,7 +40205,7 @@ def test_the_rename_route_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp
     message = str(caught.value)
     assert "relay" in message.lower(), caught.value
     # ⚠️ NOT `_OLD_RELAY`'s sentence: this relay HAS projects and is missing one route.
-    assert "does not have projects yet" not in message.lower(), caught.value
+    assert "does not serve projects" not in message.lower(), caught.value
     assert "grid project create" in message, caught.value
 
 
@@ -40715,7 +40718,7 @@ def test_an_old_relay_gets_a_sentence_naming_the_relay_not_a_bare_not_found(
 
     message = str(caught.value)
     assert "predates" in message
-    assert "operator to update it" in message
+    assert "Ask its operator" in message
     assert "does not have projects" not in message
 
 
