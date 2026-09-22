@@ -114,6 +114,15 @@ def _named(tree: ast.Module, name: str) -> ast.AST:
         f"moved, so teach this pin where it went rather than deleting the pin")
 
 
+def _has(tree: ast.Module, name: str) -> bool:
+    """Whether the sibling defines ``name`` at module level. For a seam whose half may live in
+    either of two functions — never for deciding whether to assert at all."""
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name
+        for node in tree.body
+    )
+
+
 def _wire_keys(node: ast.AST) -> set[str]:
     """The names ``node`` actually uses AS WIRE KEYS: dict-literal keys, and `.get()` lookups.
 
@@ -297,8 +306,15 @@ def test_the_snapshot_and_the_relay_agree_on_the_eligibility_verdict():
     assertion pass is the one D-b rules out.
     """
     control_plane = _control_plane("handler.py")
-    assert _ELIGIBLE_FIELD in _wire_keys(_named(control_plane, "sync_snapshot")), (
-        f"grid-apis' sync_snapshot does not name {_ELIGIBLE_FIELD!r}; the relay then stores NULL "
+    # ⚠️ **The BODY of the snapshot moved, and the pin follows the body rather than the route name.**
+    # PRD `grid-scale-phase-a` issue 03 split `build_sync_snapshot` out of the route so the control
+    # plane could PUSH a snapshot as well as answer a GET for one (`snapshot_push` imports the
+    # builder). The route is now a thin authenticator, so keying on it made this pin fail against a
+    # grid-apis where the field was never missing — a false red, which is how a real one stops being
+    # read. What the seam needs is that whatever builds the body names the field.
+    builder = "build_sync_snapshot" if _has(control_plane, "build_sync_snapshot") else "sync_snapshot"
+    assert _ELIGIBLE_FIELD in _wire_keys(_named(control_plane, builder)), (
+        f"grid-apis' {builder} does not name {_ELIGIBLE_FIELD!r}; the relay then stores NULL "
         f"and keeps deciding for itself, which is invisible until the billable set is widened")
     assert _ELIGIBLE_FIELD not in _wire_keys(_named(control_plane, "_serialize_network")), (
         f"grid-apis computes {_ELIGIBLE_FIELD!r} in the SHARED serializer. ADR 0043 D-b puts it on "
