@@ -1,6 +1,25 @@
 ---
-status: proposed
+status: superseded
 ---
+
+> ⚠️ **SUPERSEDED — the distributed-tasks feature is FROZEN, and this relay does not serve its routes.**
+> PRD `grid-scale-phase-a` issue 09 (2026-09-22). A grid the control plane manages is started with
+> `GRID_TASK_PLANE_ENABLED=false`, which leaves this plane's nineteen routers unmounted, so every route
+> described below answers **404** on the hosted fleet.
+>
+> **Frozen, not removed.** No code was deleted, every module still imports, and the switch turns the
+> plane back on — per grid with `grid network set-env`, or fleet-wide from the control plane's
+> environment. A self-hosted grid is unaffected and defaults to serving the plane.
+>
+> ⚠️ **Read this document as the record of a design, not as a description of what a hosted grid answers.**
+> Its decisions were correct when taken and the code implementing them is still here; what changed is
+> that the routes are refused. Some of the cross-repo values it introduced are **still live** — they
+> also carry inference, billing, the web tool and authentication — so a value named here is not
+> automatically one that stopped mattering.
+>
+> **Projects created before the freeze still exist and their data is untouched**: 11 bare repositories
+> on the hosted fleet as of 2026-09-22 (spanning 2026-08-12 to 2026-09-16), and 19 project rows with
+> 88 tasks and 111 turns on the development fleet. Only the routes are refused.
 
 # A project can be renamed and left, and neither is the operation it looks like
 
