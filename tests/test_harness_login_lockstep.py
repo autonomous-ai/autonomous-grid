@@ -232,6 +232,13 @@ ARGPARSE_USAGE_EXIT = 2
 
 _HARNESS_HANDOFF = "cli/src/lib/gridHandoff.ts"
 
+#: Where the harness names the BINARY it spawns. ⚠️ **It moved out of `gridHandoff.ts`** — the
+#: hand-off now calls `gridBinaryPath()`, whose last resort is this constant, so one module resolves
+#: the binary for every grid call the daemon makes. The value did not change (`grid`); only the file
+#: did, which is precisely the drift this pin is for and precisely the drift that looks like a
+#: deletion if the pin is read carelessly.
+_HARNESS_EXEC = "cli/src/lib/gridExec.ts"
+
 #: Where the harness locates the credential store this CLI writes. See the sign-out section at the
 #: foot of this file.
 _HARNESS_CREDENTIALS = "cli/src/lib/gridCredentials.ts"
@@ -261,12 +268,12 @@ def _harness_source(module: str = _HARNESS_HANDOFF) -> str:
     return source.read_text()
 
 
-def _ts_const(source: str, name: str) -> str:
+def _ts_const(source: str, name: str, *, module: str = _HARNESS_HANDOFF) -> str:
     """One exported string constant out of the harness's TypeScript."""
     match = re.search(_TS_CONST.format(name=name), source)
     if match is None:
         raise AssertionError(
-            f"autonomous-harness' {_HARNESS_HANDOFF} no longer exports a literal `{name}`, so this "
+            f"autonomous-harness' {module} no longer exports a literal `{name}`, so this "
             f"check cannot read the argv it sends — teach it the new shape rather than deleting it")
     return match.group(1)
 
@@ -317,10 +324,10 @@ def test_an_unknown_flag_on_login_exits_two():
 
 def test_the_harness_spawns_the_argv_this_cli_accepts():
     """The lockstep itself: the flag the harness spells against the flag this CLI declares."""
-    source = _harness_source()
-
-    flag = _ts_const(source, "GRID_HANDOFF_FLAG")
-    binary = _ts_const(source, "GRID_BINARY")
+    flag = _ts_const(_harness_source(), "GRID_HANDOFF_FLAG")
+    # The two halves live in two modules since the harness centralised binary resolution: the flag
+    # stays with the hand-off, the binary name moved to `gridExec.ts`.
+    binary = _ts_const(_harness_source(_HARNESS_EXEC), "GRID_BINARY", module=_HARNESS_EXEC)
 
     assert (binary, flag) == ("grid", CANONICAL_HANDOFF_ARGV[1]), (
         f"autonomous-harness spawns `{binary} … {flag}` but this CLI declares "
