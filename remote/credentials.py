@@ -17,13 +17,13 @@ import json
 import os
 import tomllib
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import tomli_w
 
-from shared import jsonio, paths
-
+from shared import filelock, jsonio, paths
 
 # The web frontend path that completes the device hand-off. Hardcoded — unlike the two URLs
 # below it is not env-configurable (matches grid-src config.py).
@@ -70,6 +70,71 @@ def device_id() -> str:
     return value
 
 
+@contextlib.contextmanager
+def credentials_lock() -> Iterator[None]:
+    """Serialize a read-modify-write of `credentials.toml` against every other process.
+
+    ⚠️ **Around the load as well as the save, or it buys nothing.** `atomic_write_toml` makes each
+    write all-or-nothing, and that is not the property in question: atomicity says a reader never
+    sees a torn file and says nothing about a **lost update**, where two writers each load, change
+    their own part and write back and the second carries a snapshot taken before the first.
+
+    ⚠️ **This is not only one person's laptop.** grid-apis seeds a per-network first-provider home
+    and then shells THIS CLI into it (`grid --remote sync`, `grid --remote join`), while its own
+    `managed_homes.seed_home_at` rewrites the same file from the control plane's process. That home
+    has two writers, and the issue that locked the other side
+    (PRD `grid-scale-phase-a`, issue 12) excluded this one on the grounds that it is *a file one
+    person writes one command at a time* — true of a laptop, false there.
+
+    The lock file is `credentials.toml.lock`, the same sibling grid-src and grid-apis take, so all
+    three halves meet. ⚠️ A **sibling**, never the store itself: `jsonio.atomic_write_bytes`
+    replaces the inode, so a lock held on the store stops existing the moment anybody writes.
+
+    ⚠️ **Not re-entrant**: `filelock.file_lock` opens a fresh fd per call and `flock` is per open
+    file description, so taking it twice on one path blocks forever. `load_credentials` and
+    `save_credentials` stay unlocked primitives for that reason — the caller that spans both takes
+    it once around them.
+
+    ⚠️ **Only the ACQUISITION is translated.** One `except OSError` around the whole `with` block is
+    the tidy-looking spelling and it reports a full disk during the write as a lock that could not
+    be taken, which sends the reader to the wrong thing entirely.
+
+    An unusable lock REFUSES rather than writing unlocked. That is already this repo's answer
+    elsewhere: `shared.run_records` takes the same lock for the same kind of merge and lets the
+    failure out, so a filesystem that cannot `flock` already stops `grid join` and `grid leave`.
+    """
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(filelock.file_lock(paths.credentials_file()))
+        except OSError as exc:
+            raise SystemExit(
+                f"Could not lock {filelock.lock_path_for(paths.credentials_file())} ({exc}). Refusing "
+                f"to rewrite the credential file unlocked: a concurrent writer could drop a grid's "
+                f"refresh token, which no retry recovers. Check that {paths.grid_home()} is "
+                f"writable and on a filesystem that supports file locking."
+            ) from exc
+        yield
+
+
+def ensure_credentials_lock_usable() -> None:
+    """Refuse NOW if the credential store cannot be locked — before anything destructive happens.
+
+    ⚠️ **Order is the whole of it.** A token refresh *consumes* the credential it presents: the
+    control plane commits the rotation before this CLI is handed the replacement. Discovering there
+    that the replacement cannot be stored is the same loss the lock exists to prevent, caused by
+    the prevention. Asking first keeps the promise — the command fails loudly and what is on disk
+    stays valid.
+
+    ⚠️ What it proves is bounded: that the lock can be TAKEN, not that the write will land. Once
+    `credentials.toml.lock` exists, opening it needs write permission on that *file* rather than on
+    the directory, so a home made read-only afterwards passes here and fails at the write. That was
+    already lossy and is not made worse; what it closes is a read-only *mount* and a filesystem
+    without `flock`.
+    """
+    with credentials_lock():
+        pass
+
+
 def load_credentials() -> dict[str, Any]:
     return load_toml(paths.credentials_file())
 
@@ -89,9 +154,13 @@ def add_network(record: dict[str, Any]) -> None:
     the new one — and preserves the rest of the credential file (session token, api_url, user).
     Immutable update: a fresh dict is written, never the loaded one mutated in place.
     """
-    data = load_credentials()
-    others = [n for n in (data.get("networks") or []) if n.get("network_id") != record.get("network_id")]
-    save_credentials({**data, "networks": [*others, record]})
+    with credentials_lock():
+        data = load_credentials()
+        others = [
+            n for n in (data.get("networks") or [])
+            if n.get("network_id") != record.get("network_id")
+        ]
+        save_credentials({**data, "networks": [*others, record]})
 
 
 def remove_network(network_id: str) -> bool:
@@ -102,12 +171,13 @@ def remove_network(network_id: str) -> bool:
     without reading the file twice. Idempotent, and it preserves the rest of the credential file the
     same way ``add_network`` does: a fresh dict is written, never the loaded one mutated.
     """
-    data = load_credentials()
-    nets = list(data.get("networks") or [])
-    kept = [n for n in nets if n.get("network_id") != network_id]
-    if len(kept) == len(nets):
-        return False
-    save_credentials({**data, "networks": kept})
+    with credentials_lock():
+        data = load_credentials()
+        nets = list(data.get("networks") or [])
+        kept = [n for n in nets if n.get("network_id") != network_id]
+        if len(kept) == len(nets):
+            return False
+        save_credentials({**data, "networks": kept})
     return True
 
 
@@ -121,34 +191,45 @@ def update_network_tokens(
     it) replaced — every other bundle and the rest of the file untouched and in original order. A
     no-op if no bundle matches ``network_id`` (the caller resolved it before joining, so it exists).
     """
-    data = load_credentials()
-    networks = []
-    found = False
-    for net in data.get("networks") or []:
-        if net.get("network_id") == network_id:
-            found = True
-            merged = {**net, "access_token": access_token}
-            if refresh_token is not None:
-                merged["refresh_token"] = refresh_token
-            networks.append(merged)
-        else:
-            networks.append(net)
-    if not found:
-        # Nothing to update (e.g. a concurrent `grid logout`) — don't rewrite the file, which would
-        # clobber whatever is there now and silently drop the refreshed token.
-        return
-    save_credentials({**data, "networks": networks})
+    with credentials_lock():
+        data = load_credentials()
+        networks = []
+        found = False
+        for net in data.get("networks") or []:
+            if net.get("network_id") == network_id:
+                found = True
+                merged = {**net, "access_token": access_token}
+                if refresh_token is not None:
+                    merged["refresh_token"] = refresh_token
+                networks.append(merged)
+            else:
+                networks.append(net)
+        if not found:
+            # Nothing to update (e.g. a concurrent `grid logout`) — don't rewrite the file, which
+            # would clobber whatever is there now and silently drop the refreshed token. Under the
+            # lock this read is now authoritative rather than a best-effort guess: the logout either
+            # already happened or cannot land until this block ends.
+            return
+        save_credentials({**data, "networks": networks})
 
 
 def clear_credentials() -> bool:
-    """Delete the credential store. Returns whether it existed (for an honest logout message)."""
-    try:
-        paths.credentials_file().unlink()
-        return True
-    except FileNotFoundError:
-        return False  # already signed out — idempotent, no race window
-    except OSError as exc:
-        raise SystemExit(f"Could not remove {paths.credentials_file()}: {exc}") from None
+    """Delete the credential store. Returns whether it existed (for an honest logout message).
+
+    ⚠️ **Under the same lock as every merge**, because a delete IS a writer here. Unlocked, a logout
+    landing inside another process's load→save is undone by that save, which rewrites the file from
+    a snapshot taken while the session still existed — a sign-out that reports success and leaves a
+    working credential on disk. The lock file itself survives the delete by design: it is an empty
+    sentinel, and creating or removing it per acquire would be its own race.
+    """
+    with credentials_lock():
+        try:
+            paths.credentials_file().unlink()
+            return True
+        except FileNotFoundError:
+            return False  # already signed out — idempotent, no race window
+        except OSError as exc:
+            raise SystemExit(f"Could not remove {paths.credentials_file()}: {exc}") from None
 
 
 def api_url(explicit: str | None = None) -> str:
