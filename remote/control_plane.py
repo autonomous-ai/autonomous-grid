@@ -214,6 +214,11 @@ def fetch_tokens(session_token: str, device_id: str, api_url: str | None = None)
     Answers the ``os_served`` key alongside them (ADR 0039 D-k) — see :class:`TokenFetch`, which is
     what turns an empty grid list into one that can say WHY it is empty.
     """
+    # ⚠️ **Rotates the refresh credential of EVERY grid in the account.** grid-apis commits
+    # each replacement before answering, so every token on this disk is dead the moment this
+    # returns — refuse NOW if they cannot be stored, never after (PRD `grid-scale-phase-a`,
+    # issue 12; the same guard grid-src's own `control_plane` carries).
+    credentials.ensure_credentials_lock_usable()
     params = {"device_id": device_id}
     machine_os = os_grid.os_token()
     if machine_os:
@@ -288,6 +293,10 @@ def refresh_network_token(
     did before. That was **measured, not assumed** — a sibling model elsewhere in these repos refuses
     unknown keys and answers 422, which would have made this a break rather than a degrade.
     """
+    # ⚠️ **Rotates this grid's refresh credential.** grid-apis commits the replacement before
+    # answering, so the token on this disk is dead the moment this returns — refuse NOW if it
+    # cannot be stored, never after (PRD `grid-scale-phase-a`, issue 12).
+    credentials.ensure_credentials_lock_usable()
     body: dict[str, Any] = {"refresh_token": refresh_token}
     machine_os = os_grid.os_token()
     if machine_os:

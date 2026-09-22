@@ -126,12 +126,17 @@ def cmd_login(args: argparse.Namespace) -> int:
     fetched = control_plane.fetch_tokens(session_token, device_id, api_url)
     networks = _validated(fetched.networks)
 
-    credentials.save_credentials({
-        "session_token": session_token,
-        "api_url": api_url,
-        "user": user,
-        "networks": networks,
-    })
+    # ⚠️ Locked although it reads nothing: a whole-file overwrite is still a writer. Unlocked, it can
+    # land inside another process's load→save, and that save then rewrites the file from a snapshot
+    # taken before this sign-in — a `grid login` that reports success and leaves the old session on
+    # disk (issue 12).
+    with credentials.credentials_lock():
+        credentials.save_credentials({
+            "session_token": session_token,
+            "api_url": api_url,
+            "user": user,
+            "networks": networks,
+        })
     signout.warn_stranded(previous_networks, networks)
     # Signing in is what "I want the hosted grids" looks like, so the mode follows the credentials
     # rather than being demanded up front (dispatch.SELF_SWITCHING). Done here, after the save: a
@@ -661,16 +666,20 @@ def cmd_sync(args: argparse.Namespace) -> int:
     from . import os_grid_notice, signout
 
     as_json = getattr(args, "json", False)
-    # One credentials snapshot for both the auth gate and the merge below. Reading the session token
-    # and `data` from the same load closes a TOCTOU window: with two reads, a concurrent `grid logout`
-    # in between would let the save recreate a partial file (networks but no session) — the same
-    # concurrent-logout hazard credentials.update_network_tokens already guards. Same "not signed in"
-    # wording as credentials.require_session (the gate every other remote command uses).
+    # One credentials snapshot for the auth gate. Same "not signed in" wording as
+    # credentials.require_session (the gate every other remote command uses).
+    #
+    # ⚠️ **It is no longer the snapshot the merge writes, and that changed the answer.** This read
+    # used to serve both, on the reasoning that one load closed a TOCTOU window: with two reads a
+    # concurrent `grid logout` in between would let the save recreate a partial file (networks but
+    # no session). The requirement was right and the means were not — merging the pre-logout
+    # snapshot rebuilt the WHOLE file, session token included, so a sync running beside a `grid
+    # logout` undid it after it had reported success. The merge below re-reads under the credential
+    # lock instead (issue 12), where "the file is gone" is a fact rather than a guess, and refuses.
     data = credentials.load_credentials()
     session_token = data.get("session_token")
     if not session_token:
         raise SystemExit("You're not signed in. Run `grid login` to sign in.")
-    prev_count = len(data.get("networks") or [])
     device_id = credentials.device_id()
     api_url = credentials.api_url()
     try:
@@ -689,17 +698,34 @@ def cmd_sync(args: argparse.Namespace) -> int:
     networks = _validated(raw.networks)
     # Authoritative overwrite of the stored grid list; session_token / api_url / user are preserved.
     # Immutable update — a fresh dict, never the loaded one mutated in place. state.json is untouched.
-    credentials.save_credentials({**data, "networks": networks})
+    #
+    # ⚠️ **Re-read UNDER the lock rather than merging into `data`.** The snapshot above was taken
+    # before a network round trip that takes seconds, and this is the writer grid-apis shells into a
+    # first-provider home it also writes (issue 12). Merging the stale snapshot puts back every key
+    # another writer changed while the fetch was in flight. The lock cannot shrink the fetch's
+    # window — it makes the MERGE read the file as it is now.
+    with credentials.credentials_lock():
+        current = credentials.load_credentials()
+        if not current.get("session_token"):
+            # ⚠️ A `grid logout` landed while the fetch was in flight, and the older code merged the
+            # pre-logout snapshot — which put the session token back and undid the sign-out, quietly.
+            # Under the lock that read is authoritative, so the sign-out wins and nothing is written.
+            raise SystemExit(
+                "You were signed out while this sync was running, so nothing was written. "
+                "Run `grid login` to sign in again."
+            )
+        previous = list(current.get("networks") or [])
+        credentials.save_credentials({**current, "networks": networks})
     # A grid that just dropped out takes its token with it while its serve child keeps polling — the
     # same unreachable state a logout produces, one grid at a time (ADR 0023). Sync does not tear it
     # down; it names it and the verb that still reaches it.
-    signout.warn_stranded(list(data.get("networks") or []), networks)
-    if prev_count and not networks:
+    signout.warn_stranded(previous, networks)
+    if previous and not networks:
         # The overwrite just cleared every grid. Make the wipe visible so a transient backend hiccup
         # isn't mistaken for a silent loss of all credentials.
         print(
-            f"Warning: the control plane returned 0 grids; {prev_count} previously synced grid(s) "
-            "were cleared locally. Re-run `grid sync` if this may be transient.",
+            f"Warning: the control plane returned 0 grids; {len(previous)} previously synced "
+            "grid(s) were cleared locally. Re-run `grid sync` if this may be transient.",
             file=sys.stderr,
         )
     return _report_sync(networks, absence=os_grid_notice.absence(raw.os_served), as_json=as_json)
