@@ -30,13 +30,35 @@ except ModuleNotFoundError:  # Windows (consumer/playground scope) — msvcrt fa
     _HAVE_FCNTL = False
 
 
+#: Appended to the guarded file's name to get the file the lock is actually taken on.
+#:
+#: ⚠️ **Hand-duplicated with grid-src `filelock.LOCK_SUFFIX` and grid-apis `filelock.LOCK_SUFFIX`**
+#: since PRD `grid-scale-phase-a` issue 12: all three repositories now lock one hosted admin's
+#: ``credentials.toml`` on the same sibling, and a lock only some of them take is a lock that does
+#: nothing. Renamed on one side alone, every repository compiles and every suite stays green. Pinned
+#: by `tests/test_credentials_lock_lockstep.py`.
+LOCK_SUFFIX = ".lock"
+
+
+def lock_path_for(path: Path) -> Path:
+    """The sibling file ``path``'s read-modify-write is locked on.
+
+    ⚠️ **A sibling, and that is not tidiness.** A guarded file written through ``jsonio`` is
+    replaced by ``os.replace()``, so a lock held on the file *itself* is a lock on an inode that
+    stops existing the moment anybody writes — every later acquirer opens the new inode and takes a
+    lock nobody else is holding. Locking the target is the version that looks right and protects
+    nothing.
+    """
+    return path.with_suffix(path.suffix + LOCK_SUFFIX)
+
+
 def _open_lock_fd(path: Path) -> int:
-    """The fd the lock is taken on: a sibling ``<path>.lock``, so it never collides with the
+    """The fd the lock is taken on: `lock_path_for(path)`, so it never collides with the
     atomic-rename target. Parent directories are created as needed — through ``paths.ensure_dir``,
     because this can be the first thing to build a grid's run directory (a `grid leave` or a
     ``mutate_record`` reaching a grid no record has been written for yet), and that directory's write
     bits are what decide who may delete the records in it (`.scratch/grid-leave/` issue 19)."""
-    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path = lock_path_for(path)
     paths.ensure_dir(lock_path.parent)
     return os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
 

@@ -22302,10 +22302,23 @@ def test_sync_json_keeps_stdout_clean_while_warning_about_a_stranded_child(monke
     assert "grid leave net-b" in captured.err
 
 
-def test_sync_concurrent_logout_does_not_strand_partial_file(monkeypatch, tmp_path):
-    """A `grid logout` racing mid-sync must not yield a partial file missing the session: the merge
-    writes the single snapshot it gated on, so session/user survive (mirrors the concurrent-logout
-    guard in credentials.update_network_tokens)."""
+def test_sync_concurrent_logout_wins_and_strands_nothing(monkeypatch, tmp_path):
+    """A `grid logout` racing mid-sync WINS: the sync writes nothing and says why.
+
+    ⚠️ **This overturns the rule this test used to encode**, and the old name said what it was
+    protecting: *does not strand partial file*. That intent still holds — there is still no file with
+    networks and no session — but it was bought by merging the single snapshot the sync gated on,
+    which put the session token BACK. The sign-out had already printed its success line, so somebody
+    who typed `grid logout` could be left signed in by a `grid sync` running beside it, with a
+    working credential on disk and nothing anywhere saying so. "No partial file" was the right
+    requirement; rebuilding the whole file was the wrong way to meet it.
+
+    Under the credential lock (PRD `grid-scale-phase-a`, issue 12) the re-read before the merge is
+    authoritative — the logout has either landed or cannot land until the merge finishes — so "the
+    file is gone" is a fact rather than the guess it used to be, and the sync refuses instead of
+    reconstructing it. The sibling guard in `credentials.update_network_tokens` reaches the same
+    answer the same way, and is unchanged.
+    """
     from remote import control_plane, credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
@@ -22316,11 +22329,13 @@ def test_sync_concurrent_logout_does_not_strand_partial_file(monkeypatch, tmp_pa
         return control_plane.TokenFetch(networks=[dict(_sync_bundle("net-a"))], os_served=None)
 
     monkeypatch.setattr(control_plane, "fetch_tokens", logout_then_return)
-    assert _run_sync() == 0
-    data = credentials.load_credentials()
-    assert data.get("session_token") == "sess-1"  # not silently dropped
-    assert data["user"] == {"email": "u@x"}
-    assert [n["network_id"] for n in data["networks"]] == ["net-a"]
+
+    with pytest.raises(SystemExit) as refused:
+        _run_sync()
+
+    assert "signed out while" in str(refused.value)
+    # Nothing at all, rather than a file missing its session — the same property, honestly obtained.
+    assert not paths.credentials_file().exists()
 
 
 def test_sync_rejects_malformed_bundle_and_keeps_store(monkeypatch, tmp_path):

@@ -1,8 +1,14 @@
 """The lock one admin's `credentials.toml` is serialized on, pinned across two repositories.
 
-PRD `grid-scale-phase-a`, issue 12. **Neither half is in this repository**, and it is pinned here
-anyway because this is the hub and because there is nowhere else both halves can be read from: the
-seam is grid-src's `grid` CLI ↔ grid-apis' control plane, and by design neither imports the other.
+PRD `grid-scale-phase-a`, issue 12 and its follow-up. **THREE repositories take this lock**, and it
+is pinned here because this is the hub and there is nowhere else all of them can be read from: the
+seam is grid-src's internal CLI ↔ grid-apis' control plane ↔ this repository's public CLI, and by
+design none of them imports another.
+
+⚠️ **This repository's half was added AFTER the other two**, because issue 12 put the public CLI out
+of scope on the grounds that its store is *a file one person writes one command at a time*. True of
+a laptop, false of the first-provider home: grid-apis seeds it with `seed_home_at` — which takes the
+lock — and then shells THIS binary into it.
 
 A hosted admin has ONE ``GRID_HOME`` holding every grid they own — one ``[[networks]]`` entry each,
 carrying that grid's **refresh credential**. Two processes read-modify-write that file: grid-apis'
@@ -29,6 +35,7 @@ places to go unnoticed — and two of them are tests.
 from __future__ import annotations
 
 import ast
+import pathlib
 
 import pytest
 
@@ -72,6 +79,13 @@ def _grid_src_lock_file() -> str:
     )
 
 
+def _public_cli_lock_file() -> str:
+    """This repository's own composition — no sibling needed, so this half runs in CI."""
+    from shared import filelock, paths
+
+    return filelock.lock_path_for(paths.credentials_file()).name
+
+
 def _grid_apis_lock_file() -> str:
     root = grid_apis_root()
     if root is None:
@@ -91,13 +105,18 @@ def test_the_control_plane_locks_the_canonical_file():
     assert _grid_apis_lock_file() == CANONICAL_LOCK_FILE
 
 
-def test_both_writers_name_one_lock():
+def test_the_public_cli_locks_the_canonical_file():
+    """Needs no sibling worktree, so it is the one half of this file that runs in CI."""
+    assert _public_cli_lock_file() == CANONICAL_LOCK_FILE
+
+
+def test_all_three_writers_name_one_lock():
     """The assertion the other two exist to make possible, stated on its own so a failure says it.
 
     Compared to each other as well as to the literal: a future edit that changed the literal here
     and one side to match would still be caught, because the OTHER side would no longer agree.
     """
-    assert _grid_src_lock_file() == _grid_apis_lock_file()
+    assert _grid_src_lock_file() == _grid_apis_lock_file() == _public_cli_lock_file()
 
 
 def test_the_lock_is_not_the_file_it_guards():
@@ -106,9 +125,10 @@ def test_the_lock_is_not_the_file_it_guards():
     assert CANONICAL_LOCK_FILE != CANONICAL_CREDENTIALS_FILE
     assert _grid_src_lock_file() != CANONICAL_CREDENTIALS_FILE
     assert _grid_apis_lock_file() != CANONICAL_CREDENTIALS_FILE
+    assert _public_cli_lock_file() != CANONICAL_CREDENTIALS_FILE
 
 
-@pytest.mark.parametrize("repo", ["grid-src", "grid-apis"])
+@pytest.mark.parametrize("repo", ["grid-src", "grid-apis", "autonomous-grid"])
 def test_each_side_derives_the_lock_path_from_the_guarded_one(repo):
     """Both `lock_path_for` implementations append to the guarded path rather than naming a file.
 
@@ -117,10 +137,12 @@ def test_each_side_derives_the_lock_path_from_the_guarded_one(repo):
     constant above intact while the two writers stopped meeting. Structural rather than textual, so
     reformatting it does not fail.
     """
-    root = grid_src_root() if repo == "grid-src" else grid_apis_root()
+    here = pathlib.Path(__file__).resolve().parent.parent
+    root = {"grid-src": grid_src_root, "grid-apis": grid_apis_root,
+            "autonomous-grid": lambda: here}[repo]()
     if root is None:
         pytest.skip(f"{repo} worktree is not beside this one; the lockstep cannot be checked here")
-    package = "grid_cli" if repo == "grid-src" else "grid_networks"
+    package = {"grid-src": "grid_cli", "grid-apis": "grid_networks", "autonomous-grid": "shared"}[repo]
     tree = ast.parse((root / package / "filelock.py").read_text())
 
     derived = [
@@ -132,3 +154,107 @@ def test_each_side_derives_the_lock_path_from_the_guarded_one(repo):
     body = ast.dump(derived[0])
     assert "with_suffix" in body, f"{repo}'s lock_path_for no longer derives a sibling path"
     assert "LOCK_SUFFIX" in body, f"{repo}'s lock_path_for no longer uses the pinned suffix"
+
+
+# --- the guard's own count, which is the thing that was got wrong -------------------------------
+
+#: Every grid-apis call that answers by ROTATING a device's refresh credential, by the handler it
+#: sits in. `_issue_bundle(..., rotate_refresh=True)` reaches `store.issue_refresh_credential`,
+#: which COMMITS an `UPDATE` replacing `refresh_token_hash` — so the token the CLI still holds is
+#: dead the moment the reply is on the wire.
+#:
+#: ⚠️ **This set is the fact the first version of the guard asserted without checking.** It was
+#: written as *"the one place a rotation is spent"*, wired to one CLI function, and the miss was
+#: reachable from the control plane: `grid network set-type` goes through the device-id half of
+#: `refresh_token` and its caller swallows `SystemExit` to print *"token refresh skipped"* and
+#: return **0** — for a rotation that had been spent. A count is pinned here so a FOURTH one
+#: appearing in grid-apis fails a test instead of being discovered the same way.
+ROTATING_HANDLERS = {
+    "refresh_token",   # POST /tokens/{id} — BOTH halves: a refresh token, and a session + device id
+    "get_tokens",      # GET  /tokens      — rotates EVERY grid in the account in one call
+    "create_network",  # POST /networks    — see GUARDED_CLI_EXCHANGES for why this one is exempt
+}
+
+#: The grid-src `control_plane` functions that must ask before they spend one.
+#:
+#: Three, against three handlers, and deliberately not a one-to-one map: grid-apis' `refresh_token`
+#: serves two different CLI calls on one route (a refresh token, or a session plus a device id).
+#: `create_network` is the exempt one — it rotates for a device that held no credential for a grid
+#: that did not exist a moment earlier, so there is nothing to destroy, and its caller already tears
+#: the half-made grid down on any `BaseException`.
+GUARDED_CLI_EXCHANGES = {"fetch_tokens", "fetch_network_token", "refresh_network_token"}
+
+GUARD_CALL = "_refuse_if_the_reply_cannot_be_stored"
+
+
+def _enclosing_functions(tree, predicate) -> set[str]:
+    """The names of the functions containing every node `predicate` accepts (innermost wins)."""
+    spans = [
+        (n.lineno, n.end_lineno, n.name)
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    found = set()
+    for node in ast.walk(tree):
+        if not predicate(node):
+            continue
+        owners = [s for s in spans if s[0] <= node.lineno <= s[1]]
+        if not owners:
+            raise AssertionError(f"a match at line {node.lineno} sits outside every function")
+        found.add(min(owners, key=lambda s: s[1] - s[0])[2])
+    return found
+
+
+def test_the_control_plane_rotates_in_exactly_the_places_the_cli_knows_about():
+    """⚠️ A FOURTH rotating handler must fail here rather than be found in production.
+
+    Errors rather than skips when the call disappears entirely: `_issue_bundle` losing its keyword,
+    or the rotation moving behind another helper, is exactly what this check must not sail past.
+    """
+    root = grid_apis_root()
+    if root is None:
+        pytest.skip("grid-apis worktree is not beside this one; the lockstep cannot be checked here")
+    tree = ast.parse((root / "grid_networks" / "handler.py").read_text())
+
+    rotating = _enclosing_functions(
+        tree,
+        lambda n: isinstance(n, ast.Call)
+        and any(
+            kw.arg == "rotate_refresh"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is True
+            for kw in n.keywords
+        ),
+    )
+
+    assert rotating, (
+        "no `rotate_refresh=True` call site found in grid-apis' handler.py at all — the rotation "
+        "moved or was renamed, and this pin has to move with it rather than pass empty")
+    assert rotating == ROTATING_HANDLERS, (
+        f"grid-apis rotates in {sorted(rotating)}, this pin expects {sorted(ROTATING_HANDLERS)}. A "
+        f"NEW one destroys the caller's refresh credential, so decide whether the CLI's "
+        f"`{GUARD_CALL}` has to cover the call that reaches it — and update both this set and "
+        f"GUARDED_CLI_EXCHANGES")
+
+
+def test_the_cli_asks_before_every_exchange_that_spends_one():
+    """The near half: the guard is on all three, and on nothing that does not need it.
+
+    Pinned as a SET rather than a count so adding it to a fourth function is as loud as dropping it
+    from one — a guard on a read would be a lock taken on a path that never writes.
+    """
+    root = grid_src_root()
+    if root is None:
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    tree = ast.parse((root / "grid_cli" / "control_plane.py").read_text())
+
+    guarded = _enclosing_functions(
+        tree,
+        lambda n: isinstance(n, ast.Call) and getattr(n.func, "id", None) == GUARD_CALL,
+    )
+    guarded.discard(GUARD_CALL)  # the helper's own definition is not a call site
+
+    assert guarded == GUARDED_CLI_EXCHANGES, (
+        f"grid-src guards {sorted(guarded)}, this pin expects {sorted(GUARDED_CLI_EXCHANGES)}. "
+        f"Every exchange grid-apis answers by rotating must ask BEFORE the round trip — refusing "
+        f"afterwards leaves the dead token on disk, which is the loss the guard exists to prevent")
