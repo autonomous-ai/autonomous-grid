@@ -30073,6 +30073,7 @@ def _poll_loop_state_and_poll(job_then_none):
     held: list[int] = []
     state = SimpleNamespace(
         stop=threading.Event(),
+        grid_asleep=threading.Event(),  # never set here: the parked path is `tests/test_grid_asleep.py`'s
         enter_job=lambda: held.append(1),
         exit_job=lambda: held.pop(),
         jobs_held=lambda: len(held),

@@ -43,6 +43,13 @@ _TERMINAL_STATUSES = frozenset({400, 403, 422})
 # every attempt that gets past the credential file's own re-read is a control-plane round trip.
 _AUTH_BACKOFF_SCHEDULE: tuple[float, ...] = (60.0, 120.0, 300.0)
 
+# A SLEEPING grid (the proxy's `relay.GRID_ASLEEP_CODE`, `idle-sleep` issue 02) is checked on its own
+# clock rather than the ordinary backoff's: the ordinary one's first steps (1, 2, 4s) ask a grid that
+# cannot answer until somebody wakes it. Not capped any higher than the ordinary one, because the price
+# of a slow check is paid AFTER the wake — every second of it is a woken grid with no provider — while
+# the price of a fast one is one refused request a minute, which the proxy answers without waking it.
+_ASLEEP_SCHEDULE: tuple[float, ...] = (30.0, 60.0)
+
 # `RelayUnauthorized` carries no message — before ADR 0022 this path died printing
 # "Remote engine stopped: " with nothing after the colon. The reason is authored here instead, and
 # it names the command, because it is the one failure on this path with an operator-side remedy.
@@ -173,8 +180,10 @@ def register_with_backoff(
     attempt = 0
     relay_failures = 0
     auth_failures = 0
+    asleep_checks = 0
     while True:
         attempt += 1
+        asleep_now = False
         try:
             register()
             return
@@ -182,15 +191,32 @@ def register_with_backoff(
             # Counted separately from transport/status failures: the two schedules mean different
             # things, so a run of 503s must not push a later token failure straight to its floor.
             auth_failures += 1
+            asleep_checks = 0
             wait = _wait_for(_AUTH_BACKOFF_SCHEDULE, auth_failures)
             reason = _AUTH_REASON
         except relay.RelayError as exc:
-            if is_terminal(exc):
+            if relay.is_grid_asleep(exc):
+                # PARKED, never terminal (issue 02): a grid asleep now wakes the moment a consumer
+                # asks it anything, and the engine that exited here would not be there when it did.
+                asleep_now = True
+                asleep_checks += 1
+                wait = _wait_for(_ASLEEP_SCHEDULE, asleep_checks)
+                reason = service_truth.ASLEEP_REASON
+            elif is_terminal(exc):
                 raise
-            relay_failures += 1
-            wait = _wait_for(waits, relay_failures)
-            reason = str(exc)
-        log(f"register attempt {attempt} failed ({_short(reason)}); retrying in {wait:.0f}s")
+            else:
+                relay_failures += 1
+                # Only a different WORD from the relay ends the sleep for the log — the serve loop's
+                # park rule. A codeless failure (nothing answered) says nothing about the grid.
+                if exc.code is not None:
+                    asleep_checks = 0
+                wait = _wait_for(waits, relay_failures)
+                reason = str(exc)
+        if asleep_now and asleep_checks > 1:
+            # Said in full once per sleep; after that one short line per check is all the log needs.
+            log(f"register attempt {attempt}: the grid is still asleep; checking again in {wait:.0f}s")
+        else:
+            log(f"register attempt {attempt} failed ({_short(reason)}); retrying in {wait:.0f}s")
         # The RAW reason for the record — `note_register_error` applies its own bound. The attempt
         # number stays out of it on purpose: the record's writer skips a write when nothing changed,
         # so a stable string is what makes a day-long outage cost one write instead of one per beat.

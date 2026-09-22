@@ -54,6 +54,20 @@ BRINGUP_QUIET_SECONDS = 300.0
 REGISTER_ERROR_MAX_CHARS = 300
 
 
+# What a provider is told — and what its record holds — when its grid is ASLEEP (the proxy's
+# `relay.GRID_ASLEEP_CODE`, `idle-sleep` issue 02). Authored here rather than relayed from the proxy's own
+# sentence, which is written for every caller that did not wake the grid: this one is a provider that is
+# not going to exit, and the useful part is that nothing needs doing. Bring-up and the serve loop both say
+# it, and the join gate below recognises a parked engine by it.
+# ⚠️ Recognised by EQUALITY with what the record holds, which is bounded to REGISTER_ERROR_MAX_CHARS: a
+# longer sentence would be stored cut and never match (pinned by a test). A reworded one is recognised
+# only in records written by a child running the new wording — a child already parked under an older CLI
+# keeps its old sentence, and the gate gives it the ordinary `--respawn` advice until it is replaced.
+ASLEEP_REASON = (
+    "the grid is asleep, and a provider does not wake it — a consumer's inference request or its "
+    "owner starting it does; this engine keeps checking and rejoins by itself once the grid is awake"
+)
+
 # The record fields this module owns. They belong to the **process**, exactly like `run_records`'
 # identity block — which is what decides where they travel: a hot-reload is the same process and
 # carries them, a respawn is a new one and must not. They live here rather than beside
@@ -260,7 +274,10 @@ def _detail(truth: ServiceTruth, log_path: Path, *, starting: bool) -> str:
         # "Warning: (see log=…)" whenever the record carried no reason, which reads like a bug.
         lines.append(f"Warning: last register error: {truth.last_error}")
     lines.append(f"(see log={log_path})")
-    if not starting:
+    # ⚠️ Not for an engine parked on a SLEEPING grid (`idle-sleep` issue 02): a fresh child meets the
+    # same grid and parks too, and the reason above already says nothing needs doing — so the one piece
+    # of advice this block gives would cost the operator a working engine for nothing.
+    if not starting and truth.last_error != ASLEEP_REASON:
         lines.append(
             "If it stays this way, re-run this join with --respawn to stop this engine and start a "
             "fresh one."
