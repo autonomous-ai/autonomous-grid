@@ -25,13 +25,13 @@ import pytest
 from remote import bringup, relay, service_truth
 
 #: The wire value, written out rather than imported: comparing the module's constant to itself would
-#: pin nothing. `tests/test_grid_asleep_lockstep.py` compares both repositories to the same literal.
+#: pin nothing. `tests/test_grid_sleep_lockstep.py` compares both repositories to the same literal.
 ASLEEP_CODE = "grid_asleep"
 
 #: What grid-apis' proxy answers a request that did not wake a sleeping grid, byte-for-byte in shape.
 ASLEEP_BODY = {
-    "detail": "grid is asleep and this request does not wake it — an inference request to the grid "
-              "wakes it, or its owner can start it",
+    "detail": "grid is asleep and this request does not wake it — a person's request wakes it: "
+              "inference, or a signed-in read, action or `grid join`",
     "code": ASLEEP_CODE,
 }
 
@@ -252,12 +252,12 @@ def test_a_poll_worker_does_not_ask_a_grid_it_knows_is_asleep(monkeypatch, tmp_p
         polls.append(1)  # and answers None: a 204, no work
 
     monkeypatch.setattr(relay, "poll", poll)
-    state.grid_asleep.set()
+    state.parked.set()
     worker = _run(serve._poll_loop, state)
     try:
         time.sleep(0.3)
         assert polls == [], "a poll worker asked a grid the engine already knew was asleep"
-        state.grid_asleep.clear()
+        state.parked.clear()
         assert _wait_until(lambda: polls), "the worker did not resume once the grid woke"
     finally:
         state.stop.set()
@@ -277,7 +277,7 @@ def test_a_poll_worker_that_meets_the_code_parks_every_worker(monkeypatch, tmp_p
     monkeypatch.setattr(relay, "poll", poll)
     worker = _run(serve._poll_loop, state)
     try:
-        assert _wait_until(state.grid_asleep.is_set), "the asleep answer did not park the engine"
+        assert _wait_until(state.parked.is_set), "the asleep answer did not park the engine"
         time.sleep(2.3)  # past the ordinary 2s poll retry
         assert polls == [1], f"the worker kept polling a sleeping grid: {len(polls)} requests"
     finally:
@@ -313,7 +313,7 @@ def test_the_heartbeat_marks_a_sleeping_grid_and_records_why(monkeypatch, tmp_pa
     for _ in range(3):
         _one_beat(monkeypatch, state, asleep)
 
-    assert state.grid_asleep.is_set()
+    assert state.parked.is_set()
     assert run_records.read_record("n1", "remote")["last_register_error"] == service_truth.ASLEEP_REASON
     assert capsys.readouterr().err.count(service_truth.ASLEEP_REASON) == 1, "said once per sleep, not per beat"
 
@@ -330,7 +330,7 @@ def test_the_heartbeat_unparks_the_engine_when_the_grid_answers_again(monkeypatc
     _one_beat(monkeypatch, state, "ok")
     _one_beat(monkeypatch, state, "ok")
 
-    assert not state.grid_asleep.is_set()
+    assert not state.parked.is_set()
     assert "last_register_error" not in run_records.read_record("n1", "remote")
     assert capsys.readouterr().err.count("Resumed") == 1, "the log closes the pause it opened, once"
 
@@ -340,12 +340,12 @@ def test_a_different_word_from_the_relay_unparks_the_poll_workers(monkeypatch, t
     down while it should be running — is a new word, and the workers go back to their ordinary retry
     rather than sitting out a grid that is coming straight back."""
     state = _serve_state(monkeypatch, tmp_path)
-    state.grid_asleep.set()
+    state.parked.set()
 
     _one_beat(monkeypatch, state, relay.RelayError("heartbeat failed (503)", status=503,
                                                    code="grid_master_down"))
 
-    assert not state.grid_asleep.is_set()
+    assert not state.parked.is_set()
 
 
 def test_a_heartbeat_that_reaches_nobody_keeps_the_park_and_says_nothing_new(monkeypatch, tmp_path, capsys):
@@ -357,7 +357,7 @@ def test_a_heartbeat_that_reaches_nobody_keeps_the_park_and_says_nothing_new(mon
 
     _one_beat(monkeypatch, state, asleep)
     _one_beat(monkeypatch, state, relay.RelayError("heartbeat transport error: connection reset"))
-    assert state.grid_asleep.is_set()
+    assert state.parked.is_set()
     _one_beat(monkeypatch, state, asleep)
 
     assert capsys.readouterr().err.count(service_truth.ASLEEP_REASON) == 1
@@ -428,11 +428,11 @@ def test_a_parked_poll_worker_waits_between_looks_instead_of_spinning(monkeypatc
             self.looks += 1
             return super().is_set()
 
-    monkeypatch.setattr(serve, "_ASLEEP_PARK_TICK_SECONDS", 0.05)
+    monkeypatch.setattr(serve, "_PARK_TICK_SECONDS", 0.05)
     monkeypatch.setattr(relay, "poll", lambda *a, **k: None)
     state = _serve_state(monkeypatch, tmp_path)
-    state.grid_asleep = CountingEvent()
-    state.grid_asleep.set()
+    state.parked = CountingEvent()
+    state.parked.set()
     worker = _run(serve._poll_loop, state)
     try:
         time.sleep(0.5)
@@ -440,4 +440,4 @@ def test_a_parked_poll_worker_waits_between_looks_instead_of_spinning(monkeypatc
         state.stop.set()
         worker.join(timeout=5)
 
-    assert state.grid_asleep.looks < 100, f"{state.grid_asleep.looks} looks in 0.5s — the worker spun"
+    assert state.parked.looks < 100, f"{state.parked.looks} looks in 0.5s — the worker spun"

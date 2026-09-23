@@ -1454,13 +1454,16 @@ class _ServeState:
         # plane, or a task credential gone bad, retires task serving while inference keeps running,
         # and nothing on the task side may ever set `stop`. Teardown sets both.
         self.tasks_stop = threading.Event()
-        # Set while the relay's last word about this grid was "asleep" (the proxy's
-        # `relay.GRID_ASLEEP_CODE`, `idle-sleep` issue 02). The poll workers stand off the relay while it
-        # is set, and the heartbeat — the one probe left running — clears it on a new WORD from the relay:
-        # success, or a different coded answer; a codeless failure leaves it set. An Event and not a flag
-        # inside `stop`: a sleeping grid parks the engine, it does not end it.
-        self.grid_asleep = threading.Event()
-        self._asleep_lock = threading.Lock()  # makes "who says it first" a single answer
+        # Set while the relay's last word about this grid was a PAUSE — "asleep" (the proxy's
+        # `relay.GRID_ASLEEP_CODE`, `idle-sleep` issue 02) or "stopped by its owner"
+        # (`relay.GRID_STOPPED_CODE`, issue 04); `park_reason` is the sentence for which. The poll
+        # workers stand off the relay while it is set, and the heartbeat — the one probe left running —
+        # clears it on a new WORD from the relay: success, or a different coded answer; a codeless
+        # failure leaves it set. An Event and not a flag inside `stop`: a pause parks the engine, it does
+        # not end it.
+        self.parked = threading.Event()
+        self.park_reason: str | None = None
+        self._park_lock = threading.Lock()  # makes "who says it first" a single answer
         self._lock = threading.Lock()  # guards the snapshot swap + token + inflight (short sections)
         self._register_lock = threading.Lock()  # serializes reload-register vs heartbeat-404 re-register
         self.reload_requested = threading.Event()  # SIGHUP sets this; the reload loop waits on it
@@ -1729,16 +1732,29 @@ class _ServeState:
         with self._lock:
             self._inflight = max(0, self._inflight - 1)
 
-    def mark_grid_asleep(self) -> bool:
-        """Record that the relay said this grid is ASLEEP. True only for the call that parked the engine.
+    def park(self, reason: str) -> bool:
+        """Record that the relay paused this grid, for ``reason``. True only for the call that CHANGED
+        the pause — parked the engine, or moved it from one reason to another.
 
         "Who says it first" has to be one answer: a poll worker per concurrency slot and the heartbeat
-        can all meet the same asleep grid in the same second, and the sentence is said once per sleep.
+        can all meet the same answer in the same second, and the sentence is said once per pause. A
+        grid that goes from asleep to stopped by its owner is a new pause with a different remedy, so
+        it is said again.
         """
-        with self._asleep_lock:
-            if self.grid_asleep.is_set():
+        with self._park_lock:
+            if self.parked.is_set() and self.park_reason == reason:
                 return False
-            self.grid_asleep.set()
+            self.park_reason = reason
+            self.parked.set()
+            return True
+
+    def unpark(self) -> bool:
+        """Clear the pause. True only for the call that ended one."""
+        with self._park_lock:
+            if not self.parked.is_set():
+                return False
+            self.parked.clear()
+            self.park_reason = None
             return True
 
     def enter_job(self) -> None:
@@ -2720,24 +2736,42 @@ def _traced_stream(txn: str, chunks: Iterable[bytes]) -> Iterator[bytes]:
 # Loops
 # ---------------------------------------------------------------------------
 
-# How often a parked poll worker looks at the engine's own `grid_asleep` flag. A local read, never a
+# How often a parked poll worker looks at the engine's own `parked` flag. A local read, never a
 # request — the heartbeat is what asks the relay — so this only bounds how soon a woken grid gets its
 # workers back after the heartbeat has seen it answer.
-_ASLEEP_PARK_TICK_SECONDS = 1.0
+_PARK_TICK_SECONDS = 1.0
+
+# How often the heartbeat asks, by what its last answer was (`idle-sleep` issue 04, decision 6).
+# ⚠️ Faster than the ordinary beat while the grid is ASLEEP and after a beat that FAILED: a woken grid's
+# master — and one the platform restarted — holds its first request until a provider heart-beats, so
+# every second of this wait is that request's. Slower while its OWNER has it stopped: only their
+# `grid start` ends that, and nothing this engine does hurries it.
+_ASLEEP_PROBE_SECONDS = 10.0
+_STOPPED_PROBE_SECONDS = 60.0
+_AFTER_A_FAILED_BEAT_SECONDS = 10.0
 
 
-def _enter_asleep(state: _ServeState) -> None:
-    """Park the engine because the relay said its grid is asleep; say why ONCE per sleep.
+def _pause_reason(exc: relay.RelayError) -> str | None:
+    """The sentence for a relay answer that PAUSES this engine, or ``None`` for any other answer."""
+    if relay.is_grid_asleep(exc):
+        return service_truth.ASLEEP_REASON
+    if relay.is_grid_stopped(exc):
+        return service_truth.STOPPED_REASON
+    return None
+
+
+def _enter_pause(state: _ServeState, reason: str) -> None:
+    """Park the engine because the relay paused its grid; say why ONCE per pause.
 
     Whichever loop meets the answer first says it — usually a poll worker, which asks continuously, and
     otherwise the heartbeat. The sentence is the one bring-up uses, because the operator's question is
     the same in both places: *do I need to re-run `grid join`?* No.
     """
-    if state.mark_grid_asleep():
-        print(f"\nPaused: {service_truth.ASLEEP_REASON}.", file=sys.stderr)
+    if state.park(reason):
+        print(f"\nPaused: {reason}.", file=sys.stderr)
 
 
-def _park_while_asleep(state: _ServeState) -> None:
+def _park_while_paused(state: _ServeState) -> None:
     """Hold a poll worker off the relay until the heartbeat sees the grid answer, or the engine stops.
 
     ⚠️ **The whole point is that nothing here makes a request.** A worker that kept polling a sleeping
@@ -2746,14 +2780,38 @@ def _park_while_asleep(state: _ServeState) -> None:
     the provider something false. Waking the grid was never on offer: provider traffic does not wake a
     grid (decision B).
     """
-    while state.grid_asleep.is_set() and not state.stop.wait(_ASLEEP_PARK_TICK_SECONDS):
+    while state.parked.is_set() and not state.stop.wait(_PARK_TICK_SECONDS):
         pass
+
+
+def _end_on_deleted(state: _ServeState) -> None:
+    """Stop the engine because the relay said its grid was DELETED (`idle-sleep` issue 04).
+
+    Said once, however many loops meet the answer, and left in the run record where `grid join` and
+    `grid status` read it. The stop is the ordinary one: the main thread tears the engine down, and the
+    unregister it attempts is refused by a grid that no longer exists — best effort, and ignored.
+    """
+    if state.stop.is_set():
+        return
+    state.stop.set()
+    print(f"\nStopped: {service_truth.DELETED_REASON}.", file=sys.stderr)
+    _bookkeep("last_register_error", service_truth.note_register_error,
+              state.network_id, state.engine_id, service_truth.DELETED_REASON)
+
+
+def _heartbeat_wait(state: _ServeState, *, failed: bool) -> float:
+    """How long until the heartbeat asks again — see ``_ASLEEP_PROBE_SECONDS``."""
+    if state.parked.is_set():
+        if state.park_reason == service_truth.STOPPED_REASON:
+            return _STOPPED_PROBE_SECONDS
+        return _ASLEEP_PROBE_SECONDS
+    return _AFTER_A_FAILED_BEAT_SECONDS if failed else relay.HEARTBEAT_INTERVAL
 
 
 def _poll_loop(state: _ServeState) -> None:
     while not state.stop.is_set():
-        if state.grid_asleep.is_set():
-            _park_while_asleep(state)
+        if state.parked.is_set():
+            _park_while_paused(state)
             continue
         try:
             job = poll_once(state)
@@ -2762,8 +2820,12 @@ def _poll_loop(state: _ServeState) -> None:
             state.stop.set()
             break
         except relay.RelayError as exc:
-            if relay.is_grid_asleep(exc):
-                _enter_asleep(state)  # the top of the loop parks this worker, and every other one
+            if relay.is_grid_deleted(exc):
+                _end_on_deleted(state)
+                break
+            reason = _pause_reason(exc)
+            if reason is not None:
+                _enter_pause(state, reason)  # the top of the loop parks this worker, and every other one
                 continue
             print(f"\nPoll error ({exc}); retrying...", file=sys.stderr)
             state.stop.wait(2)
@@ -2840,6 +2902,7 @@ def _maybe_probe_engines(state: _ServeState) -> None:
 
 def _heartbeat_loop(state: _ServeState) -> None:
     while not state.stop.is_set():
+        failed = False
         try:
             result = heartbeat_once(state)
         except relay.RelayUnauthorized:
@@ -2849,17 +2912,21 @@ def _heartbeat_loop(state: _ServeState) -> None:
             state.stop.set()
             break
         except relay.RelayError as exc:
+            if relay.is_grid_deleted(exc):
+                _end_on_deleted(state)
+                break
             # The heartbeat is the one probe a PARKED engine keeps (issue 02), and only a new WORD from
             # the relay ends a park: success below, or a different coded answer here — the proxy's
-            # `grid_master_down` says the grid is not asleep any more. A codeless failure (nothing
+            # `grid_master_down` says the grid is not paused any more. A codeless failure (nothing
             # answered, or something in front of the relay did) says nothing about the grid, so the park
-            # stands — otherwise a flaky network would re-announce the same sleep on every beat.
-            if relay.is_grid_asleep(exc):
-                _enter_asleep(state)
-                reason = service_truth.ASLEEP_REASON
+            # stands — otherwise a flaky network would re-announce the same pause on every beat.
+            reason = _pause_reason(exc)
+            if reason is not None:
+                _enter_pause(state, reason)
             else:
+                failed = True
                 if exc.code is not None:
-                    state.grid_asleep.clear()
+                    state.unpark()
                 print(f"\nHeartbeat error: {exc}", file=sys.stderr)
                 reason = str(exc) or repr(exc)
             # That line is inside a detached child's log. Put the reason where the CLI can read it
@@ -2872,9 +2939,8 @@ def _heartbeat_loop(state: _ServeState) -> None:
                 state.network_id, state.engine_id, reason,
             ) or state._register_error_noted
         else:
-            if state.grid_asleep.is_set():
-                state.grid_asleep.clear()
-                print("\nResumed: the grid is awake again.", file=sys.stderr)
+            if state.unpark():
+                print("\nResumed: the grid is answering again.", file=sys.stderr)
             _debug(f"heartbeat: ok ({result})")
             # The relay heard from us — the one fact the join gate's freshness check is about. Touched
             # only here, on success: freshening it after a failed beat would launder an unreachable
@@ -2905,7 +2971,7 @@ def _heartbeat_loop(state: _ServeState) -> None:
         # keep in sync — and an idle grid, where no job failure will ever expose a dead engine, is
         # exactly the case this exists for (ADR 0019).
         _maybe_probe_engines(state)
-        state.stop.wait(relay.HEARTBEAT_INTERVAL)
+        state.stop.wait(_heartbeat_wait(state, failed=failed))
 
 
 def _supervise(loop: Callable[[_ServeState], None], state: _ServeState) -> None:

@@ -68,6 +68,21 @@ ASLEEP_REASON = (
     "owner starting it does; this engine keeps checking and rejoins by itself once the grid is awake"
 )
 
+# The sentence for an engine parked on a grid its OWNER stopped (`idle-sleep` issue 04). Recognised by
+# the join gate exactly like ASLEEP_REASON, and bounded the same way (pinned by a test).
+STOPPED_REASON = (
+    "the grid's owner has stopped it, and nothing wakes it until they start it again (`grid start`); "
+    "this engine keeps checking and rejoins by itself once it is started"
+)
+
+# The sentence an engine on a DELETED grid stops with (`idle-sleep` issue 04). It is the last thing the
+# engine records; the gate recognises it so it never advises re-running a join against a grid that is gone.
+DELETED_REASON = "the grid was deleted, so this engine has stopped serving it"
+
+# The recorded reasons after which the gate must NOT advise `--respawn`: a fresh child would meet the
+# same answer — a grid still asleep, still stopped, or gone.
+_NO_RESPAWN_REASONS = frozenset({ASLEEP_REASON, STOPPED_REASON, DELETED_REASON})
+
 # The record fields this module owns. They belong to the **process**, exactly like `run_records`'
 # identity block — which is what decides where they travel: a hot-reload is the same process and
 # carries them, a respawn is a new one and must not. They live here rather than beside
@@ -274,10 +289,11 @@ def _detail(truth: ServiceTruth, log_path: Path, *, starting: bool) -> str:
         # "Warning: (see log=…)" whenever the record carried no reason, which reads like a bug.
         lines.append(f"Warning: last register error: {truth.last_error}")
     lines.append(f"(see log={log_path})")
-    # ⚠️ Not for an engine parked on a SLEEPING grid (`idle-sleep` issue 02): a fresh child meets the
-    # same grid and parks too, and the reason above already says nothing needs doing — so the one piece
-    # of advice this block gives would cost the operator a working engine for nothing.
-    if not starting and truth.last_error != ASLEEP_REASON:
+    # ⚠️ Not for an engine parked on a SLEEPING grid (`idle-sleep` issue 02), one its owner STOPPED, or one
+    # that was DELETED (issue 04): a fresh child meets the same answer and parks or stops too, and the
+    # reason above already says what (if anything) needs doing — so the one piece of advice this block
+    # gives would cost the operator a working engine for nothing.
+    if not starting and truth.last_error not in _NO_RESPAWN_REASONS:
         lines.append(
             "If it stays this way, re-run this join with --respawn to stop this engine and start a "
             "fresh one."

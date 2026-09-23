@@ -23014,6 +23014,15 @@ def test_remote_delete_refuses_while_the_grid_is_running(monkeypatch, tmp_path):
     assert "delete" not in calls
 
 
+def test_remote_delete_goes_ahead_for_a_grid_that_is_asleep(monkeypatch, tmp_path):
+    """Asleep is not running: nobody is being served, and there is nothing to stop first. (The status
+    once said `running` for a sleeping grid, which made one impossible to delete from here.)"""
+    calls = _seed_owned_grid(monkeypatch, tmp_path, state_="asleep")
+
+    assert cli.main(["delete", "team", "--yes"]) == 0
+    assert calls["delete"] == {"session": "sess-tok", "network_id": "n1"}
+
+
 def test_remote_delete_removes_the_grid_and_forgets_it_locally(monkeypatch, tmp_path, capsys):
     calls = _seed_owned_grid(monkeypatch, tmp_path)
 
@@ -23706,6 +23715,41 @@ def test_remote_chat_requires_grid_up(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         cli.main(["chat", "-m", "m", "hi"])
     assert "isn't up" in str(exc.value).lower()
+
+
+@pytest.mark.parametrize("state_", ["running", "asleep"])
+def test_a_grid_that_is_asleep_is_one_the_cli_calls(monkeypatch, tmp_path, state_):
+    """`idle-sleep` issue 04: the control plane says `asleep` for a grid its reaper slept — truthfully,
+    where it once said `running` to get past this very check. A request wakes such a grid, so refusing
+    it here would deadlock it: the request that would have woken it is never sent."""
+    from cli import remote_grid
+
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
+    _mock_lifecycle(monkeypatch, status={"state": state_, "signaling_url": "https://relay.example"})
+
+    base, status = remote_grid.resolve_relay_base("sess-tok", {"network_id": "n1"}, "n1", "team")
+
+    assert base.startswith("https://relay.example")
+    assert status["state"] == state_
+
+
+@pytest.mark.parametrize("state_", ["stopped", "degraded"])
+def test_a_grid_its_owner_stopped_is_still_refused_with_the_command_that_starts_it(
+    monkeypatch, tmp_path, state_
+):
+    """Nothing a caller sends wakes an owner-stopped grid (issue 04) — refusing it here, with the
+    command that does, is the truth."""
+    from cli import remote_grid
+
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
+    _mock_lifecycle(monkeypatch, status={"state": state_, "signaling_url": "https://relay.example"})
+
+    with pytest.raises(SystemExit) as exc:
+        remote_grid.resolve_relay_base("sess-tok", {"network_id": "n1"}, "n1", "team")
+
+    assert "grid start team" in str(exc.value)
 
 
 def test_remote_chat_requires_access_token(monkeypatch, tmp_path):
@@ -30073,7 +30117,7 @@ def _poll_loop_state_and_poll(job_then_none):
     held: list[int] = []
     state = SimpleNamespace(
         stop=threading.Event(),
-        grid_asleep=threading.Event(),  # never set here: the parked path is `tests/test_grid_asleep.py`'s
+        parked=threading.Event(),  # never set here: the parked path is `tests/test_grid_asleep.py`'s
         enter_job=lambda: held.append(1),
         exit_job=lambda: held.pop(),
         jobs_held=lambda: len(held),

@@ -140,7 +140,7 @@ def _guard(resp: httpx.Response, what: str) -> None:
 
 #: The control plane proxy's refusal for a request that did not wake a SLEEPING grid (grid-apis
 #: `grid_proxy.GRID_ASLEEP_CODE`, `idle-sleep` issue 02). A cross-repo wire value, hand-duplicated and
-#: pinned from both sides by `tests/test_grid_asleep_lockstep.py`.
+#: pinned from both sides by `tests/test_grid_sleep_lockstep.py`.
 #:
 #: ⚠️ **The fourth refusal code this CLI parses, where the count was held at three on purpose** — each
 #: one is a thing a reworded server can break. This one earns its place because the BEHAVIOUR has to
@@ -148,6 +148,8 @@ def _guard(resp: httpx.Response, what: str) -> None:
 #: parks until it is awake (`remote/bringup`, `remote/serve`), where before it retried every two
 #: seconds, forever. Compared for EQUALITY: an older proxy sends no code and a reworded one sends a
 #: code this CLI never heard, and both must stay transient — today's retry — never read as asleep.
+#: Issue 04 added the fifth and sixth, for the same reason: :data:`GRID_STOPPED_CODE` and
+#: :data:`GRID_DELETED_CODE` below.
 GRID_ASLEEP_CODE = "grid_asleep"
 
 
@@ -159,6 +161,30 @@ def is_grid_asleep(exc: RelayError) -> bool:
     every provider silently stop parking.
     """
     return exc.code == GRID_ASLEEP_CODE
+
+
+#: The proxy's answer for a grid its OWNER stopped (grid-apis `grid_proxy.GRID_STOPPED_CODE`,
+#: `idle-sleep` issue 04). Nothing a caller sends wakes such a grid, so a provider parks on it exactly as
+#: on a sleeping one — and checks back less often, since only the owner's `grid start` ends it. The fifth
+#: parsed refusal code, admitted for :data:`GRID_ASLEEP_CODE`'s reason: the behaviour changes, not only
+#: the words. Pinned from both sides by `tests/test_grid_sleep_lockstep.py`.
+GRID_STOPPED_CODE = "grid_stopped"
+
+#: The proxy's answer for a grid that was DELETED (grid-apis `grid_proxy.GRID_DELETED_CODE`, a 410,
+#: `idle-sleep` issue 04). The sixth parsed code: a provider on it STOPS for good, where before it sat on
+#: a grid that no longer exists for as long as its machine was up. Compared for equality like the rest —
+#: an older proxy answers a deleted grid with a codeless 404, which stays today's retry.
+GRID_DELETED_CODE = "grid_deleted"
+
+
+def is_grid_stopped(exc: RelayError) -> bool:
+    """Whether the relay's refusal says the grid's OWNER stopped it. See :data:`GRID_STOPPED_CODE`."""
+    return exc.code == GRID_STOPPED_CODE
+
+
+def is_grid_deleted(exc: RelayError) -> bool:
+    """Whether the relay's refusal says the grid was DELETED. See :data:`GRID_DELETED_CODE`."""
+    return exc.code == GRID_DELETED_CODE
 
 
 def _answer_code(resp: httpx.Response) -> str | None:
