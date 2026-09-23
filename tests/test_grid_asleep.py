@@ -413,6 +413,25 @@ def test_the_asleep_sentence_survives_the_records_bound_intact():
     assert len(service_truth.ASLEEP_REASON) <= service_truth.REGISTER_ERROR_MAX_CHARS
 
 
+@pytest.mark.parametrize(
+    "waker",
+    ["inference", "signed-in read", "`grid join`", "owner starting it"],
+)
+def test_the_asleep_sentence_names_everything_that_wakes_the_grid(waker):
+    """`idle-sleep` issue 04 (decision 1) made a signed-in read or action and a `grid join` wake a
+    sleeping grid, beside inference and the owner's start — and the sentence a parked provider logs and
+    records still named only the first and the last (issue 05, part H). A person reading it to find out
+    how to get their grid back must be told every way."""
+    assert waker in service_truth.ASLEEP_REASON
+
+
+def test_the_asleep_sentence_does_not_say_this_engine_wakes_it():
+    """A `grid join` wakes a grid; THIS engine — itself a running `grid join` — does not, by polling. The
+    sentence must not read as if the process logging it were the thing that wakes the grid."""
+    assert "new `grid join`" in service_truth.ASLEEP_REASON
+    assert "does not wake it" in service_truth.ASLEEP_REASON
+
+
 def test_a_parked_poll_worker_waits_between_looks_instead_of_spinning(monkeypatch, tmp_path):
     """Parked must mean ASLEEP, not busy. A park loop that stopped waiting would make no request — every
     other test here would stay green — while burning a core per poll worker for as long as the grid

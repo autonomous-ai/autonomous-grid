@@ -324,3 +324,15 @@ def test_the_stopped_sentence_names_who_can_start_it_and_that_the_engine_will_re
     reason = service_truth.STOPPED_REASON
     assert "owner" in reason and "start" in reason
     assert "by itself" in reason
+
+
+def test_the_owner_stopped_and_deleted_sentences_are_exactly_what_they_were():
+    """`idle-sleep` issue 05, part H reworded the ASLEEP sentence only. These two are recognised by
+    EQUALITY in the records every running engine has already written, so a reword here would bring the
+    `--respawn` advice back for every engine parked or stopped under the old words — pinned as literals,
+    because a test comparing the constant to itself pins nothing."""
+    assert service_truth.STOPPED_REASON == (
+        "the grid's owner has stopped it, and nothing wakes it until they start it again (`grid start`); "
+        "this engine keeps checking and rejoins by itself once it is started"
+    )
+    assert service_truth.DELETED_REASON == "the grid was deleted, so this engine has stopped serving it"

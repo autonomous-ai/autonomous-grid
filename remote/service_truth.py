@@ -63,9 +63,13 @@ REGISTER_ERROR_MAX_CHARS = 300
 # longer sentence would be stored cut and never match (pinned by a test). A reworded one is recognised
 # only in records written by a child running the new wording — a child already parked under an older CLI
 # keeps its old sentence, and the gate gives it the ordinary `--respawn` advice until it is replaced.
+# It names EVERY waker (`idle-sleep` issue 05, part H): since issue 04 a signed-in read or action and a
+# `grid join` wake a grid too, beside inference and the owner's start. "A new `grid join`", because this
+# engine is itself one, and its polling is exactly what does not wake the grid.
 ASLEEP_REASON = (
-    "the grid is asleep, and a provider does not wake it — a consumer's inference request or its "
-    "owner starting it does; this engine keeps checking and rejoins by itself once the grid is awake"
+    "the grid is asleep, and this engine's polling does not wake it — a person does: an inference "
+    "request, a signed-in read or action, a new `grid join`, or its owner starting it; this engine keeps "
+    "checking and rejoins by itself once the grid is awake"
 )
 
 # The sentence for an engine parked on a grid its OWNER stopped (`idle-sleep` issue 04). Recognised by
