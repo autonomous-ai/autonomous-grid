@@ -43,6 +43,7 @@ from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from . import project_arg
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .remote_grid import cmd_remote_members
+from .remote_overview import NO_WAKE_FLAG
 from .remote_price import cmd_remote_price
 from .remote_project import cmd_remote_project
 from .remote_stats import USAGE_DIMENSIONS, cmd_remote_stats, cmd_remote_usage
@@ -382,13 +383,28 @@ def _add_engines(sub) -> None:
                         help="Grid name or id (ag-…). Omit for the active grid.")
     models.add_argument("--verbose", action="store_true", help="Show the engine serving each model.")
     models.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    _add_no_wake(models)
     models.set_defaults(handler=cmd_models)
 
     engines = sub.add_parser("engines", help="Live engines joined to a grid")
     engines.add_argument("grid", nargs="?", default=None,
                          help="Grid name or id (ag-…). Omit for the active grid.")
     engines.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    _add_no_wake(engines)
     engines.set_defaults(handler=cmd_engines)
+
+
+def _add_no_wake(command) -> None:
+    """`--no-wake` on the remote reads (grid-reads-without-waking issue 01; `cli/remote_overview`).
+
+    ⚠️ The literal is a cross-repo value — the harness's Model Manager viewer passes it on every
+    automatic `engines`/`models`/`stats` call — so it is spelled once, in `remote_overview`.
+    """
+    command.add_argument(
+        NO_WAKE_FLAG, action="store_true",
+        help="Read a remote grid without waking it: no credential is sent, so a sleeping grid answers "
+             "that it is asleep instead of being started. Ignored in local mode.",
+    )
 
 
 def _add_stats(sub) -> None:
@@ -405,6 +421,7 @@ def _add_stats(sub) -> None:
     stats.add_argument("--verbose", action="store_true",
                        help="Also print a card per engine: memory, telemetry, storage and its own tokens.")
     stats.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    _add_no_wake(stats)
     stats.set_defaults(handler=cmd_remote_stats)
 
     usage = sub.add_parser("usage", help="Tokens a remote grid answered, by model, member or engine")

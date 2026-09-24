@@ -504,7 +504,7 @@ count that does not match the `-m` count fails the join.) See [ADR 0004](./adr/0
 ## Models
 
 ```
-grid models [grid] [--verbose] [--json] # live models the grid can run now
+grid models [grid] [--verbose] [--json] [--no-wake] # live models the grid can run now
 grid catalog [--json]                   # models Grid can pull
 grid catalog --api <kind> [--json]      # API-engine whitelist for a service kind (openai, codex, doggi)
 grid pull <model>                       # pull a model for the default text engine
@@ -546,7 +546,16 @@ In `remote` mode `grid models` and `grid engines` read the grid's live overview 
 relay endpoint (no per-grid token needed, so they work even before `grid sync`). `--verbose` prints
 `MODEL ENGINE NODE` — the **node** serving each model instead of a local `WHERE` URL, since remote
 engines sit behind the relay, not at an address you call directly. A grid with auto-routing enabled
-also lists the reserved model `auto` (see [Router](#router)).
+also lists the reserved model `auto` (see [Router](#router)). Model ids keep their exact case: the
+overview lower-cases them, so `grid models` restores each from the engines this computer runs and,
+for the rest, one read of the grid's public list of engines (a failed read leaves them as shown).
+
+A signed-in read of a **sleeping** grid starts it. `--no-wake` (on `grid models`, `grid engines` and
+`grid stats`) reads it without: no credential is sent, so a sleeping grid answers that it is asleep
+instead of being started — and when the grid's own status already says `asleep`, nothing is sent at
+all. That answer is a refusal; with `--json` its error envelope carries `"code": "grid_asleep"` and
+stdout stays empty. Every other refusal is reported as before, with a `null` code. The flag is
+accepted and ignored in local mode.
 
 `grid catalog --api <kind>` answers the discovery question for **API engines**: which models
 would a `grid join --api <kind>` serve? It prints a curated, static whitelist with each model's
@@ -581,7 +590,7 @@ the `openai:*` namespacing, and the key-store lifecycle.
 ## Stats
 
 ```
-grid stats [grid] [--verbose] [--json]                       # what the grid brings, and what it answered
+grid stats [grid] [--verbose] [--json] [--no-wake]           # what the grid brings, and what it answered
 grid usage [grid] [--by model|member|engine] [--json]        # who and what spent the tokens
 ```
 

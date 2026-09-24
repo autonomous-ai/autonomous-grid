@@ -127,13 +127,18 @@ def _try_status(session: str, network_id: str) -> dict[str, Any]:
         return {}
 
 
-#: The run states a use/serve command may call a grid in. ⚠️ `asleep` is a CROSS-REPO wire value
-#: (grid-apis `grid_sleep_state.ASLEEP`, `idle-sleep` issue 04): a grid the control plane's reaper slept,
-#: which the request itself wakes. Refused here, it could not be woken from this CLI at all — the request
-#: that would have woken it is never sent — which is why the control plane once reported such a grid as
-#: `running`. Compared for equality; pinned by `tests/test_grid_sleep_lockstep.py`. A grid its OWNER
-#: stopped is `stopped`, and is refused with the command that starts it.
-_CALLABLE_STATES = frozenset({"running", "asleep"})
+#: The owner status of a grid the control plane's reaper slept. ⚠️ A CROSS-REPO wire value (grid-apis
+#: `grid_sleep_state.ASLEEP`, `idle-sleep` issue 04), compared for equality and pinned by
+#: `tests/test_grid_sleep_lockstep.py` and `tests/test_grid_reads_lockstep.py`. Read two ways: it is one of
+#: :data:`_CALLABLE_STATES`, and under `--no-wake` a grid in it is reported asleep with no request at all
+#: (`cli/remote_overview.read_target`, grid-reads-without-waking issue 01).
+ASLEEP_STATE = "asleep"
+
+#: The run states a use/serve command may call a grid in. :data:`ASLEEP_STATE` is here because the
+#: request itself wakes such a grid: refused here, it could not be woken from this CLI at all — the
+#: request that would have woken it is never sent — which is why the control plane once reported such a
+#: grid as `running`. A grid its OWNER stopped is `stopped`, and is refused with the command that starts it.
+_CALLABLE_STATES = frozenset({"running", ASLEEP_STATE})
 
 
 def resolve_relay_base(
