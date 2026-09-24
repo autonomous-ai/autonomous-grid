@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import pathlib
 import re
 
@@ -38,7 +39,8 @@ import pytest
 import cli
 from cli import remote_grid, remote_overview
 from remote import relay
-from shared import user_agent
+from shared import paths, run_records, user_agent
+from tests._remote_seed import seed_remote_grid
 from tests.grid_src_repo import grid_apis_root, grid_src_private_server, harness_root
 
 OVERVIEW_ROUTE = "relay/v1/grid/overview"
@@ -54,6 +56,10 @@ ROUTE_ID_PREFIX = "provider:"
 RETENTION_SECONDS = 150
 CAPTURE_MIN_UPTIME_SECONDS = 180
 RECORD_MAX_AGE_DAYS = 29
+ACCESS_LOSS_SETTLE_SECONDS = 150
+GRID_INFO_FIELDS = ["status", "grid_url"]
+#: The run-record keys the harness reads today (`cli/src/lib/localModels.ts`), and issue 02's `servedHere`.
+RUN_RECORD_FIELDS = ["engines", "models", "advertise_as", "node_id", "meta_name", "ctx_size", "media", "pid"]
 MASTER_NODE_PRUNE_DAYS = 30
 
 _SKIP_APIS = "the grid-apis worktree is not beside this one; the lockstep cannot be checked here"
@@ -171,8 +177,39 @@ def test_this_cli_reads_the_canonical_asleep_code_and_state():
 
 def test_this_clis_user_agent_says_when_it_sends_no_credential():
     """Read by people counting journal lines (the zero-baseline alarm keys on it), not by a program."""
-    assert user_agent.user_agent(credential=True).startswith("grid-cli/")
-    assert user_agent.user_agent(credential=False) == user_agent.user_agent(credential=True) + " (no-wake)"
+    assert user_agent.relay_user_agent(has_credential=True).startswith("grid-cli/")
+    assert user_agent.relay_user_agent(has_credential=False) == (
+        user_agent.relay_user_agent(has_credential=True) + " (no-wake)")
+
+
+def test_grid_info_json_names_the_status_and_address_the_harness_reads(monkeypatch, tmp_path, capsys):
+    """The harness resolves each grid's address, and its OWN grid's owner status, from `grid info --json`
+    (issue 02). The word `asleep` passes through unchanged."""
+    seed_remote_grid(monkeypatch, tmp_path, state_word=ASLEEP_STATE)
+
+    assert cli.main(["info", "--json"]) == 0
+
+    view = json.loads(capsys.readouterr().out)
+    assert set(GRID_INFO_FIELDS) <= set(view), view
+    assert view["status"] == ASLEEP_STATE
+    assert view["grid_url"] == "https://relay.example"
+
+
+def _record_keys() -> set[str]:
+    """The keys `grid join` writes into a remote run record (`cli/remote_provider._build_record`)."""
+    source = pathlib.Path(cli.__file__).parent / "remote_provider.py"
+    build = _function(ast.parse(source.read_text()), "_build_record")
+    returned = [node.value for node in ast.walk(build) if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)]
+    assert len(returned) == 1, "`_build_record` no longer returns one dict literal — teach this check its shape"
+    return {key.value for key in returned[0].keys if isinstance(key, ast.Constant)}
+
+
+def test_a_run_record_carries_every_field_the_harness_reads(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    missing = sorted(set(RUN_RECORD_FIELDS) - _record_keys())
+    assert not missing, f"`grid join` no longer writes {missing} into a run record"
+    assert paths.engines_dir("n1") == tmp_path / "run" / "engines" / "n1"
+    assert run_records.heartbeat_path("n1", "remote").name == "remote.heartbeat"
 
 
 # --- grid-apis: the proxy's route rules, and the sleep record --------------------------------------
@@ -224,6 +261,15 @@ def test_a_capture_waits_out_a_node_ttl_and_a_beat():
     uptime = _number(_assigned(tree, "MIN_UPTIME_SECONDS"))
     assert uptime == CAPTURE_MIN_UPTIME_SECONDS
     assert uptime >= _node_ttl_seconds() + relay.HEARTBEAT_INTERVAL
+
+
+def test_no_record_is_written_while_a_removed_machine_can_still_be_listed():
+    """A removed person's machine stays in the master's node list until its last heartbeat ages out, so the
+    record's access-loss fence must outlast a node TTL and a beat."""
+    tree = _tree(grid_apis_root(), "grid_networks/sleep_record.py", _SKIP_APIS)
+    settle = _number(_assigned(tree, "ACCESS_LOSS_SETTLE_SECONDS"))
+    assert settle == ACCESS_LOSS_SETTLE_SECONDS
+    assert settle >= _node_ttl_seconds() + relay.HEARTBEAT_INTERVAL
 
 
 # --- grid-src: both reads public, and the fields they publish --------------------------------------
@@ -364,3 +410,20 @@ def test_the_harness_ignores_a_record_before_the_master_forgets_its_nodes():
         pytest.skip(_NOT_LANDED)
     assert all(seconds <= RECORD_MAX_AGE_DAYS * 86400 < MASTER_NODE_PRUNE_DAYS * 86400 for seconds in values), (
         values)
+
+
+def test_the_harness_reads_only_run_record_fields_grid_join_writes():
+    """Not skipped: the harness reads run records TODAY (`localModels.owned`), from the same layout. A key
+    it reads that `grid join` stopped writing is a model that silently stops being recognised as this
+    computer's own; issue 02's `servedHere` reads more of them."""
+    root = harness_root()
+    if root is None:
+        pytest.skip(_SKIP_HARNESS)
+    source = _source(root, "cli/src/lib/localModels.ts", _SKIP_HARNESS).read_text()
+    read = set(re.findall(r"\brecord\.(\w+)", source))
+    assert read, "the harness's localModels.ts no longer reads `record.<field>` — teach this check where it went"
+    unknown = sorted(read - _record_keys())
+    assert not unknown, f"the harness reads {unknown}, which `grid join` does not write into a run record"
+    assert "'run', 'engines'" in source, "the harness no longer finds run records under run/engines/<grid id>"
+    assert "'.heartbeat'" in source, "the harness no longer reads the heartbeat sidecar beside a record"
+

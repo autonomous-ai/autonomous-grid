@@ -67,22 +67,11 @@ MAX_NODE_CARDS = 20
 # resolution
 # ---------------------------------------------------------------------------
 
-def _resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any], str, str, str, str]:
-    """``(session, record, network_id, label, relay base, token)`` for the grid these commands act on.
-
-    Same gates, in the same order, as every other remote read: signed in → a grid resolves → it
-    is up. The token is passed along for the ride and ignored by the public overview route, which
-    is what lets `grid stats` work on a grid whose token `grid sync` has not stored yet;
-    `_require_token` adds the real gate for the one dimension that names people.
-
-    The one resolution `grid models` and `grid engines` use too (`remote_overview.read_target`), so
-    `grid stats --no-wake` reads a sleeping grid without waking it exactly as they do — the token is
-    then ``""``. `grid usage` takes no such flag and always has its token.
-    """
-    from . import remote_overview
-
-    target = remote_overview.read_target(args)
-    return target.session, target.record, target.network_id, target.label, target.base, target.token
+# Both commands resolve their grid through `remote_overview.read_target` — the one resolution `grid models`
+# and `grid engines` use, so the gates run in the same order (signed in → a grid resolves → it is up) and
+# `grid stats --no-wake` reads a sleeping grid without waking it exactly as they do. The token rides
+# along for the public overview, which ignores it; `_require_token` is the real gate for the one
+# dimension that names people. `grid usage` takes no `--no-wake` and always has its token.
 
 
 def _require_token(rec: dict[str, Any], label: str) -> str:
@@ -368,8 +357,8 @@ def _engine_card(node: dict[str, Any], overview: dict[str, Any]) -> dict[str, An
     # should render, so the displayed name comes from the overview-corrected reading, which restores
     # the catalog's true case (`deepseek-v4-flash-0731` → `DeepSeek-V4-Flash-0731`). Both lists are
     # built from the same `node["models"]`, so zipping them cannot misalign.
-    keys = remote_overview._node_models(node)
-    shown = remote_overview._node_models(node, overview)
+    keys = remote_overview._node_models(node, {})
+    shown = remote_overview._node_models(node, remote_overview._model_case_map(overview))
     models = []
     for key, name in zip(keys, shown):
         entry = capabilities.get(key)
@@ -500,7 +489,7 @@ def _serving_counts(online: list[dict[str, Any]]) -> dict[str, int]:
     for node in online:
         # Uncorrected on purpose: every id here goes through [_model_key], which lowercases, so
         # restoring the catalog's case would be work undone on the next line.
-        advertised = {_model_key(m) for m in remote_overview._node_models(node)}
+        advertised = {_model_key(m) for m in remote_overview._node_models(node, {})}
         primary = _model_key(node.get("model") or "")
         if primary:
             advertised.add(primary)
@@ -811,8 +800,9 @@ def cmd_remote_stats(args: argparse.Namespace) -> int:
     """`grid stats [grid] [-v] [--json]` — what the grid brings and what it has answered."""
     from . import remote_overview
 
-    _session, _rec, _network_id, label, base, token = _resolve(args)
-    overview = remote_overview.fetch_overview(base, token, label)
+    target = remote_overview.read_target(args)
+    label = target.label
+    overview = remote_overview.fetch_overview(target.base, target.token, label)
     rollup = grid_rollup(overview)
     cards = engine_cards(overview)
 
@@ -859,12 +849,13 @@ def cmd_remote_usage(args: argparse.Namespace) -> int:
     from . import remote_overview
 
     dimension = getattr(args, "by", "model") or "model"
-    _session, rec, _network_id, label, base, token = _resolve(args)
-    overview = remote_overview.fetch_overview(base, token, label)
+    target = remote_overview.read_target(args)
+    label = target.label
+    overview = remote_overview.fetch_overview(target.base, target.token, label)
     rollup = grid_rollup(overview)
     answered = rollup["answered"]
 
-    rows, note = _usage_rows(dimension, overview, answered, rec, label, base)
+    rows, note = _usage_rows(dimension, overview, answered, target.record, label, target.base)
 
     if getattr(args, "json", False):
         print(json.dumps({

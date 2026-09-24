@@ -547,8 +547,8 @@ relay endpoint (no per-grid token needed, so they work even before `grid sync`).
 `MODEL ENGINE NODE` — the **node** serving each model instead of a local `WHERE` URL, since remote
 engines sit behind the relay, not at an address you call directly. A grid with auto-routing enabled
 also lists the reserved model `auto` (see [Router](#router)). Model ids keep their exact case: the
-overview lower-cases them, so `grid models` restores each from this computer's own run records and,
-for the rest, one read of the grid's public provider discovery (a failed read leaves them as shown).
+overview lower-cases them, so `grid models` restores each from the engines this computer runs and,
+for the rest, one read of the grid's public list of engines (a failed read leaves them as shown).
 
 A signed-in read of a **sleeping** grid starts it. `--no-wake` (on `grid models`, `grid engines` and
 `grid stats`) reads it without: no credential is sent, so a sleeping grid answers that it is asleep

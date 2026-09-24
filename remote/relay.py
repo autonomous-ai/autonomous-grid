@@ -110,7 +110,7 @@ class RelayError(Exception):
 
 
 def _client(signaling_url: str, access_token: str, *, timeout: float | httpx.Timeout) -> httpx.Client:
-    headers = {"User-Agent": user_agent.user_agent(credential=bool(access_token))}
+    headers = {"User-Agent": user_agent.relay_user_agent(has_credential=bool(access_token))}
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
     # An empty token is a real, documented case — `_fetch_overview` calls the *public* overview

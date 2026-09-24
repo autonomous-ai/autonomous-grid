@@ -21,6 +21,7 @@ import cli
 from local import runtime
 from shared import state
 from shared._version import __version__
+from tests._remote_seed import seed_remote_grid
 
 _OVERVIEW = {
     "grid": {"state": "running"},
@@ -37,26 +38,7 @@ _ASLEEP = {"detail": "grid is asleep and this request does not wake it — a per
            "code": "grid_asleep"}
 
 
-def _seed(monkeypatch, tmp_path, *, state_word="running", access_token="AT"):
-    """A signed-in remote user with one grid, `team`, whose owner status says ``state_word``."""
-    from remote import control_plane, credentials
-
-    monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    state.set_mode("remote")
-    net = {"network_id": "n1", "name": "team", "network_type": "permissioned-public"}
-    if access_token is not None:
-        net["access_token"], net["refresh_token"] = access_token, "RT"
-    credentials.save_credentials({
-        "session_token": "sess-tok", "api_url": "https://api.example",
-        "user": {"email": "a@b.com"}, "networks": [net],
-    })
-    state.set_active("remote", "team")
-    monkeypatch.setattr(
-        control_plane, "get_managed_network_status",
-        lambda session, network_id, api_url=None: {
-            "state": state_word, "signaling_url": "https://relay.example",
-        },
-    )
+_seed = seed_remote_grid
 
 
 def _relay(monkeypatch, routes, _real=httpx.Client):
@@ -364,9 +346,11 @@ def test_the_user_agent_names_the_version_and_says_when_no_credential_is_sent(mo
 
 
 def test_the_control_plane_client_names_the_version_too():
+    """Never `(no-wake)` there: the control plane is not behind the proxy, so the suffix — which the
+    operator reads as "this request could not have woken a grid" — would only mislabel a sign-in."""
     from remote import control_plane
 
     with control_plane._client("https://api.example", "sess") as client:
         assert client.headers["user-agent"] == f"grid-cli/{__version__}"
     with control_plane._client("https://api.example") as client:
-        assert client.headers["user-agent"] == f"grid-cli/{__version__} (no-wake)"
+        assert client.headers["user-agent"] == f"grid-cli/{__version__}"

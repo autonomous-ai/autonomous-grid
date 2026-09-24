@@ -88,11 +88,11 @@ def read_target(args: argparse.Namespace) -> ReadTarget:
         token = str(rec.get("access_token") or "")  # public route — token optional
         return ReadTarget(session, rec, network_id, label, base, token)
     if status.get("state") == remote_grid.ASLEEP_STATE:
-        raise _asleep(label)
+        raise _asleep_refusal(label)
     return ReadTarget(session, rec, network_id, label, base, "")
 
 
-def _asleep(label: str, *, status: int | None = None, detail: Any = None) -> SystemExit:
+def _asleep_refusal(label: str, *, status: int | None = None, detail: Any = None) -> SystemExit:
     """The refusal for a grid that is asleep: ``grid_asleep`` in the ``--json`` envelope.
 
     A ``TaskRefusal`` because that is this CLI's one ``SystemExit`` that carries a code to the envelope
@@ -136,7 +136,7 @@ def fetch_overview(base: str, token: str, label: str) -> dict[str, Any]:
         # Only the asleep code is read (for equality); every other refusal keeps today's sentence and
         # a null code — a codeless 503 and `grid_master_down` included.
         if relay.answers_grid_asleep(resp):
-            raise _asleep(label, status=resp.status_code, detail=_detail(resp))
+            raise _asleep_refusal(label, status=resp.status_code, detail=_detail(resp))
         raise SystemExit(f"Grid {label} overview failed ({resp.status_code}): {resp.text[:200]}")
     try:
         data = resp.json()
@@ -166,8 +166,9 @@ def live_model_names(overview: dict[str, Any]) -> tuple[str, ...]:
     never matches an engine-advertised model (CONTEXT-MAP.md), so it can never be what a caller is
     asking about when it asks which models exist.
     """
+    case_map = _model_case_map(overview)
     return tuple(dict.fromkeys(
-        model for node in _nodes_from(overview) for model in _node_models(node, overview)
+        model for node in _nodes_from(overview) for model in _node_models(node, case_map)
     ))
 
 
@@ -217,10 +218,14 @@ def _case_map_of(*sources: list[str]) -> dict[str, str]:
     return case
 
 
+#: What the master's display rule strips from the end of a raw model id, compared without regard to case.
+_GGUF_SUFFIX = ".gguf"
+
+
 def _display_name(raw: str) -> str:
     """grid-src's ``model_ids.display_model_name``: a trailing ``.gguf`` removed, case kept — the rule
     the master applies before it lower-cases an id for the overview. ⚠️ Cross-repo; see the register."""
-    return raw[:-5] if raw.lower().endswith(".gguf") else raw
+    return raw[: -len(_GGUF_SUFFIX)] if raw.lower().endswith(_GGUF_SUFFIX) else raw
 
 
 def _run_record_ids(network_id: str) -> list[str]:
@@ -278,9 +283,15 @@ def _exact_case_map(overview: dict[str, Any], target: ReadTarget) -> dict[str, s
     (grid-reads-without-waking issue 01). Its ``--json`` then stops lower-casing ids."""
     case = _case_map_of(_curated_ids(overview), _run_record_ids(target.network_id))
     served = [str(model).strip().lower() for node in _nodes_from(overview) for model in _raw_models(node)]
-    if all(case.get(model, model) != case.get(model, model).lower() for model in served):
+    if all(_has_upper_case(case.get(model, model)) for model in served):
         return case
     return _case_map_of(list(case.values()), _discovered_ids(target.base, target.token))
+
+
+def _has_upper_case(model_id: str) -> bool:
+    """Whether an id carries an upper-case letter — i.e. is not merely the lower-cased form the overview
+    already shows, so no other source could spell it better."""
+    return model_id != model_id.lower()
 
 
 def _raw_models(node: dict[str, Any]) -> list[Any]:
@@ -288,17 +299,12 @@ def _raw_models(node: dict[str, Any]) -> list[Any]:
     return models if isinstance(models, list) else []
 
 
-def _node_models(
-    node: dict[str, Any], overview: dict[str, Any] | None = None, *, case_map: dict[str, str] | None = None
-) -> list[str]:
+def _node_models(node: dict[str, Any], case_map: dict[str, str]) -> list[str]:
     """A node's served model ids as strings (defends against a non-list ``models`` or non-string
     items — otherwise ``",".join`` would split a bare string into characters or raise ``TypeError``).
 
-    Corrected against ``case_map`` when given, else against ``overview``'s true-case list; a caller
-    that already has the whole overview in scope should always pass one — the raw, lowercased id is
-    never what should render."""
-    if case_map is None:
-        case_map = _model_case_map(overview) if overview is not None else {}
+    Corrected against ``case_map`` (`_model_case_map`, or `grid models`' `_exact_case_map`) — the raw,
+    lowercased id is never what should render."""
     return [case_map.get(str(model).strip().lower(), str(model)) for model in _raw_models(node)]
 
 
@@ -327,6 +333,7 @@ def cmd_remote_engines(args: argparse.Namespace) -> int:
         print("(no engines — `grid join` one first)")
         return 0
 
+    case_map = _model_case_map(overview)
     raw_names = [str(n.get("name") or "") for n in nodes]
     # `--name` at join is never enforced unique across DIFFERENT machines on the same grid (only
     # this machine's own `grid leave` collision check is — cli/provider.py:414), so two members can
@@ -352,7 +359,7 @@ def cmd_remote_engines(args: argparse.Namespace) -> int:
         tok_s = node.get("throughput_tok_s")
         # bool is an int subclass — exclude it so `throughput_tok_s: true` shows "-", not "1".
         tok = f"{tok_s:g}" if isinstance(tok_s, (int, float)) and not isinstance(tok_s, bool) else "-"
-        models = ",".join(_node_models(node, overview)) or "(none)"
+        models = ",".join(_node_models(node, case_map)) or "(none)"
         print(f"{name:<{nwidth}}  {engine:<{ewidth}}  {device:<{dwidth}}  {tok}")
         print(f"{'':<{nwidth}}  models: {models}")
     return 0
@@ -378,7 +385,7 @@ def cmd_remote_models(args: argparse.Namespace) -> int:
         engine = str(node.get("engine") or "")
         name = str(node.get("name") or "")
         capable = _node_responses_models(node)  # resolved once per node, not per served model
-        for model in _node_models(node, case_map=case_map):
+        for model in _node_models(node, case_map):
             rows.append((model, engine, name, model.lower() in capable))
     # When auto routing is enabled AND the grid actually serves something, advertise the reserved
     # router family FIRST — mirroring the relay's /relay/v1/models endpoint (owner `grid-router`).

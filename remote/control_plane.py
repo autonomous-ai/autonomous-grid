@@ -51,7 +51,7 @@ class ControlPlaneError(SystemExit):
 
 
 def _client(api_url: str | None = None, token: str | None = None) -> httpx.Client:
-    headers = {"User-Agent": user_agent.user_agent(credential=bool(token))}
+    headers = {"User-Agent": user_agent.CLI_USER_AGENT}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return httpx.Client(base_url=credentials.api_url(api_url), headers=headers, timeout=_TIMEOUT)
