@@ -814,7 +814,7 @@ wheels = [
 
 [[package]]
 name = "grid"
-version = "0.3.49"
+version = "0.3.50"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
