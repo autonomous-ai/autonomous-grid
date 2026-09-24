@@ -568,8 +568,28 @@ def run_task(job: dict[str, Any],
     # the same answer, so the user gets the reason now instead of `retries_exhausted` in three lease
     # TTLs with nothing to read. It is also what makes the relay's half fail loudly on a version
     # skew — hence: roll the relay out BEFORE the provider fleet.
-    member_key = str(job.get("member_key") or "")
+    #
+    # ⚠️ **The key goes missing two ways and they are not the same event.** ABSENT is a relay too
+    # old to send it. PRESENT and null is a relay doing its job: it is what the claim carries when
+    # the turn's owner left the project — or was removed from it — while their turn sat queued, and
+    # the relay says so where it builds the payload (*"`None` when the owner is no longer a member
+    # — a removal while the task sat queued"*). ADR 0035 D-c makes that ordinary: leaving cancels
+    # nothing, so a departed member's queued turn outlives them on purpose.
+    #
+    # Fused, the two arrived as one sentence telling whoever read it to upgrade a relay that is
+    # working exactly as designed — and that sentence reaches a PERSON, through `error=` on
+    # `grid task get`, not only the operator. Same split, and the same reason for it, as the
+    # `conversation_id` refusal below.
+    raw_member_key = job.get("member_key")
+    member_key = str(raw_member_key or "")
     if not member_key:
+        if raw_member_key is None and "member_key" in job:
+            return failed(
+                "the person who asked for this turn is no longer a member of the project, so this "
+                "provider has no workspace to run it in. Nothing is wrong with the relay: someone "
+                "can leave, or be removed, while a turn of theirs is still waiting, and the turn "
+                "is deliberately not cancelled with them. Ask a current member to send the message "
+                "again (ADR 0035 D-c).")
         return failed(
             "the relay's claim named no member_key, so this provider cannot tell whose workspace "
             "this task belongs to. It refuses to run rather than share one project-level workspace "

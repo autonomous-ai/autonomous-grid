@@ -85,6 +85,17 @@ _MERGE_KIND = "merge"
 # vocabulary and no raw git error reaches this surface. The relay is free to reword its prompt
 # without this line moving, which is why the substitution is here rather than a shorter prompt there.
 _MERGE_TURN_LABEL = "(the grid is combining this work with a colleague's)"
+# And the same substitution one surface further along, for the half `_MERGE_TURN_LABEL` does not
+# reach (C7.3 / ND-03). A merge turn's RESULT is the agent's account of a collision the grid sent it
+# to resolve — measured live on `dt-edge`, full of `git add` and conflict markers — and under the
+# ordinary heading it reads as the answer to a request the person never made.
+#
+# ⚠️ The text itself is KEPT and merely announced, which is the call `error=` already makes for the
+# same turn in `_task_get`: the two readers need different things, and filtering the agent's own
+# words would leave whoever runs the grid unable to diagnose the fault. Naming the speaker is the
+# cheapest thing that turns a non-sequitur back into a report.
+_MERGE_RESULT_HEADING = "--- result of the grid combining this work with a colleague's ---"
+_RESULT_HEADING = "--- result ---"
 
 
 def _is_merge_turn(task: object) -> bool:
@@ -1849,7 +1860,7 @@ def _task_get(args: argparse.Namespace) -> int:
         print(line)
     result = task.get("result_text")
     if result:
-        print("\n--- result ---")
+        print("\n" + (_MERGE_RESULT_HEADING if _is_merge_turn(task) else _RESULT_HEADING))
         print(result.rstrip("\n"))
     return code
 

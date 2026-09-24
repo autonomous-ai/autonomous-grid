@@ -751,6 +751,33 @@ def test_a_workspace_inside_a_denied_tree_is_refused_rather_than_half_confined(t
     assert task_agent_env_name() in message, message
 
 
+def test_the_refusal_suggests_THIS_platforms_root_and_not_the_other_ones(tmp_path, config_dir):
+    """ND-01's follow-up. The one sentence an operator is asked to act on named both platforms.
+
+    It used to end *"(for example /Users/Shared/gnd on macOS, or /var/grid on Linux)"*, so somebody
+    on Linux — the operating system the fleet runs — read a macOS path first in the remedy. Measured
+    on the dev VM while closing ND-01's live arm.
+
+    Asserted against `default_workspace_root()` rather than against a literal, which is the whole
+    point of the change: the value has moved once already (issue 62 took macOS off `/var/grid`), and
+    a hand-copied example would have gone stale in silence. The negative half is what makes it bite —
+    without it, naming both platforms passes.
+    """
+    from remote import task_agent, task_sandbox
+
+    mine = task_agent.default_workspace_root()
+    other = task_agent.default_workspace_root("linux" if sys.platform == "darwin" else "darwin")
+
+    with pytest.raises(ValueError) as refusal:
+        task_sandbox.policy(Path.home() / "gnd" / "p" / "m" / "c" / "workspace", config_dir)
+
+    message = str(refusal.value)
+    assert mine in message, f"the remedy does not name a root this platform can use: {message}"
+    assert other not in message, (
+        f"the remedy names the OTHER platform's default, which is a path that cannot exist here: "
+        f"{message}")
+
+
 def test_a_workspace_outside_every_denied_tree_still_builds_a_policy(tmp_path, config_dir):
     """The control for the refusal above: the ordinary layout must be untouched by it."""
     from remote import task_sandbox
