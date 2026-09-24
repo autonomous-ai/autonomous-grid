@@ -8,7 +8,7 @@ from datetime import datetime
 
 from local import config
 from local import runtime
-from shared import logging_setup, paths
+from shared import logging_setup, paths, stdio
 from . import json_error, update
 from .dispatch import dispatch, resolve_override, split_forwarded
 from .parser import build_parser
@@ -117,6 +117,9 @@ def cmd_internal_cli_seat_server(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # First, before anything prints: the Linux binary's streams are ASCII in the C locale, where
+    # CPython's would be UTF-8 (`shared/stdio`). A no-op for every other interpreter and locale.
+    stdio.use_utf8_in_an_ascii_locale()
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     internal = _maybe_internal(raw_argv)
     if internal is not None:
