@@ -54,6 +54,39 @@ BRINGUP_QUIET_SECONDS = 300.0
 REGISTER_ERROR_MAX_CHARS = 300
 
 
+# What a provider is told — and what its record holds — when its grid is ASLEEP (the proxy's
+# `relay.GRID_ASLEEP_CODE`, `idle-sleep` issue 02). Authored here rather than relayed from the proxy's own
+# sentence, which is written for every caller that did not wake the grid: this one is a provider that is
+# not going to exit, and the useful part is that nothing needs doing. Bring-up and the serve loop both say
+# it, and the join gate below recognises a parked engine by it.
+# ⚠️ Recognised by EQUALITY with what the record holds, which is bounded to REGISTER_ERROR_MAX_CHARS: a
+# longer sentence would be stored cut and never match (pinned by a test). A reworded one is recognised
+# only in records written by a child running the new wording — a child already parked under an older CLI
+# keeps its old sentence, and the gate gives it the ordinary `--respawn` advice until it is replaced.
+# It names EVERY waker (`idle-sleep` issue 05, part H): since issue 04 a signed-in read or action and a
+# `grid join` wake a grid too, beside inference and the owner's start. "A new `grid join`", because this
+# engine is itself one, and its polling is exactly what does not wake the grid.
+ASLEEP_REASON = (
+    "the grid is asleep, and this engine's polling does not wake it — a person does: an inference "
+    "request, a signed-in read or action, a new `grid join`, or its owner starting it; this engine keeps "
+    "checking and rejoins by itself once the grid is awake"
+)
+
+# The sentence for an engine parked on a grid its OWNER stopped (`idle-sleep` issue 04). Recognised by
+# the join gate exactly like ASLEEP_REASON, and bounded the same way (pinned by a test).
+STOPPED_REASON = (
+    "the grid's owner has stopped it, and nothing wakes it until they start it again (`grid start`); "
+    "this engine keeps checking and rejoins by itself once it is started"
+)
+
+# The sentence an engine on a DELETED grid stops with (`idle-sleep` issue 04). It is the last thing the
+# engine records; the gate recognises it so it never advises re-running a join against a grid that is gone.
+DELETED_REASON = "the grid was deleted, so this engine has stopped serving it"
+
+# The recorded reasons after which the gate must NOT advise `--respawn`: a fresh child would meet the
+# same answer — a grid still asleep, still stopped, or gone.
+_NO_RESPAWN_REASONS = frozenset({ASLEEP_REASON, STOPPED_REASON, DELETED_REASON})
+
 # The record fields this module owns. They belong to the **process**, exactly like `run_records`'
 # identity block — which is what decides where they travel: a hot-reload is the same process and
 # carries them, a respawn is a new one and must not. They live here rather than beside
@@ -260,7 +293,11 @@ def _detail(truth: ServiceTruth, log_path: Path, *, starting: bool) -> str:
         # "Warning: (see log=…)" whenever the record carried no reason, which reads like a bug.
         lines.append(f"Warning: last register error: {truth.last_error}")
     lines.append(f"(see log={log_path})")
-    if not starting:
+    # ⚠️ Not for an engine parked on a SLEEPING grid (`idle-sleep` issue 02), one its owner STOPPED, or one
+    # that was DELETED (issue 04): a fresh child meets the same answer and parks or stops too, and the
+    # reason above already says what (if anything) needs doing — so the one piece of advice this block
+    # gives would cost the operator a working engine for nothing.
+    if not starting and truth.last_error not in _NO_RESPAWN_REASONS:
         lines.append(
             "If it stays this way, re-run this join with --respawn to stop this engine and start a "
             "fresh one."

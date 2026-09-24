@@ -43,6 +43,26 @@ _TERMINAL_STATUSES = frozenset({400, 403, 422})
 # every attempt that gets past the credential file's own re-read is a control-plane round trip.
 _AUTH_BACKOFF_SCHEDULE: tuple[float, ...] = (60.0, 120.0, 300.0)
 
+# A SLEEPING grid (the proxy's `relay.GRID_ASLEEP_CODE`, `idle-sleep` issue 02) is checked on its own
+# clock rather than the ordinary backoff's: the ordinary one's first steps (1, 2, 4s) ask a grid that
+# cannot answer until somebody wakes it. Not capped any higher than the ordinary one, because the price
+# of a slow check is paid AFTER the wake — every second of it is a woken grid with no provider — while
+# the price of a fast one is one refused request a minute, which the proxy answers without waking it.
+_ASLEEP_SCHEDULE: tuple[float, ...] = (30.0, 60.0)
+
+# A grid its OWNER stopped (`relay.GRID_STOPPED_CODE`, `idle-sleep` issue 04) is checked once a minute
+# from the first: only the owner's `grid start` ends it, and nothing a provider does hurries that.
+_STOPPED_SCHEDULE: tuple[float, ...] = (60.0,)
+
+# What bring-up waits on WITHOUT failing — a grid that will not take this engine yet — keyed by the
+# proxy's code: the sentence said once per pause, the short line after it, and the clock it is checked on.
+_PAUSES: dict[str, tuple[str, str, tuple[float, ...]]] = {
+    relay.GRID_ASLEEP_CODE: (service_truth.ASLEEP_REASON, "the grid is still asleep", _ASLEEP_SCHEDULE),
+    relay.GRID_STOPPED_CODE: (
+        service_truth.STOPPED_REASON, "the grid is still stopped by its owner", _STOPPED_SCHEDULE,
+    ),
+}
+
 # `RelayUnauthorized` carries no message — before ADR 0022 this path died printing
 # "Remote engine stopped: " with nothing after the colon. The reason is authored here instead, and
 # it names the command, because it is the one failure on this path with an operator-side remedy.
@@ -57,6 +77,17 @@ class BringUpStopped(Exception):
 
     def __init__(self, message: str = "stopped while waiting to register") -> None:
         super().__init__(message)
+
+
+class GridDeleted(Exception):
+    """The relay said this engine's grid was DELETED (`relay.GRID_DELETED_CODE`, `idle-sleep` issue 04).
+
+    Terminal, and said in one sentence (``service_truth.DELETED_REASON``): a grid that is gone does not
+    come back, and a child that kept retrying one was a process and a growing log for as long as its
+    machine ran."""
+
+    def __init__(self) -> None:
+        super().__init__(service_truth.DELETED_REASON)
 
 
 # One wall clock over the WHOLE capability fan-out, which is what the 8-minute field wedge actually
@@ -173,8 +204,11 @@ def register_with_backoff(
     attempt = 0
     relay_failures = 0
     auth_failures = 0
+    pause: str | None = None  # the proxy code of the pause bring-up is waiting out, if any
+    pause_checks = 0
     while True:
         attempt += 1
+        paused_now = False
         try:
             register()
             return
@@ -182,15 +216,40 @@ def register_with_backoff(
             # Counted separately from transport/status failures: the two schedules mean different
             # things, so a run of 503s must not push a later token failure straight to its floor.
             auth_failures += 1
+            pause, pause_checks = None, 0
             wait = _wait_for(_AUTH_BACKOFF_SCHEDULE, auth_failures)
             reason = _AUTH_REASON
         except relay.RelayError as exc:
-            if is_terminal(exc):
+            if relay.is_grid_deleted(exc):
+                # Terminal, and before `is_terminal`: a 410 is not a status that list names, and a
+                # grid that is gone will not answer differently to a retry (issue 04).
+                raise GridDeleted() from exc
+            if exc.code in _PAUSES:
+                # PARKED, never terminal (issues 02, 04): a sleeping grid wakes the moment somebody
+                # uses it, and a stopped one the moment its owner starts it — and an engine that
+                # exited here would not be there when it did.
+                paused_now = True
+                if exc.code != pause:
+                    pause, pause_checks = exc.code, 0
+                pause_checks += 1
+                reason, _still, pause_waits = _PAUSES[exc.code]
+                wait = _wait_for(pause_waits, pause_checks)
+            elif is_terminal(exc):
                 raise
-            relay_failures += 1
-            wait = _wait_for(waits, relay_failures)
-            reason = str(exc)
-        log(f"register attempt {attempt} failed ({_short(reason)}); retrying in {wait:.0f}s")
+            else:
+                relay_failures += 1
+                # Only a different WORD from the relay ends the pause for the log — the serve loop's
+                # park rule. A codeless failure (nothing answered) says nothing about the grid.
+                if exc.code is not None:
+                    pause, pause_checks = None, 0
+                wait = _wait_for(waits, relay_failures)
+                reason = str(exc)
+        if paused_now and pause_checks > 1:
+            # Said in full once per pause; after that one short line per check is all the log needs.
+            still = _PAUSES[pause][1]
+            log(f"register attempt {attempt}: {still}; checking again in {wait:.0f}s")
+        else:
+            log(f"register attempt {attempt} failed ({_short(reason)}); retrying in {wait:.0f}s")
         # The RAW reason for the record — `note_register_error` applies its own bound. The attempt
         # number stays out of it on purpose: the record's writer skips a write when nothing changed,
         # so a stable string is what makes a day-long outage cost one write instead of one per beat.

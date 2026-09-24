@@ -90,11 +90,13 @@ class RelayError(Exception):
     all, so nothing was ever asked and waiting cannot change the answer. A malformed relay address
     fails that way — it is as fatal as a 403, but it carries no status to say so.
 
-    ``code`` is the relay's machine-readable refusal code (ADR 0033 D-l) when the caller asked for
-    one, and ``None`` otherwise — which is every caller but the lease renewer. It exists because one
-    provider-side decision cannot be made from the status alone: a cancelled task and an old relay
-    with no lease route both answer 404, and only one of them means "stop the agent". See
-    ``renew_task_lease``. Defaulting to ``None`` is what keeps every other raiser unchanged.
+    ``code`` is the machine-readable refusal code when the answer carried one, and ``None``
+    otherwise. Two shapes reach it: the task plane's, under ``detail`` (ADR 0033 D-l, which only the
+    lease renewer asks for), and the one ``_guard`` reads beside ``detail`` — where the control
+    plane's proxy puts :data:`GRID_ASLEEP_CODE`. It exists because a provider-side decision cannot be
+    made from the status alone: a cancelled task and an old relay with no lease route both answer 404,
+    and a sleeping grid and a relay mid-respawn both answer 503. Defaulting to ``None`` is what keeps
+    every other raiser unchanged.
     """
 
     def __init__(self, *args: Any, status: int | None = None, terminal: bool = False,
@@ -132,7 +134,76 @@ def _guard(resp: httpx.Response, what: str) -> None:
     if resp.status_code == 401:
         raise RelayUnauthorized()
     if resp.status_code >= 400:
-        raise RelayError(f"{what} failed ({resp.status_code}): {resp.text[:200]}", status=resp.status_code)
+        raise RelayError(f"{what} failed ({resp.status_code}): {resp.text[:200]}", status=resp.status_code,
+                         code=_answer_code(resp))
+
+
+#: The control plane proxy's refusal for a request that did not wake a SLEEPING grid (grid-apis
+#: `grid_proxy.GRID_ASLEEP_CODE`, `idle-sleep` issue 02). A cross-repo wire value, hand-duplicated and
+#: pinned from both sides by `tests/test_grid_sleep_lockstep.py`.
+#:
+#: ⚠️ **The fourth refusal code this CLI parses, where the count was held at three on purpose** — each
+#: one is a thing a reworded server can break. This one earns its place because the BEHAVIOUR has to
+#: change, not only the words: a provider that meets it stops polling a grid that cannot answer and
+#: parks until it is awake (`remote/bringup`, `remote/serve`), where before it retried every two
+#: seconds, forever. Compared for EQUALITY: an older proxy sends no code and a reworded one sends a
+#: code this CLI never heard, and both must stay transient — today's retry — never read as asleep.
+#: Issue 04 added the fifth and sixth, for the same reason: :data:`GRID_STOPPED_CODE` and
+#: :data:`GRID_DELETED_CODE` below.
+GRID_ASLEEP_CODE = "grid_asleep"
+
+
+def is_grid_asleep(exc: RelayError) -> bool:
+    """Whether the relay's refusal says the grid is ASLEEP — as opposed to down, or mid-respawn.
+
+    Only the exact code counts; see :data:`GRID_ASLEEP_CODE`. The status is deliberately not
+    consulted: the code is the contract, and a proxy that moved it to another status must not make
+    every provider silently stop parking.
+    """
+    return exc.code == GRID_ASLEEP_CODE
+
+
+#: The proxy's answer for a grid its OWNER stopped (grid-apis `grid_proxy.GRID_STOPPED_CODE`,
+#: `idle-sleep` issue 04). Nothing a caller sends wakes such a grid, so a provider parks on it exactly as
+#: on a sleeping one — and checks back less often, since only the owner's `grid start` ends it. The fifth
+#: parsed refusal code, admitted for :data:`GRID_ASLEEP_CODE`'s reason: the behaviour changes, not only
+#: the words. Pinned from both sides by `tests/test_grid_sleep_lockstep.py`.
+GRID_STOPPED_CODE = "grid_stopped"
+
+#: The proxy's answer for a grid that was DELETED (grid-apis `grid_proxy.GRID_DELETED_CODE`, a 410,
+#: `idle-sleep` issue 04). The sixth parsed code: a provider on it STOPS for good, where before it sat on
+#: a grid that no longer exists for as long as its machine was up. Compared for equality like the rest —
+#: an older proxy answers a deleted grid with a codeless 404, which stays today's retry.
+GRID_DELETED_CODE = "grid_deleted"
+
+
+def is_grid_stopped(exc: RelayError) -> bool:
+    """Whether the relay's refusal says the grid's OWNER stopped it. See :data:`GRID_STOPPED_CODE`."""
+    return exc.code == GRID_STOPPED_CODE
+
+
+def is_grid_deleted(exc: RelayError) -> bool:
+    """Whether the relay's refusal says the grid was DELETED. See :data:`GRID_DELETED_CODE`."""
+    return exc.code == GRID_DELETED_CODE
+
+
+def _answer_code(resp: httpx.Response) -> str | None:
+    """The ``code`` an error answer carries BESIDE its ``detail``, or ``None`` when it states none.
+
+    The shape the control plane and its proxy use (`{"detail": "<sentence>", "code": "<code>"}`), so a
+    client that renders ``detail`` as a string keeps working. Not the task plane's, which nests the
+    code under ``detail`` and is read by :func:`refusal_code` — two shapes, two readers, and neither
+    guesses at the other's.
+
+    Never raises, for :func:`refusal_code`'s reason: this only ever produces an OPTIONAL string, and an
+    answer that is not JSON, or JSON that is not an object, simply states no code.
+    """
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001 — a hostile or truncated body can raise well outside ValueError
+        return None
+    code = body.get("code") if isinstance(body, dict) else None
+    return code if isinstance(code, str) else None
 
 
 def check_credential(signaling_url: str, access_token: str) -> None:
@@ -441,8 +512,10 @@ def renew_task_lease(signaling_url: str, access_token: str, task_id: str) -> Non
     issue 19b). The status is no longer the whole answer for 404: a task a member CANCELLED and a
     relay too old to have this route both answer 404, and the renewer must stop the agent for the
     first and must not for the second. Only the refusal code separates them, so it is lifted onto
-    the error here — for this call and no other. ``_guard`` is untouched, so every other caller in
-    this module raises exactly the error it raised before.
+    the error here, from UNDER ``detail`` — the task plane's shape, read by :func:`refusal_code`.
+    ``_guard`` lifts a code too, but only one sent BESIDE ``detail`` — the control plane's proxy's
+    shape (:data:`GRID_ASLEEP_CODE`, ``grid_master_down``) — which no task-plane refusal carries, so
+    neither reader can mistake the other's code for its own.
     """
     try:
         with _client(signaling_url, access_token, timeout=_TASK_EVENT_TIMEOUT) as client:

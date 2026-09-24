@@ -127,6 +127,15 @@ def _try_status(session: str, network_id: str) -> dict[str, Any]:
         return {}
 
 
+#: The run states a use/serve command may call a grid in. ⚠️ `asleep` is a CROSS-REPO wire value
+#: (grid-apis `grid_sleep_state.ASLEEP`, `idle-sleep` issue 04): a grid the control plane's reaper slept,
+#: which the request itself wakes. Refused here, it could not be woken from this CLI at all — the request
+#: that would have woken it is never sent — which is why the control plane once reported such a grid as
+#: `running`. Compared for equality; pinned by `tests/test_grid_sleep_lockstep.py`. A grid its OWNER
+#: stopped is `stopped`, and is refused with the command that starts it.
+_CALLABLE_STATES = frozenset({"running", "asleep"})
+
+
 def resolve_relay_base(
     session: str, rec: dict[str, Any], network_id: str, label: str
 ) -> tuple[str, dict[str, Any]]:
@@ -155,7 +164,7 @@ def resolve_relay_base(
     quoted_label = shlex.quote(label)
     if not base:
         raise SystemExit(f"Grid {label} isn't up; run `grid start {quoted_label}` first.")
-    if status.get("state") and status.get("state") != "running":
+    if status.get("state") and status.get("state") not in _CALLABLE_STATES:
         raise SystemExit(f"Grid {label} isn't up; run `grid start {quoted_label}` first.")
     return base, status
 
