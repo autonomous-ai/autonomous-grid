@@ -155,7 +155,7 @@ class _RefreshFailed(Exception):
             # `os-community` literal in this repository, which by decision holds none (see
             # `tests/test_os_grid_type_lockstep.py`). That copy would degrade silently: renamed at
             # the far end the branch simply stops firing and the inverted sentence is back, with
-            # nothing red. A refusal `code` on the wire is worse still — exactly three are parsed
+            # nothing red. A refusal `code` on the wire is worse still — exactly six are parsed
             # across these seams and keeping that count low is the contract.
             return (f"{lead}\nThat is about your membership of this grid, not your sign-in. Run "
                     f"`grid sync` to re-check it; if the grid still refuses afterwards the "

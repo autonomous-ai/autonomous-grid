@@ -20958,8 +20958,9 @@ def test_harness_login_shows_a_refusal_verbatim(monkeypatch, tmp_path, status, r
     """Everything that is not a 404 reaches the person exactly as the control plane wrote it.
 
     Each of those refusals already names its own way forward, and none of them is parsed for a
-    code: exactly three refusal codes are read anywhere across these repositories, and a fourth
-    reader is a fourth thing a reworded message could silently break.
+    code: exactly six refusal codes are read anywhere across these repositories (three until
+    `idle-sleep` issue 04 admitted the proxy's), and a seventh reader is a seventh thing a reworded
+    message could silently break.
     """
     from remote import control_plane, credentials
 
@@ -40271,11 +40272,12 @@ def test_a_real_404_from_the_rename_route_is_not_masked(monkeypatch, tmp_path):
 
 
 def test_a_taken_name_reaches_the_caller_in_the_relays_own_words(monkeypatch, tmp_path):
-    """⚠️ `project_name_taken` is deliberately **not** a fourth parsed refusal code (ADR 0035 D-g).
+    """⚠️ `project_name_taken` is deliberately **not** a parsed refusal code (ADR 0035 D-g).
 
-    Exactly three codes are read across the two repositories and keeping the count that low is the
-    contract — every other refusal is displayed verbatim, because each relay message already names
-    the way forward and a fourth reader is a fourth thing a reworded relay could break. So what is
+    Exactly six codes are read across the repositories (three when ADR 0035 was written; `idle-sleep`
+    issue 04 admitted the proxy's three) and keeping the count that low is the contract — every other
+    refusal is displayed verbatim, because each relay message already names the way forward and a
+    seventh reader is a seventh thing a reworded relay could break. So what is
     pinned here is that the relay's SENTENCE survives intact, not that anything branched on it.
     """
     _seed_running_remote_grid(monkeypatch, tmp_path)
@@ -41020,9 +41022,9 @@ def test_task_list_all_without_a_project_shows_the_relays_own_refusal(monkeypatc
     verbatim (issue 46).
 
     Not re-implemented here as a local check. `remote/relay.py` records the standing rule: exactly
-    three refusal codes are parsed anywhere in this CLI, and keeping the count that low is the
-    contract — every other refusal is displayed, because the relay's message already names the way
-    forward and a fourth reader is a fourth thing a reworded relay could break.
+    six refusal codes are parsed anywhere in this CLI (three until `idle-sleep` issue 04), and keeping
+    the count that low is the contract — every other refusal is displayed, because the relay's message
+    already names the way forward and a seventh reader is a seventh thing a reworded relay could break.
     """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
@@ -41472,10 +41474,10 @@ def test_an_old_relay_says_what_the_silence_means_and_names_the_way_out(monkeypa
 ])
 def test_the_relays_two_refusals_reach_the_person_verbatim(
         monkeypatch, tmp_path, status, code, message):
-    """⚠️ **No fourth parsed refusal code** (ADR 0035 D-g). Exactly three codes are read anywhere
-    across the two repositories, and keeping the count that low is itself the contract: each relay
-    message already names the way forward, and a fourth reader is a fourth thing a reworded relay
-    could break.
+    """⚠️ **No seventh parsed refusal code** (ADR 0035 D-g, written when the count was three;
+    `idle-sleep` issue 04 admitted the proxy's three). Exactly six codes are read anywhere across the
+    repositories, and keeping the count that low is itself the contract: each relay message already
+    names the way forward, and a seventh reader is a seventh thing a reworded relay could break.
 
     So what is pinned here is that the relay's own sentence arrives unedited. A CLI that branched on
     either code would be free to rewrite it, and the day the relay reworded one, this command would

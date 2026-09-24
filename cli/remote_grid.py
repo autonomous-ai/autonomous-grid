@@ -133,7 +133,11 @@ def _try_status(session: str, network_id: str) -> dict[str, Any]:
 #: that would have woken it is never sent — which is why the control plane once reported such a grid as
 #: `running`. Compared for equality; pinned by `tests/test_grid_sleep_lockstep.py`. A grid its OWNER
 #: stopped is `stopped`, and is refused with the command that starts it.
-_CALLABLE_STATES = frozenset({"running", "asleep"})
+#:
+#: ⚠️ Read a second way since grid-reads-without-waking issue 01: under `--no-wake`, a grid whose owner
+#: status says :data:`ASLEEP_STATE` is reported asleep with no request at all (`cli/remote_overview`).
+ASLEEP_STATE = "asleep"
+_CALLABLE_STATES = frozenset({"running", ASLEEP_STATE})
 
 
 def resolve_relay_base(

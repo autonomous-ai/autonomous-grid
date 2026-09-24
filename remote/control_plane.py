@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 import httpx
 
+from shared import user_agent
 from shared.system import os_grid
 
 from . import credentials
@@ -50,7 +51,7 @@ class ControlPlaneError(SystemExit):
 
 
 def _client(api_url: str | None = None, token: str | None = None) -> httpx.Client:
-    headers = {"User-Agent": "grid-cli"}
+    headers = {"User-Agent": user_agent.user_agent(credential=bool(token))}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return httpx.Client(base_url=credentials.api_url(api_url), headers=headers, timeout=_TIMEOUT)

@@ -74,17 +74,15 @@ def _resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any], str, str, s
     is up. The token is passed along for the ride and ignored by the public overview route, which
     is what lets `grid stats` work on a grid whose token `grid sync` has not stored yet;
     `_require_token` adds the real gate for the one dimension that names people.
+
+    The one resolution `grid models` and `grid engines` use too (`remote_overview.read_target`), so
+    `grid stats --no-wake` reads a sleeping grid without waking it exactly as they do — the token is
+    then ``""``. `grid usage` takes no such flag and always has its token.
     """
-    from remote import credentials
+    from . import remote_overview
 
-    from . import remote_grid
-
-    session = credentials.require_session()
-    rec = remote_grid._select(getattr(args, "grid", None))
-    network_id = remote_grid._network_id(rec)
-    label = str(rec.get("name") or network_id)
-    base, _status = remote_grid.resolve_relay_base(session, rec, network_id, label)
-    return session, rec, network_id, label, base, str(rec.get("access_token") or "")
+    target = remote_overview.read_target(args)
+    return target.session, target.record, target.network_id, target.label, target.base, target.token
 
 
 def _require_token(rec: dict[str, Any], label: str) -> str:

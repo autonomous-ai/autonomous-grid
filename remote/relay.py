@@ -26,6 +26,8 @@ from urllib.parse import quote
 
 import httpx
 
+from shared import user_agent
+
 
 # Long-poll window and heartbeat cadence (grid-src parity: well within the relay's 120s node TTL).
 POLL_TIMEOUT = 35.0
@@ -108,7 +110,7 @@ class RelayError(Exception):
 
 
 def _client(signaling_url: str, access_token: str, *, timeout: float | httpx.Timeout) -> httpx.Client:
-    headers = {"User-Agent": "grid-cli"}
+    headers = {"User-Agent": user_agent.user_agent(credential=bool(access_token))}
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
     # An empty token is a real, documented case — `_fetch_overview` calls the *public* overview
@@ -161,6 +163,18 @@ def is_grid_asleep(exc: RelayError) -> bool:
     every provider silently stop parking.
     """
     return exc.code == GRID_ASLEEP_CODE
+
+
+def answers_grid_asleep(resp: httpx.Response) -> bool:
+    """Whether an answer the proxy gave says the grid is ASLEEP — :func:`is_grid_asleep` for a caller
+    that holds the response rather than a :class:`RelayError`.
+
+    Read by the one-shot reads ``grid models | engines | stats`` (`cli/remote_overview`, grid-reads-
+    without-waking issue 01), which put the code in their ``--json`` refusal so the harness's Model
+    Manager viewer can tell a sleeping grid from a broken one. A new READER of this code, not a seventh
+    code: the count of parsed refusal codes stays six. Equality only, like every reader of it.
+    """
+    return _answer_code(resp) == GRID_ASLEEP_CODE
 
 
 #: The proxy's answer for a grid its OWNER stopped (grid-apis `grid_proxy.GRID_STOPPED_CODE`,
@@ -1224,8 +1238,8 @@ def leave_project(signaling_url: str, access_token: str, project_id: str) -> dic
 
     Refused for the project's **owner** (``422 owner_cannot_be_removed``) and on a **grid-visible**
     project (``409 project_is_grid_visible``), and both sentences are displayed verbatim: neither is
-    a parsed code, because each already names the way forward and a fourth reader is a fourth thing
-    a reworded relay could break (ADR 0035 D-g).
+    a parsed code, because each already names the way forward and a seventh reader is a seventh
+    thing a reworded relay could break (ADR 0035 D-g; the count is six since `idle-sleep` issue 04).
     """
     return _task_oneshot(
         signaling_url, access_token, "POST",

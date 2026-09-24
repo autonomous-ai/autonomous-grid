@@ -2314,9 +2314,9 @@ def test_the_relay_normalises_a_project_name_the_way_this_cli_expects():
 
 
 def test_the_rename_refusal_still_names_the_way_forward():
-    """`project_name_taken` is **displayed verbatim** — deliberately not a fourth parsed code
-    (ADR 0035 D-g), because exactly three are read across the two repositories and keeping the count
-    that low is itself the contract.
+    """`project_name_taken` is **displayed verbatim** — deliberately not a parsed code (ADR 0035
+    D-g), because exactly six are read across the repositories (three when that ADR was written) and
+    keeping the count that low is itself the contract.
 
     So a rename of the code is a display change and nothing breaks. What this catches instead is the
     message losing its REMEDY: the sentence is the whole of what a person gets, and if it stopped
