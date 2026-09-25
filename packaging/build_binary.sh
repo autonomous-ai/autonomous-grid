@@ -50,6 +50,17 @@ esac
 
 case "$(uname -s)" in Darwin) OS_SUFFIX=macos ;; Linux) OS_SUFFIX=linux ;; *) OS_SUFFIX=unknown ;; esac
 
+# The release this binary IS, read from the one place that carries it. It names the directory the
+# onefile bootstrap unpacks into (below), so every release unpacks into its OWN directory.
+#
+# ⚠️ It used to be a constant ("0.1.0"), so every release unpacked into the same directory and an
+# upgrade rewrote the previous release's `grid.bin` IN PLACE. On Apple Silicon the kernel caches a
+# signed binary's code signature per vnode, so after that rewrite every later exec of the file is
+# SIGKILLed — the new release and the old one alike — while `codesign --verify` still says "valid on
+# disk". It surfaced the first time the harness moved its managed grid (0.3.47 → 0.3.50): every Mac
+# that had run 0.3.47 could no longer run `grid` at all.
+GRID_VERSION="$("$BUILD_PY" -c 'import re, tomllib; v = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]; print(re.match(r"\d+(\.\d+){0,3}", v).group(0))')"
+
 BUILD_VENV="$REPO_ROOT/.venv-build"
 if [ -x "$BUILD_VENV/bin/python" ]; then
   VENV_VERSION="$("$BUILD_VENV/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)"
@@ -77,7 +88,7 @@ echo ">>> Compiling with Nuitka (standalone onefile, $OS_SUFFIX)"
   --assume-yes-for-downloads \
   --company-name="LocalAGI" \
   --product-name="Grid CLI" \
-  --product-version="0.1.0" \
+  --product-version="$GRID_VERSION" \
   --include-package=cli \
   --include-package=shared \
   --include-package=local \
@@ -85,7 +96,7 @@ echo ">>> Compiling with Nuitka (standalone onefile, $OS_SUFFIX)"
   --include-package=uvicorn \
   --include-package-data=shared \
   --include-package-data=certifi \
-  --onefile-tempdir-spec="{CACHE_DIR}/localagi-grid/{VERSION}-${OS_SUFFIX}" \
+  --onefile-tempdir-spec="{CACHE_DIR}/localagi-grid/${GRID_VERSION}-${OS_SUFFIX}" \
   packaging/grid_entry.py
 
 echo
