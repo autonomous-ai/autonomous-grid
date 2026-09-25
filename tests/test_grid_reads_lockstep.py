@@ -12,6 +12,10 @@ It relies on a chain of hand-duplicated values, none of which any import path co
 * ``grid_asleep``, the ``--no-wake`` literal, and three timing values: a model is dropped only after
   150s (a node TTL plus one heartbeat), a record needs 180s of uptime, and a record older than 29 days is
   ignored because the master forgets node rows at 30.
+* how few requests one poll costs: `grid stats --json` hands the viewer `grid engines --json` and `grid
+  models --json` under ``listings`` (one overview read, not three), and a token without the creator's
+  ``admin`` role — which grid-apis never takes from a creator — skips the creator-only status, which
+  could only refuse it.
 
 ⚠️ **Every drift here fails toward a stale list or a wake, and the wake is SILENT**: reclassify a route
 so an anonymous GET wakes, or put a credential check on one, and every open harness keeps every grid it
@@ -58,6 +62,11 @@ CAPTURE_MIN_UPTIME_SECONDS = 180
 RECORD_MAX_AGE_DAYS = 29
 ACCESS_LOSS_SETTLE_SECONDS = 150
 GRID_INFO_FIELDS = ["status", "grid_url"]
+#: What `grid stats --json` carries beside its rollup, so the viewer reads a grid once per poll.
+STATS_LISTINGS_KEY = "listings"
+STATS_LISTINGS_FIELDS = ["engines", "models"]
+#: The role grid-apis grants a grid's creator and keeps; a readable token without it is a member's.
+ADMIN_ROLE = "admin"
 #: The run-record keys the harness reads today (`cli/src/lib/localModels.ts`), and issue 02's `servedHere`.
 RUN_RECORD_FIELDS = ["engines", "models", "advertise_as", "node_id", "meta_name", "ctx_size", "media", "pid"]
 MASTER_NODE_PRUNE_DAYS = 30
@@ -195,6 +204,23 @@ def test_grid_info_json_names_the_status_and_address_the_harness_reads(monkeypat
     assert view["grid_url"] == "https://relay.example"
 
 
+def test_grid_stats_json_hands_out_the_listings_the_harness_viewer_reads(monkeypatch, tmp_path, capsys):
+    """The viewer reads a grid ONCE per poll, from `grid stats --json`'s ``listings``. Renamed here, it
+    silently goes back to three commands — three overview reads and three `grid` processes a poll."""
+    seed_remote_grid(monkeypatch, tmp_path)
+    monkeypatch.setattr(remote_overview, "fetch_overview",
+                        lambda *_args, **_kwargs: {"grid": {"state": "running"}, "nodes": []})
+
+    assert cli.main(["stats", NO_WAKE, "--json"]) == 0
+
+    listings = json.loads(capsys.readouterr().out)[STATS_LISTINGS_KEY]
+    assert sorted(listings) == sorted(STATS_LISTINGS_FIELDS)
+
+
+def test_this_cli_reads_a_token_without_the_creators_role_as_a_members():
+    assert remote_grid.ADMIN_ROLE == ADMIN_ROLE
+
+
 def _record_keys() -> set[str]:
     """The keys `grid join` writes into a remote run record (`cli/remote_provider._build_record`)."""
     source = pathlib.Path(cli.__file__).parent / "remote_provider.py"
@@ -237,6 +263,16 @@ def test_the_sleep_record_reads_the_canonical_paths_and_fields():
     read = _strings(tree)
     missing = [field for field in [*OVERVIEW_NODE_FIELDS, "id", *DISCOVERY_FIELDS] if field not in read]
     assert not missing, f"grid-apis' sleep record no longer reads {missing}"
+
+
+def test_the_control_plane_grants_the_creator_the_admin_role_and_keeps_it():
+    """A creator whose token lacked ``admin`` would be read as a member: its live status — the
+    authoritative address, and `asleep`/`stopped` answered with no request — would never be asked."""
+    source = _source(grid_apis_root(), "grid_networks/store.py", _SKIP_APIS).read_text()
+    assert re.search(rf"owner_roles\s*=\s*\[[^\]]*[\"']{ADMIN_ROLE}[\"']", source), (
+        "grid-apis no longer grants the creator `admin` when it creates a grid")
+    assert re.search(rf"==\s*normalize_email\(network\.owner_email\)[\s\S]{{0,200}}\|\s*\{{\s*[\"']{ADMIN_ROLE}[\"']\s*\}}",
+                     source), "grid-apis no longer re-adds the creator's `admin` on a membership write"
 
 
 def test_the_asleep_answer_carries_last_known_in_the_canonical_shape():
@@ -427,3 +463,15 @@ def test_the_harness_reads_only_run_record_fields_grid_join_writes():
     assert "'run', 'engines'" in source, "the harness no longer finds run records under run/engines/<grid id>"
     assert "'.heartbeat'" in source, "the harness no longer reads the heartbeat sidecar beside a record"
 
+
+def test_the_harness_viewer_reads_the_listings_this_cli_prints():
+    root = harness_root()
+    if root is None:
+        pytest.skip(_SKIP_HARNESS)
+    source = _source(root, "store/agents/autonomous-grid/lib/telemetry.mjs", _SKIP_HARNESS).read_text()
+    if not re.search(rf"\b{STATS_LISTINGS_KEY}\b", source):  # not `listing`: the viewer already names `grid ls` that
+        pytest.skip("the harness viewer does not read `grid stats --json`'s listings yet — this pin turns "
+                    "itself on the moment any spelling of it appears")
+    for field in STATS_LISTINGS_FIELDS:
+        assert re.search(rf"\b{STATS_LISTINGS_KEY}\??\.{field}\b", source), (
+            f"the viewer no longer reads `{STATS_LISTINGS_KEY}.{field}` — this CLI prints it there")

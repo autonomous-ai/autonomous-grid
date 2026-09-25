@@ -365,19 +365,11 @@ def cmd_remote_engines(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_remote_models(args: argparse.Namespace) -> int:
-    """`grid models` (remote): the models served across the active grid's live engines, plus the
-    reserved ``auto`` model when the grid has auto-routing enabled AND serves at least one engine
-    model (mirrors ``GET /relay/v1/models``, except the zero-engine case — see the gate below).
+def model_listing(overview: dict[str, Any], target: ReadTarget) -> list[tuple[str, str, str, bool]]:
+    """`grid models`' rows — ``(model, engine, node, responses)`` — from an already-fetched overview.
 
-    Each engine row carries whether it serves the model via the Responses dialect (issue 10), read
-    per-engine from the overview's ``responses_models``; shown in ``-v`` and ``--json`` (an older
-    master omits the field → nothing shown). The plain listing stays bare model ids for scripting.
-
-    Ids are in exact case (`_exact_case_map`), and ``--no-wake`` reads a sleeping grid without waking
-    it (see the module docstring)."""
-    target = read_target(args)
-    overview = fetch_overview(target.base, target.token, target.label)
+    Shared with `grid stats --json` (its ``listings``), so the one overview read a poll makes can hand
+    out this view spelled exactly as `grid models --json` prints it."""
     case_map = _exact_case_map(overview, target)
     nodes = _nodes_from(overview)
     rows: list[tuple[str, str, str, bool]] = []
@@ -404,15 +396,33 @@ def cmd_remote_models(args: argparse.Namespace) -> int:
     if overview.get("router_enabled") and rows:
         rows.insert(0, ("auto", "grid-router", "", False))
         rows[1:1] = [(name, "grid-router", "", False) for name in ("Brute Force", "Feedback Loop")]
+    return rows
+
+
+def model_listing_json(rows: list[tuple[str, str, str, bool]]) -> list[dict[str, Any]]:
+    """`grid models --json`. A derived view (not a raw passthrough like engines): new API fields on a
+    model entry won't surface here. `responses` is this engine's dialect capability (issue 10)."""
+    return [{"model": model, "engine": engine, "node": node, "responses": serves}
+            for model, engine, node, serves in rows]
+
+
+def cmd_remote_models(args: argparse.Namespace) -> int:
+    """`grid models` (remote): the models served across the active grid's live engines, plus the
+    reserved ``auto`` model when the grid has auto-routing enabled AND serves at least one engine
+    model (mirrors ``GET /relay/v1/models``, except the zero-engine case — see `model_listing`).
+
+    Each engine row carries whether it serves the model via the Responses dialect (issue 10), read
+    per-engine from the overview's ``responses_models``; shown in ``-v`` and ``--json`` (an older
+    master omits the field → nothing shown). The plain listing stays bare model ids for scripting.
+
+    Ids are in exact case (`_exact_case_map`), and ``--no-wake`` reads a sleeping grid without waking
+    it (see the module docstring)."""
+    target = read_target(args)
+    overview = fetch_overview(target.base, target.token, target.label)
+    rows = model_listing(overview, target)
 
     if getattr(args, "json", False):
-        # Derived view (not a raw passthrough like engines): new API fields on a model entry
-        # won't surface here. `responses` is this engine's dialect capability (issue 10).
-        print(json.dumps(
-            [{"model": model, "engine": engine, "node": node, "responses": serves}
-             for model, engine, node, serves in rows],
-            indent=2,
-        ))
+        print(json.dumps(model_listing_json(rows), indent=2))
         return 0
 
     if not rows:
