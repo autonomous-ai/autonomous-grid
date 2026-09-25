@@ -116,13 +116,33 @@ def _grid_url(live: dict[str, Any], rec: dict[str, Any]) -> str:
     return live.get("signaling_url") or rec.get("signaling_url") or rec.get("lan_signaling_url") or ""
 
 
-def _try_status(session: str, network_id: str) -> dict[str, Any]:
-    """Live managed-network status, or ``{}`` when the caller may not read it (a non-creator member
-    gets 403 from the creator-only endpoint). For display paths that should degrade, never fail."""
+#: The role the control plane grants a grid's creator and never takes away (grid-apis `store.py`:
+#: `owner_roles`, and the owner's `admin` re-added on every membership write). ⚠️ A CROSS-REPO wire value,
+#: pinned by `tests/test_grid_reads_lockstep.py`. It can be granted to a member too, so holding it never
+#: proves "creator" — only its absence proves "not creator".
+ADMIN_ROLE = "admin"
+
+
+def _is_member_only(rec: dict[str, Any]) -> bool:
+    """Whether the grid's own token says this account did NOT create it: a readable ``roles`` claim
+    without :data:`ADMIN_ROLE`. The creator-only live status refuses such a caller (403) every time, so
+    it is not asked. A token that cannot be read says nothing and answers False — asked as before."""
+    from remote import credentials
+
+    roles = credentials.claims_from_token(rec.get("access_token")).get("roles")
+    return isinstance(roles, list) and ADMIN_ROLE not in roles
+
+
+def _try_status(session: str, rec: dict[str, Any]) -> dict[str, Any]:
+    """Live managed-network status, or ``{}`` when the caller may not read it: a member, whose own
+    token says so (not asked at all), or anyone the creator-only endpoint refuses. For display paths
+    that should degrade, never fail."""
     from remote import control_plane
 
+    if _is_member_only(rec):
+        return {}
     try:
-        return control_plane.get_managed_network_status(session, network_id)
+        return control_plane.get_managed_network_status(session, _network_id(rec))
     except SystemExit:
         return {}
 
@@ -156,12 +176,17 @@ def resolve_relay_base(
     from remote import control_plane
 
     bundle_url = rec.get("lan_signaling_url") or rec.get("signaling_url")
-    try:
-        status = control_plane.get_managed_network_status(session, network_id)
-    except SystemExit:
-        if not bundle_url:
-            raise  # not the creator and no stored relay URL — surface the original error
-        status = {}
+    if bundle_url and _is_member_only(rec):
+        # The status would only refuse a member, on every read of every poll — the harness's viewer
+        # made that some 24 refusals a minute — and the refusal fell back to this same address.
+        status: dict[str, Any] = {}
+    else:
+        try:
+            status = control_plane.get_managed_network_status(session, network_id)
+        except SystemExit:
+            if not bundle_url:
+                raise  # not the creator and no stored relay URL — surface the original error
+            status = {}
     base = _grid_url(status, rec)
     # `shlex.quote`: a grid name is freeform and can carry a space ("Hydrate Grid"), and an
     # unquoted hint isn't actually copy-pasteable (grid-leave issue: `cli/grid.py`/`cli/provider.py`
@@ -255,7 +280,7 @@ def _is_owner(rec: dict[str, Any]) -> bool:
     from remote import credentials
 
     roles = credentials.claims_from_token(rec.get("access_token")).get("roles")
-    return isinstance(roles, list) and "admin" in roles
+    return isinstance(roles, list) and ADMIN_ROLE in roles
 
 
 def _member_count(session: str, network_id: str) -> int | None:
@@ -315,7 +340,7 @@ def cmd_remote_delete(args: argparse.Namespace) -> int:
             "`grid leave` removes your machines from a grid you did not create."
         )
 
-    status = _try_status(session, network_id)
+    status = _try_status(session, rec)
     if status.get("state") == "running":
         raise SystemExit(
             f"{label} is running. Stop it first, so its members see service end before it "
@@ -411,7 +436,7 @@ def cmd_remote_info(args: argparse.Namespace) -> int:
         return 0
     rec = _select(args.grid)
     # Status is creator-only; a member sees `{}` here and just gets a blank run-state (never an error).
-    status = _try_status(session, _network_id(rec))
+    status = _try_status(session, rec)
     # Project the status reply onto a fixed grid-vocabulary shape: the live API names the run state
     # `state`; we drop the proprietary server internals (server_pid / sync_pid / postgres / base_url /
     # plan / seats) and never carry a token.

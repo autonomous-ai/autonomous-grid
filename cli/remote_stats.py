@@ -811,6 +811,17 @@ def cmd_remote_stats(args: argparse.Namespace) -> int:
         # a new relay field surfaces there rather than silently changing this shape. `--verbose`
         # deliberately does not move it — a flag that changed the machine-readable output would
         # make every script depend on how it was invoked.
+        #
+        # `listings` is the exception, and it is fenced: it holds `grid engines --json` and `grid
+        # models --json` exactly as those commands print them, built from the overview this command
+        # already read. The harness's Model Manager viewer draws all three views every poll; asked
+        # as three commands they were three overview reads of one payload (and three `grid`
+        # processes). ⚠️ A cross-repo contract: the viewer reads `listings.engines` and
+        # `listings.models` (`store/agents/autonomous-grid/lib/telemetry.mjs`), pinned by
+        # `tests/test_grid_reads_lockstep.py`. The price, for every `--json` caller: the model
+        # listing restores exact case exactly as `grid models` does, which reads the grid's public
+        # provider discovery once while some served id is still all lower-case — credential-less
+        # under `--no-wake`, never a wake. Not behind a flag, for the reason above.
         print(json.dumps({
             "grid": label,
             **rollup,
@@ -818,6 +829,12 @@ def cmd_remote_stats(args: argparse.Namespace) -> int:
             "engines": [
                 {**card, "answered": _json_answered(card["answered"], window=True)} for card in cards
             ],
+            "listings": {
+                "engines": remote_overview._nodes_from(overview),
+                "models": remote_overview.model_listing_json(
+                    remote_overview.model_listing(overview, target)
+                ),
+            },
         }, indent=2))
         return 0
 
