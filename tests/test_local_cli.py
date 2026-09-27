@@ -29839,8 +29839,69 @@ def test_capabilities_envelope_omits_ctx_when_unknown(monkeypatch):
     monkeypatch.setattr(probe, "probe_llama_capabilities", lambda url, model: {
         "vision": False, "tools": False, "parallel_tool_calls": False,
         "json_object": False, "json_schema": False})
+    monkeypatch.setattr(probe, "probe_context_window", lambda url: None)  # engine reports none either
     env = probe.capabilities("http://h:8081/v1", "qwen3.5:0.8b")  # no context_window known
     assert "context_window" not in env["models"]["qwen3.5:0.8b"]
+
+
+def test_capabilities_reads_the_engine_chosen_window_from_props(monkeypatch, tmp_path):
+    """No `--ctx-size` means llama.cpp sized its own window — it must still be advertised, read from
+    /props, or consumers overrun it until the engine 400s `exceed_context_size_error`."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(probe, "probe_llama_capabilities", lambda url, model: {
+        "vision": False, "tools": False, "parallel_tool_calls": False,
+        "json_object": False, "json_schema": False})
+    _mock_engine(monkeypatch, lambda r: httpx.Response(
+        200, json={"default_generation_settings": {"n_ctx": 131072}, "total_slots": 2})
+        if r.url.path == "/props" else httpx.Response(404))
+    env = probe.capabilities("http://h:8081/v1", "Qwen3.8-27B")
+    assert env["models"]["Qwen3.8-27B"]["context_window"] == 131072
+    # An operator's --ctx-size still wins; /props is only the fallback.
+    env = probe.capabilities("http://h:8081/v1", "Qwen3.8-27B", context_window=32768)
+    assert env["models"]["Qwen3.8-27B"]["context_window"] == 32768
+
+
+@pytest.mark.parametrize("body", [
+    {"error": "Unexpected endpoint or method."},          # LM Studio's 200 masquerade
+    {"default_generation_settings": {"n_ctx": 0}},
+    {"default_generation_settings": {"n_ctx": True}},
+    {"default_generation_settings": {"n_ctx": "131072"}},
+    {"default_generation_settings": []},
+    [],
+])
+def test_probe_context_window_is_none_unless_a_positive_int(monkeypatch, tmp_path, body):
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_engine(monkeypatch, lambda r: httpx.Response(200, json=body))
+    assert probe.probe_context_window("http://h:8081/v1") is None
+
+
+def test_engine_error_keeps_a_json_body_whole():
+    """llama.cpp's context-overflow body runs past 200 chars; cutting it mid-object left the relay a
+    string it could not parse, and the consumer an SDK type-validation error instead of the 400."""
+    from remote import serve
+
+    body = json.dumps({"error": {
+        "code": 400, "type": "exceed_context_size_error", "n_prompt_tokens": 131088, "n_ctx": 131072,
+        "message": "request (131088 tokens) exceeds the available context size (131072 tokens), "
+                   "try increasing it",
+    }})
+    assert len(body) > 200
+    message = serve._engine_error(400, body)
+    assert message.startswith("engine error 400: ")
+    inner = json.loads(message[len("engine error 400: "):])["error"]
+    assert inner["type"] == "exceed_context_size_error" and inner["n_ctx"] == 131072
+
+
+def test_engine_error_still_truncates_non_json_and_oversized_bodies():
+    from remote import serve
+
+    assert serve._engine_error(502, "<html>" + "x" * 500) == "engine error 502: " + ("<html>" + "x" * 500)[:200]
+    huge = json.dumps({"error": {"message": "y" * 10_000}})
+    assert serve._engine_error(400, huge) == "engine error 400: " + huge[:200]
 
 
 # -- provider heartbeat VRAM (grid provider VRAM roll-up on the grid page) --
