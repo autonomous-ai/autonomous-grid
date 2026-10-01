@@ -3,7 +3,7 @@
   "definition": null,
   "request": "POST /relay/v1/chat/completions",
   "status": 503,
-  "source": "grid-src @ 11a5086, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "source": "grid-src @ f837931, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
   "sanitized": true,
   "body": {
     "error": {

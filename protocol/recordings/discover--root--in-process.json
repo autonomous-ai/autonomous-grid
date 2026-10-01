@@ -3,7 +3,7 @@
   "definition": null,
   "request": "GET /nodes/discover",
   "status": 200,
-  "source": "grid-src @ 11a5086, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "source": "grid-src @ f837931, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
   "sanitized": true,
   "body": {
     "providers": [
@@ -15,7 +15,7 @@
         "pricing": {},
         "capabilities": {
           "models": {
-            "provider:6e0491f5-8591-4943-8508-214ebc7e972e:ZnRdJqM0qQvK": {
+            "provider:5681410e-41f2-46f6-a511-527053a8d92a:ZnRdJqM0qQvK": {
               "endpoints": [
                 "chat/completions"
               ],
@@ -39,8 +39,8 @@
         "load": {},
         "max_concurrency": 2,
         "endpoint_url": null,
-        "last_heartbeat": "2026-10-01T01:56:40.314265",
-        "first_seen_at": "2026-10-01T01:56:40.297146",
+        "last_heartbeat": "2026-10-01T03:04:26.643617",
+        "first_seen_at": "2026-10-01T03:04:26.625720",
         "verified_at": null,
         "meta": {
           "name": "node-a",

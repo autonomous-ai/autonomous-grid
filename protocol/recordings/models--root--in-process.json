@@ -3,7 +3,7 @@
   "definition": null,
   "request": "GET /relay/v1/models",
   "status": 200,
-  "source": "grid-src @ 11a5086, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "source": "grid-src @ f837931, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
   "sanitized": true,
   "body": {
     "object": "list",
@@ -24,7 +24,7 @@
         ],
         "context_window": null,
         "object": "model",
-        "created": 1790819800,
+        "created": 1790823866,
         "owned_by": "localagi-p2p"
       }
     ]
