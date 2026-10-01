@@ -44,6 +44,8 @@ export const RELAY_RESTARTING_CODE = 'relay_restarting'
 /** GET /relay/v1/grid/overview */
 export const OVERVIEW_PATH = '/relay/v1/grid/overview'
 
+export const RETRY_AFTER_HEADER = 'Retry-After'
+
 export const GRID_ASLEEP_CODE = 'grid_asleep'
 
 export const GRID_STOPPED_CODE = 'grid_stopped'
@@ -243,8 +245,8 @@ export interface ModelList {
 }
 
 /**
- * A served model, or a router row (`Auto`; `Brute Force` and `Feedback Loop` until Phase B 09 retires effort
- * mode), which carries only the four required keys.
+ * A served model, or a router row (`Auto`, and the effort-mode rows while effort mode is served), which
+ * carries only the four required keys.
  */
 export interface ModelEntry {
   id: string
@@ -319,7 +321,7 @@ export interface PollJob {
   transaction_id: string
   /**
    * Where to send `body` on the engine: `chat/completions`, `completions`, `responses`, or a `media/` path
-   * until Phase B 09 retires media.
+   * while media is served.
    */
   endpoint_path: string
   /** The request, already in `wire_format`. */
@@ -489,10 +491,11 @@ export interface NoProvidersAvailable {
 }
 
 /**
- * The master holding the request ended it while retiring or stopping (Phase B 11): send it again. A stream
- * gets it as its terminal event; a Responses stream as a `response.failed` event whose `response.error` is
- * `{code, message}`. The public CLI must not parse it. On 2026-10-01 only grid-src branch
- * `feat/grid-scale-phase-b` sends it.
+ * The master holding the request ended it while retiring or stopping: send it again. A non-stream request is
+ * answered 503 with this envelope (or `{"detail": <message>}` for a caller that did not ask for OpenAI
+ * errors). A chat stream ends with `data: {"error": <this envelope's error>}`. A Responses stream ends with a
+ * `response.failed` event whose `response.error.code` is `server_error`: the Responses code set is closed, so
+ * this name never reaches a Responses client. The public CLI must not parse it.
  */
 export interface RelayRestarting {
   error: {
@@ -650,12 +653,12 @@ export interface NodeAnswered {
 /**
  * The platform's coded refusal: a sentence for a person in `detail` and, BESIDE it (never under it), a
  * machine-readable `code`. grid-proxy sends it for a grid that is not up; a master sends it for a retired
- * feature. A reader compares `code` for EQUALITY, never for truthiness and never paired with the status, and
- * reads a code it does not know, or none, as a transient failure. grid-proxy's codeless answers have this
- * shape too: `404 unknown network`, `503` while a wake is starting (with `Retry-After: 20`), and `502`/`504`
- * when the master did not answer. The public CLI acts on exactly three codes (grid_asleep, grid_stopped,
- * grid_deleted); it must never parse the others, so that renaming one of them cannot change what a provider
- * does.
+ * feature. The public CLI compares `code` for EQUALITY, never for truthiness and never paired with the
+ * status, and reads a code it does not know, or none, as a transient failure. grid-proxy's codeless answers
+ * have this shape too: `404 unknown network`, `503` while a wake is starting (with `Retry-After: 20`), and
+ * `502`/`504` when the master did not answer. The public CLI acts on exactly three codes (grid_asleep,
+ * grid_stopped, grid_deleted); it must never parse the others, so that renaming one of them cannot change
+ * what a provider does.
  */
 export interface Refusal {
   /** A sentence for a person. Clients render it; its wording is not part of the contract. */
@@ -716,8 +719,8 @@ export interface GridMasterDown {
 }
 
 /**
- * The route or model name belongs to a retired feature (media, distributed tasks, effort mode). Specified by
- * Phase B 09; no master sends it on 2026-10-01. The public CLI must not parse it.
+ * The route or model name belongs to a retired feature (media, distributed tasks, effort mode), and the
+ * master answers this instead of serving it. The public CLI must not parse it.
  */
 export interface FeatureRetired {
   detail: string

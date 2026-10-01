@@ -4,18 +4,63 @@
   "title": "PollJob",
   "description": "One request for a provider to serve: the 200 body of `GET /relay/v1/poll` (node token). The master long-polls for POLL_WINDOW_SECONDS and answers 204 with an EMPTY body when no work came, so a client's own timeout must be longer. A poll never wakes a sleeping grid. Readers ignore keys they do not know.",
   "type": "object",
-  "required": ["transaction_id", "endpoint_path", "body", "is_stream", "created_at", "inference_timeout_seconds", "wire_format", "provider_attempt"],
+  "required": [
+    "transaction_id",
+    "endpoint_path",
+    "body",
+    "is_stream",
+    "created_at",
+    "inference_timeout_seconds",
+    "wire_format",
+    "provider_attempt"
+  ],
   "properties": {
-    "transaction_id": {"type": "string"},
-    "endpoint_path": {"type": "string", "description": "Where to send `body` on the engine: `chat/completions`, `completions`, `responses`, or a `media/` path until Phase B 09 retires media."},
-    "body": {"type": "object", "description": "The request, already in `wire_format`."},
-    "is_stream": {"type": "boolean"},
-    "created_at": {"type": "number", "description": "Epoch seconds."},
-    "inference_timeout_seconds": {"type": "integer", "minimum": 1, "description": "What is left of the request's budget."},
-    "wire_format": {"enum": ["chat", "responses", "anthropic"], "description": "The dialect `body` is in. An older provider ignores it."},
-    "provider_attempt": {"type": "integer", "minimum": 1},
-    "provider_attempt_token": {"type": "string", "description": "Only for a provider whose capability entry sets `provider_attempt_tokens`; echoed in `X-Grid-Provider-Attempt` on the result."}
+    "transaction_id": {
+      "type": "string"
+    },
+    "endpoint_path": {
+      "type": "string",
+      "description": "Where to send `body` on the engine: `chat/completions`, `completions`, `responses`, or a `media/` path while media is served."
+    },
+    "body": {
+      "type": "object",
+      "description": "The request, already in `wire_format`."
+    },
+    "is_stream": {
+      "type": "boolean"
+    },
+    "created_at": {
+      "type": "number",
+      "description": "Epoch seconds."
+    },
+    "inference_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "What is left of the request's budget."
+    },
+    "wire_format": {
+      "enum": [
+        "chat",
+        "responses",
+        "anthropic"
+      ],
+      "description": "The dialect `body` is in. An older provider ignores it."
+    },
+    "provider_attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "provider_attempt_token": {
+      "type": "string",
+      "description": "Only for a provider whose capability entry sets `provider_attempt_tokens`; echoed in `X-Grid-Provider-Attempt` on the result."
+    }
   },
-  "x-route": {"method": "GET", "path": "/relay/v1/poll", "constant": "POLL_PATH"},
-  "x-names": {"RELAY_PATH": "/relay/v1"}
+  "x-route": {
+    "method": "GET",
+    "path": "/relay/v1/poll",
+    "constant": "POLL_PATH"
+  },
+  "x-names": {
+    "RELAY_PATH": "/relay/v1"
+  }
 }

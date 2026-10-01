@@ -24,11 +24,10 @@ grid-apis (`test_read_polls_never_record_nor_wake`).
 
 ⚠️ Per this repository's rule for every cross-repo assertion, the grid-apis and grid-src cases **skip
 unless that worktree sits beside this one** — they skip in CI, and a green CI proves nothing about them.
-The harness cases skip until the harness half lands (issue 02) and turn themselves on when it does —
-written to FAIL, not skip, if it lands spelled differently.
+The harness half landed (issue 02), so a harness pin that finds nothing FAILS rather than skips.
 
-The canonical values are written out here rather than imported from either side: a pin that reads one
-side's constant and compares it to itself checks nothing.
+The canonical values come from `grid-protocol` (grid-platform ticket 12), the third party every side is pinned
+against, never from either side: a pin that reads one side's constant and compares it to itself checks nothing.
 """
 from __future__ import annotations
 
@@ -51,20 +50,20 @@ from tests.protocol_ast import protocol_value
 from grid_protocol import _codegen
 from grid_protocol import constants as protocol_constants
 
-OVERVIEW_ROUTE = "relay/v1/grid/overview"
-DISCOVER_ROUTE = "nodes/discover"
-ASLEEP_CODE = "grid_asleep"
+OVERVIEW_ROUTE = protocol_constants.OVERVIEW_PATH.lstrip("/")
+DISCOVER_ROUTE = protocol_constants.DISCOVER_PATH.lstrip("/")
+ASLEEP_CODE = protocol_constants.GRID_ASLEEP_CODE
 ASLEEP_STATE = "asleep"
-NO_WAKE = "--no-wake"
+NO_WAKE = protocol_constants.NO_WAKE_FLAG
 LAST_KNOWN_KEY = "last_known"
 LAST_KNOWN_FIELDS = ["age_seconds", "nodes", "ids"]
 OVERVIEW_NODE_FIELDS = ["name", "engine", "models"]
 DISCOVERY_FIELDS = ["providers", "models", "capabilities", "raw_model_id"]
-ROUTE_ID_PREFIX = "provider:"
-RETENTION_SECONDS = 150
-CAPTURE_MIN_UPTIME_SECONDS = 180
-RECORD_MAX_AGE_DAYS = 29
-ACCESS_LOSS_SETTLE_SECONDS = 150
+ROUTE_ID_PREFIX = protocol_constants.PROVIDER_ROUTE_PREFIX
+RETENTION_SECONDS = protocol_constants.MODEL_RETENTION_SECONDS
+CAPTURE_MIN_UPTIME_SECONDS = protocol_constants.SLEEP_RECORD_MIN_UPTIME_SECONDS
+RECORD_MAX_AGE_DAYS = protocol_constants.LAST_KNOWN_MAX_AGE_SECONDS / 86400
+ACCESS_LOSS_SETTLE_SECONDS = protocol_constants.ACCESS_LOSS_SETTLE_SECONDS
 GRID_INFO_FIELDS = ["status", "grid_url"]
 #: What `grid stats --json` carries beside its rollup, so the viewer reads a grid once per poll.
 STATS_LISTINGS_KEY = "listings"
@@ -73,7 +72,7 @@ STATS_LISTINGS_FIELDS = ["engines", "models"]
 ADMIN_ROLE = "admin"
 #: The run-record keys the harness reads today (`cli/src/lib/localModels.ts`), and issue 02's `servedHere`.
 RUN_RECORD_FIELDS = ["engines", "models", "advertise_as", "node_id", "meta_name", "ctx_size", "media", "pid"]
-MASTER_NODE_PRUNE_DAYS = 30
+MASTER_NODE_PRUNE_DAYS = protocol_constants.MASTER_NODE_PRUNE_SECONDS / 86400
 
 _SKIP_APIS = "the grid-apis worktree is not beside this one; the lockstep cannot be checked here"
 _SKIP_SRC = "the grid-src worktree is not beside this one; the lockstep cannot be checked here"
@@ -385,7 +384,8 @@ def test_a_model_outlives_a_node_ttl_and_a_beat():
 # ⚠️ **The names below are the contract for issue 02**: the two literals are found wherever the harness
 # QUOTES them (since grid-platform ticket 12 that includes its copy of `gridProtocol.ts`), and the two timings
 # by these exact constant names (either unit), written as digits or as a `grid-protocol` constant times 1000.
-# Issue 02 has landed, so a pin that finds nothing FAILS: skipping would let a rename pass for ever. Test files are not read — a harness test proving that `'GRID_ASLEEP'` is NOT the code spells it
+# Issue 02 has landed, so a pin that finds nothing FAILS: skipping would let a rename pass for ever. Test
+# files are not read — a harness test proving that `'GRID_ASLEEP'` is NOT the code spells it
 # wrong on purpose. A constant that merely looks similar (`pasteDropFiles.RETENTION_MS`, 24h, measured on
 # the harness at the time of writing) is exactly what a looser match would have read instead.
 
@@ -395,6 +395,8 @@ _HARNESS_RETENTION = re.compile(r"\bGRID_MODEL_RETENTION_(SECONDS|MS)\s*(?::\s*\
 _HARNESS_MAX_AGE = re.compile(r"\bGRID_LAST_KNOWN_MAX_AGE_(SECONDS|MS)\s*(?::\s*\w+\s*)?=\s*([0-9A-Z_*\s]+)[;\n]")
 #: The harness's copy of the generated contract, which must equal what `protocol/` generates.
 _HARNESS_PROTOCOL = "cli/src/lib/gridProtocol.ts"
+#: The harness's copies of this repository's recordings, which its reader is tested against.
+_HARNESS_FIXTURES = "cli/src/lib/__fixtures__/protocol"
 
 
 def _harness_files() -> list[pathlib.Path]:
@@ -437,7 +439,8 @@ def _harness_timing(pattern: re.Pattern[str]) -> list[float]:
     for path in _harness_files():
         for unit, expression in pattern.findall(path.read_text(errors="replace")):
             # Digits, `*`, and grid-protocol's UPPER_CASE constants — nothing else can reach eval.
-            names = {name: getattr(protocol_constants, name) for name in re.findall(r"[A-Z][A-Z0-9_]*", expression)}
+            names = {name: getattr(protocol_constants, name, None)
+                     for name in re.findall(r"[A-Z][A-Z0-9_]*", expression)}
             missing = [name for name, value in names.items() if not isinstance(value, (int, float))]
             assert not missing, f"{path}: {missing} are not grid-protocol numbers"
             literal = re.sub(r"(?<=\d)_(?=\d)", "", expression)
@@ -503,3 +506,10 @@ def test_the_harness_carries_the_contract_this_repository_generates():
     assert copy == _codegen.TYPESCRIPT_FILE.read_text(encoding="utf-8"), (
         f"the harness's {_HARNESS_PROTOCOL} is not this repository's protocol/typescript/gridProtocol.ts — "
         f"copy the generated file over it, whole")
+    # Its tests read real answers: copies of this repository's recordings, which must not drift from them.
+    fixtures = sorted((root / _HARNESS_FIXTURES).glob("*.json"))
+    assert fixtures, f"the harness has no recordings under {_HARNESS_FIXTURES} — teach this check where they went"
+    recordings = _codegen.PACKAGE_DIR.parent / "recordings"
+    for fixture in fixtures:
+        assert fixture.read_bytes() == (recordings / fixture.name).read_bytes(), (
+            f"the harness's {fixture.name} is not protocol/recordings/{fixture.name} — copy it over, whole")

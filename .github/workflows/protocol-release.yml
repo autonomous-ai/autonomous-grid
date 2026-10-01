@@ -1,6 +1,6 @@
 name: Release grid-protocol
 
-# Publish the wire contract (protocol/, ADR 0004) as a wheel on a GitHub Release:
+# Publish the wire contract (protocol/; the grid-platform review's ADR 0004) as a wheel on a GitHub Release:
 #   git tag -a protocol-vX.Y.Z -m "grid-protocol X.Y.Z" && git push public protocol-vX.Y.Z
 # Bump protocol/pyproject.toml and grid_protocol.__version__ first and regenerate
 # (`python -m grid_protocol._codegen --write`); the tag must match the built wheel.

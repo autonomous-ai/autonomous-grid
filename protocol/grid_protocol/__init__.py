@@ -1,4 +1,7 @@
-"""grid-protocol — the wire contract between the grid relay, the public `grid` CLI and the harness (ADR 0004).
+"""grid-protocol — the wire contract between the grid relay, the public `grid` CLI and the harness.
+
+Its decision record is ADR 0004 of the grid-platform review ("the wire contract lives in the public repo"),
+not this repository's ``docs/adr/0004``.
 
 The JSON Schemas in ``grid_protocol/schemas/`` are the source of truth. Import the named values from
 ``grid_protocol.constants`` (generated from the schemas; plain Python, no data files, no dependencies). Load

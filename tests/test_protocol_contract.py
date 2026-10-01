@@ -15,8 +15,10 @@ from __future__ import annotations
 import ast
 import json
 import pathlib
+import re
 
 import grid_protocol
+import httpx
 import pytest
 from grid_protocol import constants as protocol
 
@@ -42,7 +44,8 @@ NOT_YET_RECORDED = {
     ("refusal", "FeatureRetired"): "no master sends it until Phase B 09 is built and on DEV (ticket 11)",
     ("openai-error", "RelayRestarting"): "only Phase B 11's branch sends it; recorded once it runs on DEV (ticket 11)",
 }
-#: Shapes that are requests or local values, not answers a server sends. Validated where they are produced.
+#: Shapes that are requests or local values, not answers a server sends. The requests are validated against what
+#: this CLI really sends, at its HTTP boundary (section 2b); the timing values by the rules in section 1.
 NOT_ANSWERS = {
     ("node-registration", None), ("node-heartbeat", None), ("node-heartbeat", "NodeLoad"),
     ("node-registration", "NodeCapabilities"), ("node-registration", "ModelCapability"),
@@ -111,7 +114,9 @@ def _string_constants(folder: pathlib.Path) -> set[str]:
 
 
 def test_this_cli_never_spells_a_code_it_must_not_parse():
-    spelled = set().union(*(_string_constants(ROOT / package) for package in ("cli", "remote", "shared", "local")))
+    # Every package the wheel ships (pyproject.toml's `packages.find`).
+    shipped = ("cli", "remote", "shared", "local", "doggi", "train")
+    spelled = set().union(*(_string_constants(ROOT / package) for package in shipped))
 
     assert spelled & (set(REFUSALS) - PARSED_BY_THIS_CLI) == set()
 
@@ -149,6 +154,106 @@ def test_this_cli_sends_the_capability_envelope_at_the_schemas_version():
 
     assert envelope["schema_version"] == protocol.CAPABILITIES_SCHEMA_VERSION
     assert grid_protocol.validator("node-registration", "NodeCapabilities").is_valid(envelope)
+
+
+# ---- 2b. this CLI's node traffic, at its HTTP boundary ---------------------------------------------------
+
+RELAY_URL = "https://relay.example"
+
+
+class _Relay:
+    """Stands where the relay would: records each request this CLI sends and answers in the protocol's shapes."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, str, object]] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        is_json = request.headers.get("content-type", "").startswith("application/json")
+        self.seen.append((request.method, request.url.path, json.loads(request.content) if is_json else None))
+        path = request.url.path
+        if path == protocol.HEARTBEAT_PATH:
+            return httpx.Response(200, json={"status": "ok", "ttl_seconds": protocol.NODE_TTL_SECONDS})
+        if path == protocol.POLL_PATH:
+            return httpx.Response(204)
+        if path.startswith(protocol.ERROR_REPORT_PATH.split("{")[0]):
+            return httpx.Response(200, json={"status": "failed"})
+        if path.startswith(protocol.RESPONSE_PATH.split("{")[0]):
+            return httpx.Response(200, json={"status": "delivered"})
+        return httpx.Response(200, json={"status": "updated"})
+
+
+@pytest.fixture
+def relay_double(monkeypatch):
+    """Every `httpx.Client` this CLI opens talks to a `_Relay` instead of the network."""
+    double, real_client = _Relay(), httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda *args, **kwargs: real_client(
+        *args, transport=httpx.MockTransport(double), **kwargs))
+    return double
+
+
+def _assert_fits(body: object, schema: str, definition: str | None = None) -> None:
+    errors = list(grid_protocol.validator(schema, definition).iter_errors(body))
+    assert not errors, [f"{list(error.path)}: {error.message}" for error in errors[:5]]
+
+
+def _serve_state(monkeypatch, tmp_path):
+    """A serving engine as `grid join` builds one (the construction `test_grid_asleep._serve_state` uses)."""
+    from remote import serve
+    from shared.system import host
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(host, "platform_kind", lambda: "linux")
+    monkeypatch.setattr(host, "disk_gb", lambda path: None)
+    return serve._ServeState(
+        signaling_url=RELAY_URL, node_id="node-1", network_id="n1", llm_url="http://127.0.0.1:8081/v1",
+        access_token="AT", refresh_token="RT", models=["qwen3.5-2b"],
+        capabilities={"schema_version": 1, "models": {}}, meta={"name": "e1", "engine": "llama.cpp"},
+        pricing={}, max_concurrency=1)
+
+
+def test_this_cli_registers_and_leaves_on_the_schemas_route_in_its_shape(relay_double):
+    from remote import probe, relay, serve
+
+    record = {"meta_name": "node-a", "meta_name_chosen": True, "engines": [{"engine_label": "llama.cpp"}]}
+    capabilities = probe.envelope("qwen3.5-2b", {feature: True for feature in probe.PROBED_FEATURES}, 32768)
+    relay.register_node(RELAY_URL, "AT", "node-1", models=["qwen3.5-2b"], capabilities=capabilities,
+                        meta=serve._meta(record, "e1"), pricing={}, max_concurrency=2)
+    relay.unregister_node(RELAY_URL, "AT", "node-1")
+
+    (method, path, body), (left_method, left_path, left_body) = relay_double.seen
+    assert (method, path) == ("PUT", protocol.NODE_PATH.format(node_id="node-1"))
+    _assert_fits(body, "node-registration")
+    assert (left_method, left_path) == ("PUT", path)
+    _assert_fits(left_body, "node-registration")
+    assert left_body["role"] == "consumer" and left_body["models"] == []
+
+
+def test_this_cli_beats_on_the_schemas_route_with_its_real_load_and_meta(relay_double, monkeypatch, tmp_path):
+    from remote import relay
+    from shared.system import node_hardware
+
+    state = _serve_state(monkeypatch, tmp_path)
+
+    assert relay.heartbeat(RELAY_URL, "AT", load=state.load(), meta=node_hardware.meta_fields()) == "ok"
+
+    ((method, path, body),) = relay_double.seen
+    assert (method, path) == ("POST", protocol.HEARTBEAT_PATH)
+    _assert_fits(body, "node-heartbeat")
+
+
+def test_this_cli_polls_and_answers_on_the_schemas_routes(relay_double):
+    from remote import relay
+
+    assert relay.poll(RELAY_URL, "AT") is None  # 204: no work
+    relay.submit_response(RELAY_URL, "AT", "txn-1", content=b'{"id": "x"}', stream=False)
+    relay.submit_error(RELAY_URL, "AT", "txn-2", message="the engine failed", tokens_delivered=0)
+
+    (poll, result, report) = relay_double.seen
+    assert poll[:2] == ("GET", protocol.POLL_PATH)
+    assert result[:2] == ("POST", protocol.RESPONSE_PATH.format(transaction_id="txn-1"))
+    assert report[:2] == ("POST", protocol.ERROR_REPORT_PATH.format(transaction_id="txn-2"))
+    _assert_fits(report[2], "node-upload", "ErrorReport")
+    assert all(path.startswith(protocol.RELAY_PATH + "/") for _method, path, _body in (poll, result, report))
 
 
 # ---- 3. real answers fit it ------------------------------------------------------------------------------
@@ -192,21 +297,23 @@ def test_every_answer_shape_has_a_recording_or_a_stated_reason():
     assert not missing, f"answers with no recording and no stated reason: {sorted(missing, key=str)}"
 
 
+_IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_NODE_ID = re.compile(r"grid-[0-9a-f]{32}")
+#: The sanitizer numbers what it replaces from 1; a real node id is 128 random bits.
+_MAX_PLACEHOLDER_ID = 0xFFFF
+
+
 def test_a_recording_is_sanitized():
-    # The public repository must never carry a person's address, a machine's own name or a token.
+    # The public repository must never carry a person's address, a machine's own name, a token or an address
+    # of ours — anywhere in the file, `source` included.
     for path in _recordings():
         text = path.read_text(encoding="utf-8")
-        recording = json.loads(text)
-        assert recording.get("sanitized") is True, f"{path.name} does not say it was sanitized"
+        assert json.loads(text).get("sanitized") is True, f"{path.name} does not say it was sanitized"
         for marker in ("lga_sk_", "Bearer ", "eyJ"):
             assert marker not in text, f"{path.name} carries {marker!r}"
-        for address in _emails(recording["body"]):
-            assert address.endswith("@example.com"), f"{path.name} carries a real address"
-
-
-def _emails(value: object) -> list[str]:
-    if isinstance(value, dict):
-        return [found for item in value.values() for found in _emails(item)]
-    if isinstance(value, list):
-        return [found for item in value for found in _emails(item)]
-    return [value] if isinstance(value, str) and "@" in value else []
+        assert not _IPV4.search(text), f"{path.name} carries an IP address: {_IPV4.search(text).group(0)}"
+        strangers = [email for email in _EMAIL.findall(text) if not email.endswith("@example.com")]
+        assert not strangers, f"{path.name} carries a real address"
+        real_ids = [node for node in _NODE_ID.findall(text) if int(node[5:], 16) > _MAX_PLACEHOLDER_ID]
+        assert not real_ids, f"{path.name} carries a node id the sanitizer did not replace"

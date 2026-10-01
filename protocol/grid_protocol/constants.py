@@ -55,6 +55,9 @@ RELAY_RESTARTING_CODE = "relay_restarting"
 #: GET /relay/v1/grid/overview (overview.schema.json)
 OVERVIEW_PATH = "/relay/v1/grid/overview"
 
+#: (refusal.schema.json)
+RETRY_AFTER_HEADER = "Retry-After"
+
 #: (refusal.schema.json/$defs/GridAsleep/properties/code)
 GRID_ASLEEP_CODE = "grid_asleep"
 

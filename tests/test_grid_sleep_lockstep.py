@@ -17,8 +17,8 @@ side, both suites stay green and the behaviour silently goes back to what it was
 worktree sits beside this one** — i.e. they skip in CI, and a green CI proves nothing about them. Run
 them locally, on a machine that has both.
 
-The canonical values are written out here rather than imported from either side: a pin that reads one
-side's constant and compares it to itself checks nothing.
+The canonical values come from `grid-protocol` (grid-platform ticket 12), the third party every side is pinned
+against, never from either side: a pin that reads one side's constant and compares it to itself checks nothing.
 """
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ import ast
 import pathlib
 
 import pytest
+from grid_protocol import constants as protocol_constants
 
 from cli import remote_grid
 from remote import relay
@@ -34,9 +35,9 @@ from tests.protocol_ast import protocol_value
 
 #: (grid-apis `grid_proxy` constant, this CLI's `remote.relay` constant, the canonical value).
 PROXY_CODES = [
-    ("GRID_ASLEEP_CODE", "GRID_ASLEEP_CODE", "grid_asleep"),
-    ("GRID_STOPPED_CODE", "GRID_STOPPED_CODE", "grid_stopped"),
-    ("GRID_DELETED_CODE", "GRID_DELETED_CODE", "grid_deleted"),
+    ("GRID_ASLEEP_CODE", "GRID_ASLEEP_CODE", protocol_constants.GRID_ASLEEP_CODE),
+    ("GRID_STOPPED_CODE", "GRID_STOPPED_CODE", protocol_constants.GRID_STOPPED_CODE),
+    ("GRID_DELETED_CODE", "GRID_DELETED_CODE", protocol_constants.GRID_DELETED_CODE),
 ]
 CANONICAL_ASLEEP_STATE = "asleep"
 

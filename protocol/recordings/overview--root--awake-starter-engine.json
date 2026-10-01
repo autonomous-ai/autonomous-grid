@@ -61,7 +61,7 @@
       {
         "name": "node-a",
         "provider_email": "provider@example.com",
-        "device": "DO-Premium-Intel",
+        "device": "example-device",
         "chip": null,
         "memory_gb": null,
         "vram_total_mb": null,

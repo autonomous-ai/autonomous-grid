@@ -5,62 +5,84 @@
   "description": "The timing values two or more parties must agree on, each in seconds. The rules BETWEEN them (a parked probe fits twice in the boot hold; a model outlives a node TTL and a beat; the last-known record dies before the master forgets its nodes) are checked by grid-protocol's own tests, because JSON Schema cannot relate two values. Several are also operator knobs on the side that owns them (named in each description); the value here is the default the others were built against.",
   "type": "object",
   "required": [
-    "heartbeat_interval_seconds", "node_ttl_seconds", "poll_window_seconds", "asleep_probe_seconds",
-    "stopped_probe_seconds", "after_a_failed_beat_seconds", "boot_hold_seconds", "boot_hold_window_seconds",
-    "model_retention_seconds", "sleep_record_min_uptime_seconds", "access_loss_settle_seconds",
-    "last_known_max_age_seconds", "master_node_prune_seconds"
+    "heartbeat_interval_seconds",
+    "node_ttl_seconds",
+    "poll_window_seconds",
+    "asleep_probe_seconds",
+    "stopped_probe_seconds",
+    "after_a_failed_beat_seconds",
+    "boot_hold_seconds",
+    "boot_hold_window_seconds",
+    "model_retention_seconds",
+    "sleep_record_min_uptime_seconds",
+    "access_loss_settle_seconds",
+    "last_known_max_age_seconds",
+    "master_node_prune_seconds"
   ],
   "properties": {
     "heartbeat_interval_seconds": {
-      "const": 30, "x-constant": "HEARTBEAT_INTERVAL_SECONDS",
+      "const": 30,
+      "x-constant": "HEARTBEAT_INTERVAL_SECONDS",
       "description": "How often a provider beats (public CLI `relay.HEARTBEAT_INTERVAL`)."
     },
     "node_ttl_seconds": {
-      "const": 120, "x-constant": "NODE_TTL_SECONDS",
+      "const": 120,
+      "x-constant": "NODE_TTL_SECONDS",
       "description": "A node silent this long is not selected (grid-src `NODE_TTL_SECONDS`, a knob; the heartbeat answer's `ttl_seconds`)."
     },
     "poll_window_seconds": {
-      "const": 30, "x-constant": "POLL_WINDOW_SECONDS",
+      "const": 30,
+      "x-constant": "POLL_WINDOW_SECONDS",
       "description": "How long a poll is held before its 204 (grid-src `poll_timeout_seconds`); a provider's own poll timeout must be longer."
     },
     "asleep_probe_seconds": {
-      "const": 10, "x-constant": "ASLEEP_PROBE_SECONDS",
+      "const": 10,
+      "x-constant": "ASLEEP_PROBE_SECONDS",
       "description": "A provider parked on grid_asleep probes this often (public CLI `serve._ASLEEP_PROBE_SECONDS`)."
     },
     "stopped_probe_seconds": {
-      "const": 60, "x-constant": "STOPPED_PROBE_SECONDS",
+      "const": 60,
+      "x-constant": "STOPPED_PROBE_SECONDS",
       "description": "A provider parked on grid_stopped probes this often: only the owner's start ends it."
     },
     "after_a_failed_beat_seconds": {
-      "const": 10, "x-constant": "AFTER_A_FAILED_BEAT_SECONDS",
+      "const": 10,
+      "x-constant": "AFTER_A_FAILED_BEAT_SECONDS",
       "description": "The next beat after a failed one (the platform's restart of a dead master)."
     },
     "boot_hold_seconds": {
-      "const": 30, "x-constant": "BOOT_HOLD_SECONDS",
+      "const": 30,
+      "x-constant": "BOOT_HOLD_SECONDS",
       "description": "Inside the boot-hold window a request that finds NO provider is held this long for one to beat (grid-src `GRID_BOOT_HOLD_SECONDS`, a knob). A woken master starts with every provider past its TTL."
     },
     "boot_hold_window_seconds": {
-      "const": 120, "x-constant": "BOOT_HOLD_WINDOW_SECONDS",
+      "const": 120,
+      "x-constant": "BOOT_HOLD_WINDOW_SECONDS",
       "description": "How long after a master starts its boot hold applies (grid-src `GRID_BOOT_HOLD_WINDOW_SECONDS`, a knob)."
     },
     "model_retention_seconds": {
-      "const": 150, "x-constant": "MODEL_RETENTION_SECONDS",
+      "const": 150,
+      "x-constant": "MODEL_RETENTION_SECONDS",
       "description": "A model is dropped from a reader's list only after this long absent across two or more awake reads (a node TTL and a beat), so a cold wake does not blank a list (harness `GRID_MODEL_RETENTION_SECONDS|_MS`)."
     },
     "sleep_record_min_uptime_seconds": {
-      "const": 180, "x-constant": "SLEEP_RECORD_MIN_UPTIME_SECONDS",
+      "const": 180,
+      "x-constant": "SLEEP_RECORD_MIN_UPTIME_SECONDS",
       "description": "The last-known record is captured only from a master up this long: a node TTL and a beat, with a margin (grid-apis `sleep_record.MIN_UPTIME_SECONDS`)."
     },
     "access_loss_settle_seconds": {
-      "const": 150, "x-constant": "ACCESS_LOSS_SETTLE_SECONDS",
+      "const": 150,
+      "x-constant": "ACCESS_LOSS_SETTLE_SECONDS",
       "description": "No record is written until this long after somebody lost access to the grid: their machine can stay listed for a TTL and a beat (grid-apis `sleep_record.ACCESS_LOSS_SETTLE_SECONDS`)."
     },
     "last_known_max_age_seconds": {
-      "const": 2505600, "x-constant": "LAST_KNOWN_MAX_AGE_SECONDS",
+      "const": 2505600,
+      "x-constant": "LAST_KNOWN_MAX_AGE_SECONDS",
       "description": "29 days: a last-known record older than this is not sent, and a reader ignores one (grid-apis `sleep_record.MAX_AGE_SECONDS`; harness `GRID_LAST_KNOWN_MAX_AGE_SECONDS|_MS`)."
     },
     "master_node_prune_seconds": {
-      "const": 2592000, "x-constant": "MASTER_NODE_PRUNE_SECONDS",
+      "const": 2592000,
+      "x-constant": "MASTER_NODE_PRUNE_SECONDS",
       "description": "30 days: a master forgets a node row silent this long (grid-src `registry.prune_stale_nodes`)."
     }
   }

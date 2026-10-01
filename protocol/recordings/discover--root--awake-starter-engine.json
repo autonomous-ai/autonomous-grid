@@ -11,13 +11,13 @@
       {
         "node_id": "grid-00000000000000000000000000000001",
         "models": [
-          "provider:grid-00000000000000000000000000000001:NTWj54ka9e-2",
-          "provider:grid-00000000000000000000000000000001:QB_7LHVMMYfy"
+          "provider:grid-00000000000000000000000000000001:model0000001",
+          "provider:grid-00000000000000000000000000000001:model0000002"
         ],
         "pricing": {},
         "capabilities": {
           "models": {
-            "provider:grid-00000000000000000000000000000001:NTWj54ka9e-2": {
+            "provider:grid-00000000000000000000000000000001:model0000001": {
               "context_window": 1048576,
               "endpoints": [
                 "chat/completions",
@@ -48,12 +48,12 @@
               "output_modalities": [
                 "text"
               ],
-              "provider_group_id": "provider-group:NTWj54ka9e-2",
+              "provider_group_id": "provider-group:model0000001",
               "provider_supplied": true,
-              "public_model_id": "provider:grid-00000000000000000000000000000001:NTWj54ka9e-2",
+              "public_model_id": "provider:grid-00000000000000000000000000000001:model0000001",
               "raw_model_id": "deepseek/deepseek-v4-flash-0731"
             },
-            "provider:grid-00000000000000000000000000000001:QB_7LHVMMYfy": {
+            "provider:grid-00000000000000000000000000000001:model0000002": {
               "context_window": 1000000,
               "endpoints": [
                 "chat/completions",
@@ -85,9 +85,9 @@
               "output_modalities": [
                 "text"
               ],
-              "provider_group_id": "provider-group:QB_7LHVMMYfy",
+              "provider_group_id": "provider-group:model0000002",
               "provider_supplied": true,
-              "public_model_id": "provider:grid-00000000000000000000000000000001:QB_7LHVMMYfy",
+              "public_model_id": "provider:grid-00000000000000000000000000000001:model0000002",
               "raw_model_id": "qwen/qwen3.8-27b"
             }
           },
@@ -109,7 +109,7 @@
           "name": "node-a",
           "name_chosen": true,
           "engine": "starter",
-          "device": "DO-Premium-Intel",
+          "device": "example-device",
           "device_class": "server"
         }
       }

@@ -81,7 +81,10 @@ def test_the_distribution_version_is_the_package_version():
 def test_the_schemas_ship_inside_the_package():
     # The wheel's package data is `grid_protocol/schemas/*.schema.json`; a schema anywhere else would be
     # missing from every install while every test here, reading the source tree, still passed.
+    built = {"build", "dist"}  # what `uv build` leaves behind locally holds copies; it never ships from here
     for path in _codegen.SCHEMA_DIR.parent.parent.rglob(f"*{_codegen.SCHEMA_SUFFIX}"):
+        if built & set(path.parts) or any(part.endswith(".egg-info") for part in path.parts):
+            continue
         assert path.parent == _codegen.SCHEMA_DIR, f"{path} is outside grid_protocol/schemas/"
     json.loads((_codegen.SCHEMA_DIR / f"refusal{_codegen.SCHEMA_SUFFIX}").read_text())
 

@@ -23,7 +23,11 @@ test and broke the seam at runtime. Now the schema is the one place a shape is w
 
 Each schema's `description` says why the shape is the way it is. Named values carry an `x-constant` (a
 `const` a program imports), `x-route` (a route's path), `x-names` (a flag or a header name) or `x-status` (the
-HTTP status a refusal code travels with).
+HTTP status a refusal code travels with); `x-headers` documents the headers an answer may carry.
+
+What checks it, in this repository's CI: every answer shape against a real recorded answer; every request
+shape against what this CLI really sends (`register`, `heartbeat`, `poll`, the result and the error report,
+caught at its HTTP boundary); the rules between timing values; and every value this CLI still writes by hand.
 
 ## Using it
 
@@ -54,7 +58,9 @@ copies in whole.
 
 `recordings/*.json` are real answers, each validated against the shape it names. Every identifying value is
 replaced before a recording is committed — machine names become `node-a`, provider addresses
-`provider@example.com`, node ids `grid-000…01` (in route ids too) — because this repository is public.
+`provider@example.com`, node ids `grid-000…01` (in route ids too), the per-model hashes in route ids `model0000001`,
+and device labels `example-device` — because this repository is public. `test_a_recording_is_sanitized` fails on an
+IP address, a token, an address outside `example.com` or a real node id anywhere in a recording.
 `source` says where the answer came from: the DEV VM, or a server's own code run in-process at a named sha
 when the platform cannot produce the answer without a write.
 

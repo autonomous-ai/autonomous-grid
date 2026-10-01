@@ -4,31 +4,89 @@
   "title": "ModelList",
   "description": "The relay's OpenAI-style model list. Needs a credential (scope `inference:models`), so a GET of it WAKES a sleeping grid: it belongs to a person's act (the harness's wake read), never to an automatic read. When the router is on and the list is not empty, the router's rows (`owned_by: grid-router`) come first.",
   "type": "object",
-  "required": ["object", "data"],
+  "required": [
+    "object",
+    "data"
+  ],
   "properties": {
-    "object": {"const": "list"},
-    "data": {"type": "array", "items": {"$ref": "#/$defs/ModelEntry"}}
+    "object": {
+      "const": "list"
+    },
+    "data": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ModelEntry"
+      }
+    }
   },
-  "x-route": {"method": "GET", "path": "/relay/v1/models", "constant": "MODELS_PATH"},
+  "x-route": {
+    "method": "GET",
+    "path": "/relay/v1/models",
+    "constant": "MODELS_PATH"
+  },
   "$defs": {
     "ModelEntry": {
-      "description": "A served model, or a router row (`Auto`; `Brute Force` and `Feedback Loop` until Phase B 09 retires effort mode), which carries only the four required keys.",
+      "description": "A served model, or a router row (`Auto`, and the effort-mode rows while effort mode is served), which carries only the four required keys.",
       "type": "object",
-      "required": ["id", "object", "created", "owned_by"],
+      "required": [
+        "id",
+        "object",
+        "created",
+        "owned_by"
+      ],
       "properties": {
-        "id": {"type": "string"},
-        "object": {"const": "model"},
-        "created": {"type": "integer"},
-        "owned_by": {"type": "string"},
-        "display_name": {"type": "string"},
-        "provider_count": {"type": "integer"},
-        "provider_supplied": {"type": "boolean"},
-        "trusted": {"type": "boolean"},
-        "raw_model_id": {"type": "string"},
-        "raw_model_ids": {"type": "array", "items": {"type": "string"}},
-        "provider_group_id": {"type": ["string", "null"]},
-        "provider_group_ids": {"type": "array", "items": {"type": "string"}},
-        "context_window": {"type": ["integer", "null"], "description": "The largest window any engine serving the model was started with."}
+        "id": {
+          "type": "string"
+        },
+        "object": {
+          "const": "model"
+        },
+        "created": {
+          "type": "integer"
+        },
+        "owned_by": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "provider_count": {
+          "type": "integer"
+        },
+        "provider_supplied": {
+          "type": "boolean"
+        },
+        "trusted": {
+          "type": "boolean"
+        },
+        "raw_model_id": {
+          "type": "string"
+        },
+        "raw_model_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "provider_group_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_group_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "context_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "The largest window any engine serving the model was started with."
+        }
       }
     }
   }

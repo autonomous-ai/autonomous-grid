@@ -1,6 +1,7 @@
 """The generator that turns `grid-protocol`'s JSON Schemas into Python constants and TypeScript types.
 
-The schemas under ``protocol/grid_protocol/schemas/`` are the source of truth (ADR 0004). Two artefacts are
+The schemas under ``protocol/grid_protocol/schemas/`` are the source of truth (the grid-platform review's
+ADR 0004). Two artefacts are
 derived from them and committed: ``grid_protocol/constants.py`` (the named values every party imports) and
 ``protocol/typescript/gridProtocol.ts`` (the types and values the harness daemon vendors). These tests pin the
 generator's rules on small synthetic schemas, so a rule is readable here without reading the real contract.
@@ -245,3 +246,18 @@ def test_x_headers_documents_headers_and_must_map_a_name_to_a_sentence():
     _codegen.typescript(_schemas(good=good), version="0.0.0")
     with pytest.raises(_codegen.UnsupportedSchema, match="x-headers"):
         _codegen.typescript(_schemas(bad=bad), version="0.0.0")
+
+
+def test_a_union_of_arrays_of_unions_stays_valid_typescript():
+    # Found in review: members were de-duplicated by splitting the rendered text on " | ", which also cut
+    # inside `Array<…>` and emitted `Array<string | number> | Array<boolean`.
+    pair = {"title": "Pair", "oneOf": [
+        {"type": "array", "items": {"type": ["string", "integer"]}},
+        {"type": "array", "items": {"type": ["boolean", "integer"]}},
+        {"type": ["string", "null"]},
+        {"type": "null"},
+    ]}
+
+    ts = _codegen.typescript(_schemas(pair=pair), version="0.0.0")
+
+    assert "export type Pair = Array<string | number> | Array<boolean | number> | string | null\n" in ts

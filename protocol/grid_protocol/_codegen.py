@@ -1,6 +1,7 @@
 """Derive grid-protocol's named values (Python) and types (TypeScript) from its JSON Schemas.
 
-The schemas in ``grid_protocol/schemas/`` are the contract (ADR 0004). This module turns them into the two
+The schemas in ``grid_protocol/schemas/`` are the contract (the grid-platform review's ADR 0004 — not this
+repository's ``docs/adr/0004``). This module turns them into the two
 files every party reads instead of hand-copying literals:
 
 - ``grid_protocol/constants.py`` — each value a schema names with ``x-constant``, each route path named with
@@ -11,13 +12,17 @@ files every party reads instead of hand-copying literals:
 - ``protocol/typescript/gridProtocol.ts`` — the same values, plus one TypeScript type per schema and per
   ``$defs`` entry, for the harness daemon (which vendors the file) and ticket 13's conformance driver.
 
+``x-headers`` (a header name → a sentence) documents the headers an answer may carry; it is checked for shape
+and emits nothing.
+
 It FAILS CLOSED. A keyword it does not translate is an error, never skipped: a skipped ``allOf`` or ``if``
 would emit a type that promises more than the wire carries, which is exactly the silent drift the old
 lockstep register existed to catch. Keywords that only narrow a value in ways TypeScript cannot express
 (``minimum``, ``pattern``…) are allowed and left to JSON Schema validation.
 
 Run ``python -m grid_protocol._codegen --write`` after changing a schema; ``--check`` exits 1 while a
-committed file is stale. ``tests/test_protocol_generated.py`` runs the check in CI.
+committed file is stale. ``tests/test_protocol_package.py`` runs the check in CI. ``--write`` needs this
+repository's source tree: an installed wheel has no ``protocol/typescript/`` to write into.
 """
 from __future__ import annotations
 
@@ -201,12 +206,24 @@ def _resolve(contract: _Contract, file: str, ref: str, where: str) -> str:
     return match.group(1)
 
 
+# ---- shared ------------------------------------------------------------------------------------------------
+
+def _wrap(text: str, width: int) -> list[str]:
+    lines: list[str] = []
+    current = ""
+    for word in text.split(" "):
+        if current and len(current) + 1 + len(word) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}" if current else word
+    return lines + ([current] if current else [])
+
+
 # ---- Python ------------------------------------------------------------------------------------------------
 
 def _py_literal(value: object) -> str:
-    if isinstance(value, bool) or value is None:
-        return repr(value)
-    if isinstance(value, (int, float)):
+    if value is None or isinstance(value, (bool, int, float)):
         return repr(value)
     if isinstance(value, str):
         return json.dumps(value)
@@ -259,18 +276,6 @@ def _ts_key(name: str) -> str:
     return name if _IDENTIFIER.match(name) else _ts_literal(name)
 
 
-def _wrap(text: str, width: int) -> list[str]:
-    lines: list[str] = []
-    current = ""
-    for word in text.split(" "):
-        if current and len(current) + 1 + len(word) > width:
-            lines.append(current)
-            current = word
-        else:
-            current = f"{current} {word}" if current else word
-    return lines + ([current] if current else [])
-
-
 def _ts_doc(description: str, indent: str) -> list[str]:
     text = " ".join(description.split()).replace("*/", "*\\/")
     if not text:
@@ -281,12 +286,31 @@ def _ts_doc(description: str, indent: str) -> list[str]:
     return [f"{indent}/**", *body, f"{indent} */"]
 
 
+def _members(rendered: str) -> list[str]:
+    """A rendered type's top-level union members: `A | Array<B | C>` is two, not three."""
+    members, depth, quote, start = [], 0, "", 0
+    for index, char in enumerate(rendered):
+        if quote:
+            quote = "" if char == quote and rendered[index - 1] != "\\" else quote
+        elif char == "'":
+            quote = char
+        elif char in "<{(":
+            depth += 1
+        elif char in ">})":
+            depth -= 1
+        elif depth == 0 and rendered.startswith(" | ", index):
+            members.append(rendered[start:index])
+            start = index + 3
+    return members + [rendered[start:]]
+
+
 def _union(parts: list[str]) -> str:
+    """The parts as one union, each top-level member once, in first-seen order."""
     seen: list[str] = []
     for part in parts:
-        for piece in part.split(" | ") if not part.startswith("{") else [part]:
-            if piece not in seen:
-                seen.append(piece)
+        for member in _members(part):
+            if member not in seen:
+                seen.append(member)
     return " | ".join(seen)
 
 
@@ -388,13 +412,14 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--write", action="store_true", help="rewrite the generated files")
     mode.add_argument("--check", action="store_true", help="exit 1 while a generated file is stale")
     args = parser.parse_args(argv)
-    stale = [path for path, text in _outputs(__version__).items()
+    outputs = _outputs(__version__)
+    stale = [path for path, text in outputs.items()
              if not path.exists() or path.read_text(encoding="utf-8") != text]
     if args.check:
         for path in stale:
             print(f"stale: {path}", file=sys.stderr)
         return 1 if stale else 0
-    for path, text in _outputs(__version__).items():
+    for path, text in outputs.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     return 0
