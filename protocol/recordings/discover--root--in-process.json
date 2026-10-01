@@ -3,7 +3,7 @@
   "definition": null,
   "request": "GET /nodes/discover",
   "status": 200,
-  "source": "grid-src @ f837931, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "source": "grid-src @ db3c5be, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
   "sanitized": true,
   "body": {
     "providers": [
@@ -15,7 +15,7 @@
         "pricing": {},
         "capabilities": {
           "models": {
-            "provider:5681410e-41f2-46f6-a511-527053a8d92a:ZnRdJqM0qQvK": {
+            "provider:00000000-0000-0000-0000-000000000001:ZnRdJqM0qQvK": {
               "endpoints": [
                 "chat/completions"
               ],
@@ -28,7 +28,7 @@
               "output_modalities": [
                 "text"
               ],
-              "provider_group_id": "provider-group:ZnRdJqM0qQvK",
+              "provider_group_id": "provider-group:model0000001",
               "provider_supplied": true,
               "public_model_id": "provider:00000000-0000-0000-0000-000000000001:ZnRdJqM0qQvK",
               "raw_model_id": "qwen3.5-2b"
@@ -39,13 +39,13 @@
         "load": {},
         "max_concurrency": 2,
         "endpoint_url": null,
-        "last_heartbeat": "2026-10-01T03:04:26.643617",
-        "first_seen_at": "2026-10-01T03:04:26.625720",
+        "last_heartbeat": "2026-10-01T04:40:32.378684",
+        "first_seen_at": "2026-10-01T04:40:32.357203",
         "verified_at": null,
         "meta": {
           "name": "node-a",
           "engine": "llama.cpp",
-          "device": "test"
+          "device": "example-device"
         }
       }
     ]

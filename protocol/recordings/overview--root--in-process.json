@@ -3,7 +3,7 @@
   "definition": null,
   "request": "GET /relay/v1/grid/overview",
   "status": 200,
-  "source": "grid-src @ f837931, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "source": "grid-src @ db3c5be, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
   "sanitized": true,
   "body": {
     "grid": {
@@ -40,7 +40,7 @@
       {
         "name": "node-a",
         "provider_email": "provider@example.com",
-        "device": "test",
+        "device": "example-device",
         "chip": null,
         "memory_gb": null,
         "vram_total_mb": null,

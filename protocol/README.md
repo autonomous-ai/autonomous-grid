@@ -60,7 +60,17 @@ copies in whole.
 replaced before a recording is committed — machine names become `node-a`, provider addresses
 `provider@example.com`, node ids `grid-000…01` (in route ids too), the per-model hashes in route ids `model0000001`,
 and device labels `example-device` — because this repository is public. `test_a_recording_is_sanitized` fails on an
-IP address, a token, an address outside `example.com` or a real node id anywhere in a recording.
-`source` says where the answer came from: the DEV VM, or a server's own code run in-process at a named sha
-when the platform cannot produce the answer without a write.
+IP address, a token, an address outside `example.com` or a real node id anywhere in a recording, and every committed
+recording must be what `tools/sanitize.py` makes of it (`tests/test_protocol_tools.py`). `source` says where the
+answer came from.
 
+Making them again, from this repository:
+
+| Answers | How |
+|---|---|
+| A grid's public reads and the proxy's refusals for a sleeping or deleted grid | `python protocol/tools/record_reads.py <grid address>/relay/v1/grid/overview --schema … [--definition …] --stem … --source "…"` from anywhere the proxy is reachable. It sends no credential and has no option to: a credential-less read never wakes a grid. It writes nothing unless the answer is the named shape. |
+| The master's: a provider's traffic, the model list, `no_providers_available` | in grid-src, `GRID_PROTOCOL_RECORD_DIR=<dir> pytest grid_cli/private_server/tests/test_protocol_conformance.py --asyncio-mode=auto`, then `python protocol/tools/sanitize.py <dir>/*.json --out protocol/recordings` |
+| The proxy's `grid_stopped` and `grid_master_down` (a live grid cannot be put in that state without a write) | `<grid-apis>/.venv/bin/python protocol/tools/record_proxy.py --grid-apis <grid-apis>` — grid-apis' own interpreter, which has its dependencies |
+
+The harness reads some of them as test fixtures (`cli/src/lib/__fixtures__/protocol/`); copy any you re-record over
+its copies, whole — a lockstep pin compares them byte for byte.

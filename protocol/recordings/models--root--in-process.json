@@ -3,7 +3,7 @@
   "definition": null,
   "request": "GET /relay/v1/models",
   "status": 200,
-  "source": "grid-src @ f837931, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "source": "grid-src @ db3c5be, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
   "sanitized": true,
   "body": {
     "object": "list",
@@ -18,13 +18,13 @@
         "raw_model_ids": [
           "qwen3.5-2b"
         ],
-        "provider_group_id": "provider-group:ZnRdJqM0qQvK",
+        "provider_group_id": "provider-group:model0000001",
         "provider_group_ids": [
-          "provider-group:ZnRdJqM0qQvK"
+          "provider-group:model0000001"
         ],
         "context_window": null,
         "object": "model",
-        "created": 1790823866,
+        "created": 1790829632,
         "owned_by": "localagi-p2p"
       }
     ]

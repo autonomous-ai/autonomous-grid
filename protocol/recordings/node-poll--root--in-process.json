@@ -3,7 +3,7 @@
   "definition": null,
   "request": "GET /relay/v1/poll",
   "status": 200,
-  "source": "grid-src @ f837931, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "source": "grid-src @ db3c5be, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
   "sanitized": true,
   "body": {
     "transaction_id": "00000000-0000-0000-0000-000000000001",
@@ -18,7 +18,7 @@
       ]
     },
     "is_stream": false,
-    "created_at": 1790823866.5499678,
+    "created_at": 1790829632.2707698,
     "inference_timeout_seconds": 599,
     "wire_format": "chat",
     "provider_attempt": 1

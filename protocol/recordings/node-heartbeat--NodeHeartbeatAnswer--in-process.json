@@ -3,7 +3,7 @@
   "definition": "NodeHeartbeatAnswer",
   "request": "POST /nodes/heartbeat",
   "status": 200,
-  "source": "grid-src @ f837931, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "source": "grid-src @ db3c5be, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
   "sanitized": true,
   "body": {
     "status": "ok",
