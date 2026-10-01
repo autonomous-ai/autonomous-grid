@@ -96,3 +96,12 @@ def test_a_definition_validates_only_its_own_case():
     assert not grid_protocol.validator("refusal", "GridAsleep").is_valid(stopped)
     with pytest.raises(KeyError, match="GridAsleep"):
         grid_protocol.validator("refusal", "NoSuchCase")
+
+
+def test_a_protocol_release_is_never_the_repositorys_latest():
+    # install.sh resolves the CLI to install through /releases/latest. A protocol release marked latest (the
+    # release action's default) sends every new install to a release that has no `grid` in it — it happened once.
+    workflow = (_codegen.PACKAGE_DIR.parent.parent / ".github" / "workflows" / "protocol-release.yml").read_text()
+    publish = workflow[workflow.index("uses: softprops/action-gh-release"):]
+
+    assert 'make_latest: "false"' in publish.split("\n      - ", 1)[0]

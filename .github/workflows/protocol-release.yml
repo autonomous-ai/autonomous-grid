@@ -82,10 +82,14 @@ jobs:
             echo "::error::$REF_NAME has an empty tag message — no notes to publish."
             exit 1
           fi
+      # ⚠️ NEVER the repository's "latest" release. install.sh finds the CLI to install through the redirect of
+      # /releases/latest, so a protocol release marked latest sends every new install to a release with no `grid`
+      # in it. protocol-v0.1.0 did exactly that for ~1.5 minutes (2026-10-01) before v0.3.53 was set back.
       - name: Publish the GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          make_latest: "false"
           files: |
             protocol/dist/grid_protocol-*-py3-none-any.whl
             protocol/dist/grid_protocol-*.tar.gz
