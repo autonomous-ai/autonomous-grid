@@ -1,0 +1,26 @@
+{
+  "schema": "node-poll",
+  "definition": null,
+  "request": "GET /relay/v1/poll",
+  "status": 200,
+  "source": "grid-src @ 11a5086, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "sanitized": true,
+  "body": {
+    "transaction_id": "00000000-0000-0000-0000-000000000001",
+    "endpoint_path": "chat/completions",
+    "body": {
+      "model": "qwen3.5-2b",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ]
+    },
+    "is_stream": false,
+    "created_at": 1790819800.232078,
+    "inference_timeout_seconds": 599,
+    "wire_format": "chat",
+    "provider_attempt": 1
+  }
+}

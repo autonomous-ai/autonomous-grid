@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grid.autonomous.ai/protocol/node-upload.schema.json",
+  "title": "ResultDelivered",
+  "description": "The answer to a provider's result: `POST /relay/v1/response/{transaction_id}` with a node token, whose body is the engine's own bytes — one JSON body (`application/json`), or its SSE lines as they come (`text/event-stream`). The master checks the framing and answers `400` ResultRejected for a malformed result, `409` for a stale attempt, `410` when the transaction already ended. An upload never wakes a sleeping grid.",
+  "type": "object",
+  "required": ["status"],
+  "properties": {
+    "status": {"const": "delivered"}
+  },
+  "x-route": {"method": "POST", "path": "/relay/v1/response/{transaction_id}", "constant": "RESPONSE_PATH"},
+  "x-headers": {
+    "X-Grid-Provider-Attempt": "The poll job's `provider_attempt_token`, when it carried one; a mismatch is answered 409."
+  },
+  "x-names": {"PROVIDER_ATTEMPT_HEADER": "X-Grid-Provider-Attempt"},
+  "$defs": {
+    "ResultRejected": {
+      "description": "400: the result's framing is wrong, and the request is failed rather than delivered.",
+      "type": "object",
+      "required": ["error", "reason"],
+      "properties": {
+        "error": {"const": "validation_failed"},
+        "reason": {
+          "enum": [
+            "bare_cr_in_sse_line", "unterminated_sse_block", "invalid_responses_stream",
+            "truncated_responses_stream", "non_stream_responses_submit", "invalid_responses_body",
+            "non_terminal_responses_body", "invalid_json"
+          ]
+        }
+      }
+    },
+    "ErrorReport": {
+      "description": "A provider's report that it could not serve the request: `POST /relay/v1/error/{transaction_id}`.",
+      "type": "object",
+      "required": ["error"],
+      "properties": {
+        "error": {"description": "What failed, for the log; the public CLI sends a string."},
+        "tokens_delivered": {"type": "integer", "minimum": 0, "description": "Tokens already streamed; the relay retries on another provider only when none were."}
+      },
+      "x-route": {"method": "POST", "path": "/relay/v1/error/{transaction_id}", "constant": "ERROR_REPORT_PATH"}
+    },
+    "ErrorReportAnswer": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {"status": {"enum": ["failed", "retried"]}}
+    }
+  }
+}

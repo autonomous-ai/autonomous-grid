@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grid.autonomous.ai/protocol/cli-error.schema.json",
+  "title": "CliErrorEnvelope",
+  "description": "The one JSON line the public `grid` CLI writes on stderr when a `--json` command fails. Under `--no-wake` (`grid models | engines | stats`, from 0.3.49) the overview and discovery go out with no credential, an owner status already `asleep` is answered with no request at all, and `code` is `grid_asleep` when the proxy said so and null for every other refusal. A `grid` older than 0.3.49 exits 2 at argparse before it sends anything; a caller reads that as \"no read\" and must never retry without the flag, which would be a wake. Accepted and ignored in local mode.",
+  "type": "object",
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "status"],
+      "properties": {
+        "code": {"type": ["string", "null"]},
+        "message": {"type": "string"},
+        "status": {"type": ["integer", "null"], "description": "The HTTP status behind the refusal, when there was one."}
+      }
+    }
+  },
+  "x-names": {"NO_WAKE_FLAG": "--no-wake"}
+}

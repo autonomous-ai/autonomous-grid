@@ -46,6 +46,10 @@ from remote import relay
 from shared import paths, run_records, user_agent
 from tests._remote_seed import seed_remote_grid
 from tests.grid_src_repo import grid_apis_root, grid_src_private_server, harness_root
+from tests.protocol_ast import protocol_value
+
+from grid_protocol import _codegen
+from grid_protocol import constants as protocol_constants
 
 OVERVIEW_ROUTE = "relay/v1/grid/overview"
 DISCOVER_ROUTE = "nodes/discover"
@@ -74,8 +78,8 @@ MASTER_NODE_PRUNE_DAYS = 30
 _SKIP_APIS = "the grid-apis worktree is not beside this one; the lockstep cannot be checked here"
 _SKIP_SRC = "the grid-src worktree is not beside this one; the lockstep cannot be checked here"
 _SKIP_HARNESS = "the autonomous-harness worktree is not beside this one; the lockstep cannot be checked here"
-_NOT_LANDED = ("the harness half has not landed yet (grid-reads-without-waking issue 02) — this pin turns "
-               "itself on the moment any spelling of it appears")
+_GONE = ("the harness no longer has it — issue 02 landed, so an absence is a rename or a move: teach this pin "
+         "where it went rather than letting it pass")
 
 
 # --- reading the siblings --------------------------------------------------------------------------
@@ -144,11 +148,12 @@ def _apis_wake_routes():
 
 def _node_ttl_seconds() -> int:
     tree = _tree(grid_src_private_server(), "config.py", _SKIP_SRC)
+    # The default is a literal, or (since grid-platform ticket 12) `str(protocol.NODE_TTL_SECONDS)`.
     defaults = [
-        node.args[1].value for node in ast.walk(tree)
+        protocol_value(node.args[1]) for node in ast.walk(tree)
         if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "getenv"
         and len(node.args) == 2 and isinstance(node.args[0], ast.Constant)
-        and node.args[0].value == "NODE_TTL_SECONDS" and isinstance(node.args[1], ast.Constant)
+        and node.args[0].value == "NODE_TTL_SECONDS"
     ]
     assert len(defaults) == 1, "grid-src's config no longer reads NODE_TTL_SECONDS with one default"
     return int(defaults[0])
@@ -156,12 +161,14 @@ def _node_ttl_seconds() -> int:
 
 def _master_node_prune_days() -> float:
     prune = _function(_tree(grid_src_private_server(), "registry.py", _SKIP_SRC), "prune_stale_nodes")
+    # `timedelta(days=30)`, or (since grid-platform ticket 12) `timedelta(seconds=protocol.MASTER_NODE_PRUNE_SECONDS)`.
+    per_unit = {"days": 1.0, "seconds": 1 / 86400}
     days = [
-        _number(keyword.value) for node in ast.walk(prune)
+        float(protocol_value(keyword.value)) * per_unit[keyword.arg] for node in ast.walk(prune)
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "timedelta"
-        for keyword in node.keywords if keyword.arg == "days"
+        for keyword in node.keywords if keyword.arg in per_unit
     ]
-    assert len(days) == 1, "grid-src's prune_stale_nodes no longer names its window as timedelta(days=…)"
+    assert len(days) == 1, "grid-src's prune_stale_nodes no longer names its window as one timedelta(days|seconds=…)"
     return days[0]
 
 
@@ -364,7 +371,7 @@ def test_the_master_publishes_the_fields_the_readers_read():
 
     model_ids = _tree(root, "model_ids.py", _SKIP_SRC)
     assert "raw_model_id" in _strings(model_ids)
-    assert ast.literal_eval(_assigned(model_ids, "PROVIDER_PREFIX")) == ROUTE_ID_PREFIX
+    assert protocol_value(_assigned(model_ids, "PROVIDER_PREFIX")) == ROUTE_ID_PREFIX
     assert ".gguf" in _strings(_function(model_ids, "display_model_name")), (
         "the display rule every reader applies is a trailing `.gguf` removed, case kept")
 
@@ -373,18 +380,21 @@ def test_a_model_outlives_a_node_ttl_and_a_beat():
     assert RETENTION_SECONDS >= _node_ttl_seconds() + relay.HEARTBEAT_INTERVAL
 
 
-# --- the harness: skip until issue 02 lands, then fail on any other spelling ------------------------
+# --- the harness: fail on any other spelling, and on an absence -------------------------------------
 #
-# ⚠️ **The names below are the contract for issue 02**, recorded in the lockstep register: the two literals
-# are found wherever the harness QUOTES them, and the two timings by these exact constant names (either
-# unit). Test files are not read — a harness test proving that `'GRID_ASLEEP'` is NOT the code spells it
+# ⚠️ **The names below are the contract for issue 02**: the two literals are found wherever the harness
+# QUOTES them (since grid-platform ticket 12 that includes its copy of `gridProtocol.ts`), and the two timings
+# by these exact constant names (either unit), written as digits or as a `grid-protocol` constant times 1000.
+# Issue 02 has landed, so a pin that finds nothing FAILS: skipping would let a rename pass for ever. Test files are not read — a harness test proving that `'GRID_ASLEEP'` is NOT the code spells it
 # wrong on purpose. A constant that merely looks similar (`pasteDropFiles.RETENTION_MS`, 24h, measured on
 # the harness at the time of writing) is exactly what a looser match would have read instead.
 
 _HARNESS_TREES = ("cli/src", "store/agents/autonomous-grid")
 _HARNESS_SUFFIXES = (".ts", ".mjs", ".js")
-_HARNESS_RETENTION = re.compile(r"\bGRID_MODEL_RETENTION_(SECONDS|MS)\s*(?::\s*\w+\s*)?=\s*([0-9_*\s]+)[;\n]")
-_HARNESS_MAX_AGE = re.compile(r"\bGRID_LAST_KNOWN_MAX_AGE_(SECONDS|MS)\s*(?::\s*\w+\s*)?=\s*([0-9_*\s]+)[;\n]")
+_HARNESS_RETENTION = re.compile(r"\bGRID_MODEL_RETENTION_(SECONDS|MS)\s*(?::\s*\w+\s*)?=\s*([0-9A-Z_*\s]+)[;\n]")
+_HARNESS_MAX_AGE = re.compile(r"\bGRID_LAST_KNOWN_MAX_AGE_(SECONDS|MS)\s*(?::\s*\w+\s*)?=\s*([0-9A-Z_*\s]+)[;\n]")
+#: The harness's copy of the generated contract, which must equal what `protocol/` generates.
+_HARNESS_PROTOCOL = "cli/src/lib/gridProtocol.ts"
 
 
 def _harness_files() -> list[pathlib.Path]:
@@ -415,7 +425,7 @@ def _harness_spellings(pattern: str) -> dict[str, list[str]]:
 def test_the_harness_spells_each_literal_as_this_side_does(pattern, canonical):
     spellings = _harness_spellings(pattern)
     if not spellings:
-        pytest.skip(_NOT_LANDED)
+        raise AssertionError(_GONE)
     assert set(spellings) == {canonical}, (
         f"the harness spells it {sorted(spellings)} — the CLI and the proxy say {canonical!r}. Renamed on "
         f"one side, the viewer is refused with exit 2 (the flag) or reads 'not answering' (the code)")
@@ -426,7 +436,12 @@ def _harness_timing(pattern: re.Pattern[str]) -> list[float]:
     values: list[float] = []
     for path in _harness_files():
         for unit, expression in pattern.findall(path.read_text(errors="replace")):
-            value = float(eval(expression.replace("_", ""), {"__builtins__": {}}))  # digits and `*` only
+            # Digits, `*`, and grid-protocol's UPPER_CASE constants — nothing else can reach eval.
+            names = {name: getattr(protocol_constants, name) for name in re.findall(r"[A-Z][A-Z0-9_]*", expression)}
+            missing = [name for name, value in names.items() if not isinstance(value, (int, float))]
+            assert not missing, f"{path}: {missing} are not grid-protocol numbers"
+            literal = re.sub(r"(?<=\d)_(?=\d)", "", expression)
+            value = float(eval(literal, {"__builtins__": {}}, names))
             values.append(value / 1000 if unit == "MS" else value)
     return values
 
@@ -434,7 +449,7 @@ def _harness_timing(pattern: re.Pattern[str]) -> list[float]:
 def test_the_harness_keeps_a_model_past_a_node_ttl_and_a_beat():
     values = _harness_timing(_HARNESS_RETENTION)
     if not values:
-        pytest.skip(_NOT_LANDED)
+        raise AssertionError(_GONE)
     assert all(seconds >= RETENTION_SECONDS for seconds in values), (
         f"the harness's GRID_MODEL_RETENTION is {values}s — under a node TTL plus a beat, a cold wake "
         f"blanks a list")
@@ -443,7 +458,7 @@ def test_the_harness_keeps_a_model_past_a_node_ttl_and_a_beat():
 def test_the_harness_ignores_a_record_before_the_master_forgets_its_nodes():
     values = _harness_timing(_HARNESS_MAX_AGE)
     if not values:
-        pytest.skip(_NOT_LANDED)
+        raise AssertionError(_GONE)
     assert all(seconds <= RECORD_MAX_AGE_DAYS * 86400 < MASTER_NODE_PRUNE_DAYS * 86400 for seconds in values), (
         values)
 
@@ -475,3 +490,16 @@ def test_the_harness_viewer_reads_the_listings_this_cli_prints():
     for field in STATS_LISTINGS_FIELDS:
         assert re.search(rf"\b{STATS_LISTINGS_KEY}\??\.{field}\b", source), (
             f"the viewer no longer reads `{STATS_LISTINGS_KEY}.{field}` — this CLI prints it there")
+
+
+def test_the_harness_carries_the_contract_this_repository_generates():
+    """The harness reads every path, code and field name off its copy of `gridProtocol.ts`. A copy that is
+    stale or edited by hand is a harness reading a contract nobody else speaks — so it must equal, byte for
+    byte, what `protocol/` generates today (grid-platform ticket 12)."""
+    root = harness_root()
+    if root is None:
+        pytest.skip(_SKIP_HARNESS)
+    copy = _source(root, _HARNESS_PROTOCOL, _SKIP_HARNESS).read_text(encoding="utf-8")
+    assert copy == _codegen.TYPESCRIPT_FILE.read_text(encoding="utf-8"), (
+        f"the harness's {_HARNESS_PROTOCOL} is not this repository's protocol/typescript/gridProtocol.ts — "
+        f"copy the generated file over it, whole")

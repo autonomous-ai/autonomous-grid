@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grid.autonomous.ai/protocol/openai-error.schema.json",
+  "title": "OpenAIError",
+  "description": "OpenAI's error envelope. A master answers an inference request's failure in it when the caller asked for OpenAI errors (a Bearer `lga_sk_` key, or the error-format header); otherwise the same failure is `{\"detail\": <message>}` with no code. `/messages` answers in Anthropic's envelope instead. Keys a master adds go BESIDE `error`, never inside it.",
+  "type": "object",
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "type": "object",
+      "required": ["message", "type", "param", "code"],
+      "properties": {
+        "message": {"type": "string"},
+        "type": {"type": "string"},
+        "param": {"type": ["string", "null"]},
+        "code": {"type": ["string", "null"], "description": "The relay's name for the failure."}
+      }
+    }
+  },
+  "$defs": {
+    "NoProvidersAvailable": {
+      "description": "No provider serves the requested model now. Inside a master's boot hold (BOOT_HOLD_WINDOW_SECONDS after it starts) a request for a model nobody serves yet is held up to BOOT_HOLD_SECONDS first, so that a provider parked on the sleeping grid can come back.",
+      "type": "object",
+      "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "object",
+          "required": ["message", "type", "param", "code"],
+          "properties": {
+            "message": {"type": "string"},
+            "type": {"const": "server_error"},
+            "param": {"type": ["string", "null"]},
+            "code": {"const": "no_providers_available", "x-constant": "NO_PROVIDERS_AVAILABLE_CODE"}
+          }
+        }
+      },
+      "x-status": 503
+    },
+    "RelayRestarting": {
+      "description": "The master holding the request ended it while retiring or stopping (Phase B 11): send it again. A stream gets it as its terminal event; a Responses stream as a `response.failed` event whose `response.error` is `{code, message}`. The public CLI must not parse it. On 2026-10-01 only grid-src branch `feat/grid-scale-phase-b` sends it.",
+      "type": "object",
+      "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "object",
+          "required": ["message", "type", "param", "code"],
+          "properties": {
+            "message": {"type": "string"},
+            "type": {"const": "server_error"},
+            "param": {"type": "null"},
+            "code": {"const": "relay_restarting", "x-constant": "RELAY_RESTARTING_CODE"}
+          }
+        }
+      },
+      "x-status": 503
+    }
+  }
+}

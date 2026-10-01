@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grid.autonomous.ai/protocol/overview.schema.json",
+  "title": "GridOverview",
+  "description": "A grid's public overview (grid-src `overview.build_grid_overview`). The master serves it with NO authentication, and a credential-less GET never wakes a sleeping grid: grid-proxy answers it `503 grid_asleep` with `last_known` instead, while a GET that carries any credential (its presence, not its validity) wakes the grid. So an automatic reader — the harness daemon, `grid models|engines|stats --no-wake` — must never add one. Readers take `nodes[].{name, engine, models}` and `models[].id`; anything that is not a 200 object with a `nodes` array is \"not answering\", never \"awake with nothing\".",
+  "type": "object",
+  "required": ["grid", "router_enabled", "advertises_chat_completions", "advertises_responses", "advertises_messages", "stats", "answered", "models", "nodes"],
+  "properties": {
+    "grid": {
+      "type": "object",
+      "required": ["state"],
+      "properties": {
+        "state": {"type": "string", "description": "`running` whenever a master answers."}
+      }
+    },
+    "router_enabled": {"type": "boolean", "description": "Whether the reserved model `auto` routes on this grid."},
+    "advertises_chat_completions": {"type": "boolean"},
+    "advertises_responses": {"type": "boolean"},
+    "advertises_messages": {"type": "boolean"},
+    "stats": {
+      "type": "object",
+      "required": ["models", "nodes", "concurrent_capacity", "uptime_pct"],
+      "properties": {
+        "models": {"type": "integer", "minimum": 0},
+        "nodes": {"type": "integer", "minimum": 0},
+        "concurrent_capacity": {"type": "integer", "minimum": 0},
+        "uptime_pct": {"type": "number", "description": "A fixed placeholder, not a measurement."}
+      }
+    },
+    "answered": {
+      "anyOf": [{"type": "null"}, {"$ref": "#/$defs/Answered"}],
+      "description": "What the grid answered in the rollup window; null until a rollup has landed (a master warming up must not report an idle grid)."
+    },
+    "models": {"type": "array", "items": {"$ref": "#/$defs/OverviewModel"}},
+    "nodes": {"type": "array", "items": {"$ref": "#/$defs/OverviewNode"}}
+  },
+  "x-route": {"method": "GET", "path": "/relay/v1/grid/overview", "constant": "OVERVIEW_PATH"},
+  "$defs": {
+    "Answered": {
+      "type": "object",
+      "required": ["window_seconds", "tokens_in", "tokens_cached", "tokens_out", "requests"],
+      "properties": {
+        "window_seconds": {"type": "integer"},
+        "tokens_in": {"type": "integer", "description": "Includes `tokens_cached`, the cached share of the prefill."},
+        "tokens_cached": {"type": "integer"},
+        "tokens_out": {"type": "integer"},
+        "requests": {"type": "integer"}
+      }
+    },
+    "OverviewModel": {
+      "description": "An admin-curated model a live node of its provider serves now (or a `coming_soon` placeholder).",
+      "type": "object",
+      "required": ["id", "name", "maker", "modality", "context_length", "vision", "pricing", "status"],
+      "properties": {
+        "id": {"type": "string", "description": "Lower-cased."},
+        "name": {"type": "string"},
+        "maker": {"type": ["string", "null"]},
+        "modality": {"type": "string"},
+        "context_length": {"type": ["integer", "null"]},
+        "vision": {"type": "boolean"},
+        "pricing": {
+          "anyOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["unit", "input_per_1m", "output_per_1m"],
+              "properties": {
+                "unit": {"const": "token"},
+                "input_per_1m": {"type": "number"},
+                "output_per_1m": {"type": "number"}
+              }
+            }
+          ]
+        },
+        "status": {"type": "string"}
+      }
+    },
+    "OverviewNode": {
+      "description": "One live engine node. Telemetry fields are each independently null when the node did not report them — never a zero.",
+      "type": "object",
+      "required": ["name", "provider_email", "device", "device_class", "model", "models", "model_engines", "model_capabilities", "responses_models", "engine", "max_concurrency", "answered", "online"],
+      "properties": {
+        "name": {"type": "string", "description": "On an `os-community` grid, the machine's name only when its operator chose it; otherwise an anonymous `node-<id>` label."},
+        "provider_email": {"type": ["string", "null"], "description": "Withheld (null) where the grid does not publish it."},
+        "device": {"type": "string"},
+        "chip": {"type": ["string", "null"]},
+        "memory_gb": {"type": ["number", "null"]},
+        "vram_total_mb": {"type": ["number", "null"]},
+        "vram_gb": {"type": ["number", "null"]},
+        "vram_used_mb": {"type": ["number", "null"]},
+        "gpu_util_pct": {"type": ["number", "null"]},
+        "gpu_temp_c": {"type": ["number", "null"]},
+        "gpu_power_w": {"type": ["number", "null"]},
+        "gpu_power_limit_w": {"type": ["number", "null"]},
+        "disk_total_gb": {"type": ["number", "null"]},
+        "disk_used_gb": {"type": ["number", "null"]},
+        "platform": {"type": ["string", "null"]},
+        "device_class": {"type": "string"},
+        "model": {"type": ["string", "null"], "description": "`models[0]`, or null when the node serves nothing."},
+        "models": {"type": "array", "items": {"type": "string"}, "description": "Every model the node serves, lower-cased (the display rule: a trailing `.gguf` removed)."},
+        "model_engines": {"type": "object", "additionalProperties": {"type": "string"}},
+        "model_capabilities": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/NodeModelCapability"},
+          "description": "Keyed like `models`. A model absent here is one the node published no capability envelope for — not one with no window."
+        },
+        "responses_models": {"type": "array", "items": {"type": "string"}},
+        "engine": {"type": "string"},
+        "plan_type": {"type": ["string", "null"]},
+        "codex_rate_limits": {"type": ["object", "null"]},
+        "throughput_tok_s": {"type": ["number", "null"]},
+        "max_concurrency": {"type": "integer", "minimum": 1},
+        "answered": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/NodeAnswered"}]},
+        "online": {"type": "boolean"}
+      }
+    },
+    "NodeModelCapability": {
+      "type": "object",
+      "required": ["context_length", "vision"],
+      "properties": {
+        "context_length": {"type": ["integer", "null"]},
+        "vision": {"type": ["boolean", "null"]}
+      }
+    },
+    "NodeAnswered": {
+      "type": "object",
+      "required": ["window_seconds", "tokens_in", "tokens_cached", "tokens_out", "requests", "by_model"],
+      "properties": {
+        "window_seconds": {"type": "integer"},
+        "tokens_in": {"type": "integer"},
+        "tokens_cached": {"type": "integer"},
+        "tokens_out": {"type": "integer"},
+        "requests": {"type": "integer"},
+        "by_model": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["model", "tokens_in", "tokens_cached", "tokens_out", "requests"],
+            "properties": {
+              "model": {"type": "string"},
+              "tokens_in": {"type": "integer"},
+              "tokens_cached": {"type": "integer"},
+              "tokens_out": {"type": "integer"},
+              "requests": {"type": "integer"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

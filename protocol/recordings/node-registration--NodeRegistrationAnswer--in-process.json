@@ -1,0 +1,11 @@
+{
+  "schema": "node-registration",
+  "definition": "NodeRegistrationAnswer",
+  "request": "PUT /nodes/{node_id}",
+  "status": 200,
+  "source": "grid-src @ 11a5086, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "sanitized": true,
+  "body": {
+    "status": "updated"
+  }
+}

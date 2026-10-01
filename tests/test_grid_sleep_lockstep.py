@@ -30,6 +30,7 @@ import pytest
 from cli import remote_grid
 from remote import relay
 from tests.grid_src_repo import grid_apis_root
+from tests.protocol_ast import protocol_value
 
 #: (grid-apis `grid_proxy` constant, this CLI's `remote.relay` constant, the canonical value).
 PROXY_CODES = [
@@ -131,7 +132,12 @@ def _boot_hold_default() -> float:
     if root is None:
         pytest.skip("the grid-src worktree is not beside this one; the lockstep cannot be checked here")
     source = root / "relay.py"
-    values = _module_constant(ast.parse(source.read_text()), "DEFAULT_BOOT_HOLD_SECONDS")
+    # A literal, or (since grid-platform ticket 12) `float(protocol.BOOT_HOLD_SECONDS)`.
+    values = [
+        protocol_value(node.value) for node in ast.parse(source.read_text()).body
+        if isinstance(node, ast.Assign)
+        and any(getattr(target, "id", None) == "DEFAULT_BOOT_HOLD_SECONDS" for target in node.targets)
+    ]
     assert len(values) == 1 and isinstance(values[0], (int, float)), (
         f"grid-src's relay.py no longer defines DEFAULT_BOOT_HOLD_SECONDS as a number ({values!r}) — "
         f"teach this check where the boot hold's default went rather than letting it pass")

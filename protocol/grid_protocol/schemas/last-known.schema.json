@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grid.autonomous.ai/protocol/last-known.schema.json",
+  "title": "LastKnown",
+  "description": "What the platform recorded a grid serving when it put the grid to sleep (grid-apis `sleep_record.answer_field`), carried on the `503 grid_asleep` answer to a credential-less GET of the overview. The record is kept only from a master up SLEEP_RECORD_MIN_UPTIME_SECONDS, and is deleted when somebody loses access to the grid: it must never name a machine whose owner lost access. Drift costs a stale or empty model list on a grid the reader has never seen awake — never a wake.",
+  "type": "object",
+  "required": ["age_seconds", "nodes", "ids"],
+  "properties": {
+    "age_seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2505600,
+      "description": "How old the record is, computed by the SERVER from its own clock, so no client clock matters. Never above LAST_KNOWN_MAX_AGE_SECONDS: an older record is not sent."
+    },
+    "nodes": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {"$ref": "#/$defs/LastKnownNode"}
+    },
+    "ids": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"type": "string"},
+      "description": "Exact-case candidate model ids: a spelling source for a case map, never a list of what is served."
+    }
+  },
+  "$defs": {
+    "LastKnownNode": {
+      "type": "object",
+      "required": ["name", "engine", "models"],
+      "properties": {
+        "name": {"type": "string"},
+        "engine": {"type": ["string", "null"]},
+        "models": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"type": "string"},
+          "description": "Lower-cased, as the overview lists them."
+        }
+      }
+    }
+  }
+}

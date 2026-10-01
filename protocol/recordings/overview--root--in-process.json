@@ -1,0 +1,79 @@
+{
+  "schema": "overview",
+  "definition": null,
+  "request": "GET /relay/v1/grid/overview",
+  "status": 200,
+  "source": "grid-src @ 11a5086, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "sanitized": true,
+  "body": {
+    "grid": {
+      "state": "running"
+    },
+    "router_enabled": false,
+    "advertises_chat_completions": true,
+    "advertises_responses": false,
+    "advertises_messages": true,
+    "stats": {
+      "models": 1,
+      "nodes": 1,
+      "concurrent_capacity": 2,
+      "uptime_pct": 99.9
+    },
+    "answered": null,
+    "models": [
+      {
+        "id": "qwen3.5-2b",
+        "name": "qwen3.5-2b",
+        "maker": null,
+        "modality": "chat",
+        "context_length": null,
+        "vision": false,
+        "pricing": {
+          "unit": "token",
+          "input_per_1m": 0.0,
+          "output_per_1m": 0.0
+        },
+        "status": "available"
+      }
+    ],
+    "nodes": [
+      {
+        "name": "node-a",
+        "provider_email": "provider@example.com",
+        "device": "test",
+        "chip": null,
+        "memory_gb": null,
+        "vram_total_mb": null,
+        "vram_gb": null,
+        "vram_used_mb": null,
+        "gpu_util_pct": null,
+        "gpu_temp_c": null,
+        "gpu_power_w": null,
+        "gpu_power_limit_w": null,
+        "disk_total_gb": null,
+        "disk_used_gb": null,
+        "platform": null,
+        "device_class": "gpu",
+        "model": "qwen3.5-2b",
+        "models": [
+          "qwen3.5-2b"
+        ],
+        "model_engines": {},
+        "model_capabilities": {
+          "qwen3.5-2b": {
+            "context_length": null,
+            "vision": false
+          }
+        },
+        "responses_models": [],
+        "engine": "llama.cpp",
+        "plan_type": null,
+        "codex_rate_limits": null,
+        "throughput_tok_s": null,
+        "max_concurrency": 2,
+        "answered": null,
+        "online": true
+      }
+    ]
+  }
+}

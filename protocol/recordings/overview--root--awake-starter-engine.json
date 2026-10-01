@@ -1,0 +1,115 @@
+{
+  "schema": "overview",
+  "definition": null,
+  "request": "GET /relay/v1/grid/overview",
+  "status": 200,
+  "source": "the DEV VM, through grid-proxy (grid-apis feat/grid-platform-03-proxy-env @ 12b6bae, grid-src fix/grid-platform-03-loopback-bind @ 4aa0b01), no credential",
+  "recorded_at": "2026-09-30T19:00Z",
+  "sanitized": true,
+  "body": {
+    "grid": {
+      "state": "running"
+    },
+    "router_enabled": false,
+    "advertises_chat_completions": true,
+    "advertises_responses": true,
+    "advertises_messages": true,
+    "stats": {
+      "models": 2,
+      "nodes": 1,
+      "concurrent_capacity": 4,
+      "uptime_pct": 99.9
+    },
+    "answered": {
+      "window_seconds": 86400,
+      "tokens_in": 0,
+      "tokens_cached": 0,
+      "tokens_out": 0,
+      "requests": 0
+    },
+    "models": [
+      {
+        "id": "deepseek/deepseek-v4-flash-0731",
+        "name": "deepseek/deepseek-v4-flash-0731",
+        "maker": null,
+        "modality": "chat",
+        "context_length": 1048576,
+        "vision": false,
+        "pricing": {
+          "unit": "token",
+          "input_per_1m": 0.0,
+          "output_per_1m": 0.0
+        },
+        "status": "available"
+      },
+      {
+        "id": "qwen/qwen3.8-27b",
+        "name": "qwen/qwen3.8-27b",
+        "maker": null,
+        "modality": "chat",
+        "context_length": 1000000,
+        "vision": true,
+        "pricing": {
+          "unit": "token",
+          "input_per_1m": 0.0,
+          "output_per_1m": 0.0
+        },
+        "status": "available"
+      }
+    ],
+    "nodes": [
+      {
+        "name": "node-a",
+        "provider_email": "provider@example.com",
+        "device": "DO-Premium-Intel",
+        "chip": null,
+        "memory_gb": null,
+        "vram_total_mb": null,
+        "vram_gb": null,
+        "vram_used_mb": null,
+        "gpu_util_pct": null,
+        "gpu_temp_c": null,
+        "gpu_power_w": null,
+        "gpu_power_limit_w": null,
+        "disk_total_gb": 115.2,
+        "disk_used_gb": 28.7,
+        "platform": "linux",
+        "device_class": "server",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "models": [
+          "deepseek/deepseek-v4-flash-0731",
+          "qwen/qwen3.8-27b"
+        ],
+        "model_engines": {},
+        "model_capabilities": {
+          "deepseek/deepseek-v4-flash-0731": {
+            "context_length": 1048576,
+            "vision": false
+          },
+          "qwen/qwen3.8-27b": {
+            "context_length": 1000000,
+            "vision": true
+          }
+        },
+        "responses_models": [
+          "deepseek/deepseek-v4-flash-0731",
+          "qwen/qwen3.8-27b"
+        ],
+        "engine": "starter",
+        "plan_type": null,
+        "codex_rate_limits": null,
+        "throughput_tok_s": 229.9,
+        "max_concurrency": 4,
+        "answered": {
+          "window_seconds": 86400,
+          "tokens_in": 0,
+          "tokens_cached": 0,
+          "tokens_out": 0,
+          "requests": 0,
+          "by_model": []
+        },
+        "online": true
+      }
+    ]
+  }
+}

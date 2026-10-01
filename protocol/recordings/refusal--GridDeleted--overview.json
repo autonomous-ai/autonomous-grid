@@ -1,0 +1,13 @@
+{
+  "schema": "refusal",
+  "definition": "GridDeleted",
+  "request": "GET /relay/v1/grid/overview",
+  "status": 410,
+  "source": "the DEV VM, through grid-proxy (grid-apis feat/grid-platform-03-proxy-env @ 12b6bae, grid-src fix/grid-platform-03-loopback-bind @ 4aa0b01), no credential",
+  "recorded_at": "2026-09-30T19:00Z",
+  "sanitized": true,
+  "body": {
+    "detail": "grid was deleted",
+    "code": "grid_deleted"
+  }
+}
