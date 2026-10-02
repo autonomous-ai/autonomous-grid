@@ -31,6 +31,23 @@ grid-platform ticket 13 (ADR 0004). Built on ticket 12's `grid-protocol`: every 
 **The harness reads** are the overview and discovery, awake and asleep (with `last_known`), and every refusal code
 (`grid_asleep`, `grid_stopped`, `grid_deleted`, `grid_master_down`, `feature_retired`) with its status.
 
+## What it does NOT cover
+
+The stand-ins are what make it run in CI without the fleet. A green run therefore says nothing about these:
+- **The control plane** beyond a grid's status: login, token refresh and rotation, session revoke, the snapshot push.
+  Tokens are minted here and expire in 2100.
+- **The wake's cost:** the stand-in flips the state at once. The real wake's rate limits, queue and memory floor are
+  not exercised, and neither is the slow-wake timing pair (the boot hold against the parked probe). The proxy is told
+  memory is plentiful.
+- **The admin revive:** a master that is down while `running` stays down here. Only its refusal
+  (`grid_master_down`) is checked.
+- **The master's database:** it runs on SQLite, with billing off and no sync snapshot, so Postgres, RLS, billing's
+  402 and the allowlist are out.
+- **`relay_restarting`:** it needs a SIGTERM in the middle of a request, and no client may parse it (the register).
+  Only its schema exists.
+- **Anything a schema leaves optional:** a renamed optional field passes the schema. The tests name what the harness
+  reads (the overview's `models[].id`, discovery's `raw_model_id`), but that list is only as complete as they are.
+
 ## Running it
 
 ```bash
@@ -43,7 +60,9 @@ GRID_SRC_REPO=~/Projects/grid-src GRID_APIS_REPO=~/Projects/grid-apis \
 - Without the siblings it skips. With `GRID_CONFORMANCE_REQUIRED=1`, which CI sets, a missing sibling FAILS: pytest
   exits 0 on an all-skipped run.
 - `GRID_HARNESS_PIN` overrides the manifest's pin. `GRID_CONFORMANCE_CACHE` is where the venvs live.
-- About 10 minutes cold, most of it the per-version venvs.
+- About 10 minutes cold, most of it the per-version venvs; about 8 warm.
+- **Every answer is checked against THIS checkout's `protocol/`**, not grid-src's pinned `grid-protocol`, so a schema
+  changed here first is what the server is held to.
 
 ## CI
 
@@ -51,6 +70,11 @@ GRID_SRC_REPO=~/Projects/grid-src GRID_APIS_REPO=~/Projects/grid-apis \
 checks out this one with no token, and the OTHER private sibling with a read-only deploy key: `GRID_APIS_DEPLOY_KEY`
 in grid-src, `GRID_SRC_DEPLOY_KEY` in grid-apis. A last step reads the JUnit report and fails on zero tests or any
 skip.
+
+**Paired changes.** The suite and the other sibling are checked out at the PR's own branch name when their repository
+has one, and otherwise at `main`, or at `CONFORMANCE_SUITE_REF`, `CONFORMANCE_GRID_SRC_REF` or
+`CONFORMANCE_GRID_APIS_REF`. A wire change made in two repositories, on two branches of one name, tests each half
+against the other.
 
 ## Changing it
 

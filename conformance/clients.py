@@ -9,6 +9,7 @@ its own `GRID_HOME`, holding the credentials a signed-in user would have for the
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import platform
@@ -17,8 +18,13 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
+import tomli_w
+
+if TYPE_CHECKING:
+    from conformance.stack import Stack
 
 #: Every release still in the field. 0.3.47 is what the harness pinned until 2026-09-24; nothing older is supported.
 RELEASED = ("0.3.47", "0.3.48", "0.3.49", "0.3.50", "0.3.51", "0.3.52")
@@ -32,13 +38,23 @@ def parse(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.split("."))
 
 
+@functools.cache
 def harness_pin() -> str:
-    """The `grid` the harness daemon installs: `GRID_HARNESS_PIN`, else its live manifest's entry for this platform."""
+    """The `grid` the harness daemon installs: `GRID_HARNESS_PIN`, else its live manifest's entry for this platform.
+
+    Read ONCE per run, so every test of the run means the same version."""
     if os.environ.get("GRID_HARNESS_PIN"):
         return os.environ["GRID_HARNESS_PIN"]
-    machine = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}[platform.machine().lower()]
+    machines = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}
+    machine = machines.get(platform.machine().lower())
+    if machine is None:
+        raise RuntimeError(f"no harness build for {platform.machine()}; set GRID_HARNESS_PIN")
     key = f"{'darwin' if platform.system() == 'Darwin' else 'linux'}-{machine}"
-    return httpx.get(HARNESS_MANIFEST, timeout=20).json()["grid"][key]["version"]
+    try:
+        return httpx.get(HARNESS_MANIFEST, timeout=20).json()["grid"][key]["version"]
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        raise RuntimeError(f"could not read the harness's grid pin from {HARNESS_MANIFEST} ({exc}); "
+                           "set GRID_HARNESS_PIN") from exc
 
 
 def _cache() -> Path:
@@ -46,35 +62,29 @@ def _cache() -> Path:
 
 
 def install(version: str) -> Path:
-    """The `grid` executable of `version`, installed from its release wheel into a cached venv."""
-    venv = _cache() / f"grid-{version}"
-    exe = venv / "bin" / "grid"
-    if exe.exists():
-        return exe
-    uv = shutil.which("uv")
-    if uv is None:
-        raise RuntimeError("uv is required to install the released clients")
-    tmp = venv.with_name(venv.name + ".partial")
-    shutil.rmtree(tmp, ignore_errors=True)
-    subprocess.run([uv, "venv", "-q", "--python", "3.12", str(tmp)], check=True)
-    subprocess.run([uv, "pip", "install", "-q", "--python", str(tmp / "bin" / "python"), WHEEL_URL.format(v=version)],
-                   check=True)
-    shutil.rmtree(venv, ignore_errors=True)
-    tmp.rename(venv)
-    _repoint_scripts(venv, tmp)
+    """The `grid` executable of `version`, installed from its release wheel into a cached venv.
+
+    Built at its final path and trusted only once its marker is written, under a lock: an install that was killed
+    halfway, or two runs sharing the cache, leave nothing a later run mistakes for a working client."""
+    import fcntl
+
+    cache = _cache()
+    cache.mkdir(parents=True, exist_ok=True)
+    venv = cache / f"grid-{version}"
+    exe, marker = venv / "bin" / "grid", venv / ".installed"
+    with open(cache / f".grid-{version}.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if marker.exists() and exe.exists():
+            return exe
+        uv = shutil.which("uv")
+        if uv is None:
+            raise RuntimeError("uv is required to install the released clients")
+        shutil.rmtree(venv, ignore_errors=True)
+        subprocess.run([uv, "venv", "-q", "--python", "3.12", str(venv)], check=True)
+        subprocess.run([uv, "pip", "install", "-q", "--python", str(venv / "bin" / "python"),
+                        WHEEL_URL.format(v=version)], check=True)
+        marker.write_text(WHEEL_URL.format(v=version))
     return exe
-
-
-def _repoint_scripts(venv: Path, old: Path) -> None:
-    """A venv's scripts name its interpreter by absolute path; the rename moved it."""
-    for script in (venv / "bin").iterdir():
-        if script.is_file() and not script.is_symlink():
-            try:
-                text = script.read_text()
-            except UnicodeDecodeError:
-                continue
-            if str(old) in text:
-                script.write_text(text.replace(str(old), str(venv)))
 
 
 @dataclass(frozen=True)
@@ -99,10 +109,8 @@ class Client:
         return subprocess.run([str(self.exe), *args], env=env, capture_output=True, text=True, timeout=timeout,
                               check=False)
 
-    def sign_in(self, stack, *, token: str, roles: list[str], scopes: list[str], name: str = "conformance") -> None:
+    def sign_in(self, stack: Stack, *, token: str, roles: list[str], scopes: list[str], name: str = "conformance") -> None:
         """The credentials `grid login` + `grid network join` leave behind, for the grid under test."""
-        import tomli_w
-
         grid_home = self.home / ".grid"
         grid_home.mkdir(parents=True, exist_ok=True)
         now = int(time.time())

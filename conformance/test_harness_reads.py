@@ -9,6 +9,8 @@ Every refusal code a client branches on is driven too, with its status, and none
 """
 from __future__ import annotations
 
+import time
+
 import grid_protocol
 import httpx
 import pytest
@@ -18,6 +20,7 @@ from grid_protocol.constants import (
     GRID_DELETED_CODE,
     GRID_MASTER_DOWN_CODE,
     GRID_STOPPED_CODE,
+    NO_PROVIDERS_AVAILABLE_CODE,
     REFUSAL_STATUS,
 )
 
@@ -32,11 +35,12 @@ def _get(stack: Stack, read: str) -> httpx.Response:
     return httpx.get(f"{stack.grid_url}/{READS[read]}", timeout=30, headers={"User-Agent": "autonomous-harness/conformance (read)"})
 
 
-@pytest.fixture(scope="module")
-def provider(stack, tmp_path_factory):
-    """One engine joined with the harness's pinned `grid`, so the awake answers have a node and a model to describe."""
+@pytest.fixture
+def provider(stack, tmp_path):
+    """An engine joined with the harness's pinned `grid`, so the awake answers have a node and a model to describe.
+    Per test: a test of a deleted grid ends an engine, and none may depend on running after it."""
     version = harness_pin()
-    joined = Client(version, install(version), tmp_path_factory.mktemp("provider"))
+    joined = Client(version, install(version), tmp_path / "provider")
     joined.sign_in(stack, token=stack.provider_token(), roles=["consumer", "provider"],
                    scopes=INFERENCE_SCOPES + PROVIDER_SCOPES)
     done = joined.run("join", stack.network_id, "--at", stack.engine_url, "-m", ENGINE_MODEL, "--name", "harness-view",
@@ -49,8 +53,6 @@ def provider(stack, tmp_path_factory):
 
 @pytest.mark.parametrize("read, schema", [("overview", "overview"), ("discover", "discover")])
 def test_an_awake_grid_answers_in_the_shape_the_harness_reads(stack, provider, read, schema):
-    import time
-
     deadline = time.monotonic() + 60
     while True:
         answer = _get(stack, read)
@@ -65,6 +67,8 @@ def test_an_awake_grid_answers_in_the_shape_the_harness_reads(stack, provider, r
     assert listed, f"the joined engine never appeared in the {read}"
     if read == "overview":
         assert any(ENGINE_MODEL in (node.get("models") or []) for node in body["nodes"])
+        # The harness's model list is the overview's top-level `models[].id` (gridReader.ts), not the nodes'.
+        assert ENGINE_MODEL in {entry.get("id") for entry in body.get("models") or []}, body.get("models")
     else:
         # Discovery lists ROUTE ids; the harness reads the model's own name off its capabilities (gridReader.ts).
         raw = {entry.get("raw_model_id") for p in body["providers"]
@@ -122,3 +126,23 @@ def test_a_retired_feature_is_refused_by_the_proxy(stack, path):
     body = answer.json()
     grid_protocol.validator("refusal", "FeatureRetired").validate(body)
     assert body["code"] == FEATURE_RETIRED_CODE
+
+
+@pytest.mark.parametrize("openai_errors", [True, False], ids=["openai-envelope", "detail"])
+def test_no_engine_for_the_model_is_no_providers_available(stack, openai_errors):
+    """The relay's own refusal. In OpenAI's envelope, with its `code`, when the caller asked for OpenAI errors (the
+    error-format header; an `lga_sk_` key does too); otherwise `{"detail": …}` with no code (`grid-protocol`
+    `openai-error`)."""
+    headers = {"Authorization": f"Bearer {stack.consumer_token()}"}
+    if openai_errors:
+        headers["X-Error-Format"] = "openai"
+    answer = httpx.post(f"{stack.grid_url}/relay/v1/chat/completions", timeout=60, headers=headers,
+                        json={"model": "conformance-nobody-serves-this", "messages": [{"role": "user", "content": "x"}]})
+
+    assert answer.status_code == REFUSAL_STATUS[NO_PROVIDERS_AVAILABLE_CODE], answer.text
+    body = answer.json()
+    if openai_errors:
+        grid_protocol.validator("openai-error", "NoProvidersAvailable").validate(body)
+        assert body["error"]["code"] == NO_PROVIDERS_AVAILABLE_CODE
+    else:
+        assert isinstance(body.get("detail"), str) and "error" not in body

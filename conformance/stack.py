@@ -20,7 +20,7 @@ import socket
 import subprocess
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -210,6 +210,8 @@ class Stack:
     _master_proc: subprocess.Popen | None = None
     _master_lock: threading.Lock = field(default_factory=threading.Lock)
     _paused: bool = False
+    _master_env: dict[str, str] = field(default_factory=dict)
+    supervisor_errors: list[str] = field(default_factory=list)
 
     @property
     def state_path(self) -> Path:
@@ -306,14 +308,15 @@ class Stack:
             try:
                 self._sync_master()
             except Exception as exc:  # noqa: BLE001 — a supervisor that died would freeze the grid's state
+                self.supervisor_errors.append(repr(exc))
                 with (self.workdir / "supervisor.log").open("a") as log:
                     log.write(f"{time.time()} {exc!r}\n")
 
     def _sync_master(self) -> None:
-        want_up = self.state()["state"] == "running"
         with self._master_lock:
             if self._paused:
                 return
+            want_up = self.state()["state"] == "running"  # read under the lock: a set_state cannot slip between
             alive = self._master_proc is not None and self._master_proc.poll() is None
             if want_up and not alive:
                 self._master_proc = self._start_master()
@@ -330,7 +333,12 @@ class Stack:
                  "--port", str(self.master_port), "--log-level", "warning"],
                 cwd=private_server, env=self._master_env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             )
-        _wait_until(lambda: _answers(f"http://127.0.0.1:{self.master_port}/server/info"), proc, "the master", log_path)
+        try:
+            _wait_until(lambda: _answers(f"http://127.0.0.1:{self.master_port}/server/info"), proc, "the master",
+                        log_path)
+        except BaseException:
+            _stop(proc)  # a master that never answered is still a process: never leave one behind
+            raise
         return proc
 
     def _build_master_env(self) -> dict[str, str]:
@@ -356,6 +364,9 @@ class Stack:
             "FAILED_AUTH_THROTTLE_ENABLED": "false",
             "KEYS_PATH": str(self.workdir / "keys"),
             "GRID_TASK_PLANE_ENABLED": "false",
+            "GRID_MASTER_BOOT_ID": secrets.token_hex(16),
+            "HOME": str(self.workdir / "master-home"),
+            "GRID_HOME": str(self.workdir / "master-home" / ".grid"),
         }
 
     # ── the proxy ──
@@ -383,8 +394,26 @@ class Stack:
 
 
 def _write_state(path: Path, grids: dict) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"grids": grids}))
+    with state_lock(path):
+        _replace(path, {"grids": grids})
+
+
+@contextlib.contextmanager
+def state_lock(path: Path) -> Iterator[None]:
+    """One writer of the state file at a time, across processes: the proxy's wake and the test both write it."""
+    import fcntl
+
+    with open(path.with_suffix(".lock"), "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _replace(path: Path, document: dict) -> None:
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}")
+    tmp.write_text(json.dumps(document))
     tmp.replace(path)
 
 
@@ -395,7 +424,7 @@ def _answers(url: str) -> bool:
         return False
 
 
-def _wait_until(ready, proc: subprocess.Popen, what: str, log: Path, timeout: float = 90.0) -> None:
+def _wait_until(ready: Callable[[], bool], proc: subprocess.Popen, what: str, log: Path, timeout: float = 90.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if proc.poll() is not None:

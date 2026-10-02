@@ -50,19 +50,25 @@ def read_last_known(network_id: str) -> dict | None:
 
 
 async def wake(network_id: str) -> dict | None:
-    state = json.loads(STATE.read_text())
-    grid = state["grids"].get(network_id)
-    if grid is None or grid["state"] != "asleep":
-        return None
-    grid["state"] = "running"
-    grid["woken"] = grid.get("woken", 0) + 1
-    tmp = STATE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state))
-    tmp.replace(STATE)
+    """The control plane's wake: flip an asleep grid to `running`, under the state file's lock (the test writes it too)."""
+    import fcntl
+
+    with open(STATE.with_suffix(".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = json.loads(STATE.read_text())
+        grid = state["grids"].get(network_id)
+        if grid is None or grid["state"] != "asleep":
+            return None
+        grid["state"] = "running"
+        grid["woken"] = grid.get("woken", 0) + 1
+        tmp = STATE.with_name(f".{STATE.name}.{os.getpid()}")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(STATE)
     return {"network_id": network_id, "coming_up": True, "reason": "starting"}
 
 
-async def cannot_revive(network_id: str) -> dict | None:
+async def no_revive(network_id: str) -> dict | None:
+    """The admin revive is out of scope (README): a master that is down while `running` stays down here."""
     return None
 
 
@@ -75,7 +81,7 @@ def main() -> None:
         read_grid_state=read_grid_state,
         read_last_known=read_last_known,
         wake=wake,
-        revive=cannot_revive,
+        revive=no_revive,
         record_activity=lambda network_id: None,
         record_served=lambda network_id: None,
         record_inference=lambda network_id: None,

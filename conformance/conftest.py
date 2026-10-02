@@ -11,9 +11,14 @@ skips, so a CI job whose sibling checkout went missing would report green foreve
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
+
+# The suite checks every answer against ITS OWN `protocol/` (the shapes this checkout defines), not against whichever
+# `grid-protocol` wheel grid-src happens to pin: a schema changed here first must be what the server is held to.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "protocol"))
 
 from conformance.clients import RELEASED, Client, harness_pin, install
 from conformance.stack import Stack, locate_siblings
@@ -48,7 +53,7 @@ def stack(siblings, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
-def awake(request):
+def grid_starts_awake(request):
     """Every test starts on an awake grid, whatever the previous one left."""
     if "stack" in request.fixturenames:
         request.getfixturevalue("stack").set_state("running")
@@ -71,7 +76,3 @@ def pytest_generate_tests(metafunc):
     if "client" in metafunc.fixturenames:
         metafunc.parametrize("client", VERSIONS, ids=[f"grid-{v}" for v in VERSIONS], indirect=True)
 
-
-@pytest.fixture
-def grid_home(client: Client) -> Path:
-    return client.home / ".grid"

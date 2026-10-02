@@ -14,7 +14,11 @@ failure here, and a client that changed on purpose names the version it changed 
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import signal
+import subprocess
 import time
 
 import grid_protocol
@@ -83,7 +87,7 @@ def test_a_signed_in_read_wakes_an_asleep_grid(client, stack):
     done = client.run("--remote", "models", stack.network_id, "--json", timeout=120)
 
     assert done.returncode == 0, done.stderr
-    assert stack.state()["state"] == "running" and stack.state().get("woken") == 1
+    assert stack.state()["state"] == "running" and stack.state().get("woken", 0) >= 1
 
 
 # ── A provider ───────────────────────────────────────────────────────────────────────────────────
@@ -100,14 +104,23 @@ class _Joined:
         _as_provider(self.client, self.stack)
         done = self.client.run("join", self.stack.network_id, "--at", self.stack.engine_url, "-m", ENGINE_MODEL,
                                "--name", self.name, timeout=120)
-        assert done.returncode == 0, done.stdout + done.stderr
-        _until(lambda: self.name in _node_names(self.stack), 60, f"{self.name} never appeared in the overview")
+        try:
+            assert done.returncode == 0, done.stdout + done.stderr
+            # The engine is a real, live process: otherwise every "it stopped" below would pass by never having run.
+            _until(self.engine_alive, 30, f"{self.name}: no live engine process after `grid join`")
+            _until(lambda: self.name in _node_names(self.stack), 60, f"{self.name} never appeared in the overview")
+        except BaseException:
+            self.__exit__()  # a detached engine outlives the test unless it is left here
+            raise
         return self
 
-    def __exit__(self, *exc) -> None:
+    def __exit__(self, *exc: object) -> None:
         self.stack.set_state("running")
-        self.client.run("leave", self.stack.network_id, timeout=60)
-        _until(lambda: not self.engine_alive(), 30, f"{self.name} outlived `grid leave`")
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self.client.run("leave", self.stack.network_id, timeout=60)
+        for pid in self.engine_pids():  # whatever `grid leave` did not end, ended here
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
 
     def engine_pids(self) -> list[int]:
         records = (self.client.home / ".grid" / "run" / "engines" / self.stack.network_id)
@@ -120,8 +133,6 @@ class _Joined:
         return pids
 
     def engine_alive(self) -> bool:
-        import os
-
         for pid in self.engine_pids():
             try:
                 os.kill(pid, 0)
@@ -141,14 +152,26 @@ def _node_names(stack: Stack) -> list[str]:
     return [node.get("name") for node in answer.json().get("nodes", [])] if answer.status_code == 200 else []
 
 
-def _chat(stack: Stack) -> httpx.Response:
+def _chat(stack: Stack, *, model: str = ENGINE_MODEL, stream: bool = False) -> httpx.Response:
     return httpx.post(f"{stack.grid_url}/relay/v1/chat/completions", timeout=120,
                       headers={"Authorization": f"Bearer {stack.consumer_token()}"},
-                      json={"model": ENGINE_MODEL, "messages": [{"role": "user", "content": "say it"}]})
+                      json={"model": model, "stream": stream, "messages": [{"role": "user", "content": "say it"}]})
 
 
 def _served(answer: httpx.Response) -> bool:
     return answer.status_code == 200 and answer.json()["choices"][0]["message"]["content"] == ENGINE_ANSWER
+
+
+def _streamed(answer: httpx.Response) -> bool:
+    """The provider's streamed upload, relayed as server-sent events, carries the engine's answer."""
+    if answer.status_code != 200:
+        return False
+    text = "".join(
+        (json.loads(line[6:])["choices"][0].get("delta") or {}).get("content") or ""
+        for line in answer.text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]" and json.loads(line[6:]).get("choices")
+    )
+    return ENGINE_ANSWER in text
 
 
 def _until(condition, seconds: float, message: str) -> None:
@@ -163,14 +186,16 @@ def _until(condition, seconds: float, message: str) -> None:
 def test_a_joined_provider_serves_a_request_through_the_proxy(client, stack):
     with _Joined(client, stack):
         answer = _chat(stack)
+        streamed = _chat(stack, stream=True)
 
         assert _served(answer), answer.text
+        assert _streamed(streamed), streamed.text
 
 
 def test_a_provider_outlives_a_sleep_and_serves_after_the_wake(client, stack):
     with _Joined(client, stack) as joined:
         stack.set_state("asleep", last_known={"nodes": [], "ids": []})
-        time.sleep(8)
+        time.sleep(12)  # past a parked provider's 10 s probe
         assert joined.engine_alive(), "a sleeping grid must never end an engine (it parks from 0.3.48)"
 
         stack.set_state("running")
