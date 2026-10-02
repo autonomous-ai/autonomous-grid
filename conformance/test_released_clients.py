@@ -226,4 +226,3 @@ def test_a_provider_whose_node_row_is_gone_registers_again_and_serves(client, st
 
         # One heartbeat (HEARTBEAT_INTERVAL_SECONDS, 30) to be answered 404, the registration, and a poll.
         _until(lambda: _served(_chat(stack)), 90, f"{joined.name} never served again after its node row was deleted")
-

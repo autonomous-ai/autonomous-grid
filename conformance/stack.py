@@ -264,7 +264,8 @@ class Stack:
     def delete_node(self, name: str) -> int:
         """Delete a provider's node row in the master's own database, by the name it registered under: the row a
         30-day prune, a restore or a move leaves a running provider without (grid-platform ticket 23). Returns how
-        many rows went, so a test cannot pass by deleting nothing."""
+        many rows went, so a test cannot pass by deleting nothing. A plain connection: foreign keys are off on it, so
+        a row naming the node (an API key) is left behind, as a restore that lost only `nodes` would leave it."""
         with contextlib.closing(sqlite3.connect(self.workdir / "master.db", timeout=10)) as db, db:
             return db.execute("DELETE FROM nodes WHERE json_extract(meta, '$.name') = ?", (name,)).rowcount
 
