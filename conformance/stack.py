@@ -266,8 +266,12 @@ class Stack:
         30-day prune, a restore or a move leaves a running provider without (grid-platform ticket 23). Returns how
         many rows went, so a test cannot pass by deleting nothing. A plain connection: foreign keys are off on it, so
         a row naming the node (an API key) is left behind, as a restore that lost only `nodes` would leave it."""
+        # The LIVE row only: the stack lives for the whole session and each join signs in as a new node under the same
+        # name, so a provider that joined and left in an earlier test left its row behind (as `consumer`).
         with contextlib.closing(sqlite3.connect(self.workdir / "master.db", timeout=10)) as db, db:
-            return db.execute("DELETE FROM nodes WHERE json_extract(meta, '$.name') = ?", (name,)).rowcount
+            return db.execute(
+                "DELETE FROM nodes WHERE node_id = (SELECT node_id FROM nodes WHERE json_extract(meta, '$.name') = ?"
+                " AND role IN ('provider', 'both') ORDER BY last_heartbeat DESC LIMIT 1)", (name,)).rowcount
 
     def consumer_token(self, email: str = "consumer@conformance.invalid") -> str:
         return self.signer.token(self.network_id, email=email, node_id=f"node-{secrets.token_hex(4)}",

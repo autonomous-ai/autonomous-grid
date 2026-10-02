@@ -10,7 +10,9 @@ failure here, and a client that changed on purpose names the version it changed 
 * a signed-in read wakes an asleep grid;
 * `grid join --at` registers, heart-beats and polls, and a consumer's request through the proxy is served by it;
 * a joined provider on an asleep grid outlives the sleep and serves after the wake;
-* a joined provider on a deleted grid stops from 0.3.48 (`grid_deleted` ends an engine) and keeps retrying before it.
+* a joined provider on a deleted grid stops from 0.3.48 (`grid_deleted` ends an engine) and keeps retrying before it;
+* a joined provider whose node row is gone (pruned, lost, moved) is answered 404 on its next heartbeat, registers
+  again, and serves within one heartbeat and a registration (grid-platform ticket 23).
 """
 from __future__ import annotations
 
@@ -224,5 +226,6 @@ def test_a_provider_whose_node_row_is_gone_registers_again_and_serves(client, st
 
         assert stack.delete_node(joined.name) == 1
 
-        # One heartbeat (HEARTBEAT_INTERVAL_SECONDS, 30) to be answered 404, the registration, and a poll.
-        _until(lambda: _served(_chat(stack)), 90, f"{joined.name} never served again after its node row was deleted")
+        # Criterion 1: one heartbeat (HEARTBEAT_INTERVAL_SECONDS, 30) to be answered 404, then the registration and a
+        # poll — 45 s, which no version may need more than.
+        _until(lambda: _served(_chat(stack)), 45, f"{joined.name} was not serving again 45 s after its row was deleted")
