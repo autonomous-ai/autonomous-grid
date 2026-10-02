@@ -12,7 +12,6 @@ their own `.venv/bin/python`.
 """
 from __future__ import annotations
 
-import base64
 import contextlib
 import json
 import os
@@ -21,10 +20,10 @@ import socket
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Iterator
 
 import httpx
 import jwt
@@ -269,7 +268,7 @@ class Stack:
 
     @classmethod
     @contextlib.contextmanager
-    def up(cls, siblings: Siblings, workdir: Path) -> Iterator["Stack"]:
+    def up(cls, siblings: Siblings, workdir: Path) -> Iterator[Stack]:
         workdir.mkdir(parents=True, exist_ok=True)
         network_id = f"grid-{secrets.token_hex(8)}"
         signer = Signer()
@@ -418,7 +417,3 @@ def _stop(proc: subprocess.Popen) -> None:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(proc.pid, 9)
         proc.wait(timeout=5)
-
-
-def b64(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")

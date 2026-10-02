@@ -9,8 +9,6 @@ Every refusal code a client branches on is driven too, with its status, and none
 """
 from __future__ import annotations
 
-import contextlib
-
 import grid_protocol
 import httpx
 import pytest

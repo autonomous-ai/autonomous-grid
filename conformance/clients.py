@@ -96,7 +96,8 @@ class Client:
             "NO_COLOR": "1",
             "GRID_NO_UPDATE_CHECK": "1",
         }
-        return subprocess.run([str(self.exe), *args], env=env, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run([str(self.exe), *args], env=env, capture_output=True, text=True, timeout=timeout,
+                              check=False)
 
     def sign_in(self, stack, *, token: str, roles: list[str], scopes: list[str], name: str = "conformance") -> None:
         """The credentials `grid login` + `grid network join` leave behind, for the grid under test."""

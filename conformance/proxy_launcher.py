@@ -67,9 +67,8 @@ async def cannot_revive(network_id: str) -> dict | None:
 
 
 def main() -> None:
-    import uvicorn
-
     import grid_proxy
+    import uvicorn
 
     app = grid_proxy.build_app(
         get_port=get_port,

@@ -23,7 +23,13 @@ import pytest
 from grid_protocol.constants import GRID_ASLEEP_CODE
 
 from conformance.clients import Client, envelope, parse
-from conformance.stack import ENGINE_ANSWER, ENGINE_MODEL, INFERENCE_SCOPES, PROVIDER_SCOPES, Stack
+from conformance.stack import (
+    ENGINE_ANSWER,
+    ENGINE_MODEL,
+    INFERENCE_SCOPES,
+    PROVIDER_SCOPES,
+    Stack,
+)
 
 READS = ("models", "engines", "stats")
 #: `grid_deleted` stops an engine, and `grid_asleep`/`grid_stopped` park one, from 0.3.48 (`idle-sleep` issues 02, 04).
@@ -90,7 +96,7 @@ class _Joined:
         self.client, self.stack = client, stack
         self.name = f"conformance-{client.version.replace('.', '-')}"
 
-    def __enter__(self) -> "_Joined":
+    def __enter__(self) -> _Joined:
         _as_provider(self.client, self.stack)
         done = self.client.run("join", self.stack.network_id, "--at", self.stack.engine_url, "-m", ENGINE_MODEL,
                                "--name", self.name, timeout=120)
