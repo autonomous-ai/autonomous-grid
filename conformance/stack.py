@@ -17,6 +17,7 @@ import json
 import os
 import secrets
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -259,6 +260,13 @@ class Stack:
             with self._master_lock:
                 self._paused = False
             self._sync_master()
+
+    def delete_node(self, name: str) -> int:
+        """Delete a provider's node row in the master's own database, by the name it registered under: the row a
+        30-day prune, a restore or a move leaves a running provider without (grid-platform ticket 23). Returns how
+        many rows went, so a test cannot pass by deleting nothing."""
+        with contextlib.closing(sqlite3.connect(self.workdir / "master.db", timeout=10)) as db, db:
+            return db.execute("DELETE FROM nodes WHERE json_extract(meta, '$.name') = ?", (name,)).rowcount
 
     def consumer_token(self, email: str = "consumer@conformance.invalid") -> str:
         return self.signer.token(self.network_id, email=email, node_id=f"node-{secrets.token_hex(4)}",

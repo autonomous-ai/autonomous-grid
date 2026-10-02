@@ -212,3 +212,18 @@ def test_a_provider_on_a_deleted_grid(client, stack):
         else:
             time.sleep(15)
             assert joined.engine_alive(), "0.3.47 never parsed grid_deleted: it keeps retrying"
+
+
+def test_a_provider_whose_node_row_is_gone_registers_again_and_serves(client, stack):
+    """grid-platform ticket 23: a node whose row was pruned, lost in a restore or left behind by a move. Every released
+    CLI registers again when its heartbeat is answered 404 (`grid-protocol` node-heartbeat). Before the master's half
+    of that rule it re-created the row with no models and answered 200, so the provider stayed connected, its polls
+    answered 204, and it was never given work again — which is what this fails on."""
+    with _Joined(client, stack) as joined:
+        _until(lambda: _served(_chat(stack)), 60, f"{joined.name} never served before its row was deleted")
+
+        assert stack.delete_node(joined.name) == 1
+
+        # One heartbeat (HEARTBEAT_INTERVAL_SECONDS, 30) to be answered 404, the registration, and a poll.
+        _until(lambda: _served(_chat(stack)), 90, f"{joined.name} never served again after its node row was deleted")
+
