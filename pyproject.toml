@@ -84,3 +84,6 @@ markers = [
 addopts = ["-m", "not canary"]
 # `protocol/` holds `grid-protocol` (ADR 0004), its own distribution; its tests run with this suite.
 pythonpath = [".", "protocol"]
+# `conformance/` runs the released CLIs against a master behind the proxy, with grid-src's interpreter and both private
+# siblings (grid-platform ticket 13): run it by naming it, `pytest conformance`. A plain `pytest` leaves it alone.
+norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}", "conformance"]
