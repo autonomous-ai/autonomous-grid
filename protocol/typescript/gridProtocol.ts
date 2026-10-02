@@ -269,7 +269,11 @@ export interface ModelEntry {
 /**
  * A provider's heartbeat: the body of `POST /nodes/heartbeat`, every HEARTBEAT_INTERVAL_SECONDS, with a node
  * token (the node is the token's, not the body's). It never wakes a sleeping grid; on a sleeping or stopped
- * grid it is the parked provider's one probe. The public CLI registers again when it is answered 404.
+ * grid it is the parked provider's one probe. In grid mode the master answers 404 to a heartbeat from a node
+ * that has not completed its registration (`PUT /nodes/{node_id}`), and nothing else makes a node registered:
+ * not a token, not a heartbeat, not a poll. The public CLI registers again when it is answered 404, so a node
+ * whose row was pruned, lost in a restore or left behind by a move is serving again within one heartbeat,
+ * instead of staying connected and never being given work.
  */
 export interface NodeHeartbeat {
   load?: NodeLoad
