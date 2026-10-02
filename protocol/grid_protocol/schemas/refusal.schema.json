@@ -19,7 +19,7 @@
   },
   "$defs": {
     "GridAsleep": {
-      "description": "The grid is asleep and this request did not wake it. A request that may wake a grid (a signed-in read, inference, an owner's act, a provider's registration) is held and replayed instead; a provider's heartbeat, poll and callbacks, and any credential-less read, never wake one. The public CLI's provider PARKS on it: its heartbeat probes every ASLEEP_PROBE_SECONDS, bring-up on its own schedule, and the engine serves again by itself after a wake.",
+      "description": "The grid is asleep and this request did not wake it. A request that may wake a grid (a signed-in read, inference, an owner's act, a provider's registration) is held and replayed instead, unless a wake limit turns it away (then with a Retry-After); a provider's heartbeat, poll and callbacks, and any credential-less read, never wake one. The public CLI's provider PARKS on it: its heartbeat probes every ASLEEP_PROBE_SECONDS, bring-up on its own schedule, and the engine serves again by itself after a wake.",
       "type": "object",
       "required": [
         "detail",
@@ -40,7 +40,7 @@
       },
       "x-status": 503,
       "x-headers": {
-        "Retry-After": "Optional, whole seconds. Sent on the answer to a request refused past the wake waiter's bound (grid-platform ticket 21); otherwise absent. A reader must work without it: the public CLI's park branches on the code alone."
+        "Retry-After": "Optional, whole seconds. Sent when a wake limit turned away a request that may wake the grid (grid-platform ticket 21: the episodes a client may start, or a grid may have, per window; the requests waiting at once; the bytes they hold), and nothing was asked or held for it; otherwise absent. A reader must work without it: the public CLI's park branches on the code alone."
       }
     },
     "GridStopped": {

@@ -675,10 +675,10 @@ export interface Refusal {
 
 /**
  * The grid is asleep and this request did not wake it. A request that may wake a grid (a signed-in read,
- * inference, an owner's act, a provider's registration) is held and replayed instead; a provider's heartbeat,
- * poll and callbacks, and any credential-less read, never wake one. The public CLI's provider PARKS on it:
- * its heartbeat probes every ASLEEP_PROBE_SECONDS, bring-up on its own schedule, and the engine serves again
- * by itself after a wake.
+ * inference, an owner's act, a provider's registration) is held and replayed instead, unless a wake limit
+ * turns it away (then with a Retry-After); a provider's heartbeat, poll and callbacks, and any
+ * credential-less read, never wake one. The public CLI's provider PARKS on it: its heartbeat probes every
+ * ASLEEP_PROBE_SECONDS, bring-up on its own schedule, and the engine serves again by itself after a wake.
  */
 export interface GridAsleep {
   detail: string
