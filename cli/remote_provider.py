@@ -414,6 +414,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # Remote has ONE identity per grid (the token pins the relay node_id), so `grid join` is additive:
     # merge this join's engines into whatever is already serving, then respawn the single detached engine.
     # The read-merge-write is serialized so two concurrent joins can't lost-update the union (ADR 0010).
+    spawned: subprocess.Popen | None = None
     with file_lock(run_records.record_path(network_id, engine_id)):
         live = _live_records(network_id)  # normally just the singleton; also legacy `engine-<uuid>` on upgrade
         # What this join INHERITS, which is not the same question as what is running. A re-join is
@@ -541,8 +542,11 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
                     print(drift, file=sys.stderr)
         else:
             # stops prior process(es) then respawns; aborts on failure
-            _respawn_identity(network_id, record, live, env_overrides=engine_env)
+            spawned = _respawn_identity(network_id, record, live, env_overrides=engine_env)
 
+    if spawned is not None:
+        # AFTER the lock: the child takes it to stamp its registration (see `_await_registration`).
+        _report_registration(spawned, network_id, engine_id)
     appended = bool(live)
     verb = "Appended to" if appended else "Joining"
     print(f"{verb} {label} (pid={record['pid']}) — {'re-serving' if appended else 'serving'} the union via the relay.")
@@ -1354,9 +1358,9 @@ def _hot_reload_identity(
 def _respawn_identity(
     network_id: str, record: dict[str, object], priors: list[dict[str, object]],
     *, env_overrides: dict[str, str] | None = None,
-) -> None:
+) -> subprocess.Popen:
     """Stop the prior process(es), then write ``record`` and (re)spawn the one detached engine, setting
-    ``record["pid"]``. Shared by join-append and leave-shrink (respawn is Slice 1's update mechanism).
+    ``record["pid"]``; returns the spawned process. Shared by join-append and leave-shrink (respawn is Slice 1's update mechanism).
 
     Aborts (SystemExit) BEFORE spawning if any prior can't be confirmed stopped — a second live child on
     the same token-pinned node_id would clobber it (the original bug). Raises if the fresh process dies
@@ -1408,8 +1412,7 @@ def _respawn_identity(
     run_records.write_record(network_id, engine_id, record)
 
     log_path = paths.engines_dir(network_id) / f"{engine_id}.log"
-    outcome = _await_remote_engine_start(proc, network_id, engine_id)
-    if outcome == "died":
+    if _await_remote_engine_start(proc) == "died":
         run_records.remove_record(network_id, engine_id)
         from . import provider
 
@@ -1417,10 +1420,7 @@ def _respawn_identity(
             f"Engine exited before it started — the grid is not serving now. See {log_path}:\n"
             f"{provider._log_tail(log_path)}"
         )
-    if outcome == "starting":
-        print(f"The engine is still starting: it had not registered with the grid after "
-              f"{int(REGISTER_WAIT_SECONDS)}s. `grid models` lists its models once it has; its log is {log_path}.",
-              file=sys.stderr)
+    return proc
 
 
 def _resolve_or_defer(
@@ -1647,6 +1647,20 @@ def _spawn_remote_engine(
     )
 
 
+def _await_remote_engine_start(proc: subprocess.Popen, grace: float = 3.0) -> str:
+    """Block briefly to tell a freshly-spawned remote engine "died" from "starting".
+
+    Unlike local there is no local registry to poll (the relay isn't locally reachable), so this
+    only checks the process stayed alive — registration is `_await_registration`'s, after the lock.
+    """
+    deadline = time.time() + grace
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return "died"
+        time.sleep(0.2)
+    return "starting" if proc.poll() is None else "died"
+
+
 #: How long `grid join` waits for a freshly spawned engine to register with its grid before returning (DEV e2e F3;
 #: operator, 2026-10-04). A model a grid has never served is now refused 404 at once, so a join that returned before
 #: the relay knew its model turned "join, then chat" into a refusal. Bounded: a local model load takes minutes, and
@@ -1654,27 +1668,45 @@ def _spawn_remote_engine(
 REGISTER_WAIT_SECONDS = 60.0
 
 
-def _await_remote_engine_start(
-    proc: subprocess.Popen, network_id: str, engine_id: str, *, grace: float = 3.0,
-    register_wait: float = REGISTER_WAIT_SECONDS, poll_every: float = 0.2,
+def _await_registration(
+    proc: subprocess.Popen, network_id: str, engine_id: str, *,
+    register_wait: float = REGISTER_WAIT_SECONDS, poll_every: float = 0.5,
 ) -> str:
-    """Wait for a freshly spawned remote engine: ``"registered"`` once it is on the grid, ``"died"`` if it exited,
-    ``"starting"`` if it is alive but had not registered within ``register_wait`` seconds.
+    """``"registered"`` once the spawned engine is on the grid, ``"died"`` if it exited first, ``"starting"`` if it
+    had not registered within ``register_wait`` seconds.
 
     "Registered" is the ``registered_at`` the child stamps on its run record when the relay accepted it — the same
-    offline fact the join gate reads (`remote/service_truth.py`). ``grace`` is the old floor: at least that long
-    alive before a quick exit is told from a slow start.
+    offline fact the join gate reads (`remote/service_truth.py`).
+    ⚠️ **Never call this holding the identity's record lock.** The child takes that lock to stamp its record during
+    bring-up, so a wait inside it stalls the very registration it waits for — measured on DEV: the full wait, then
+    the engine came up the moment the join let go.
     """
-    started = time.time()
+    deadline = time.time() + register_wait
     while True:
         if proc.poll() is not None:
             return "died"
-        waited = time.time() - started
-        if waited >= grace and (run_records.read_record(network_id, engine_id) or {}).get("registered_at"):
+        if (run_records.read_record(network_id, engine_id) or {}).get("registered_at"):
             return "registered"
-        if waited >= max(grace, register_wait):
-            return "starting" if proc.poll() is None else "died"
+        if time.time() >= deadline:
+            return "starting"
         time.sleep(poll_every)
+
+
+def _report_registration(proc: subprocess.Popen, network_id: str, engine_id: str) -> None:
+    """Wait for a freshly spawned engine to register, and say so when it did not — `grid join`, after its lock."""
+    log_path = paths.engines_dir(network_id) / f"{engine_id}.log"
+    outcome = _await_registration(proc, network_id, engine_id)
+    if outcome == "died":
+        from . import provider
+
+        raise SystemExit(
+            f"Engine exited before it registered with the grid — the grid is not serving it. See {log_path}:\n"
+            f"{provider._log_tail(log_path)}"
+        )
+    if outcome == "starting":
+        print(f"The engine is still starting: it had not registered with the grid after "
+              f"{int(REGISTER_WAIT_SECONDS)}s. `grid models` lists its models once it has; its log is {log_path}.",
+              file=sys.stderr)
 
 
 def _select_for_leave(name: str | None) -> dict[str, object]:

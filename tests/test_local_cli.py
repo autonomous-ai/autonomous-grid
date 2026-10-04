@@ -7623,7 +7623,8 @@ def _mock_remote_spawn(monkeypatch, *, pid=4242):
         return type("P", (), {"pid": pid})()
 
     monkeypatch.setattr(cli.remote_provider.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", lambda *a, **k: "registered")
+    monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", lambda *a, **k: "starting")
+    monkeypatch.setattr(cli.remote_provider, "_await_registration", lambda *a, **k: "registered")
     monkeypatch.setattr(cli.remote_provider.os, "kill", lambda p, s: spawned["signals"].append((p, s)))
     return spawned
 
@@ -7659,8 +7660,8 @@ def test_remote_engine_start_waits_until_the_child_registered(monkeypatch, tmp_p
 
     monkeypatch.setattr(run_records, "read_record", registers_on_the_third_look)
 
-    outcome = cli.remote_provider._await_remote_engine_start(
-        _SpawnedEngine(), "n1", "remote", grace=0, register_wait=10, poll_every=0.01)
+    outcome = cli.remote_provider._await_registration(
+        _SpawnedEngine(), "n1", "remote", register_wait=10, poll_every=0.01)
 
     assert outcome == "registered"
     assert reads["n"] == 3
@@ -7672,8 +7673,8 @@ def test_remote_engine_start_gives_up_waiting_and_says_still_starting(monkeypatc
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     run_records.write_record("n1", "remote", {"engine_id": "remote", "pid": 4242})
 
-    outcome = cli.remote_provider._await_remote_engine_start(
-        _SpawnedEngine(), "n1", "remote", grace=0, register_wait=0.1, poll_every=0.01)
+    outcome = cli.remote_provider._await_registration(
+        _SpawnedEngine(), "n1", "remote", register_wait=0.1, poll_every=0.01)
 
     assert outcome == "starting"
 
@@ -7684,8 +7685,8 @@ def test_remote_engine_start_reports_a_child_that_died_before_registering(monkey
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     run_records.write_record("n1", "remote", {"engine_id": "remote", "pid": 4242})
 
-    outcome = cli.remote_provider._await_remote_engine_start(
-        _SpawnedEngine(exit_after=2), "n1", "remote", grace=0, register_wait=10, poll_every=0.01)
+    outcome = cli.remote_provider._await_registration(
+        _SpawnedEngine(exit_after=2), "n1", "remote", register_wait=10, poll_every=0.01)
 
     assert outcome == "died"
 
@@ -7694,12 +7695,42 @@ def test_remote_join_says_its_engine_is_still_starting_and_succeeds(monkeypatch,
     """A local model load takes minutes: past the wait the join returns, saying where the models will show."""
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_remote_spawn(monkeypatch)
-    monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", lambda *a, **k: "starting")
+    monkeypatch.setattr(cli.remote_provider, "_await_registration", lambda *a, **k: "starting")
 
     assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
 
     err = capsys.readouterr().err
     assert "still starting" in err and "grid models" in err
+
+
+def test_remote_join_waits_for_registration_with_the_identity_lock_released(monkeypatch, tmp_path):
+    """The child takes the identity's record lock to stamp its registration during bring-up. A join waiting INSIDE
+    that lock stalled the registration it waited for — measured on DEV: the whole 60 s, then the engine came up the
+    moment the join let go. The wait must see the lock free."""
+    import fcntl
+
+    from shared import filelock, run_records
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    seen: dict = {}
+
+    def lock_is_free(proc, network_id, engine_id, **_kw):
+        lock = filelock.lock_path_for(run_records.record_path(network_id, engine_id))
+        with open(lock, "a+") as fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                seen["free"] = True
+            except BlockingIOError:
+                seen["free"] = False
+        return "registered"
+
+    monkeypatch.setattr(cli.remote_provider, "_await_registration", lock_is_free)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+
+    assert seen == {"free": True}
 
 
 def test_remote_join_serve_writes_record_and_spawns_remote_engine(monkeypatch, tmp_path):
