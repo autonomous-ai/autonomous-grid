@@ -23324,6 +23324,8 @@ def test_remote_start_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
         "network_id": "n-new", "name": "team", "network_type": "permissioned-public",
         "signaling_url": "https://relay.example", "status": "running",
     })
+    _disable_orphan_sweep(monkeypatch)
+    _sync_patch_fetch(monkeypatch, [])  # a token refresh that does not name the new grid yet: its record is kept
 
     assert cli.main(["start", "team"]) == 0
     out = capsys.readouterr().out
@@ -23335,6 +23337,58 @@ def test_remote_start_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
     nets = credentials.load_credentials()["networks"]  # persisted so ls/use/info see it
     assert [n["network_id"] for n in nets] == ["n-new"]
     assert nets[0]["signaling_url"] == "https://relay.example"
+
+
+def test_remote_start_create_stores_the_new_grids_token(monkeypatch, tmp_path, capsys):
+    """DEV e2e F11: the create reply carries no token, so a grid its creator had just made could not be stopped,
+    deleted or served from that home until a `grid sync`. The create now refreshes the grid list as sync does —
+    the WHOLE list, because a token fetch rotates every grid's refresh token."""
+    _seed_remote(monkeypatch, tmp_path, networks=[
+        {"network_id": "n-old", "name": "old", "access_token": "stale", "refresh_token": "stale-r"}])
+    _mock_lifecycle(monkeypatch, create={
+        "network_id": "n-new", "name": "team", "network_type": "permissioned-public",
+        "signaling_url": "https://relay.example", "status": "running",
+    })
+    _disable_orphan_sweep(monkeypatch)
+    fetches: list = []
+    _sync_patch_fetch(monkeypatch, [
+        {"network_id": "n-old", "name": "old", "access_token": "a-old", "refresh_token": "r-old"},
+        {"network_id": "n-new", "name": "team", "access_token": "a-new", "refresh_token": "r-new",
+         "lan_signaling_url": "https://relay.example"},
+    ], calls=fetches)
+
+    assert cli.main(["start", "team"]) == 0
+
+    from remote import credentials
+    nets = {n["network_id"]: n for n in credentials.load_credentials()["networks"]}
+    assert len(fetches) == 1
+    assert nets["n-new"]["access_token"] == "a-new", "the creator can act on the grid at once"
+    assert nets["n-old"]["refresh_token"] == "r-old", "every grid's rotated token is kept, not only the new one"
+
+
+def test_remote_start_create_succeeds_when_the_token_refresh_fails(monkeypatch, tmp_path, capsys):
+    """The grid exists once the control plane said so: a refresh that fails afterwards says how to finish, and the
+    create still reports the grid (a non-zero exit would invite a second `grid start` — a duplicate)."""
+    from remote import control_plane
+
+    _seed_remote(monkeypatch, tmp_path)
+    _mock_lifecycle(monkeypatch, create={
+        "network_id": "n-new", "name": "team", "network_type": "permissioned-public",
+        "signaling_url": "https://relay.example", "status": "running",
+    })
+
+    def refused(session_token, device_id, api_url=None):
+        raise SystemExit("GET /v1/grid/tokens failed (503): busy")
+
+    monkeypatch.setattr(control_plane, "fetch_tokens", refused)
+
+    assert cli.main(["start", "team"]) == 0
+
+    captured = capsys.readouterr()
+    assert "grid=team" in captured.out
+    assert "grid sync" in captured.err
+    from remote import credentials
+    assert [n["network_id"] for n in credentials.load_credentials()["networks"]] == ["n-new"]
 
 
 def test_remote_start_starts_when_name_known(monkeypatch, tmp_path, capsys):
@@ -23377,6 +23431,8 @@ def test_remote_start_type_on_create_sets_network_type(monkeypatch, tmp_path, ca
     calls = _mock_lifecycle(monkeypatch, create={
         "network_id": "n1", "name": "lab", "network_type": "permissioned-providers",
         "signaling_url": "https://r"})
+    _disable_orphan_sweep(monkeypatch)
+    _sync_patch_fetch(monkeypatch, [])
 
     assert cli.main(["start", "lab", "--type", "permissioned-providers"]) == 0
     capsys.readouterr()

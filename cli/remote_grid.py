@@ -17,6 +17,7 @@ import argparse
 import json
 import re
 import shlex
+import sys
 from typing import Any
 
 from shared import shell, state
@@ -253,7 +254,28 @@ def cmd_remote_up(args: argparse.Namespace) -> int:
             f"Grid {name!r} was created in remote mode but couldn't be saved locally ({exc}). "
             "Run `grid login` to re-sync your grids before retrying."
         ) from None
+    _store_the_new_grids_token(session, name, record)
     return _print_up(resp.get("name") or name, _grid_url(resp, record))
+
+
+def _store_the_new_grids_token(session: str, name: str, record: dict[str, Any]) -> None:
+    """Refresh the stored grid list the way `grid sync` does, so the grid just created carries its access token.
+
+    The create reply carries none (DEV e2e F11), and without it the creator could not stop, delete or serve the grid
+    from this home until a `grid sync`. Never fails the create: the grid exists once the control plane said so, and
+    a non-zero exit here would invite a second `grid start` — a duplicate grid. ``record`` (what the create saved)
+    is kept if the fetched list does not name the new grid yet.
+    """
+    from remote import control_plane, credentials
+
+    from . import auth
+
+    try:
+        auth.store_networks(control_plane.fetch_tokens(session, credentials.device_id(), credentials.api_url()),
+                            keep=record)
+    except (SystemExit, OSError) as exc:
+        print(f"Grid {name!r} was created, but its access token could not be fetched ({exc}). "
+              "Run `grid sync` before you stop, delete or serve it from here.", file=sys.stderr)
 
 
 def cmd_remote_down(args: argparse.Namespace) -> int:

@@ -650,6 +650,57 @@ def _report_logout(
     return 0
 
 
+def store_networks(raw: Any, *, keep: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Overwrite the stored grid list with a fresh ``GET /v1/grid/tokens`` answer (``raw``, a ``TokenFetch``) — what
+    `grid sync` does after its fetch, and what `grid start` does after it creates a grid (DEV e2e F11: the create
+    reply carries no token, so the new grid could not be stopped, deleted or served until a sync). The WHOLE list:
+    a token fetch rotates every grid's refresh token, so the stored ones are dead once it returns. ``keep`` is a
+    record kept when the fetched list does not name its grid (a grid created a moment ago). Returns the list.
+    """
+    from remote import credentials
+
+    from . import signout
+
+    # Validated here, outside any session handling: a malformed bundle is a data error, not a session error, so it
+    # must surface as-is (never rewritten to "session expired").
+    networks = _validated(raw.networks)
+    if keep is not None and all(net.get("network_id") != keep.get("network_id") for net in networks):
+        networks = [*networks, keep]
+    # Authoritative overwrite of the stored grid list; session_token / api_url / user are preserved.
+    # Immutable update — a fresh dict, never the loaded one mutated in place. state.json is untouched.
+    #
+    # ⚠️ **Re-read UNDER the lock rather than merging into the caller's snapshot.** That was taken
+    # before a network round trip that takes seconds, and this is the writer grid-apis shells into a
+    # first-provider home it also writes (issue 12). Merging the stale snapshot puts back every key
+    # another writer changed while the fetch was in flight. The lock cannot shrink the fetch's
+    # window — it makes the MERGE read the file as it is now.
+    with credentials.credentials_lock():
+        current = credentials.load_credentials()
+        if not current.get("session_token"):
+            # ⚠️ A `grid logout` landed while the fetch was in flight, and the older code merged the
+            # pre-logout snapshot — which put the session token back and undid the sign-out, quietly.
+            # Under the lock that read is authoritative, so the sign-out wins and nothing is written.
+            raise SystemExit(
+                "You were signed out while this sync was running, so nothing was written. "
+                "Run `grid login` to sign in again."
+            )
+        previous = list(current.get("networks") or [])
+        credentials.save_credentials({**current, "networks": networks})
+    # A grid that just dropped out takes its token with it while its serve child keeps polling — the
+    # same unreachable state a logout produces, one grid at a time (ADR 0023). Sync does not tear it
+    # down; it names it and the verb that still reaches it.
+    signout.warn_stranded(previous, networks)
+    if previous and not networks:
+        # The overwrite just cleared every grid. Make the wipe visible so a transient backend hiccup
+        # isn't mistaken for a silent loss of all credentials.
+        print(
+            f"Warning: the control plane returned 0 grids; {len(previous)} previously synced "
+            "grid(s) were cleared locally. Re-run `grid sync` if this may be transient.",
+            file=sys.stderr,
+        )
+    return networks
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     """Refresh the stored grid list + per-grid tokens using the saved session — no browser.
 
@@ -663,7 +714,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     """
     from remote import control_plane, credentials
 
-    from . import os_grid_notice, signout
+    from . import os_grid_notice
 
     as_json = getattr(args, "json", False)
     # One credentials snapshot for the auth gate. Same "not signed in" wording as
@@ -693,41 +744,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 "Your grid session has expired. Run `grid login` to sign in again."
             ) from exc
         raise
-    # Validate outside the try: a malformed bundle is a data error, not a session error, so it must
-    # surface as-is (never rewritten to "session expired").
-    networks = _validated(raw.networks)
-    # Authoritative overwrite of the stored grid list; session_token / api_url / user are preserved.
-    # Immutable update — a fresh dict, never the loaded one mutated in place. state.json is untouched.
-    #
-    # ⚠️ **Re-read UNDER the lock rather than merging into `data`.** The snapshot above was taken
-    # before a network round trip that takes seconds, and this is the writer grid-apis shells into a
-    # first-provider home it also writes (issue 12). Merging the stale snapshot puts back every key
-    # another writer changed while the fetch was in flight. The lock cannot shrink the fetch's
-    # window — it makes the MERGE read the file as it is now.
-    with credentials.credentials_lock():
-        current = credentials.load_credentials()
-        if not current.get("session_token"):
-            # ⚠️ A `grid logout` landed while the fetch was in flight, and the older code merged the
-            # pre-logout snapshot — which put the session token back and undid the sign-out, quietly.
-            # Under the lock that read is authoritative, so the sign-out wins and nothing is written.
-            raise SystemExit(
-                "You were signed out while this sync was running, so nothing was written. "
-                "Run `grid login` to sign in again."
-            )
-        previous = list(current.get("networks") or [])
-        credentials.save_credentials({**current, "networks": networks})
-    # A grid that just dropped out takes its token with it while its serve child keeps polling — the
-    # same unreachable state a logout produces, one grid at a time (ADR 0023). Sync does not tear it
-    # down; it names it and the verb that still reaches it.
-    signout.warn_stranded(previous, networks)
-    if previous and not networks:
-        # The overwrite just cleared every grid. Make the wipe visible so a transient backend hiccup
-        # isn't mistaken for a silent loss of all credentials.
-        print(
-            f"Warning: the control plane returned 0 grids; {len(previous)} previously synced "
-            "grid(s) were cleared locally. Re-run `grid sync` if this may be transient.",
-            file=sys.stderr,
-        )
+    networks = store_networks(raw)
     return _report_sync(networks, absence=os_grid_notice.absence(raw.os_served), as_json=as_json)
 
 
