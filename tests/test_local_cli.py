@@ -7623,9 +7623,83 @@ def _mock_remote_spawn(monkeypatch, *, pid=4242):
         return type("P", (), {"pid": pid})()
 
     monkeypatch.setattr(cli.remote_provider.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", lambda *a, **k: "starting")
+    monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", lambda *a, **k: "registered")
     monkeypatch.setattr(cli.remote_provider.os, "kill", lambda p, s: spawned["signals"].append((p, s)))
     return spawned
+
+
+class _SpawnedEngine:
+    """A spawned engine child: alive until ``exit_after`` polls (never, by default)."""
+
+    def __init__(self, exit_after: int | None = None) -> None:
+        self.polls = 0
+        self.exit_after = exit_after
+
+    def poll(self):
+        self.polls += 1
+        return 1 if self.exit_after is not None and self.polls > self.exit_after else None
+
+
+def test_remote_engine_start_waits_until_the_child_registered(monkeypatch, tmp_path):
+    """DEV e2e F3 (operator, 2026-10-04): a model a grid has never served is refused 404 at once, so `grid join`
+    must not return before its engine is on the grid — or "join, then chat" asks for a model the relay has not
+    heard of. The child stamps `registered_at` on its run record when it registers; the join waits for that."""
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "pid": 4242})
+    reads = {"n": 0}
+    real_read = run_records.read_record
+
+    def registers_on_the_third_look(grid_id, engine_id):
+        reads["n"] += 1
+        if reads["n"] == 3:
+            run_records.write_record(grid_id, engine_id, {"engine_id": "remote", "pid": 4242, "registered_at": "2026-10-04T12:00:00Z"})
+        return real_read(grid_id, engine_id)
+
+    monkeypatch.setattr(run_records, "read_record", registers_on_the_third_look)
+
+    outcome = cli.remote_provider._await_remote_engine_start(
+        _SpawnedEngine(), "n1", "remote", grace=0, register_wait=10, poll_every=0.01)
+
+    assert outcome == "registered"
+    assert reads["n"] == 3
+
+
+def test_remote_engine_start_gives_up_waiting_and_says_still_starting(monkeypatch, tmp_path):
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "pid": 4242})
+
+    outcome = cli.remote_provider._await_remote_engine_start(
+        _SpawnedEngine(), "n1", "remote", grace=0, register_wait=0.1, poll_every=0.01)
+
+    assert outcome == "starting"
+
+
+def test_remote_engine_start_reports_a_child_that_died_before_registering(monkeypatch, tmp_path):
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "pid": 4242})
+
+    outcome = cli.remote_provider._await_remote_engine_start(
+        _SpawnedEngine(exit_after=2), "n1", "remote", grace=0, register_wait=10, poll_every=0.01)
+
+    assert outcome == "died"
+
+
+def test_remote_join_says_its_engine_is_still_starting_and_succeeds(monkeypatch, tmp_path, capsys):
+    """A local model load takes minutes: past the wait the join returns, saying where the models will show."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", lambda *a, **k: "starting")
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+
+    err = capsys.readouterr().err
+    assert "still starting" in err and "grid models" in err
 
 
 def test_remote_join_serve_writes_record_and_spawns_remote_engine(monkeypatch, tmp_path):

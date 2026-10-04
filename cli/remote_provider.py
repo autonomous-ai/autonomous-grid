@@ -1408,7 +1408,8 @@ def _respawn_identity(
     run_records.write_record(network_id, engine_id, record)
 
     log_path = paths.engines_dir(network_id) / f"{engine_id}.log"
-    if _await_remote_engine_start(proc) == "died":
+    outcome = _await_remote_engine_start(proc, network_id, engine_id)
+    if outcome == "died":
         run_records.remove_record(network_id, engine_id)
         from . import provider
 
@@ -1416,6 +1417,10 @@ def _respawn_identity(
             f"Engine exited before it started — the grid is not serving now. See {log_path}:\n"
             f"{provider._log_tail(log_path)}"
         )
+    if outcome == "starting":
+        print(f"The engine is still starting: it had not registered with the grid after "
+              f"{int(REGISTER_WAIT_SECONDS)}s. `grid models` lists its models once it has; its log is {log_path}.",
+              file=sys.stderr)
 
 
 def _resolve_or_defer(
@@ -1642,18 +1647,34 @@ def _spawn_remote_engine(
     )
 
 
-def _await_remote_engine_start(proc: subprocess.Popen, grace: float = 3.0) -> str:
-    """Block briefly to tell a freshly-spawned remote engine "died" from "starting".
+#: How long `grid join` waits for a freshly spawned engine to register with its grid before returning (DEV e2e F3;
+#: operator, 2026-10-04). A model a grid has never served is now refused 404 at once, so a join that returned before
+#: the relay knew its model turned "join, then chat" into a refusal. Bounded: a local model load takes minutes, and
+#: past this the join returns saying the engine is still starting.
+REGISTER_WAIT_SECONDS = 60.0
 
-    Unlike local there is no local registry to poll (the relay isn't locally reachable), so this
-    only checks the process stayed alive — registration shows up on the grid page, not here.
+
+def _await_remote_engine_start(
+    proc: subprocess.Popen, network_id: str, engine_id: str, *, grace: float = 3.0,
+    register_wait: float = REGISTER_WAIT_SECONDS, poll_every: float = 0.2,
+) -> str:
+    """Wait for a freshly spawned remote engine: ``"registered"`` once it is on the grid, ``"died"`` if it exited,
+    ``"starting"`` if it is alive but had not registered within ``register_wait`` seconds.
+
+    "Registered" is the ``registered_at`` the child stamps on its run record when the relay accepted it — the same
+    offline fact the join gate reads (`remote/service_truth.py`). ``grace`` is the old floor: at least that long
+    alive before a quick exit is told from a slow start.
     """
-    deadline = time.time() + grace
-    while time.time() < deadline:
+    started = time.time()
+    while True:
         if proc.poll() is not None:
             return "died"
-        time.sleep(0.2)
-    return "starting" if proc.poll() is None else "died"
+        waited = time.time() - started
+        if waited >= grace and (run_records.read_record(network_id, engine_id) or {}).get("registered_at"):
+            return "registered"
+        if waited >= max(grace, register_wait):
+            return "starting" if proc.poll() is None else "died"
+        time.sleep(poll_every)
 
 
 def _select_for_leave(name: str | None) -> dict[str, object]:
