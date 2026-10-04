@@ -452,10 +452,15 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # called `mybox`. Same string, opposite fact — and without this half the operator is told
         # "already serving", the relay never hears the claim, and the name stays withheld on an
         # `os-community` grid with nothing anywhere to say why (ADR 0039 D-n).
+        # An explicit --max-concurrency the live identity does not run is a change too (DEV e2e F5): answered
+        # "nothing to append", it was dropped in silence. The pool is sized only at spawn, so it respawns.
+        asked_concurrency = getattr(args, "max_concurrency", None)
         if (
             live and not changed and media == base_media and bundles == base_bundles
             and meta_name == _identity_field(live, "meta_name")
             and _states_the_same_name_choice(live, name_chosen)
+            and (asked_concurrency is None
+                 or asked_concurrency == run_records.effective_max_concurrency(_identity_record(live) or {}))
             and not rotated_live
             and not respawn
         ):

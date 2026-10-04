@@ -9492,6 +9492,42 @@ def test_remote_join_noop_surfaces_last_reload_error(monkeypatch, tmp_path, caps
     assert "no key is stored for openai" in out_err.err  # the failure is surfaced, not silent
 
 
+def test_remote_join_rejoin_with_only_a_new_max_concurrency_respawns_to_apply_it(monkeypatch, tmp_path, capsys):
+    """DEV e2e F5 (B4b): `grid join … --max-concurrency 8` on an engine already serving at 1 answered "Already
+    serving …; nothing to append." and kept 1 — the flag silently ignored. A different explicit size is a change:
+    the pool is sized only at spawn, so the join respawns to apply it."""
+    import signal as _sig
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0  # hardware: 1 at a time
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    capsys.readouterr()
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--max-concurrency", "8"]) == 0
+
+    assert "nothing to append" not in capsys.readouterr().out
+    assert cli.provider._read_records("n1")["remote"]["max_concurrency"] == 8
+    assert terminated == [4242]                           # respawned to resize the pool...
+    assert (4242, _sig.SIGHUP) not in spawned["signals"]  # ...not hot-reloaded at the old size
+
+
+def test_remote_join_rejoin_with_the_same_max_concurrency_stays_a_noop(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--max-concurrency", "8"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--max-concurrency", "8"]) == 0
+
+    assert "nothing to append" in capsys.readouterr().out
+    assert terminated == []
+
+
 def test_remote_join_hardware_onto_api_only_respawns_for_concurrency_flip(monkeypatch, tmp_path):
     """Adding a hardware engine to an API-only identity flips the concurrency default (8 → 1). The
     pool is sized once at spawn, so this join must RESPAWN — a SIGHUP would leave 8 workers
