@@ -49,6 +49,9 @@ ERROR_REPORT_PATH = "/relay/v1/error/{transaction_id}"
 #: (openai-error.schema.json/$defs/NoProvidersAvailable/properties/error/properties/code)
 NO_PROVIDERS_AVAILABLE_CODE = "no_providers_available"
 
+#: (openai-error.schema.json/$defs/ModelNotFound/properties/error/properties/code)
+MODEL_NOT_FOUND_CODE = "model_not_found"
+
 #: (openai-error.schema.json/$defs/RelayRestarting/properties/error/properties/code)
 RELAY_RESTARTING_CODE = "relay_restarting"
 
@@ -133,6 +136,7 @@ MASTER_NODE_PRUNE_SECONDS = 2592000
 #: Each refusal code, and the HTTP status that carries it.
 REFUSAL_STATUS = MappingProxyType({
     "no_providers_available": 503,
+    "model_not_found": 404,
     "relay_restarting": 503,
     "grid_asleep": 503,
     "grid_stopped": 503,

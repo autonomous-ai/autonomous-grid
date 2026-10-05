@@ -5,11 +5,20 @@ The harness polls every grid a person can see with two CREDENTIAL-LESS reads, th
 generated from `grid-protocol`'s schemas (ticket 12), so this driver checks every answer against the same schemas: no
 harness checkout is needed, and a field the server renames fails here, not in somebody's model list.
 
-Every refusal code a client branches on is driven too, with its status, and none of these reads may wake a grid.
+Every refusal code a client branches on is driven too, with its status, and none of these reads may wake a grid. So
+are the relay's own two answers to a request no engine can serve now: `no_providers_available` (retryable) for a model
+the grid has served, and `model_not_found` (at once) for one no engine on it ever served (DEV e2e F3).
 """
 from __future__ import annotations
 
+import contextlib
+import json
+import os
+import secrets
+import subprocess
 import time
+from collections.abc import Iterator
+from pathlib import Path
 
 import grid_protocol
 import httpx
@@ -20,6 +29,7 @@ from grid_protocol.constants import (
     GRID_DELETED_CODE,
     GRID_MASTER_DOWN_CODE,
     GRID_STOPPED_CODE,
+    MODEL_NOT_FOUND_CODE,
     NO_PROVIDERS_AVAILABLE_CODE,
     REFUSAL_STATUS,
 )
@@ -35,20 +45,56 @@ def _get(stack: Stack, read: str) -> httpx.Response:
     return httpx.get(f"{stack.grid_url}/{READS[read]}", timeout=30, headers={"User-Agent": "autonomous-harness/conformance (read)"})
 
 
+@contextlib.contextmanager
+def _joined(stack: Stack, home: Path, *, model: str, name: str) -> Iterator[Client]:
+    """An engine for `model` joined with the harness's pinned `grid`, and left again at the end whatever happened."""
+    version = harness_pin()
+    joined = Client(version, install(version), home)
+    joined.sign_in(stack, token=stack.provider_token(), roles=["consumer", "provider"],
+                   scopes=INFERENCE_SCOPES + PROVIDER_SCOPES)
+    try:
+        done = joined.run("join", stack.network_id, "--at", stack.engine_url, "-m", model, "--name", name, timeout=120)
+        assert done.returncode == 0, done.stdout + done.stderr
+        yield joined
+    finally:
+        stack.set_state("running")
+        joined.run("leave", stack.network_id, timeout=60)
+
+
 @pytest.fixture
 def provider(stack, tmp_path):
     """An engine joined with the harness's pinned `grid`, so the awake answers have a node and a model to describe.
     Per test: a test of a deleted grid ends an engine, and none may depend on running after it."""
-    version = harness_pin()
-    joined = Client(version, install(version), tmp_path / "provider")
-    joined.sign_in(stack, token=stack.provider_token(), roles=["consumer", "provider"],
-                   scopes=INFERENCE_SCOPES + PROVIDER_SCOPES)
-    done = joined.run("join", stack.network_id, "--at", stack.engine_url, "-m", ENGINE_MODEL, "--name", "harness-view",
-                      timeout=120)
-    assert done.returncode == 0, done.stdout + done.stderr
-    yield joined
-    stack.set_state("running")
-    joined.run("leave", stack.network_id, timeout=60)
+    with _joined(stack, tmp_path / "provider", model=ENGINE_MODEL, name="harness-view") as joined:
+        yield joined
+
+
+def _advertised(stack: Stack) -> set[str]:
+    """Every model a node in the overview advertises now."""
+    answer = _get(stack, "overview")
+    assert answer.status_code == 200, answer.text
+    return {model for node in answer.json().get("nodes") or [] for model in node.get("models") or []}
+
+
+def _until(condition, seconds: float, message: str) -> None:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError(message)
+        time.sleep(0.5)
+
+
+@pytest.fixture
+def served_model_whose_engine_left(stack, tmp_path) -> str:
+    """A model this grid HAS served whose engine is not online now: an engine joined for it, seen, then left.
+
+    The model is this test's own, so no engine another test joined, or left behind, can be serving it. What the leave
+    leaves is what it leaves on the fleet: a node row with no models, and the model's catalog row."""
+    model = f"conformance-away-{secrets.token_hex(4)}"
+    with _joined(stack, tmp_path / "away", model=model, name="harness-away"):
+        _until(lambda: model in _advertised(stack), 60, f"the engine for {model} never appeared in the overview")
+    _until(lambda: model not in _advertised(stack), 60, f"{model} is still advertised after `grid leave`")
+    return model
 
 
 @pytest.mark.parametrize("read, schema", [("overview", "overview"), ("discover", "discover")])
@@ -128,16 +174,47 @@ def test_a_retired_feature_is_refused_by_the_proxy(stack, path):
     assert body["code"] == FEATURE_RETIRED_CODE
 
 
-@pytest.mark.parametrize("openai_errors", [True, False], ids=["openai-envelope", "detail"])
-def test_no_engine_for_the_model_is_no_providers_available(stack, openai_errors):
-    """The relay's own refusal. In OpenAI's envelope, with its `code`, when the caller asked for OpenAI errors (the
-    error-format header; an `lga_sk_` key does too); otherwise `{"detail": …}` with no code (`grid-protocol`
-    `openai-error`)."""
+def _chat(stack: Stack, model: str, *, openai_errors: bool) -> httpx.Response:
+    """A consumer's request through the proxy. The master answers a failure in OpenAI's envelope, with its `code`, when
+    the caller asked for OpenAI errors (the error-format header; an `lga_sk_` key does too); otherwise `{"detail": …}`
+    with no code (`grid-protocol` `openai-error`). Long enough for a woken master's boot hold and the retry budget."""
     headers = {"Authorization": f"Bearer {stack.consumer_token()}"}
     if openai_errors:
         headers["X-Error-Format"] = "openai"
-    answer = httpx.post(f"{stack.grid_url}/relay/v1/chat/completions", timeout=60, headers=headers,
-                        json={"model": "conformance-nobody-serves-this", "messages": [{"role": "user", "content": "x"}]})
+    return httpx.post(f"{stack.grid_url}/relay/v1/chat/completions", timeout=90, headers=headers,
+                      json={"model": model, "messages": [{"role": "user", "content": "x"}]})
+
+
+def _record_if_asked(stack: Stack, definition: str, answer: httpx.Response) -> None:
+    """With `GRID_PROTOCOL_RECORD_DIR` set, write `answer` there as a raw recording of `openai-error`/`definition`, for
+    `protocol/tools/sanitize.py` to make a `protocol/recordings/` one of (`protocol/README.md`); else nothing."""
+    folder = os.environ.get("GRID_PROTOCOL_RECORD_DIR")
+    if not folder:
+        return
+
+    def commit(repo: Path) -> str:
+        return subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                              check=False).stdout.strip() or "unknown"
+
+    recording = {
+        "schema": "openai-error", "definition": definition, "request": "POST /relay/v1/chat/completions",
+        "status": answer.status_code,
+        "source": f"grid-src @ {commit(stack.siblings.grid_src)}, its master behind grid-apis @ "
+                  f"{commit(stack.siblings.grid_apis)}'s proxy (conformance/test_harness_reads.py)",
+        "body": answer.json(),
+    }
+    path = Path(folder) / f"openai-error--{definition}--conformance.json"
+    path.write_text(json.dumps(recording, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+ENVELOPES = pytest.mark.parametrize("openai_errors", [True, False], ids=["openai-envelope", "detail"])
+
+
+@ENVELOPES
+def test_a_model_the_grid_has_served_whose_engine_is_gone_is_no_providers_available(
+        stack, served_model_whose_engine_left, openai_errors):
+    """The relay's retryable refusal: this grid has served the model, so its engine may only be away (DEV e2e F3)."""
+    answer = _chat(stack, served_model_whose_engine_left, openai_errors=openai_errors)
 
     assert answer.status_code == REFUSAL_STATUS[NO_PROVIDERS_AVAILABLE_CODE], answer.text
     body = answer.json()
@@ -146,3 +223,25 @@ def test_no_engine_for_the_model_is_no_providers_available(stack, openai_errors)
         assert body["error"]["code"] == NO_PROVIDERS_AVAILABLE_CODE
     else:
         assert isinstance(body.get("detail"), str) and "error" not in body
+
+
+@ENVELOPES
+def test_a_model_no_engine_on_the_grid_ever_served_is_model_not_found(stack, provider, openai_errors):
+    """Refused at once, not retried: no wait brings an engine for a name this grid never served (DEV e2e F3). The grid
+    has an engine, seen before the request: one that never had any keeps the retryable 503."""
+    _until(lambda: ENGINE_MODEL in _advertised(stack), 60, "the joined engine never appeared in the overview")
+    never_served = f"conformance-never-served-{secrets.token_hex(4)}"
+
+    answer = _chat(stack, never_served, openai_errors=openai_errors)
+
+    assert answer.status_code == REFUSAL_STATUS[MODEL_NOT_FOUND_CODE], answer.text
+    body = answer.json()
+    if openai_errors:
+        grid_protocol.validator("openai-error", "ModelNotFound").validate(body)
+        assert body["error"]["code"] == MODEL_NOT_FOUND_CODE
+        message = body["error"]["message"]
+        _record_if_asked(stack, "ModelNotFound", answer)
+    else:
+        assert isinstance(body.get("detail"), str) and "error" not in body
+        message = body["detail"]
+    assert never_served not in message, "the requested name is never echoed"

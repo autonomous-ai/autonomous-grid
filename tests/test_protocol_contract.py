@@ -33,6 +33,7 @@ REFUSALS = {
     "grid_deleted": 410,
     "grid_master_down": 503,
     "no_providers_available": 503,
+    "model_not_found": 404,
     "feature_retired": 410,
     "relay_restarting": 503,
 }

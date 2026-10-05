@@ -39,6 +39,8 @@ export const ERROR_REPORT_PATH = '/relay/v1/error/{transaction_id}'
 
 export const NO_PROVIDERS_AVAILABLE_CODE = 'no_providers_available'
 
+export const MODEL_NOT_FOUND_CODE = 'model_not_found'
+
 export const RELAY_RESTARTING_CODE = 'relay_restarting'
 
 /** GET /relay/v1/grid/overview */
@@ -121,6 +123,7 @@ export const MASTER_NODE_PRUNE_SECONDS = 2592000
 /** Each refusal code, and the HTTP status that carries it. */
 export const REFUSAL_STATUS = {
   no_providers_available: 503,
+  model_not_found: 404,
   relay_restarting: 503,
   grid_asleep: 503,
   grid_stopped: 503,
@@ -480,9 +483,11 @@ export interface OpenAIError {
 }
 
 /**
- * No provider serves the requested model now. Inside a master's boot hold (BOOT_HOLD_WINDOW_SECONDS after it
- * starts) a request for a model nobody serves yet is held up to BOOT_HOLD_SECONDS first, so that a provider
- * parked on the sleeping grid can come back.
+ * No provider serves the requested model now, on a grid that has served it (its engine may only be away),
+ * that has never had an engine at all, or whose master cannot tell: retryable. On a grid that has had an
+ * engine, a model none of its engines ever served is ModelNotFound instead. Inside a master's boot hold
+ * (BOOT_HOLD_WINDOW_SECONDS after it starts) a request for a model nobody serves yet is held up to
+ * BOOT_HOLD_SECONDS first, so that a provider parked on the sleeping grid can come back.
  */
 export interface NoProvidersAvailable {
   error: {
@@ -490,6 +495,25 @@ export interface NoProvidersAvailable {
     type: 'server_error'
     param: string | null
     code: 'no_providers_available'
+    [key: string]: unknown
+  }
+  [key: string]: unknown
+}
+
+/**
+ * No engine on this grid has ever served the requested model: none it still has a node row for, live or not,
+ * and nothing in its model catalog, whose rows outlive an engine that left. No wait can bring one, so it is
+ * refused at once (after a woken master's boot hold) rather than as the retryable NoProvidersAvailable, which
+ * a grid that has served the model, a grid that has never had an engine, and a master that cannot tell keep.
+ * The message names what the grid serves now and never echoes the requested name. A caller that did not ask
+ * for OpenAI errors gets `{"detail": <message>}`. Displayed, never parsed: the public CLI must not parse it.
+ */
+export interface ModelNotFound {
+  error: {
+    message: string
+    type: 'invalid_request_error'
+    param: string | null
+    code: 'model_not_found'
     [key: string]: unknown
   }
   [key: string]: unknown

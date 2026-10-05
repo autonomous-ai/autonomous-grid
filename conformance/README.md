@@ -31,6 +31,11 @@ grid-platform ticket 13 (ADR 0004). Built on ticket 12's `grid-protocol`: every 
 **The harness reads** are the overview and discovery, awake and asleep (with `last_known`), and every refusal code
 (`grid_asleep`, `grid_stopped`, `grid_deleted`, `grid_master_down`, `feature_retired`) with its status.
 
+**The relay's own refusals** for a model no engine serves now, in both envelopes: `no_providers_available` (503,
+retryable) for a model the grid has served whose engine has left, and `model_not_found` (404, at once) for a model no
+engine on the grid ever served, once it has had one. Each test makes the history it needs, so neither depends on the
+order the tests run in.
+
 ## What it does NOT cover
 
 The stand-ins are what make it run in CI without the fleet. A green run therefore says nothing about these:
