@@ -498,6 +498,42 @@ def serves_vision(args) -> bool:
     return gguf.projector_beside(paths.models_dir() / serve) is not None
 
 
+def serves_decisions(args) -> bool:
+    """Whether the model this join just started is a decision (Jev) model: it answers System One
+    questions at `/v1/systemone` and refuses chat, so its next step is a decision, never `grid chat`.
+
+    A built-in `--serve` engine says so in its GGUF header — the key the launcher reads to refuse an
+    old llama.cpp. An `--at` engine is asked one decision, the same probe its serve loop asks at join.
+    """
+    serve = getattr(args, "serve", None)
+    if serve:
+        from shared.models import gguf
+
+        return gguf.decision_type(paths.models_dir() / serve) is not None
+    # Never a vendor's API (`--api`): an API engine sees no traffic at join, and serves its catalog
+    # row's endpoints only. Nor a media join, which serves no text model.
+    if getattr(args, "api", None) or getattr(args, "media", False):
+        return False
+    at, models = getattr(args, "at", None), list(getattr(args, "models", None) or [])
+    if at and models:
+        from remote import probe
+
+        return probe.probe_systemone(at, models[0], timeout=5.0)
+    return False
+
+
+def decision_hints(model: str, grid: str) -> list[str]:
+    """The next step for a decision model on a remote grid: one System One request through the
+    relay, with the grid's address and key from `grid info --env` (docs/cli.md, Decision models)."""
+    body = json.dumps({"model": model, "state": "I was charged twice. Please refund the duplicate.",
+                       "questions": {"refund": {"type": "noul", "instructions": "Is a refund requested?"}}})
+    return [
+        f'  eval "$(grid info {grid} --env)"',
+        '  curl "$OPENAI_BASE_URL/systemone" -H "Authorization: Bearer $OPENAI_API_KEY" \\',
+        f"    -H 'Content-Type: application/json' -d {shlex.quote(body)}",
+    ]
+
+
 def chat_hints(model: str, vision: bool) -> list[str]:
     """The `grid chat` line(s) to suggest for [model] — two when it can see, one when it cannot.
 

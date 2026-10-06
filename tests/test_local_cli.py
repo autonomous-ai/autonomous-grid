@@ -7622,8 +7622,15 @@ def _mock_remote_spawn(monkeypatch, *, pid=4242):
             spawned["env"] = kw.get("env") or {}
         return type("P", (), {"pid": pid})()
 
+    def fake_started(*a, **k):
+        # What the child of this build stamps into its own record once it runs (remote/serve
+        # `_stamp_own_pid`) — after the join's own write, which is why it lands here and not at spawn.
+        if "cmd" in spawned and run_records.read_record(*spawned["cmd"][-2:]) is not None:
+            run_records.update_record(*spawned["cmd"][-2:], serves_systemone=True)
+        return "starting"
+
     monkeypatch.setattr(cli.remote_provider.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", lambda *a, **k: "starting")
+    monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", fake_started)
     monkeypatch.setattr(cli.remote_provider.os, "kill", lambda p, s: spawned["signals"].append((p, s)))
     return spawned
 
@@ -9997,6 +10004,7 @@ def _seed_remote_identity(monkeypatch, tmp_path, engines, *, pid=4242, media=Fal
     run_records.write_record("n1", "remote", {
         "engine_id": "remote", "grid_id": "n1", "pid": pid, "media": media,
         "reload_signal": reload_signal,  # a Slice-2 identity supports SIGHUP hot-reload; None = pre-handler
+        "serves_systemone": True,  # what a child of this build stamps itself (remote/serve._stamp_own_pid)
         "signaling_url": "https://relay.example", "meta_name": "mybox",
         "engines": engines,
         "models": list(dict.fromkeys(m for e in engines for m in e.get("models") or [])),
@@ -10014,7 +10022,7 @@ def _seed_live_identity_record(*, pid, engines, grid_id="n1", **fields):
 
     run_records.write_record(grid_id, "remote", {
         "engine_id": "remote", "grid_id": grid_id, "pid": pid, "media": False,
-        "reload_signal": "sighup",
+        "reload_signal": "sighup", "serves_systemone": True,
         "signaling_url": "https://relay.example", "meta_name": "mybox",
         "engines": engines,
         "models": list(dict.fromkeys(m for e in engines for m in e.get("models") or [])),
@@ -15246,6 +15254,7 @@ def test_stamp_own_pid_says_this_child_reads_each_engines_aliases(monkeypatch, t
     serve._stamp_own_pid("n1", "remote")
 
     assert run_records.read_record("n1", "remote")["per_engine_aliases"] is True
+    assert run_records.read_record("n1", "remote")["serves_systemone"] is True
 
 
 def test_stamp_own_pid_preserves_sibling_fields(monkeypatch, tmp_path):
@@ -15271,7 +15280,7 @@ def test_stamp_own_pid_preserves_sibling_fields(monkeypatch, tmp_path):
 
     got = run_records.read_record("n1", "remote")
     # The identity, plus the one thing the child declares about itself (ADR 0045); nothing else moves.
-    identity = set(run_records.identity_stamp(os.getpid())) | {"per_engine_aliases"}
+    identity = set(run_records.identity_stamp(os.getpid())) | {"per_engine_aliases", "serves_systemone"}
     assert got["pid"] == os.getpid()
     assert got["pgid"] == os.getpgrp()
     assert run_records.record_verdict(got) is run_records.RecordVerdict.LIVE_OURS

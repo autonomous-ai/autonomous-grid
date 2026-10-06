@@ -620,7 +620,7 @@ def test_a_seat_never_hot_reloads():
     its models against a port with nothing listening — seen live when a second seat was joined."""
     from cli import remote_provider
 
-    live = [{"engine_id": "remote", "reload_signal": "sighup", "engines": []}]
+    live = [{"engine_id": "remote", "reload_signal": "sighup", "serves_systemone": True, "engines": []}]
     record = {"engines": []}
     external = [{"endpoint_url": "http://127.0.0.1:9001", "models": ["x"]}]
     assert remote_provider._hot_reloadable(live, external, record) is True

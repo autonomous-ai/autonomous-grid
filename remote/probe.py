@@ -114,6 +114,59 @@ def probe_responses_endpoint(llm_url: str, *, timeout: float | httpx.Timeout = _
     return resp.status_code in (400, 422)
 
 
+# TypeSafe's System One decision endpoint (`/v1/systemone`), which decision models (Laya on llama.cpp,
+# Nimble on Ollama) answer instead of chat. Authored here and only here: `remote/serve.py` gates on
+# this literal and `systemone_entry` advertises it. Must match grid-src's `endpoint_path` byte-for-byte.
+SYSTEMONE_ENDPOINT = "systemone"
+
+# One question of each type. grid-src's own decision provider asks the same three before it joins
+# (`provider_runtime.engine.systemone.probe_capabilities`), so an engine that passes here passes there.
+_SYSTEMONE_PROBE_QUESTIONS: dict[str, dict[str, Any]] = {
+    "refund": {"type": "noul", "instructions": "Does the customer ask for a refund?"},
+    "team": {"type": "choice", "instructions": "Which team should handle this?",
+             "criteria": {"billing": None, "technical": None}},
+    "urgency": {"type": "score", "instructions": "How urgent is it?", "criteria": ["not urgent", "urgent"]},
+}
+
+
+def probe_systemone(llm_url: str, model: str, *, timeout: float | httpx.Timeout = _PROBE_TIMEOUT) -> bool:
+    """Whether ``model`` answers System One decisions at ``/systemone``.
+
+    A real decision, not a route probe like ``probe_responses_endpoint``: llama.cpp serves the route
+    for every model and refuses it for a chat one, so only an answer says the model can decide. Per
+    MODEL for the same reason — one Ollama serves chat and decision models side by side. Fail closed:
+    a transport failure, a non-200, or an answer missing a question or its probabilities is ``False``.
+    """
+    payload = {"model": model, "state": "The customer asks for a refund today.",
+               "questions": _SYSTEMONE_PROBE_QUESTIONS}
+    body = _post_json(f"{llm_url.rstrip('/')}/{SYSTEMONE_ENDPOINT}", payload, timeout=timeout)
+    answers = body.get("answers") if isinstance(body, dict) else None
+    if not isinstance(answers, dict) or set(answers) != set(_SYSTEMONE_PROBE_QUESTIONS):
+        return False
+    for key, question in _SYSTEMONE_PROBE_QUESTIONS.items():
+        answer = answers[key]
+        if not isinstance(answer, dict) or answer.get("type") != question["type"]:
+            return False
+        if question["type"] == "noul":
+            noul = answer.get("noul")
+            if isinstance(noul, bool) or not isinstance(noul, (int, float)):
+                return False
+        elif not isinstance(answer.get("probabilities"), dict) or not answer["probabilities"]:
+            return False
+    return True
+
+
+def probe_chats(llm_url: str, model: str, *, timeout: float | httpx.Timeout = _PROBE_TIMEOUT) -> bool:
+    """Whether ``model`` answers a one-token chat completion.
+
+    Asked only of a model that passed ``probe_systemone``, to tell a decision-only model (llama.cpp
+    answers its chat requests with a 500) from one that also chats. Every other hardware model is
+    still taken to chat without asking, so this can never cost a chat engine its traffic.
+    """
+    payload = {"model": model, "messages": [{"role": "user", "content": "ok"}], "max_tokens": 1}
+    return _post_chat(llm_url, payload, timeout=timeout) is not None
+
+
 # --- HTTP (routed through httpx.Client so tests can inject a MockTransport) ---
 #
 # Every guard below catches `httpx.InvalidURL` alongside `HTTPError`, because it is NOT a subclass of
@@ -147,7 +200,7 @@ def _post_chat(llm_url: str, payload: dict[str, Any], *, timeout: float | httpx.
 
 def _post_json(url: str, payload: dict[str, Any], *, timeout: float | httpx.Timeout) -> dict[str, Any] | None:
     """POST ``payload`` to an arbitrary URL and return the parsed JSON object, or ``None`` on any
-    transport / non-200 / non-JSON response (used for Ollama's native ``/api/show``)."""
+    transport / non-200 / non-JSON response (Ollama's native ``/api/show``, the System One probe)."""
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(url, json=payload)
@@ -526,6 +579,21 @@ def unprobed_entry(context_window: int | None = None) -> dict[str, Any]:
     costs the engine its entire registration.
     """
     return capability_entry({key: False for key in PROBED_FEATURES}, context_window)
+
+
+def systemone_entry() -> dict[str, Any]:
+    """The capability entry for a decision-only model: ``systemone`` and nothing else.
+
+    The shape grid-src's own decision provider registers. No chat features, not even ``False`` ones:
+    none of them mean anything for a model that cannot generate text, and a System One request asks
+    nothing of an engine beyond the endpoint.
+    """
+    return {
+        "endpoints": [SYSTEMONE_ENDPOINT],
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "features": {},
+    }
 
 
 def envelope(

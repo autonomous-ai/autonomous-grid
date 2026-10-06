@@ -39,6 +39,15 @@ CATALOG: tuple[CatalogEntry, ...] = (
         notes="Recommended Qwen 3.6 MTP model for NVIDIA CUDA hosts.",
         target=TARGET_NVIDIA,
     ),
+    # A decision model, not a chat model: it answers System One questions (`/v1/systemone` — named
+    # choices, yes/no, scores, as probabilities) and refuses chat. 0.4B parameters, so it runs anywhere.
+    CatalogEntry(
+        hf_repo="ggml-org/Laya-GGUF",
+        quantized_file="Laya-Q8_0.gguf",
+        min_vram_gb=1,
+        kind="decision",
+        notes="Laya (English) decision model for /v1/systemone; it does not chat.",
+    ),
 )
 
 
