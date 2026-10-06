@@ -182,6 +182,9 @@ def _stamp_own_pid(grid_id: str, engine_id: str) -> None:
                 # reloaded into an older child would be advertised as chat and every decision refused,
                 # so the join respawns any child that does not say this (`_hot_reloadable`).
                 serves_systemone=True,
+                # And that its reload keeps the built-in engines it runs: an older child refuses a reload with
+                # any, so the join respawns it — reloading a running chat model for an engine joining beside it.
+                reloads_builtins=True,
             )
             # Declare, before any socket is opened, that this build reports service truth (issue 10).
             # The sidecar's ABSENCE is what keeps the join gate quiet about an older build's child, so
@@ -541,6 +544,17 @@ def _flat_spec(record: dict[str, Any]) -> dict[str, Any]:
         "endpoint_url": record.get("endpoint_url"),
         "models": list(record.get("models") or []),
         "engine_label": record.get("engine_label"),
+    }
+
+
+def _builtin_urls(record: dict[str, Any], engine_results: _EngineResults) -> dict[str, str]:
+    """Where each built-in engine of [record] answers, keyed by `run_records.builtin_key`. Bring-up resolves the
+    record's specs in order, one result each (`_bring_up_engines`), so the two line up."""
+    specs = record.get("engines") or [_flat_spec(record)]
+    return {
+        run_records.builtin_key(spec, record): result[0]
+        for spec, result in zip(specs, engine_results, strict=False)
+        if run_records.is_builtin(spec)
     }
 
 
@@ -1494,6 +1508,9 @@ class _ServeState:
         # The probe results the live snapshot was built from, kept so a reload probes only newly-added
         # engines (ADR 0010 D4 F6). Reload-owned: set at startup, thereafter only the reload loop writes.
         self._engine_results: _EngineResults = []
+        # The address of each built-in engine this process launched, by `run_records.builtin_key`. A reload
+        # keeps one the re-read record still names unchanged — it launches and stops nothing. Set at startup.
+        self.builtin_urls: dict[str, str] = {}
         # This box's media (comfyui:*) model names + a fingerprint of the media config the process
         # brought up. A hot-reload can't launch/teardown media or swap bundles, so a reload whose re-read
         # record differs here is refused — the CLI respawns instead (ADR 0010 D4 F6 / C3). Set at startup.
@@ -1997,8 +2014,12 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
     )
     # These refusals mean the CLI signalled something it should have respawned (or a manual SIGHUP) —
     # surface them, don't hide behind GRID_ENGINE_DEBUG (the CLI already reported the join/leave).
-    if any(not spec.get("endpoint_url") for spec in specs):
-        _warn("reload: record needs a built-in launch; refusing (respawn required)")
+    # A built-in engine is this process's own, and a reload neither launches nor stops one: those running
+    # keep serving where they are, so another engine can join or leave beside a running chat model without
+    # reloading it. A built-in the record adds, changes or drops needs a respawn.
+    builtin_specs = [spec for spec in specs if run_records.is_builtin(spec)]
+    if {run_records.builtin_key(spec, record) for spec in builtin_specs} != set(state.builtin_urls):
+        _warn("reload: record adds, changes or drops a built-in engine; refusing (respawn required)")
         return
     # Several aliased engines are fine: each spec carries its own aliases (ADR 0045), and a record that
     # doesn't — one written before that — only ever aliased a sole engine (`run_records.spec_aliases`).
@@ -2019,6 +2040,15 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
     # the front; see the branch comment below, which this must not contradict.)
     deadline = bringup.probe_deadline()
     for spec in specs:
+        if run_records.is_builtin(spec):
+            # Running as it was launched — its alias is a launch argument — so it keeps exactly the routing
+            # and caps it serves with now.
+            running = retained.get(state.builtin_urls[run_records.builtin_key(spec, record)])
+            if running is None:
+                _warn("reload: a running built-in engine has no routing to keep; refusing (respawn required)")
+                return
+            reassembled.append(running)
+            continue
         url = (spec.get("endpoint_url") or "").rstrip("/")
         models = list(spec.get("models") or [])
         api_kind = spec.get("api_kind")
@@ -3297,6 +3327,7 @@ def _start_reload_watcher(
     inherits the block and the signal lands on the main thread — then unblocks it on main afterwards.
     """
     state._engine_results = engine_results
+    state.builtin_urls = _builtin_urls(record, engine_results)
     state.media_models = list(media_models)
     state.media_signature = _media_signature(record)
     if hasattr(signal, "SIGHUP"):
