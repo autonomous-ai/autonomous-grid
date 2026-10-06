@@ -14,6 +14,7 @@ the same atomic, ``0o600`` writer ``local/config`` re-exports — so local behav
 """
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -330,6 +331,19 @@ def builtin_launch(spec: dict[str, Any], record: dict[str, Any]) -> dict[str, An
     own = spec.get("launch")
     source = own if isinstance(own, dict) else record
     return {field: source.get(field) for field in BUILTIN_LAUNCH_FIELDS}
+
+
+def is_builtin(spec: dict[str, Any]) -> bool:
+    """Whether ``spec`` is a built-in (``--serve``) engine: one this identity's serve child launches itself."""
+    return not spec.get("endpoint_url") and not spec.get("api_kind")
+
+
+def builtin_key(spec: dict[str, Any], record: dict[str, Any]) -> str:
+    """A built-in engine as its process runs it — its model and launch settings. A hot reload keeps an engine
+    whose key it still finds; anything else about a built-in needs its process started or stopped, which only
+    a respawn does. Shared by the CLI's reload gate and the serve child's reload, so the two can't disagree."""
+    return json.dumps({"models": list(spec.get("models") or []), "launch": builtin_launch(spec, record)},
+                      sort_keys=True, default=str)
 
 
 def spec_aliases(spec: dict[str, Any], record: dict[str, Any], spec_count: int) -> list[str]:
