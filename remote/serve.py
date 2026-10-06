@@ -75,6 +75,15 @@ _ALLOWED_ENDPOINTS = frozenset({"chat/completions", "completions"})
 # authored literal is included, never WHAT it is, so nothing discovered over the network reaches URL
 # construction. Must match grid-src's `endpoint_path` byte-for-byte (CLAUDE.md lockstep).
 _RESPONSES_ENDPOINT = "responses"
+# System One decisions: composed onto a hardware model's served set only when ITS join-time probe got a
+# decision back (per model, not per engine — one Ollama serves chat and decision models side by side).
+# The same authored-literal rule as `_RESPONSES_ENDPOINT`; the literal lives with the probe that earns it.
+_SYSTEMONE_ENDPOINT = probe.SYSTEMONE_ENDPOINT
+# The model names TypeSafe's and OpenJev's SDKs send by default, so an unmodified Jev client reaches this
+# node's decision model by them, as grid-src's own decision provider does. Hand-duplicated with grid-src
+# `private_server/systemone_contract.DEFAULT_MODEL_ALIASES`, which keeps them out of `/models`: they are
+# names to reach a model by, not models to pick from a list.
+_SYSTEMONE_ALIASES = ("default", "laya", "jev-latest", "jev-preview", "openjev-latest")
 _MEDIA_ENDPOINTS = frozenset({"media/image/generate", "media/image/edit", "media/video/i2v"})
 
 # The proactive rotation's due-conditions (ADR 0015 D-d), evaluated on the heartbeat tick so an
@@ -169,6 +178,10 @@ def _stamp_own_pid(grid_id: str, engine_id: str) -> None:
                 # running child it did not spawn, so only the child can vouch that its reload reads each
                 # engine's own aliases (ADR 0045). An older child never says it, and is respawned instead.
                 per_engine_aliases=True,
+                # Likewise that it probes and serves System One decision models: a decision model
+                # reloaded into an older child would be advertised as chat and every decision refused,
+                # so the join respawns any child that does not say this (`_hot_reloadable`).
+                serves_systemone=True,
             )
             # Declare, before any socket is opened, that this build reports service truth (issue 10).
             # The sidecar's ABSENCE is what keeps the join gate quiet about an older build's child, so
@@ -1002,9 +1015,17 @@ def _probe_spec_caps(
             raise bringup.ProbeBudgetExceeded(
                 {"schema_version": 1, "models": caps_models} if caps_models else {}, advertised[index:]
             )
+        model_endpoints = endpoints
+        if probe.probe_systemone(llm_url, upstream_model):
+            if not probe.probe_chats(llm_url, upstream_model):
+                # A decision model (Laya on llama.cpp): it answers System One and refuses chat, so it
+                # advertises exactly that and skips the chat feature probes it could only fail.
+                caps_models[advertised_model] = probe.systemone_entry()
+                continue
+            model_endpoints = [*endpoints, _SYSTEMONE_ENDPOINT]
         env = probe.capabilities(
             llm_url, upstream_model, advertise_as=advertised_model, context_window=ctx_size,
-            endpoints=endpoints, honours_output_cap=serves_responses,
+            endpoints=model_endpoints, honours_output_cap=serves_responses,
         )
         caps_models.update((env or {}).get("models") or {})
     return {"schema_version": 1, "models": caps_models} if caps_models else {}
@@ -1050,8 +1071,34 @@ def _build_routing(
             union_models.append(model)
             if model in caps_models:
                 merged_models[model] = caps_models[model]
+    _route_systemone_aliases(routes, upstream_routes, union_models, merged_models)
     merged_caps = {"schema_version": 1, "models": merged_models} if merged_models else {}
     return routes, upstream_routes, union_models, merged_caps, warnings
+
+
+def _route_systemone_aliases(
+    routes: dict[str, str], upstream_routes: dict[str, str], union_models: list[str],
+    caps_models: dict[str, Any],
+) -> None:
+    """Answer Jev's default model names (``_SYSTEMONE_ALIASES``) with this node's first decision-only
+    model, in place. Each alias is registered like a model — its route, upstream name and the same
+    caps entry — because the relay requires a caps key for every advertised name. Only a decision-only
+    model lends them: an alias of a model that also chats would be listed in `/models` as a chat model.
+    A name a real model already uses is left alone; an alias never shadows a model."""
+    decider = next(
+        (model for model in union_models
+         if (caps_models.get(model) or {}).get("endpoints") == [_SYSTEMONE_ENDPOINT]),
+        None,
+    )
+    if decider is None:
+        return
+    for alias in _SYSTEMONE_ALIASES:
+        if alias in routes:
+            continue
+        routes[alias] = routes[decider]
+        upstream_routes[alias] = upstream_routes[decider]
+        union_models.append(alias)
+        caps_models[alias] = caps_models[decider]
 
 
 def _merge_media(
@@ -2065,8 +2112,20 @@ def _hardware_serves_responses(snap: _Snapshot, model: str | None, target: str) 
     return isinstance(endpoints, list) and _RESPONSES_ENDPOINT in endpoints
 
 
+def _model_serves_systemone(snap: _Snapshot, model: str | None) -> bool:
+    """Whether the routed model answers System One decisions — read from ITS caps entry only.
+
+    Unlike ``_hardware_serves_responses`` there is no fallback to another model on the same engine:
+    deciding is a property of the model (an Ollama serves chat and decision models side by side), so a
+    model with no caps entry of its own — the single-engine fallback — is refused, never guessed.
+    Defensive like its sibling: a non-dict entry or non-list ``endpoints`` reads as "no"."""
+    entry = (snap.capabilities.get("models") or {}).get(model)
+    endpoints = entry.get("endpoints") if isinstance(entry, dict) else None
+    return isinstance(endpoints, list) and _SYSTEMONE_ENDPOINT in endpoints
+
+
 def _served_endpoints(
-    api_kind: str | None, *, hardware_serves_responses: bool = False,
+    api_kind: str | None, *, hardware_serves_responses: bool = False, hardware_serves_systemone: bool = False,
 ) -> tuple[str, ...] | frozenset[str]:
     """The relay endpoints the routed engine serves. An API kind keeps ADR 0015 D-b's per-KIND matrix:
     it serves exactly its whitelist row's endpoints (openai ⇒ chat/completions, codex ⇒ responses),
@@ -2077,11 +2136,15 @@ def _served_endpoints(
     decision 1): the closed ``_ALLOWED_ENDPOINTS`` chat pair, plus the authored ``responses`` literal
     composed on ONLY when this engine's join-time probe found the route (``hardware_serves_responses``).
     ``_ALLOWED_ENDPOINTS`` itself is never widened — the served set stays a closed set of fixed literals
-    checked before any URL is built (decision 3)."""
+    checked before any URL is built (decision 3). The authored ``systemone`` literal composes on the
+    same way, when the routed MODEL's own probe got a decision back (``hardware_serves_systemone``)."""
     if not api_kind:
+        served = _ALLOWED_ENDPOINTS  # composed with `|` below, so the closed frozenset itself is never touched
         if hardware_serves_responses:
-            return _ALLOWED_ENDPOINTS | {_RESPONSES_ENDPOINT}  # frozenset | set → frozenset; the closed set is unchanged
-        return _ALLOWED_ENDPOINTS
+            served = served | {_RESPONSES_ENDPOINT}
+        if hardware_serves_systemone:
+            served = served | {_SYSTEMONE_ENDPOINT}
+        return served
     whitelist = api_catalog.WHITELISTS.get(api_kind)
     return whitelist.endpoints if whitelist else ("chat/completions",)
 
@@ -2199,6 +2262,7 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     served = _served_endpoints(
         api_kind,
         hardware_serves_responses=api_kind is None and _hardware_serves_responses(snap, model, target),
+        hardware_serves_systemone=api_kind is None and _model_serves_systemone(snap, model),
     )
     if endpoint not in served:
         if api_kind:
@@ -2271,6 +2335,11 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
             # concern and there is no stream here. `_forward_whole` already answers a non-200 with a
             # terminal signal, so the same caller obligation is met. The codex seat never reaches this
             # arm: it is stream-only and refuses a non-stream job at the per-kind gate above.
+            _forward_whole(state, txn, endpoint, forward_body, read_timeout, target,
+                           headers=_forward_headers(state, target, snap), api_kind=api_kind)
+        elif endpoint == _SYSTEMONE_ENDPOINT:
+            # A decision is one JSON object; the relay refuses a streaming System One request before
+            # it queues, so the whole-body forward serves it whatever the job's stream flag says.
             _forward_whole(state, txn, endpoint, forward_body, read_timeout, target,
                            headers=_forward_headers(state, target, snap), api_kind=api_kind)
         elif is_stream:
@@ -2655,8 +2724,9 @@ def _forward_whole(
         _try_submit_error(state, txn, f"engine error {resp.status_code}: {resp.text[:200]}")
         return
     # Every caller of this forward is a text dialect (chat, anthropic /messages, non-stream
-    # responses) — media never reaches here — so the reply always has a usage object to read, in one
-    # spelling or another. Measured before the submit so a relay-side failure doesn't cost the sample.
+    # responses, System One) — media never reaches here — so the reply always has a usage object to
+    # read, in one spelling or another (a decision's has no output tokens, so it yields no sample).
+    # Measured before the submit so a relay-side failure doesn't cost the sample.
     state.set_throughput(throughput.whole_body_tok_s(resp.content, time.monotonic() - started))
     _submit_response(state, txn, content=resp.content, stream=False)
 

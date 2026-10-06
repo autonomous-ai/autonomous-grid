@@ -91,6 +91,21 @@ def read_context_length(path: str | Path) -> int | None:
         return None
 
 
+def decision_type(path: str | Path) -> str | None:
+    """The file's ``<arch>.decision.type`` (``laya``, ``kev``, …), or ``None`` for a chat model.
+
+    A decision model answers TypeSafe's System One questions at ``/v1/systemone`` and cannot chat;
+    llama.cpp reads this key to switch the server into that mode. Unreadable files return ``None``.
+    """
+    try:
+        for key, val in _iter_kv(path):
+            if key.endswith(".decision.type") and isinstance(val, str) and val:
+                return val
+        return None
+    except Exception:
+        return None
+
+
 def is_projector(path: str | Path) -> bool:
     """True when the file is a multimodal projector (an ``mmproj``), not a language model.
 

@@ -46,19 +46,19 @@ class MacosBuild:
     sha256: str
 
 
-LLAMA_RELEASE = "b10369"
+LLAMA_RELEASE = "b11378"
 _RELEASE_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_RELEASE}"
 
 MACOS_BUILDS: dict[str, MacosBuild] = {
     "arm64": MacosBuild(
         label="macos-arm64",
         url=f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_RELEASE}/llama-{LLAMA_RELEASE}-bin-macos-arm64.tar.gz",
-        sha256="de2ac2c0a7cc245bce2411393658ff19c9c00d9d1fe37c5dfe94668c0d7bc01f",
+        sha256="d17911a00ba2023fab962167f4f49db5de9177ccae87dcdd99a018eddd184077",
     ),
     "x86_64": MacosBuild(
         label="macos-x64",
         url=f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_RELEASE}/llama-{LLAMA_RELEASE}-bin-macos-x64.tar.gz",
-        sha256="3cd137ae474fe4a55dcbcf319b94b36fe136571e6ca680d3eb8a175aa6ff1717",
+        sha256="1040550248b6c081cfcb9ad07e4a32893f0e4352a158d54de98063b0b660f125",
     ),
 }
 
@@ -73,22 +73,22 @@ LINUX_BUILDS: dict[tuple[str, str], LinuxBuild] = {
     ("vulkan", "x86_64"): LinuxBuild(
         label="linux-vulkan-x64",
         url=f"{_RELEASE_BASE}/{_linux_asset('vulkan', 'x86_64')}",
-        sha256="baa1deb5adda0baf72fc9d213d657b8388997d0e20b1a0e8bea48ff91b5cad00",
+        sha256="199e1810b044cb8c298a0b11d28899600822362ce290d2bcb3bd95be6672e766",
     ),
     ("vulkan", "aarch64"): LinuxBuild(
         label="linux-vulkan-arm64",
         url=f"{_RELEASE_BASE}/{_linux_asset('vulkan', 'aarch64')}",
-        sha256="12f09eb4dc7df11940deda07329bf6b0bb643bf5aad323b8af778689528187f4",
+        sha256="a523126222693dfae6bca7021e1dfbb6e619726fe367409e272ef32aca517738",
     ),
     ("cpu", "x86_64"): LinuxBuild(
         label="linux-cpu-x64",
         url=f"{_RELEASE_BASE}/{_linux_asset('cpu', 'x86_64')}",
-        sha256="675a266f6cc8a8c7b85dc431a2472e372d0ff3741b7f4eb153dc786dff3964d1",
+        sha256="0241f12a0fe64bb26683158d32ca0a8a61a3d1fcfd856b22d6d62b93bacbdaef",
     ),
     ("cpu", "aarch64"): LinuxBuild(
         label="linux-cpu-arm64",
         url=f"{_RELEASE_BASE}/{_linux_asset('cpu', 'aarch64')}",
-        sha256="7a806180a5136358b76cc654eebf98efb6c7d6b0f6879a55e69697d944bd91f1",
+        sha256="4d9c1187ae7bd3acb2555815424adbc6238aed6e666f6ae12c9c3c6dac297dbb",
     ),
 }
 

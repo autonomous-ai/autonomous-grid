@@ -574,7 +574,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         print(f"(hot-reloaded — no in-flight requests dropped; stop with `grid leave {quoted_label}`)")
         if advertised:
             print("\nNext:")
-            for line in provider.chat_hints(advertised[0], provider.serves_vision(args)):
+            for line in _next_hints(args, advertised[0], quoted_label):
                 print(line)
     else:
         # The relay isn't locally pollable, so we can't confirm "registered" here — report starting.
@@ -584,9 +584,19 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         print("\nNext:")
         print(f"  grid models {quoted_label}")
         if advertised:
-            for line in provider.chat_hints(advertised[0], provider.serves_vision(args)):
+            for line in _next_hints(args, advertised[0], quoted_label):
                 print(line)
     return 0
+
+
+def _next_hints(args: argparse.Namespace, model: str, quoted_label: str) -> list[str]:
+    """What to try with the model just joined: a decision for a decision model, which refuses
+    chat — its `grid chat` line would only ever fail — else the chat line(s)."""
+    from . import provider
+
+    if provider.serves_decisions(args):
+        return provider.decision_hints(model, quoted_label)
+    return provider.chat_hints(model, provider.serves_vision(args))
 
 
 def _resolve_api_targets(
@@ -1266,6 +1276,12 @@ def _hot_reloadable(
         return False
     if singleton.get("reload_signal") != "sighup":  # a pre-Slice-2 process has no SIGHUP handler (C1)
         return False
+    # A child older than System One support neither probes nor serves decision models: one reloaded into
+    # it would be advertised as chat and every decision refused, while the join had said it was serving.
+    # Only a child that stamped `serves_systemone` itself (remote/serve `_stamp_own_pid`) takes a reload;
+    # an older one respawns ONCE, onto this build — the first join after an upgrade, never again.
+    if singleton.get("serves_systemone") is not True:
+        return False
     # A spec that needs a PROCESS started cannot be hot-reloaded — a reload re-advertises models
     # but launches nothing. That is a built-in `--serve`, and equally a CLI seat, whose loopback
     # server the serve loop starts at spawn. Reloading one would advertise its models against a
@@ -1476,6 +1492,12 @@ def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, obj
             raise SystemExit("--at requires at least one -m/--model naming what that engine serves.")
         return [{"endpoint_url": args.at, "models": list(args.models), "engine_label": None}], False
     if args.serve:
+        from pathlib import Path
+
+        from shared.engine import launcher
+
+        # Here, not only in the serve child: refused there, the join would print "starting" first.
+        launcher.assert_serves(paths.models_dir() / Path(args.serve).name)
         return [{
             "endpoint_url": None, "models": [args.serve], "engine_label": None,
             # Its own settings, so a later join's flags retune only the engine that join names (ADR 0045).
