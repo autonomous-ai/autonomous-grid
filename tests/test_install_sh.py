@@ -149,3 +149,74 @@ def test_installer_never_calls_the_github_api():
         "install.sh must never call api.github.com: shared-NAT IPs exhaust its "
         f"60 req/hr limit and every install behind them 403s. Offending lines: {offenders}"
     )
+
+
+# --- latest_release_tag(): only a CLI release is "the latest grid" -------------------------------
+#
+# Since grid-platform ticket 12 this repository also publishes `protocol-vX.Y.Z` releases (the
+# grid-protocol wheel). They are never marked Latest, so the /releases/latest redirect skips them —
+# but the Atom fallback took the NEWEST release of any kind, so the first protocol release cut after
+# a CLI release would have been "installed" as grid (a wheel URL that 404s, or worse, the wrong
+# package). Both sources must yield a `v<digit>…` tag or nothing.
+
+STUB_CURL_RELEASES = """#!/bin/bash
+for arg in "$@"; do
+  case "$arg" in
+    */releases/latest) printf '%s' "${STUB_REDIRECT:-}"; exit 0 ;;
+    */releases.atom) cat "$STUB_ATOM"; exit 0 ;;
+  esac
+done
+exit 22
+"""
+
+
+def _atom(*tags: str) -> str:
+    entries = "".join(
+        f'<entry><link rel="alternate" type="text/html" '
+        f'href="https://github.com/autonomous-ai/autonomous-grid/releases/tag/{t}"/></entry>'
+        for t in tags
+    )
+    return f'<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">{entries}</feed>'
+
+
+def _latest_release_tag(tmp_path: Path, redirect: str, atom: str) -> str:
+    """Run install.sh's own latest_release_tag() — cut out of the real file — against a stub curl."""
+    text = INSTALL_SH.read_text()
+    start = text.index("latest_release_tag() {")
+    function = text[start:text.index("\n}\n", start) + 3]
+    stubbin = tmp_path / "stubbin"
+    stubbin.mkdir(exist_ok=True)
+    _write_exe(stubbin / "curl", STUB_CURL_RELEASES)
+    feed = tmp_path / "releases.atom"
+    feed.write_text(atom)
+    res = subprocess.run(
+        ["bash", "-c", f'OWNER=autonomous-ai; REPO=autonomous-grid\n{function}\nlatest_release_tag'],
+        env={"PATH": f"{stubbin}:/usr/bin:/bin", "STUB_REDIRECT": redirect, "STUB_ATOM": str(feed)},
+        capture_output=True, text=True, timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+    return res.stdout
+
+
+RELEASES = "https://github.com/autonomous-ai/autonomous-grid/releases/tag/"
+
+
+def test_latest_release_tag_follows_the_latest_redirect(tmp_path):
+    assert _latest_release_tag(tmp_path, RELEASES + "v0.3.56", _atom("v0.3.56")) == "v0.3.56"
+
+
+def test_atom_fallback_skips_a_newer_protocol_release(tmp_path):
+    """The redirect came back empty; the newest release in the feed is a protocol one."""
+    feed = _atom("protocol-v0.2.0", "v0.3.56", "v0.3.55", "protocol-v0.1.0")
+    assert _latest_release_tag(tmp_path, "", feed) == "v0.3.56"
+
+
+def test_a_protocol_release_marked_latest_is_not_installed_as_grid(tmp_path):
+    """Somebody ticks "Latest" on a protocol release: the redirect must not be believed."""
+    feed = _atom("protocol-v0.2.0", "v0.3.56")
+    assert _latest_release_tag(tmp_path, RELEASES + "protocol-v0.2.0", feed) == "v0.3.56"
+
+
+def test_no_cli_release_at_all_resolves_to_nothing(tmp_path):
+    """Empty, so the caller's own `die` names GRID_VERSION — never a protocol tag."""
+    assert _latest_release_tag(tmp_path, "", _atom("protocol-v0.1.0")) == ""

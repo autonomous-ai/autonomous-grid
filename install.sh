@@ -53,14 +53,19 @@ sha256_of() {
 # 403s. Both sources below go through github.com, which is NOT rate-limited:
 #   1) the redirect of /releases/latest  ->  /releases/tag/<tag>
 #   2) fallback: the releases Atom feed (newest entry first)
+# Only a CLI release (`v<digit>…`) counts. This repository also publishes `protocol-vX.Y.Z`
+# releases (the grid-protocol wheel): never marked Latest, but the newest entry in the feed
+# whenever one is cut after a CLI release — so the feed is filtered, and a redirect to a
+# non-CLI tag (a protocol release ticked "Latest" by hand) is not believed either.
 latest_release_tag() {
   local loc tag
   loc="$(curl -fsS --proto '=https' --tlsv1.2 -o /dev/null \
            -w '%{redirect_url}' "https://github.com/$OWNER/$REPO/releases/latest" 2>/dev/null || true)"
   tag="${loc##*/}"; tag="${tag%%\?*}"
+  case "$tag" in v[0-9]*) ;; *) tag="" ;; esac
   if [ -z "$tag" ]; then
     tag="$(curl -fsSL --proto '=https' "https://github.com/$OWNER/$REPO/releases.atom" 2>/dev/null \
-            | grep -oE '/releases/tag/[^"<]+' | head -1 || true)"
+            | grep -oE '/releases/tag/v[0-9][^"<]*' | head -1 || true)"
     tag="${tag##*/}"
   fi
   printf '%s' "$tag"
