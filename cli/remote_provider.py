@@ -565,7 +565,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         print(f"(hot-reloaded — no in-flight requests dropped; stop with `grid leave {quoted_label}`)")
         if advertised:
             print("\nNext:")
-            for line in provider.chat_hints(advertised[0], provider.serves_vision(args)):
+            for line in _next_hints(args, advertised[0], quoted_label):
                 print(line)
     else:
         # The relay isn't locally pollable, so we can't confirm "registered" here — report starting.
@@ -575,9 +575,19 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         print("\nNext:")
         print(f"  grid models {quoted_label}")
         if advertised:
-            for line in provider.chat_hints(advertised[0], provider.serves_vision(args)):
+            for line in _next_hints(args, advertised[0], quoted_label):
                 print(line)
     return 0
+
+
+def _next_hints(args: argparse.Namespace, model: str, quoted_label: str) -> list[str]:
+    """What to try with the model just joined: a decision for a decision model, which refuses
+    chat — its `grid chat` line would only ever fail — else the chat line(s)."""
+    from . import provider
+
+    if provider.serves_decisions(args):
+        return provider.decision_hints(model, quoted_label)
+    return provider.chat_hints(model, provider.serves_vision(args))
 
 
 def _resolve_api_targets(
@@ -1245,10 +1255,11 @@ def _hot_reloadable(
 ) -> bool:
     """Whether this update can be SIGHUP-hot-reloaded into the live singleton (zero-drop) instead of a
     stop-respawn. True only when the SOLE live process is the singleton, it was started by a build that
-    installs the SIGHUP reload handler (``reload_signal``), the merged union is external-only, the
-    media config is unchanged, and the effective poll-worker count doesn't flip. Everything else — a
-    first join, a legacy/pre-handler sibling, a built-in ``--serve`` launch, any media/bundle change,
-    or a concurrency-default flip — still respawns (ADR 0010 D3 / C1 / C3).
+    installs the SIGHUP reload handler (``reload_signal``), the merged union's built-in engines are
+    exactly the ones it already runs (none, or unchanged — and it says it keeps them), the media config
+    is unchanged, and the effective poll-worker count doesn't flip. Everything else — a first join, a
+    legacy/pre-handler sibling, a built-in ``--serve`` launch or change, any media/bundle change, or a
+    concurrency-default flip — still respawns (ADR 0010 D3 / C1 / C3).
     """
     if len(live) != 1:
         return False
@@ -1257,11 +1268,32 @@ def _hot_reloadable(
         return False
     if singleton.get("reload_signal") != "sighup":  # a pre-Slice-2 process has no SIGHUP handler (C1)
         return False
+    # A child older than System One support neither probes nor serves decision models: one reloaded into
+    # it would be advertised as chat and every decision refused, while the join had said it was serving.
+    # Only a child that stamped `serves_systemone` itself (remote/serve `_stamp_own_pid`) takes a reload;
+    # an older one respawns ONCE, onto this build — the first join after an upgrade, never again.
+    if singleton.get("serves_systemone") is not True:
+        return False
     # A spec that needs a PROCESS started cannot be hot-reloaded — a reload re-advertises models
-    # but launches nothing. That is a built-in `--serve`, and equally a CLI seat, whose loopback
-    # server the serve loop starts at spawn. Reloading one would advertise its models against a
-    # port with nothing listening.
-    if any(not spec.get("endpoint_url") or _needs_local_process(spec) for spec in merged_specs):
+    # but launches nothing. That is a CLI seat, whose loopback server the serve loop starts at spawn:
+    # reloading one would advertise its models against a port with nothing listening.
+    if any(_needs_local_process(spec) for spec in merged_specs):
+        return False
+    # And a built-in `--serve` engine is the child's own process, which a reload neither launches nor
+    # stops. A child that says it keeps the ones it runs (`reloads_builtins`, remote/serve._reload_once)
+    # takes a reload whose built-ins are exactly those, unchanged: an engine joining or leaving beside a
+    # running chat model used to respawn the identity, reloading the whole model. A built-in added,
+    # changed or dropped — or an older child — respawns.
+    builtins = sorted(
+        run_records.builtin_key(spec, record) for spec in merged_specs if run_records.is_builtin(spec)
+    )
+    live_specs = singleton.get("engines")
+    running = sorted(
+        run_records.builtin_key(spec, singleton)
+        for spec in (live_specs if isinstance(live_specs, list) else [])
+        if isinstance(spec, dict) and run_records.is_builtin(spec)
+    )
+    if (builtins or running) and (singleton.get("reloads_builtins") is not True or builtins != running):
         return False
     # An older child reads one flat alias list and refuses a union with several aliased engines — after
     # this CLI had already printed "hot-reloaded". Only a child that stamped `per_engine_aliases` itself
@@ -1466,6 +1498,12 @@ def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, obj
             raise SystemExit("--at requires at least one -m/--model naming what that engine serves.")
         return [{"endpoint_url": args.at, "models": list(args.models), "engine_label": None}], False
     if args.serve:
+        from pathlib import Path
+
+        from shared.engine import launcher
+
+        # Here, not only in the serve child: refused there, the join would print "starting" first.
+        launcher.assert_serves(paths.models_dir() / Path(args.serve).name)
         return [{
             "endpoint_url": None, "models": [args.serve], "engine_label": None,
             # Its own settings, so a later join's flags retune only the engine that join names (ADR 0045).

@@ -517,6 +517,32 @@ engine given the same alias, fails the join before anything is restarted.) See
 [ADR 0008](./adr/0008-remote-media-serve.md), and
 [ADR 0045](./adr/0045-one-machine-serves-several-models-on-a-grid.md).
 
+### Decision models (`/relay/v1/systemone`)
+
+A **decision model** does not chat. It answers TypeSafe's System One API — a `state` plus named
+questions, each a `choice`, a yes/no `noul` or an ordered `score` — with probabilities, and the
+relay serves it at `/relay/v1/systemone`. Join one like any other model (remote mode):
+
+```bash
+grid pull ggml-org/Laya-GGUF:Laya-Q8_0.gguf     # in `grid catalog`, marked `decision`
+grid join --serve Laya-Q8_0.gguf                # or --at an Ollama >= 0.35 serving a decision model
+```
+
+- **No flag says "decision".** At join every model is asked one real three-question decision; a
+  model that answers advertises `systemone`, and only `systemone` if it then refuses a one-token
+  chat. Chat models are never asked to chat, so nothing changes for them.
+- **The first join after upgrading restarts the running engine once.** An engine started by an
+  older `grid` cannot serve decision models, so a join respawns it instead of hot-reloading it;
+  every join after that hot-reloads as before.
+- **It needs llama.cpp b11361 or newer** (the build that added `/v1/systemone`). `grid join --serve`
+  refuses a decision GGUF on an older engine and names the fix: `grid engine install llama.cpp`.
+- **Jev's default model names reach it.** The names TypeSafe's and OpenJev's SDKs send by default —
+  `default`, `laya`, `jev-latest`, `jev-preview`, `openjev-latest` — route to the engine's first
+  decision model, so an unmodified Jev client works. They never shadow a real model, and the relay
+  keeps them out of `grid models`.
+- **One JSON answer, never a stream**, and no image questions yet (the relay accepts `model`,
+  `state` and `questions` only).
+
 ## Models
 
 ```

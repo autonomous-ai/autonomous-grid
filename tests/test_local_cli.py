@@ -7622,8 +7622,15 @@ def _mock_remote_spawn(monkeypatch, *, pid=4242):
             spawned["env"] = kw.get("env") or {}
         return type("P", (), {"pid": pid})()
 
+    def fake_started(*a, **k):
+        # What the child of this build stamps into its own record once it runs (remote/serve
+        # `_stamp_own_pid`) — after the join's own write, which is why it lands here and not at spawn.
+        if "cmd" in spawned and run_records.read_record(*spawned["cmd"][-2:]) is not None:
+            run_records.update_record(*spawned["cmd"][-2:], serves_systemone=True)
+        return "starting"
+
     monkeypatch.setattr(cli.remote_provider.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", lambda *a, **k: "starting")
+    monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", fake_started)
     monkeypatch.setattr(cli.remote_provider.os, "kill", lambda p, s: spawned["signals"].append((p, s)))
     return spawned
 
@@ -9997,6 +10004,7 @@ def _seed_remote_identity(monkeypatch, tmp_path, engines, *, pid=4242, media=Fal
     run_records.write_record("n1", "remote", {
         "engine_id": "remote", "grid_id": "n1", "pid": pid, "media": media,
         "reload_signal": reload_signal,  # a Slice-2 identity supports SIGHUP hot-reload; None = pre-handler
+        "serves_systemone": True,  # what a child of this build stamps itself (remote/serve._stamp_own_pid)
         "signaling_url": "https://relay.example", "meta_name": "mybox",
         "engines": engines,
         "models": list(dict.fromkeys(m for e in engines for m in e.get("models") or [])),
@@ -10014,7 +10022,7 @@ def _seed_live_identity_record(*, pid, engines, grid_id="n1", **fields):
 
     run_records.write_record(grid_id, "remote", {
         "engine_id": "remote", "grid_id": grid_id, "pid": pid, "media": False,
-        "reload_signal": "sighup",
+        "reload_signal": "sighup", "serves_systemone": True,
         "signaling_url": "https://relay.example", "meta_name": "mybox",
         "engines": engines,
         "models": list(dict.fromkeys(m for e in engines for m in e.get("models") or [])),
@@ -15246,6 +15254,7 @@ def test_stamp_own_pid_says_this_child_reads_each_engines_aliases(monkeypatch, t
     serve._stamp_own_pid("n1", "remote")
 
     assert run_records.read_record("n1", "remote")["per_engine_aliases"] is True
+    assert run_records.read_record("n1", "remote")["serves_systemone"] is True
 
 
 def test_stamp_own_pid_preserves_sibling_fields(monkeypatch, tmp_path):
@@ -15271,7 +15280,9 @@ def test_stamp_own_pid_preserves_sibling_fields(monkeypatch, tmp_path):
 
     got = run_records.read_record("n1", "remote")
     # The identity, plus the one thing the child declares about itself (ADR 0045); nothing else moves.
-    identity = set(run_records.identity_stamp(os.getpid())) | {"per_engine_aliases"}
+    identity = set(run_records.identity_stamp(os.getpid())) | {
+        "per_engine_aliases", "serves_systemone", "reloads_builtins",
+    }
     assert got["pid"] == os.getpid()
     assert got["pgid"] == os.getpgrp()
     assert run_records.record_verdict(got) is run_records.RecordVerdict.LIVE_OURS
@@ -15800,6 +15811,66 @@ def test_serve_reload_probes_only_new_engine_and_registers_union(monkeypatch, tm
     assert probed == [("http://e2/v1", "b")]            # only the new engine probed; A reused from retained
     assert state.route("a") == "http://e1/v1" and state.route("b") == "http://e2/v1"
     assert seen["models"] == ["a", "b"]                 # re-registered the full union after the swap
+
+
+_QWEN_BUILTIN = {"endpoint_url": None, "models": ["Qwen-Q5.gguf"], "advertise_as": ["qwen"],
+                 "launch": {"endpoint_port": 64101, "ctx_size": 262144, "parallel": 1}}
+_QWEN_URL = "http://127.0.0.1:64101/v1"
+
+
+def _seed_builtin_reload_state(monkeypatch, tmp_path, engines):
+    """A child serving one built-in engine (a chat model it launched), whose record now says ``engines``."""
+    from shared import run_records
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        (_QWEN_URL, ["qwen"], ["qwen"], {"schema_version": 1, "models": {"qwen": {"vision": True}}}),
+    ], engines=engines)
+    state.builtin_urls = {run_records.builtin_key(_QWEN_BUILTIN, {}): _QWEN_URL}
+    return state
+
+
+def test_serve_reload_keeps_a_running_built_in_engine_and_adds_one_beside_it(monkeypatch, tmp_path):
+    """A Jev model joining beside a chat model the identity runs itself: the reload keeps that built-in
+    engine where it is — its routing and caps — and probes only the new one. A reload used to refuse any
+    record with a built-in, and the respawn that followed reloaded the whole chat model."""
+    from remote import probe, relay, serve
+
+    kev = {"endpoint_url": "http://e2/v1", "models": ["kev"], "engine_label": None}
+    state = _seed_builtin_reload_state(monkeypatch, tmp_path, [_QWEN_BUILTIN, kev])
+    probed = []
+    monkeypatch.setattr(probe, "probe_systemone", lambda url, model, **kw: False)
+    monkeypatch.setattr(probe, "capabilities",
+                        lambda url, model, **kw: probed.append((url, model)) or {"schema_version": 1, "models": {model: {}}})
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+
+    serve._reload_once(state, "remote")
+
+    assert probed == [("http://e2/v1", "kev")]
+    assert state.route("qwen") == _QWEN_URL and state.route("kev") == "http://e2/v1"
+    assert seen["models"] == ["qwen", "kev"]
+
+    # And the Jev model leaving again: the chat model serves on, untouched.
+    from shared import run_records
+    run_records.update_record("n1", "remote", engines=[_QWEN_BUILTIN])
+    serve._reload_once(state, "remote")
+    assert state.route("qwen") == _QWEN_URL and "kev" not in state.models
+    assert seen["models"] == ["qwen"]
+
+
+def test_serve_reload_refuses_a_built_in_it_would_have_to_start_change_or_stop(monkeypatch, tmp_path):
+    """A reload launches and stops nothing, so a record whose built-ins differ from the ones running — one
+    retuned, one added, the running one dropped — keeps the old routing; the CLI respawns for those."""
+    from remote import relay, serve
+
+    kev = {"endpoint_url": "http://e2/v1", "models": ["kev"], "engine_label": None}
+    retuned = {**_QWEN_BUILTIN, "launch": {**_QWEN_BUILTIN["launch"], "ctx_size": 65536}}
+    other = {"endpoint_url": None, "models": ["Other.gguf"], "launch": {"endpoint_port": 8082}}
+    monkeypatch.setattr(relay, "register_node", lambda *a, **kw: pytest.fail("a refused reload re-registered"))
+    for engines in ([retuned, kev], [_QWEN_BUILTIN, other, kev], [kev]):
+        state = _seed_builtin_reload_state(monkeypatch, tmp_path, engines)
+        serve._reload_once(state, "remote")
+        assert state.route("qwen") == _QWEN_URL and state.models == ["qwen"]
 
 
 def test_serve_reload_probes_every_model_of_new_multi_model_engine(monkeypatch, tmp_path):
