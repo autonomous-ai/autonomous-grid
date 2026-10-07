@@ -1,0 +1,13 @@
+{
+  "schema": "refusal",
+  "definition": "GridMasterDown",
+  "request": "POST /nodes/heartbeat",
+  "status": 503,
+  "headers": {},
+  "source": "grid-apis @ 12b6bae, grid_proxy.build_app in-process against a closed port (its own tests/test_proxy_refusals.py harness); the DEV VM has no grid in this state",
+  "sanitized": true,
+  "body": {
+    "detail": "grid's master is down, not asleep, and the platform could not restart it just now — a master that should be running is restarted by the platform; try again in a few minutes",
+    "code": "grid_master_down"
+  }
+}

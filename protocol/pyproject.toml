@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grid-protocol"
+version = "0.1.0"
+description = "The wire contract between the grid relay, the public grid CLI and the harness, as JSON Schema."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+# No runtime dependency on purpose: the public CLI ships as a single binary, and grid-src's master imports
+# `grid_protocol.constants` on every start. Validation is opt-in.
+dependencies = []
+
+[project.optional-dependencies]
+# `referencing` (the cross-file $ref registry) arrived with jsonschema 4.18.
+validate = ["jsonschema>=4.18"]
+
+[tool.setuptools]
+packages = ["grid_protocol"]
+
+[tool.setuptools.package-data]
+grid_protocol = ["schemas/*.schema.json"]

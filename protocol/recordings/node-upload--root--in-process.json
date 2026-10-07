@@ -1,0 +1,11 @@
+{
+  "schema": "node-upload",
+  "definition": null,
+  "request": "POST /relay/v1/response/{transaction_id}",
+  "status": 200,
+  "source": "grid-src @ db3c5be, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "sanitized": true,
+  "body": {
+    "status": "delivered"
+  }
+}

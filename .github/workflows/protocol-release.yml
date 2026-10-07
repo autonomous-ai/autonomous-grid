@@ -1,0 +1,97 @@
+name: Release grid-protocol
+
+# Publish the wire contract (protocol/; the grid-platform review's ADR 0004) as a wheel on a GitHub Release:
+#   git tag -a protocol-vX.Y.Z -m "grid-protocol X.Y.Z" && git push public protocol-vX.Y.Z
+# Bump protocol/pyproject.toml and grid_protocol.__version__ first and regenerate
+# (`python -m grid_protocol._codegen --write`); the tag must match the built wheel.
+#
+# Its own tag prefix on purpose: release.yml publishes the CLI on `v*`, and a `protocol-v*` tag does not
+# match that filter, so a protocol release never cuts a CLI release or the other way round.
+
+on:
+  push:
+    tags: ["protocol-v*"]
+  workflow_dispatch: {}   # a dry run: builds and checks, publishes nothing
+
+permissions:
+  contents: write
+
+jobs:
+  tests:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  release:
+    needs: [tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Build the sdist and the wheel
+        working-directory: protocol
+        run: uv build
+      # The schemas are package data. A wheel without them imports fine and fails on the first
+      # `load_schema`, so the check is on the artefact that ships, not on the source tree.
+      - name: The wheel carries every schema
+        working-directory: protocol
+        run: |
+          wheel="$(ls dist/grid_protocol-*-py3-none-any.whl)"
+          want="$(ls grid_protocol/schemas/*.schema.json | wc -l)"
+          have="$(unzip -l "$wheel" | grep -c 'grid_protocol/schemas/.*\.schema\.json')"
+          if [ "$want" != "$have" ]; then
+            echo "::error::$wheel carries $have schema(s); the source has $want."
+            exit 1
+          fi
+          uv run --isolated --no-project --with "$wheel" python -c \
+            "import grid_protocol; assert grid_protocol.schema_names(); print(grid_protocol.__version__)"
+      - name: The tag matches the wheel's version
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        working-directory: protocol
+        run: |
+          built="$(basename dist/grid_protocol-*-py3-none-any.whl)"
+          built="${built#grid_protocol-}"; built="${built%-py3-none-any.whl}"
+          if [ "protocol-v$built" != "$REF_NAME" ]; then
+            echo "::error::tag is $REF_NAME but the wheel is $built."
+            exit 1
+          fi
+      - name: Checksums
+        working-directory: protocol/dist
+        run: sha256sum grid_protocol-* > SHA256SUMS && cat SHA256SUMS
+      # The notes are the annotated tag's own message, as release.yml does for the CLI: what was reviewed at tag time
+      # is what publishes. actions/checkout turns the pushed tag into a lightweight one, so it is fetched again.
+      # ref_name goes through env, never `${{ }}` inside run: a ref name may carry shell syntax.
+      - name: Take the release notes from the tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          git fetch --force origin tag "$REF_NAME"
+          if [ "$(git cat-file -t "$REF_NAME")" != tag ]; then
+            echo "::error::$REF_NAME is a lightweight tag, so it carries no release notes. Re-tag with git tag -a."
+            exit 1
+          fi
+          git tag -l --format='%(contents)' "$REF_NAME" > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::error::$REF_NAME has an empty tag message — no notes to publish."
+            exit 1
+          fi
+      # ⚠️ NEVER the repository's "latest" release. install.sh finds the CLI to install through the redirect of
+      # /releases/latest, so a protocol release marked latest sends every new install to a release with no `grid`
+      # in it. protocol-v0.1.0 did exactly that for ~1.5 minutes (2026-10-01) before v0.3.53 was set back.
+      - name: Publish the GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          make_latest: "false"
+          files: |
+            protocol/dist/grid_protocol-*-py3-none-any.whl
+            protocol/dist/grid_protocol-*.tar.gz
+            protocol/dist/SHA256SUMS
+          body_path: RELEASE_NOTES.md
