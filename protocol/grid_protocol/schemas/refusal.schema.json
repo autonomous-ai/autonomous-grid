@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grid.autonomous.ai/protocol/refusal.schema.json",
+  "title": "Refusal",
+  "description": "The platform's coded refusal: a sentence for a person in `detail` and, BESIDE it (never under it), a machine-readable `code`. grid-proxy sends it for a grid that is not up; a master sends it for a retired feature. The public CLI compares `code` for EQUALITY, never for truthiness and never paired with the status, and reads a code it does not know, or none, as a transient failure. grid-proxy's codeless answers have this shape too: `404 unknown network`, `503` while a wake is starting (with `Retry-After: 20`), and `502`/`504` when the master did not answer. The public CLI acts on exactly three codes (grid_asleep, grid_stopped, grid_deleted); it must never parse the others, so that renaming one of them cannot change what a provider does.",
+  "type": "object",
+  "required": [
+    "detail"
+  ],
+  "properties": {
+    "detail": {
+      "type": "string",
+      "description": "A sentence for a person. Clients render it; its wording is not part of the contract."
+    },
+    "code": {
+      "type": "string",
+      "description": "The refusal's name, when it has one. Each named refusal is a definition below."
+    }
+  },
+  "$defs": {
+    "GridAsleep": {
+      "description": "The grid is asleep and this request did not wake it. A request that may wake a grid (a signed-in read, inference, an owner's act, a provider's registration) is held and replayed instead; a provider's heartbeat, poll and callbacks, and any credential-less read, never wake one. The public CLI's provider PARKS on it: its heartbeat probes every ASLEEP_PROBE_SECONDS, bring-up on its own schedule, and the engine serves again by itself after a wake.",
+      "type": "object",
+      "required": [
+        "detail",
+        "code"
+      ],
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "code": {
+          "const": "grid_asleep",
+          "x-constant": "GRID_ASLEEP_CODE"
+        },
+        "last_known": {
+          "$ref": "last-known.schema.json",
+          "description": "Only on the answer to a credential-less GET of the overview, after `detail` and `code`. Absent when the platform holds no record for the grid, or none younger than LAST_KNOWN_MAX_AGE_SECONDS."
+        }
+      },
+      "x-status": 503,
+      "x-headers": {
+        "Retry-After": "Optional, whole seconds. Sent on the answer to a request refused past the wake waiter's bound (grid-platform ticket 21); otherwise absent. A reader must work without it: the public CLI's park branches on the code alone."
+      }
+    },
+    "GridStopped": {
+      "description": "The grid's OWNER stopped it, and nothing wakes it until the owner starts it: not inference, not a read, not a join. The public CLI's provider parks on it as on grid_asleep, probing every STOPPED_PROBE_SECONDS.",
+      "type": "object",
+      "required": [
+        "detail",
+        "code"
+      ],
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "code": {
+          "const": "grid_stopped",
+          "x-constant": "GRID_STOPPED_CODE"
+        }
+      },
+      "x-status": 503
+    },
+    "GridDeleted": {
+      "description": "The grid was deleted. The only refusal that ENDS a provider: the public CLI stops the engine for good, so a false positive would stop a provider serving a live grid. An older proxy answered `404 unknown network` with no code instead.",
+      "type": "object",
+      "required": [
+        "detail",
+        "code"
+      ],
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "code": {
+          "const": "grid_deleted",
+          "x-constant": "GRID_DELETED_CODE"
+        }
+      },
+      "x-status": 410
+    },
+    "GridMasterDown": {
+      "description": "The grid should be running but its master refused the connection; the platform is bringing it back. Deliberately NOT parsed for its value by the public CLI: a parked provider leaves the park on any code other than a pause code, and otherwise retries it like any 503.",
+      "type": "object",
+      "required": [
+        "detail",
+        "code"
+      ],
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "code": {
+          "const": "grid_master_down",
+          "x-constant": "GRID_MASTER_DOWN_CODE"
+        }
+      },
+      "x-status": 503,
+      "x-headers": {
+        "Retry-After": "`10` while the platform is restarting the master; absent otherwise."
+      }
+    },
+    "FeatureRetired": {
+      "description": "The route or model name belongs to a retired feature (media, distributed tasks, effort mode), and the master answers this instead of serving it. The public CLI must not parse it.",
+      "type": "object",
+      "required": [
+        "detail",
+        "code"
+      ],
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "code": {
+          "const": "feature_retired",
+          "x-constant": "FEATURE_RETIRED_CODE"
+        }
+      },
+      "x-status": 410
+    }
+  },
+  "x-names": {
+    "RETRY_AFTER_HEADER": "Retry-After"
+  }
+}

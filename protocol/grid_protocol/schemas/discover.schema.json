@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grid.autonomous.ai/protocol/discover.schema.json",
+  "title": "ProviderDiscovery",
+  "description": "A grid's provider discovery (grid-src `server.discover`). Public at the master, and a credential-less GET never wakes a sleeping grid, as for the overview. Readers take only `providers[].models` and `providers[].capabilities.models[<route id>].raw_model_id` — the exact-case model name the overview lower-cases — and read any failure as an empty list.",
+  "type": "object",
+  "required": [
+    "providers"
+  ],
+  "properties": {
+    "providers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DiscoveredProvider"
+      }
+    }
+  },
+  "x-route": {
+    "method": "GET",
+    "path": "/nodes/discover",
+    "constant": "DISCOVER_PATH"
+  },
+  "$defs": {
+    "DiscoveredProvider": {
+      "type": "object",
+      "required": [
+        "node_id",
+        "models",
+        "pricing",
+        "capabilities",
+        "load",
+        "max_concurrency",
+        "endpoint_url",
+        "last_heartbeat",
+        "first_seen_at",
+        "verified_at",
+        "meta"
+      ],
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Route ids, `provider:<node id>:<hash>`. A route id embeds a NODE id, so nothing that outlives a membership (the sleep record) may store one. Models the provider withdrew in its heartbeat are left out."
+        },
+        "pricing": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number"
+          }
+        },
+        "capabilities": {
+          "$ref": "#/$defs/DiscoveredCapabilities"
+        },
+        "load": {
+          "type": "object"
+        },
+        "max_concurrency": {
+          "type": "integer"
+        },
+        "endpoint_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_heartbeat": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "first_seen_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "verified_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "meta": {
+          "type": "object",
+          "description": "The node's presentation metadata, as the overview publishes it."
+        }
+      },
+      "x-names": {
+        "PROVIDER_ROUTE_PREFIX": "provider:"
+      }
+    },
+    "DiscoveredCapabilities": {
+      "description": "The provider's capability envelope, normalized by the master. `{}` when the provider published none.",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer"
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DiscoveredModel"
+          }
+        }
+      }
+    },
+    "DiscoveredModel": {
+      "type": "object",
+      "required": [
+        "raw_model_id"
+      ],
+      "properties": {
+        "raw_model_id": {
+          "type": "string",
+          "description": "The model's exact-case name as its engine serves it. Shown under the display rule: a trailing `.gguf` removed, case kept."
+        },
+        "public_model_id": {
+          "type": "string"
+        },
+        "provider_group_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_supplied": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

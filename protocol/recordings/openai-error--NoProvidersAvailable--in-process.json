@@ -1,0 +1,16 @@
+{
+  "schema": "openai-error",
+  "definition": "NoProvidersAvailable",
+  "request": "POST /relay/v1/chat/completions",
+  "status": 503,
+  "source": "grid-src @ db3c5be, the master's app in-process (grid_cli/private_server/tests/test_protocol_conformance.py)",
+  "sanitized": true,
+  "body": {
+    "error": {
+      "message": "No providers available for this model",
+      "type": "server_error",
+      "param": null,
+      "code": "no_providers_available"
+    }
+  }
+}

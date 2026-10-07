@@ -1,0 +1,118 @@
+{
+  "schema": "discover",
+  "definition": null,
+  "request": "GET /nodes/discover",
+  "status": 200,
+  "source": "the DEV VM, through grid-proxy (grid-apis feat/grid-platform-03-proxy-env @ 12b6bae, grid-src fix/grid-platform-03-loopback-bind @ 4aa0b01), no credential",
+  "recorded_at": "2026-09-30T19:00Z",
+  "sanitized": true,
+  "body": {
+    "providers": [
+      {
+        "node_id": "grid-00000000000000000000000000000001",
+        "models": [
+          "provider:grid-00000000000000000000000000000001:model0000001",
+          "provider:grid-00000000000000000000000000000001:model0000002"
+        ],
+        "pricing": {},
+        "capabilities": {
+          "models": {
+            "provider:grid-00000000000000000000000000000001:model0000001": {
+              "context_window": 1048576,
+              "endpoints": [
+                "chat/completions",
+                "responses"
+              ],
+              "features": {
+                "audio": false,
+                "json_object": true,
+                "json_schema": true,
+                "logprobs": false,
+                "output_cap": true,
+                "parallel_tool_calls": true,
+                "tools": true,
+                "top_logprobs": false,
+                "vision": false
+              },
+              "input_modalities": [
+                "text"
+              ],
+              "limits": {
+                "max_context_tokens": 1048576,
+                "max_image_bytes": 4000000,
+                "max_images": 8,
+                "max_output_tokens": 64000,
+                "max_top_logprobs": 0
+              },
+              "max_output_tokens": 64000,
+              "output_modalities": [
+                "text"
+              ],
+              "provider_group_id": "provider-group:model0000001",
+              "provider_supplied": true,
+              "public_model_id": "provider:grid-00000000000000000000000000000001:model0000001",
+              "raw_model_id": "deepseek/deepseek-v4-flash-0731"
+            },
+            "provider:grid-00000000000000000000000000000001:model0000002": {
+              "context_window": 1000000,
+              "endpoints": [
+                "chat/completions",
+                "responses"
+              ],
+              "features": {
+                "audio": false,
+                "json_object": true,
+                "json_schema": true,
+                "logprobs": false,
+                "output_cap": true,
+                "parallel_tool_calls": true,
+                "tools": true,
+                "top_logprobs": false,
+                "vision": true
+              },
+              "input_modalities": [
+                "text",
+                "image"
+              ],
+              "limits": {
+                "max_context_tokens": 1000000,
+                "max_image_bytes": 4000000,
+                "max_images": 8,
+                "max_output_tokens": 64000,
+                "max_top_logprobs": 0
+              },
+              "max_output_tokens": 64000,
+              "output_modalities": [
+                "text"
+              ],
+              "provider_group_id": "provider-group:model0000002",
+              "provider_supplied": true,
+              "public_model_id": "provider:grid-00000000000000000000000000000001:model0000002",
+              "raw_model_id": "qwen/qwen3.8-27b"
+            }
+          },
+          "schema_version": 1
+        },
+        "load": {
+          "active_tasks": 0,
+          "platform": "linux",
+          "disk_total_gb": 115.2,
+          "disk_used_gb": 28.7,
+          "tok_s": 229.9
+        },
+        "max_concurrency": 4,
+        "endpoint_url": null,
+        "last_heartbeat": "2026-09-30T18:55:21.845867Z",
+        "first_seen_at": "2026-09-24T01:45:06.537045Z",
+        "verified_at": null,
+        "meta": {
+          "name": "node-a",
+          "name_chosen": true,
+          "engine": "starter",
+          "device": "example-device",
+          "device_class": "server"
+        }
+      }
+    ]
+  }
+}

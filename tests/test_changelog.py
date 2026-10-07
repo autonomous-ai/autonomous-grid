@@ -263,6 +263,26 @@ def test_a_tag_on_a_divergent_branch_is_not_used_as_the_base(repo):
     assert "never merged" not in out, "a tag off the mainline must not become the base"
 
 
+def test_a_protocol_tag_on_the_mainline_is_not_used_as_the_base(repo):
+    """`protocol-v*` tags (grid-protocol, protocol-release.yml) sit on the mainline too.
+
+    Picked as the nearest tag, the CLI's notes would cover only the commits since the last
+    protocol release — perfectly formatted, silently short.
+    """
+    _commit(repo, "feat: shipped in the previous release")
+    _git(repo, "tag", "v1.0.0")
+    _commit(repo, "feat: shipped in this release, before the protocol tag")
+    _git(repo, "tag", "-a", "protocol-v0.1.0", "-m", "grid-protocol 0.1.0")
+    _commit(repo, "feat: shipped in this release, after the protocol tag")
+    _git(repo, "tag", "v1.1.0")
+
+    out = _render(repo, "v1.1.0")
+
+    assert "before the protocol tag" in out, "a protocol tag must not become the CLI's base"
+    assert "after the protocol tag" in out
+    assert "shipped in the previous release" not in out
+
+
 def test_other_types_land_in_other_changes_with_their_prefix_intact(repo):
     _git(repo, "tag", "v1.0.0")
     _commit(repo, "docs(router): ADR 0014 — the Advisor sees candidate prices")
