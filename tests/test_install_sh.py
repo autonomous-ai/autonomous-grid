@@ -190,7 +190,9 @@ def _latest_release_tag(tmp_path: Path, redirect: str, atom: str) -> str:
     feed = tmp_path / "releases.atom"
     feed.write_text(atom)
     res = subprocess.run(
-        ["bash", "-c", f'OWNER=autonomous-ai; REPO=autonomous-grid\n{function}\nlatest_release_tag'],
+        # install.sh's own shell options: a no-match grep inside a pipefail pipeline is the case that
+        # most needs them (drop the function's `|| true` and every install with no CLI entry dies).
+        ["bash", "-c", f'set -euo pipefail\nOWNER=autonomous-ai; REPO=autonomous-grid\n{function}\nlatest_release_tag'],
         env={"PATH": f"{stubbin}:/usr/bin:/bin", "STUB_REDIRECT": redirect, "STUB_ATOM": str(feed)},
         capture_output=True, text=True, timeout=30,
     )
@@ -202,7 +204,13 @@ RELEASES = "https://github.com/autonomous-ai/autonomous-grid/releases/tag/"
 
 
 def test_latest_release_tag_follows_the_latest_redirect(tmp_path):
-    assert _latest_release_tag(tmp_path, RELEASES + "v0.3.56", _atom("v0.3.56")) == "v0.3.56"
+    """The feed disagrees on purpose, so only the redirect can produce this answer."""
+    assert _latest_release_tag(tmp_path, RELEASES + "v0.3.56", _atom("v0.3.99")) == "v0.3.56"
+
+
+def test_a_cli_pre_release_tag_is_still_a_cli_release(tmp_path):
+    assert _latest_release_tag(tmp_path, RELEASES + "v0.4.0-rc1", _atom("v0.3.99")) == "v0.4.0-rc1"
+    assert _latest_release_tag(tmp_path, "", _atom("protocol-v0.2.0", "v0.4.0-rc1")) == "v0.4.0-rc1"
 
 
 def test_atom_fallback_skips_a_newer_protocol_release(tmp_path):

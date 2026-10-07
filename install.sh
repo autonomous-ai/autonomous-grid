@@ -56,7 +56,9 @@ sha256_of() {
 # Only a CLI release (`v<digit>…`) counts. This repository also publishes `protocol-vX.Y.Z`
 # releases (the grid-protocol wheel): never marked Latest, but the newest entry in the feed
 # whenever one is cut after a CLI release — so the feed is filtered, and a redirect to a
-# non-CLI tag (a protocol release ticked "Latest" by hand) is not believed either.
+# non-CLI tag (a protocol release ticked "Latest" by hand) is not believed either. This is
+# the macOS wheel path only: the Linux binary path downloads `releases/latest/download/…`
+# directly and never calls this function.
 latest_release_tag() {
   local loc tag
   loc="$(curl -fsS --proto '=https' --tlsv1.2 -o /dev/null \
