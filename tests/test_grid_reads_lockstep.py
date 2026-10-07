@@ -36,6 +36,7 @@ import importlib.util
 import json
 import pathlib
 import re
+from typing import NamedTuple
 
 import pytest
 
@@ -466,19 +467,157 @@ def test_the_harness_ignores_a_record_before_the_master_forgets_its_nodes():
         values)
 
 
+#: How the harness spells a run record's folder (`join(home, 'run', 'engines', gridId)`). A function that
+#: builds it is a function that reads grid's run records — which is what scopes the pin below.
+_HARNESS_RUN_RECORD_PATH = "'run', 'engines'"
+#: `localModels.owned` (the Model Manager's own engines) and `readRunRecords` (`servedHere`), measured
+#: 2026-10-07. One more or one fewer is a move to teach this check, never a pass on what is left in scope.
+_HARNESS_RUN_RECORD_READERS = 2
+#: The harness's OWN record of an engine it started in another app (`AppEngineRecord`, `app-engines.json`,
+#: written by the harness itself — PR #569), read in the same file through a variable also named `record`.
+#: A block that names it reads that record, not grid's.
+_HARNESS_APP_RECORD = re.compile(r"\b(?:AppEngineRecord|readAppRecords)\b")
+#: A read of a record's field. A block's keys are matched in its RAW source — a `${record.x}` in a template
+#: literal stays visible, and a comment that mentions one can only err toward failing.
+_RECORD_READ = re.compile(r"\brecord\.(\w+)")
+#: Comments, then string and template literals: blanked before braces are matched, so none can unbalance
+#: them. Whichever starts first wins, which is how a `//` inside a URL string stays a string.
+_TS_NOT_CODE = re.compile(r"//[^\n]*|/\*[\s\S]*?\*/|'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"|`(?:\\.|[^`\\])*`")
+#: A function's name, from its header — everything since the last `;`, `{` or `}` at its own level, which
+#: spans several statements in a file written without semicolons. The `$` is what picks the function's own
+#: name out of that: the identifier right before the parameter list that ends the header (parentheses nested
+#: two deep inside it, as a callback parameter's own callback is).
+_TS_NAMED = re.compile(
+    r"(\w+)\s*(?:=\s*(?:async\s*)?)?(?:<[^()]*>)?\s*\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)[^()]*$")
+
+
+class _TsBlock(NamedTuple):
+    name: str  # the function's, or "(unnamed)" for an object or type literal
+    line: int
+    start: int  # the offset of its `{` in the file
+    source: str  # raw, comments and strings included
+
+
+class _TsOpen(NamedTuple):
+    start: int
+    kind: str  # "class" (a class body), "signature" (a type literal in a header) or "block"
+    nested: bool  # inside a function body, an object literal or a signature: never reported on its own
+    header: str
+
+
+def _ts_code_only(source: str) -> str:
+    """``source`` with the same offsets, comments blanked to spaces and strings to `_` — so a header ending in
+    a string-literal type (`): 'a' | 'b'`) still ends in a word, not in the `|` that opens a type literal."""
+    return _TS_NOT_CODE.sub(
+        lambda match: re.sub(r"[^\n]", " " if match.group().startswith("/") else "_", match.group()), source)
+
+
+def _ts_signature_literal(header: str) -> bool:
+    """Whether the `{` after ``header`` opens a type literal in it — `Promise<{ … }>`, `(record: { … })`,
+    `): { … } | null` — rather than a body. It belongs to the header, so the body after it keeps its name.
+    An escaped paren (`/\\(build/`) is not a paren, and only a `<` written against a name opens a generic:
+    `t < 5` is a comparison."""
+    unclosed = re.sub(r"\\.", "", header.replace("=>", ""))
+    return (unclosed.count("(") > unclosed.count(")") or len(re.findall(r"\w<", unclosed)) > unclosed.count(">")
+            or unclosed.endswith((":", "|", "&")))
+
+
+def _ts_top_level_blocks(source: str) -> list[_TsBlock]:
+    """Every block at the top of a TypeScript file or of a class in it — each function body, and the object
+    and type literals beside them, which nothing here asks for by name.
+
+    A misreading that unbalances the braces is refused here. One that does not — a header misjudged as a
+    type literal, which folds a body into the next header — drops a block instead, and that is what
+    `_harness_run_record_scope` refuses: a read of a record that sits in no block this found.
+    """
+    code = _ts_code_only(source)
+
+    def line(offset: int) -> int:
+        return code.count("\n", 0, offset) + 1
+
+    found: list[_TsBlock] = []
+    opened: list[_TsOpen] = []
+    header_from = 0
+    for offset, char in enumerate(code):
+        top = not opened or opened[-1].kind == "class"
+        if char == ";" and top:
+            header_from = offset + 1
+        elif char == "{":
+            header = " ".join(code[header_from:offset].split())
+            kind = ("block" if not top else "signature" if _ts_signature_literal(header)
+                    else "class" if re.search(r"\bclass\b(?!\s*[:?])", header) else "block")
+            opened.append(_TsOpen(offset, kind, not top, header))
+            if top and kind != "signature":
+                header_from = offset + 1
+        elif char == "}":
+            assert opened, f"an unmatched `}}` on line {line(offset)} — teach this check the harness's syntax"
+            block = opened.pop()
+            if block.kind == "block" and not block.nested:
+                named = _TS_NAMED.search(block.header)
+                found.append(_TsBlock(named.group(1) if named else "(unnamed)", line(block.start), block.start,
+                                      source[block.start:offset + 1]))
+            if block.kind != "signature" and (not opened or opened[-1].kind == "class"):
+                header_from = offset + 1
+    assert not opened, (f"an unmatched `{{` on line {line(opened[-1].start)} (after `{opened[-1].header[-80:]}`) "
+                        f"— teach this check the harness's syntax")
+    return found
+
+
+def _harness_run_record_scope(source: str) -> list[_TsBlock]:
+    """The blocks of the harness's `localModels.ts` that read grid's run records, each move refused loudly."""
+    blocks = _ts_top_level_blocks(source)
+    code = _ts_code_only(source)
+    spans = [(block.start, block.start + len(block.source)) for block in blocks]
+    dropped = sorted({code.count("\n", 0, read.start()) + 1 for read in _RECORD_READ.finditer(code)
+                      if not any(start <= read.start() < end for start, end in spans)})
+    assert not dropped, (
+        f"`record.<field>` on line(s) {dropped} sits outside every block this check found — in an "
+        f"expression-bodied arrow, a class field or a default value, or in a function it misread and dropped: "
+        f"teach it where that read is rather than letting it go unchecked")
+    readers = [block for block in blocks if _HARNESS_RUN_RECORD_PATH in block.source]
+    assert len(readers) == _HARNESS_RUN_RECORD_READERS, (
+        f"expected {_HARNESS_RUN_RECORD_READERS} functions that find run records under run/engines/<grid id> "
+        f"(`owned`, `readRunRecords`), found {[f'{b.name} (line {b.line})' for b in readers]} — the reading "
+        f"moved: teach this check where it went rather than letting it pass on what is left")
+    for reader in readers:
+        assert _RECORD_READ.search(reader.source), (
+            f"`{reader.name}` (line {reader.line}) builds the run-record path but reads no `record.<field>` — "
+            f"the reads moved out of this check's reach: teach it where they went")
+    handed = {called for reader in readers for called in re.findall(r"\b(\w+)\(\s*record\s*\)", reader.source)}
+    scope = readers + [block for block in blocks if block.name in handed]
+    unclassified = [f"{block.name} (line {block.line})" for block in blocks
+                    if block not in scope and _RECORD_READ.search(block.source)
+                    and not _HARNESS_APP_RECORD.search(block.source)]
+    assert not unclassified, (
+        f"{unclassified} read `record.<field>`, but none of them finds run records under run/engines/<grid "
+        f"id>, is handed one by a function that does, or reads the harness's own `AppEngineRecord` — teach "
+        f"this check which record that is rather than leaving its keys unchecked")
+    return scope
+
+
 def test_the_harness_reads_only_run_record_fields_grid_join_writes():
-    """Not skipped: the harness reads run records TODAY (`localModels.owned`), from the same layout. A key
-    it reads that `grid join` stopped writing is a model that silently stops being recognised as this
-    computer's own; issue 02's `servedHere` reads more of them."""
+    """Not skipped: the harness reads run records TODAY, from the same layout — in the functions that build
+    their folder's path (`localModels.owned`, `readRunRecords`) and in the helpers those hand a record to
+    (`recordPid`). A key they read that `grid join` stopped writing is a model that silently stops being
+    recognised as this computer's own.
+
+    ⚠️ Those functions, never the whole file: since harness PR #569 (2026-10-02) `localModels.ts` also
+    reads the harness's OWN app-engine records (`AppEngineRecord` in `app-engines.json`, which the harness
+    writes itself) through a variable that is also named `record`, and a file-wide match reported their
+    `alias`, `engine`, `grid`, `modelId` and `name` as keys `grid join` had stopped writing. A reader that
+    moves is reported as a move, never a pass on whatever is left in scope: exactly
+    `_HARNESS_RUN_RECORD_READERS` readers are demanded, each reading the record itself; any other block
+    reading a `record.<field>` must be one about the harness's own record, or it fails as unclassified; and
+    a read in no block at all fails too — it is outside every function body, or in one this check's reading
+    of TypeScript dropped. Only that spelling is seen — `record?.x`, `record['x']` and destructuring are
+    not, as before."""
     root = harness_root()
     if root is None:
         pytest.skip(_SKIP_HARNESS)
     source = _source(root, "cli/src/lib/localModels.ts", _SKIP_HARNESS).read_text()
-    read = set(re.findall(r"\brecord\.(\w+)", source))
-    assert read, "the harness's localModels.ts no longer reads `record.<field>` — teach this check where it went"
+    read = {field for block in _harness_run_record_scope(source) for field in _RECORD_READ.findall(block.source)}
     unknown = sorted(read - _record_keys())
     assert not unknown, f"the harness reads {unknown}, which `grid join` does not write into a run record"
-    assert "'run', 'engines'" in source, "the harness no longer finds run records under run/engines/<grid id>"
     assert "'.heartbeat'" in source, "the harness no longer reads the heartbeat sidecar beside a record"
 
 
