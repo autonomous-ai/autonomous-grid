@@ -232,12 +232,13 @@ ARGPARSE_USAGE_EXIT = 2
 
 _HARNESS_HANDOFF = "cli/src/lib/gridHandoff.ts"
 
-#: Where the harness names the BINARY it spawns. ⚠️ **It moved out of `gridHandoff.ts`** — the
-#: hand-off now calls `gridBinaryPath()`, whose last resort is this constant, so one module resolves
-#: the binary for every grid call the daemon makes. The value did not change (`grid`); only the file
-#: did, which is precisely the drift this pin is for and precisely the drift that looks like a
-#: deletion if the pin is read carelessly.
-_HARNESS_EXEC = "cli/src/lib/gridExec.ts"
+#: Where the harness names the BINARY it spawns. ⚠️ **It has moved twice**: out of `gridHandoff.ts`
+#: into `gridExec.ts` (the hand-off calls `gridBinaryPath()`, whose last resort is this constant, so one
+#: module resolves the binary for every grid call the daemon makes), and then — when the harness moved
+#: models into a process of its own (autonomous-harness #896, 2026-10) — into `gridBinary.ts`. The
+#: value never changed (`grid`); only the file did, which is precisely the drift this pin is for and
+#: precisely the drift that looks like a deletion if the pin is read carelessly.
+_HARNESS_EXEC = "cli/src/lib/gridBinary.ts"
 
 #: Where the harness locates the credential store this CLI writes. See the sign-out section at the
 #: foot of this file.
@@ -326,7 +327,7 @@ def test_the_harness_spawns_the_argv_this_cli_accepts():
     """The lockstep itself: the flag the harness spells against the flag this CLI declares."""
     flag = _ts_const(_harness_source(), "GRID_HANDOFF_FLAG")
     # The two halves live in two modules since the harness centralised binary resolution: the flag
-    # stays with the hand-off, the binary name moved to `gridExec.ts`.
+    # stays with the hand-off, the binary name moved to `gridBinary.ts` (by way of `gridExec.ts`).
     binary = _ts_const(_harness_source(_HARNESS_EXEC), "GRID_BINARY", module=_HARNESS_EXEC)
 
     assert (binary, flag) == ("grid", CANONICAL_HANDOFF_ARGV[1]), (
