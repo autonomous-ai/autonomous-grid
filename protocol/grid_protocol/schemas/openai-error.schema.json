@@ -41,7 +41,7 @@
   },
   "$defs": {
     "NoProvidersAvailable": {
-      "description": "No provider serves the requested model now. Inside a master's boot hold (BOOT_HOLD_WINDOW_SECONDS after it starts) a request for a model nobody serves yet is held up to BOOT_HOLD_SECONDS first, so that a provider parked on the sleeping grid can come back.",
+      "description": "No provider serves the requested model now, on a grid that has served it (its engine may only be away), that has never had an engine at all, or whose master cannot tell: retryable. On a grid that has had an engine, a model none of its engines ever served is ModelNotFound instead. Inside a master's boot hold (BOOT_HOLD_WINDOW_SECONDS after it starts) a request for a model nobody serves yet is held up to BOOT_HOLD_SECONDS first, so that a provider parked on the sleeping grid can come back.",
       "type": "object",
       "required": [
         "error"
@@ -76,6 +76,43 @@
         }
       },
       "x-status": 503
+    },
+    "ModelNotFound": {
+      "description": "No engine on this grid has ever served the requested model: none it still has a node row for, live or not, and nothing in its model catalog, whose rows outlive an engine that left. No wait can bring one, so it is refused at once (after a woken master's boot hold) rather than as the retryable NoProvidersAvailable, which a grid that has served the model, a grid that has never had an engine, and a master that cannot tell keep. The message names what the grid serves now and never echoes the requested name. A caller that did not ask for OpenAI errors gets `{\"detail\": <message>}`. Displayed, never parsed: the public CLI must not parse it.",
+      "type": "object",
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "type": "object",
+          "required": [
+            "message",
+            "type",
+            "param",
+            "code"
+          ],
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "const": "invalid_request_error"
+            },
+            "param": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "code": {
+              "const": "model_not_found",
+              "x-constant": "MODEL_NOT_FOUND_CODE"
+            }
+          }
+        }
+      },
+      "x-status": 404
     },
     "RelayRestarting": {
       "description": "The master holding the request ended it while retiring or stopping: send it again. A non-stream request is answered 503 with this envelope (or `{\"detail\": <message>}` for a caller that did not ask for OpenAI errors). A chat stream ends with `data: {\"error\": <this envelope's error>}`. A Responses stream ends with a `response.failed` event whose `response.error.code` is `server_error`: the Responses code set is closed, so this name never reaches a Responses client. The public CLI must not parse it.",

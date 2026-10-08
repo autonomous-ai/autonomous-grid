@@ -1,0 +1,16 @@
+{
+  "schema": "openai-error",
+  "definition": "ModelNotFound",
+  "request": "POST /relay/v1/chat/completions",
+  "status": 404,
+  "source": "grid-src @ 87c2170, its master behind grid-apis @ a0ea1c8's proxy (conformance/test_harness_reads.py)",
+  "sanitized": true,
+  "body": {
+    "error": {
+      "message": "This grid has never served that model. It serves: conformance-echo",
+      "type": "invalid_request_error",
+      "param": null,
+      "code": "model_not_found"
+    }
+  }
+}

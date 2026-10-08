@@ -13,7 +13,7 @@ test and broke the seam at runtime. Now the schema is the one place a shape is w
 | Schema (`grid_protocol/schemas/`) | What it is |
 |---|---|
 | `refusal` | The platform's coded refusal `{detail, code}`: `grid_asleep` (with `last_known`), `grid_stopped`, `grid_deleted`, `grid_master_down`, `feature_retired` |
-| `openai-error` | A master's OpenAI-envelope failure: `no_providers_available`, `relay_restarting` |
+| `openai-error` | A master's OpenAI-envelope failure: `no_providers_available`, `model_not_found` (a model no engine on the grid ever served; displayed, never parsed), `relay_restarting` |
 | `last-known` | What a sleeping grid served when it was put to sleep |
 | `overview`, `discover` | The two public reads, which never wake a sleeping grid when sent without a credential |
 | `models` | The relay's model list (needs a credential, so it wakes a grid) |
@@ -70,6 +70,7 @@ Making them again, from this repository:
 |---|---|
 | A grid's public reads and the proxy's refusals for a sleeping or deleted grid | `python protocol/tools/record_reads.py <grid address>/relay/v1/grid/overview --schema … [--definition …] --stem … --source "…"` from anywhere the proxy is reachable. It sends no credential and has no option to: a credential-less read never wakes a grid. It writes nothing unless the answer is the named shape. |
 | The master's: a provider's traffic, the model list, `no_providers_available` | in grid-src, `GRID_PROTOCOL_RECORD_DIR=<dir> pytest grid_cli/private_server/tests/test_protocol_conformance.py --asyncio-mode=auto`, then `python protocol/tools/sanitize.py <dir>/*.json --out protocol/recordings` |
+| The master's `model_not_found`, behind the proxy (it needs a grid that has had an engine) | `GRID_PROTOCOL_RECORD_DIR=<dir>` on a conformance run of `conformance/test_harness_reads.py` (`conformance/README.md`), then `python protocol/tools/sanitize.py <dir>/*.json --out protocol/recordings` |
 | The proxy's `grid_stopped` and `grid_master_down` (a live grid cannot be put in that state without a write) | `<grid-apis>/.venv/bin/python protocol/tools/record_proxy.py --grid-apis <grid-apis>` — grid-apis' own interpreter, which has its dependencies |
 
 The harness reads some of them as test fixtures (`cli/src/lib/__fixtures__/protocol/`); copy any you re-record over

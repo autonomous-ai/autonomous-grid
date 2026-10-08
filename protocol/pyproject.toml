@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grid-protocol"
-version = "0.1.0"
+version = "0.1.1"
 description = "The wire contract between the grid relay, the public grid CLI and the harness, as JSON Schema."
 readme = "README.md"
 license = { text = "MIT" }
