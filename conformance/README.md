@@ -72,15 +72,15 @@ GRID_SRC_REPO=~/Projects/grid-src GRID_APIS_REPO=~/Projects/grid-apis \
 
 ## CI
 
-`.github/workflows/conformance.yml` in **grid-src** and **grid-apis** runs it on every pull request. Each repository
-checks out this one with no token, and the OTHER private sibling with a read-only deploy key: `GRID_APIS_DEPLOY_KEY`
-in grid-src, `GRID_SRC_DEPLOY_KEY` in grid-apis. A last step reads the JUnit report and fails on zero tests or any
-skip.
+`.github/workflows/conformance.yml` in the private **grid-platform** monorepo (grid-src and grid-apis under their old
+names since grid-platform M2 ticket 01) runs it on every pull request touching either: the master and the proxy come
+from that one checkout at one commit, and this repository is checked out with no token. A last step reads the JUnit
+report and fails on zero tests or any skip. (Before the monorepo, each of the two repositories ran its own copy and
+checked out the other with a read-only deploy key, `GRID_APIS_DEPLOY_KEY` / `GRID_SRC_DEPLOY_KEY`.)
 
-**Paired changes.** The suite and the other sibling are checked out at the PR's own branch name when their repository
-has one, and otherwise at `main`, or at `CONFORMANCE_SUITE_REF`, `CONFORMANCE_GRID_SRC_REF` or
-`CONFORMANCE_GRID_APIS_REF`. A wire change made in two repositories, on two branches of one name, tests each half
-against the other.
+**Paired changes.** The suite is checked out at the PR's own branch name when this repository has one, and otherwise
+at `main` or at `CONFORMANCE_SUITE_REF`. A wire change made here and in grid-platform, on two branches of one name,
+tests each half against the other.
 
 ## Changing it
 

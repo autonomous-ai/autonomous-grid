@@ -26,9 +26,32 @@ FEATS_DIR_NAME = "autonomous-grid-feats"
 #: the feature worktree is lost -- silently, as a skip.
 PARALLEL_SUFFIX = "_parallel"
 
+#: The private monorepo grid-src and grid-apis live in since grid-platform M2 ticket 01 (ADR 0010), each under its old
+#: name: `grid-platform/grid-src/`, `grid-platform/grid-apis/`.
+MONOREPO = "grid-platform"
+MONOREPO_PROJECTS = frozenset({"grid-src", "grid-apis"})
+
 
 def _mirror_candidates(here: pathlib.Path, repo: str) -> list[pathlib.Path]:
     """Where a checkout of ``repo`` could sit beside the checkout at ``here``, best guess first.
+
+    For grid-src and grid-apis, the monorepo's layout comes FIRST (its mirror, its feature fallback, its main clone,
+    each with the project's subdirectory), then the old repository's. The old repositories are read-only from the cut
+    on: reading one first would compare against code the monorepo has moved past, and a value that moved there would
+    read as one that was deleted.
+    """
+    if repo in MONOREPO_PROJECTS:
+        return [top / repo for top in _checkout_candidates(here, MONOREPO)] + _checkout_candidates(here, repo)
+    return _checkout_candidates(here, repo)
+
+
+def _monorepo_checkout(here: pathlib.Path) -> pathlib.Path | None:
+    """The closest grid-platform checkout beside ``here`` (a work tree: its `.git` is a directory or a file), or None."""
+    return next((top for top in _checkout_candidates(here, MONOREPO) if (top / ".git").exists()), None)
+
+
+def _checkout_candidates(here: pathlib.Path, repo: str) -> list[pathlib.Path]:
+    """Where a checkout of the repository ``repo`` could sit beside the checkout at ``here``, best guess first.
 
     Split out of `_sibling_root` so the layouts can be pinned as data: this function is the whole
     of the derivation, and the derivation is what decides whether the lockstep suites run at all.
@@ -65,19 +88,23 @@ def _mirror_candidates(here: pathlib.Path, repo: str) -> list[pathlib.Path]:
 
 
 def _sibling_root(
-    marker: pathlib.Path, repo: str, env_var: str, *, hint: str = ""
+    marker: pathlib.Path, repo: str, env_var: str, *, hint: str = "", here: pathlib.Path | None = None
 ) -> pathlib.Path | None:
     """A sibling checkout of ``repo``, or ``None`` when this machine has none beside this worktree.
 
     Derived from THIS file's location rather than written out, so the checks run in whichever
     worktree they are checked out into instead of skipping everywhere but one. The convention is
     `<repo>-feats/<slug>` beside `<repo>`, so a worktree of `autonomous-grid` at
-    `…/autonomous-grid-feats/<slug>` looks for `…/<repo>-feats/<slug>` first and falls back to the
-    main `…/<repo>` checkout. `_mirror_candidates` holds the full rule, including the
-    parallel-ticket layout, and `tests/test_sibling_root.py` pins it.
+    `…/autonomous-grid-feats/<slug>` looks for `…/<repo>-feats/<slug>` and falls back to the main
+    `…/<repo>` checkout — and for grid-src and grid-apis, looks in the grid-platform monorepo first.
+    `_mirror_candidates` holds the full rule, including the parallel-ticket layout, and
+    `tests/test_sibling_root.py` pins it.
 
     ``marker`` is a directory that must exist under a candidate for it to count as that repository —
     the difference between "found it" and "found a directory with the right name".
+
+    ⚠️ **For grid-src and grid-apis, the closest grid-platform checkout DECIDES.** If it lacks the project's marker
+    this RAISES rather than falling back to the old checkouts, which are frozen from the cut on.
 
     ``env_var`` wins over both, and is **validated**: a bad one raises rather than skips, because an
     override pointing somewhere else is a person's configuration mistake, not evidence the
@@ -94,7 +121,17 @@ def _sibling_root(
                 + (f" — {hint}" if hint else ""))
         return root
 
-    here = pathlib.Path(__file__).resolve().parent.parent  # the autonomous-grid checkout
+    here = here or pathlib.Path(__file__).resolve().parent.parent  # the autonomous-grid checkout
+    if repo in MONOREPO_PROJECTS:
+        top = _monorepo_checkout(here)
+        if top is not None:
+            if (top / repo / marker).is_dir():
+                return top / repo
+            # ⚠️ Never fall through to the old repository here: it is read-only from the cut on, so every pin would
+            # compare against code the monorepo has moved past, and a value that MOVED would read as unchanged.
+            raise AssertionError(
+                f"{top} is a grid-platform checkout but has no {repo}/{marker}: it moved, so teach this resolver "
+                f"where it went rather than letting the pins read the frozen {repo} repository")
     for candidate in _mirror_candidates(here, repo):
         if (candidate / marker).is_dir():
             return candidate
@@ -105,8 +142,8 @@ def grid_apis_root() -> pathlib.Path | None:
     """grid-apis' checkout — the CONTROL PLANE — or ``None`` when it is not beside this worktree.
 
     A third repository joined the lockstep with ADR 0039's `os-community` literal: grid-apis
-    `grid_networks/store.py` holds a copy of it, alongside grid-src's two. `GRID_APIS_REPO`
-    overrides the derivation.
+    `grid_networks/store.py` holds a copy of it, alongside grid-src's two. Since the monorepo it is
+    `grid-platform/grid-apis/`, looked for first. `GRID_APIS_REPO` overrides the derivation.
     """
     return _sibling_root(pathlib.Path("grid_networks"), "grid-apis", "GRID_APIS_REPO")
 
@@ -144,7 +181,8 @@ def grid_src_root() -> pathlib.Path | None:
     worktree they are checked out into instead of skipping everywhere but one. The convention is
     `<repo>-feats/<slug>` beside `<repo>`, so a worktree of `autonomous-grid` at
     `…/autonomous-grid-feats/<slug>` looks for `…/grid-src-feats/<slug>` first and falls back to
-    the main `…/grid-src` checkout.
+    the main `…/grid-src` checkout — after the same places in the grid-platform monorepo
+    (`…/grid-platform-feats/<slug>/grid-src`, then `…/grid-platform/grid-src`), which come first.
 
     ⚠️ `GRID_SRC_REPO` — the cross-repo E2E's own override — wins over both, so a machine that lays
     the repositories out differently can still run these. It is **validated**, and a bad one raises
