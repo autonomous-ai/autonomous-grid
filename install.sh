@@ -6,7 +6,9 @@
 # Hybrid by OS, because a *distributable* macOS binary needs Apple notarization
 # (the ad-hoc Nuitka build is SIGKILL'd on modern macOS), while the same code runs
 # fine under Python:
-#   • Linux  → download a self-contained `grid` binary (no Python needed).
+#   • Linux  → download a self-contained `grid` binary (no Python needed). If this machine
+#              cannot run it (a C library older than the one it was built against — releases
+#              up to v0.3.56 need glibc 2.38), install the wheel with uv instead.
 #   • macOS  → install the universal wheel with uv (bootstraps uv if missing).
 # Either way it's one command and you end up with `grid` (+ the `agrid` alias).
 #
@@ -15,10 +17,10 @@
 #   GRID_INSTALL_DIR=~/bin    Linux binary location (default: ~/.local/bin)
 #   GRID_REPO_OWNER / _NAME   source repo (default: autonomous-ai / autonomous-grid)
 #   GRID_BASE_URL=https://…   Linux: fetch the binary + SHA256SUMS from a mirror
-#   GRID_WHEEL_URL / GRID_PACKAGE   macOS: install this wheel URL / PyPI name instead
+#   GRID_WHEEL_URL / GRID_PACKAGE   the wheel path (macOS, or Linux's fallback): this wheel URL / PyPI name
 set -euo pipefail
 
-# The user's real PATH, captured before this script augments its own (install_macos_wheel
+# The user's real PATH, captured before this script augments its own (install_wheel
 # prepends ~/.local/bin). The post-install hint must test THIS, not the augmented PATH,
 # or the hint never fires and macOS users end up with grid installed but not found.
 # Covered by tests/test_install_sh.py — removing this breaks CI (see 716c686 revert).
@@ -57,8 +59,8 @@ sha256_of() {
 # releases (the grid-protocol wheel): never marked Latest, but the newest entry in the feed
 # whenever one is cut after a CLI release — so the feed is filtered, and a redirect to a
 # non-CLI tag (a protocol release ticked "Latest" by hand) is not believed either. This is
-# the macOS wheel path only: the Linux binary path downloads `releases/latest/download/…`
-# directly and never calls this function.
+# the wheel path only (macOS, and Linux's fallback): the Linux binary path downloads
+# `releases/latest/download/…` directly and never calls this function.
 latest_release_tag() {
   local loc tag
   loc="$(curl -fsS --proto '=https' --tlsv1.2 -o /dev/null \
@@ -74,8 +76,11 @@ latest_release_tag() {
 }
 
 # --- Linux: self-contained binary, verified against the release's SHA256SUMS --
+# Returns 1, having replaced nothing, when this machine cannot RUN the binary: the caller then
+# installs the wheel. Called in an `||` list, so `set -e` is off in here — every step that
+# matters says `|| die` itself.
 install_linux_binary() {
-  local asset="grid-linux-${arch_tag}" base want got
+  local asset="grid-linux-${arch_tag}" base want got out
   if   [ -n "${GRID_BASE_URL:-}" ]; then base="${GRID_BASE_URL%/}"
   elif [ "$VERSION" = latest ];    then base="https://github.com/$OWNER/$REPO/releases/latest/download"
   else                                  base="https://github.com/$OWNER/$REPO/releases/download/v$VERSION"; fi
@@ -95,15 +100,23 @@ install_linux_binary() {
     fi
   fi
 
-  mkdir -p "$INSTALL_DIR"
-  chmod +x "$tmp/grid"
-  mv -f "$tmp/grid" "$INSTALL_DIR/grid"
+  mkdir -p "$INSTALL_DIR" || die "cannot create $INSTALL_DIR"
+  chmod +x "$tmp/grid" || die "cannot make the download executable"
+  # Tried where it will live (a noexec /tmp must not count against it), under a name nothing
+  # runs, so a binary this machine cannot start never replaces a `grid` that works.
+  mv -f "$tmp/grid" "$INSTALL_DIR/.grid.new" || die "cannot write to $INSTALL_DIR"
+  if ! out="$("$INSTALL_DIR/.grid.new" --version 2>&1)"; then
+    rm -f "$INSTALL_DIR/.grid.new"
+    info "This Linux cannot run the prebuilt binary: $(printf '%s' "$out" | tail -1)"
+    return 1
+  fi
+  mv -f "$INSTALL_DIR/.grid.new" "$INSTALL_DIR/grid" || die "cannot write $INSTALL_DIR/grid"
   ln -sf grid "$INSTALL_DIR/agrid"   # match the wheel's two console scripts
   ok "installed to $INSTALL_DIR/grid"
 }
 
-# --- macOS: universal wheel via uv (uv installs both grid + agrid) ------------
-install_macos_wheel() {
+# --- the universal wheel via uv (uv installs both grid + agrid): macOS, and Linux's fallback ---
+install_wheel() {
   local src tag ver
   export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
   if ! command -v uv >/dev/null 2>&1; then
@@ -132,8 +145,8 @@ install_macos_wheel() {
 }
 
 case "$(uname -s)" in
-  Linux)  install_linux_binary ;;
-  Darwin) install_macos_wheel ;;
+  Linux)  install_linux_binary || { info "Installing the Python wheel with uv instead (the same grid)…"; install_wheel; } ;;
+  Darwin) install_wheel ;;
   *) die "unsupported OS: $(uname -s) — macOS and Linux only (Windows: see the docs)" ;;
 esac
 

@@ -42,6 +42,15 @@ jobs:
   binaries:
     name: ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    # A Nuitka binary links against the C library of the machine that compiled it, and the
+    # dynamic linker refuses to start it on an older one. Built on the runner itself
+    # (ubuntu-latest = 24.04, glibc 2.39), every release up to v0.3.56 needed GLIBC_2.38 in its
+    # onefile bootstrap: `grid --version` died on Debian 12, Ubuntu 22.04 and RHEL 9. Debian 11's
+    # glibc is 2.31, so the binaries run on Debian 11+, Ubuntu 20.04+ and RHEL/Rocky 9 (measured
+    # 2026-10-08 on all five). The image is multi-arch, so both runners use the same name; it
+    # brings its own Python 3.12 (built --enable-shared, which Nuitka needs) and runs as root.
+    # Pinned by tests/test_release_binaries.py.
+    container: python:3.12-bullseye
     strategy:
       fail-fast: false
       matrix:
@@ -50,9 +59,6 @@ jobs:
           - { runner: ubuntu-24.04-arm, os: linux, arch: arm64 }
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       # ccache is not on the GitHub image, and Nuitka says so itself, twice per build:
       # "You are not using ccache, re-compilation of identical code will be slower than
       # necessary." Nuitka's Scons backend picks it up off PATH with no flag of its own.
@@ -70,7 +76,7 @@ jobs:
       - name: Install patchelf (Linux standalone needs it) + ccache
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update && sudo apt-get install -y patchelf ccache
+          apt-get update && apt-get install -y patchelf ccache
           echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
       # Measured on v0.3.23: of a 9m24s x86_64 build, 5m32s is gcc compiling the 591 C files
       # Nuitka generates. Most of those are the frozen dependencies (pydantic, fastapi,
@@ -93,6 +99,12 @@ jobs:
           chmod +x packaging/build_binary.sh
           GRID_BUILD_PYTHON="$(command -v python3.12)" packaging/build_binary.sh
           mv dist/grid "grid-${{ matrix.os }}-${{ matrix.arch }}"
+      # This container's glibc is the oldest the release claims to run on, so a binary that cannot
+      # start HERE must never be uploaded.
+      - name: The binary runs on the build image's glibc
+        run: |
+          ldd --version | head -1
+          ./grid-${{ matrix.os }}-${{ matrix.arch }} --version
       # The hit rate is the whole justification for the cache above, so print it rather than
       # assume it. A run showing ~0 hits means the cache is not working and the step should go.
       - name: ccache statistics
