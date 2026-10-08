@@ -159,7 +159,8 @@ def _without_token(exc: ControlPlaneError, secret: str) -> ControlPlaneError:
     Not reachable through today's validators, and guarded anyway: it becomes reachable the first time
     the far end puts a ``max_length`` or a pattern on ``harness_token``, which is a one-line change in
     another repository that no test on either side would notice. The remedy sentences this seam does
-    show — 401, 403, 409, 502 — never contain the token, so nothing verbatim is lost.
+    show — 401, 403, 409, 503 — never contain the token, so nothing verbatim is lost. (Unattributable
+    refusals were 502 until grid-apis #30: Cloudflare replaced every 502 with its own HTML page.)
     """
     rendered = str(exc)
     if not secret or secret not in rendered:

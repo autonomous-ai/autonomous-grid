@@ -43,6 +43,9 @@ import sys
 DEFAULT_SERVER = "https://github.com"
 DEFAULT_REPO = "autonomous-ai/autonomous-grid"
 
+# The CLI's own release tags (release.yml fires on `v*`). A git glob, not a regex.
+CLI_TAG_GLOB = "v[0-9]*"
+
 # feat(scope)!: description
 CONVENTIONAL = re.compile(
     r"^(?P<type>[a-z]+)(?:\((?P<scope>[^)]*)\))?(?P<breaking>!)?: (?P<desc>.+)$"
@@ -97,9 +100,13 @@ def previous_tag(ref: str) -> str:
 
     `--tags` matches lightweight tags too — most of this repo's are. Tags cut on a
     divergent line (v0.1.13) aren't ancestors, so they're correctly skipped.
+
+    `--match` keeps it to CLI tags: `protocol-v*` (grid-protocol, protocol-release.yml)
+    is cut on the mainline too, and as the base it would silently drop every commit
+    before the last protocol release from the CLI's notes.
     """
     try:
-        return _git("describe", "--tags", "--abbrev=0", f"{ref}^")
+        return _git("describe", "--tags", "--abbrev=0", "--match", CLI_TAG_GLOB, f"{ref}^")
     except subprocess.CalledProcessError:
         pass  # no tag reachable, or no parent — both land on the same remedy below
     _git("rev-parse", "--verify", f"{ref}^{{commit}}")  # a bad ref dies here, with git's words

@@ -449,3 +449,28 @@ def test_a_child_older_than_system_one_is_respawned_rather_than_reloaded():
     older = {key: value for key, value in current.items() if key != "serves_systemone"}
     assert remote_provider._hot_reloadable([current], external, record) is True
     assert remote_provider._hot_reloadable([older], external, record) is False
+
+
+def test_an_engine_joins_or_leaves_beside_a_running_built_in_by_reload_not_respawn():
+    """Starting or stopping a Jev model beside a chat model the identity runs itself (`--serve`) respawned
+    the identity — the reload gate refused any built-in — and the respawn reloaded the whole chat model. A
+    child that keeps the built-ins it runs (`reloads_builtins`) now takes the reload when they are exactly
+    those, unchanged; a built-in added, retuned or dropped, or an older child, still respawns."""
+    from cli import remote_provider
+
+    qwen = {"endpoint_url": None, "models": ["Qwen-Q5.gguf"],
+            "launch": {"endpoint_port": 64101, "ctx_size": 262144, "parallel": 1}}
+    kev = {"endpoint_url": "http://127.0.0.1:50872/v1", "models": ["kev-0.8b"]}
+    live = {"engine_id": "remote", "reload_signal": "sighup", "serves_systemone": True,
+            "reloads_builtins": True, "engines": [qwen]}
+    assert remote_provider._hot_reloadable([live], [qwen, kev], {"engines": [qwen, kev]}) is True
+    assert remote_provider._hot_reloadable(
+        [{**live, "engines": [qwen, kev]}], [qwen], {"engines": [qwen]}) is True
+
+    older = {key: value for key, value in live.items() if key != "reloads_builtins"}
+    assert remote_provider._hot_reloadable([older], [qwen, kev], {"engines": [qwen, kev]}) is False
+    retuned = {**qwen, "launch": {**qwen["launch"], "ctx_size": 65536}}
+    assert remote_provider._hot_reloadable([live], [retuned, kev], {"engines": [retuned, kev]}) is False
+    other = {"endpoint_url": None, "models": ["Other.gguf"], "launch": {"endpoint_port": 8082}}
+    assert remote_provider._hot_reloadable([live], [qwen, other], {"engines": [qwen, other]}) is False
+    assert remote_provider._hot_reloadable([live], [kev], {"engines": [kev]}) is False
