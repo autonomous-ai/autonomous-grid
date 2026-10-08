@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grid.autonomous.ai/protocol/node-heartbeat.schema.json",
+  "title": "NodeHeartbeat",
+  "description": "A provider's heartbeat: the body of `POST /nodes/heartbeat`, every HEARTBEAT_INTERVAL_SECONDS, with a node token (the node is the token's, not the body's). It never wakes a sleeping grid; on a sleeping or stopped grid it is the parked provider's one probe. The public CLI registers again when it is answered 404.",
+  "type": "object",
+  "properties": {
+    "load": {
+      "$ref": "#/$defs/NodeLoad"
+    },
+    "meta": {
+      "$ref": "node-registration.schema.json#/$defs/NodeMeta"
+    }
+  },
+  "x-route": {
+    "method": "POST",
+    "path": "/nodes/heartbeat",
+    "constant": "HEARTBEAT_PATH"
+  },
+  "$defs": {
+    "NodeHeartbeatAnswer": {
+      "type": "object",
+      "required": [
+        "status",
+        "ttl_seconds"
+      ],
+      "properties": {
+        "status": {
+          "const": "ok"
+        },
+        "ttl_seconds": {
+          "type": "integer",
+          "description": "The master's node TTL (NODE_TTL_SECONDS by default): a node silent this long is not selected."
+        }
+      }
+    },
+    "NodeLoad": {
+      "description": "Live telemetry. Each key is optional, and a key the provider did not measure is left out rather than sent as zero.",
+      "type": "object",
+      "properties": {
+        "active_tasks": {
+          "type": "integer"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "unhealthy_models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Models whose engine is failing; the relay stops selecting them until they drop off this list."
+        },
+        "gpu_count": {
+          "type": "integer"
+        },
+        "memory_total_mb": {
+          "type": "number"
+        },
+        "memory_used_mb": {
+          "type": "number"
+        },
+        "gpu_util": {
+          "type": "number"
+        },
+        "gpu_temp_c": {
+          "type": "number"
+        },
+        "gpu_power_w": {
+          "type": "number"
+        },
+        "gpu_power_limit_w": {
+          "type": "number"
+        },
+        "disk_total_gb": {
+          "type": "number"
+        },
+        "disk_used_gb": {
+          "type": "number"
+        },
+        "tok_s": {
+          "type": "number"
+        },
+        "codex_rate_limits": {
+          "type": "object"
+        },
+        "quota": {
+          "type": "object"
+        }
+      },
+      "x-names": {
+        "UNHEALTHY_MODELS_LOAD_KEY": "unhealthy_models"
+      }
+    }
+  }
+}

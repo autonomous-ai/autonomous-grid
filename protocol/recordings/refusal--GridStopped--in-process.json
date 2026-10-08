@@ -1,0 +1,13 @@
+{
+  "schema": "refusal",
+  "definition": "GridStopped",
+  "request": "GET /relay/v1/grid/overview",
+  "status": 503,
+  "headers": {},
+  "source": "grid-apis @ 12b6bae, grid_proxy.build_app in-process against a closed port (its own tests/test_proxy_refusals.py harness); the DEV VM has no grid in this state",
+  "sanitized": true,
+  "body": {
+    "detail": "grid was stopped by its owner, and nothing wakes it until they start it again (`grid start`, or Start in the app)",
+    "code": "grid_stopped"
+  }
+}

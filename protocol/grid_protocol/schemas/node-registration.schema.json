@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grid.autonomous.ai/protocol/node-registration.schema.json",
+  "title": "NodeRegistration",
+  "description": "A provider's registration: the body of `PUT /nodes/{node_id}`, with a node token whose node is the path's. Every key is optional at the master and an unknown key is ignored; the public CLI always sends `role`, `models` and `pricing`, and leaving a grid sends `{role: consumer, models: [], pricing: {}}`. A registration WAKES a sleeping grid (it carries a credential). A node answered 404 on its heartbeat registers again.",
+  "type": "object",
+  "properties": {
+    "role": {
+      "type": "string",
+      "description": "`provider`, or `consumer` to stop serving."
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "capabilities": {
+      "$ref": "#/$defs/NodeCapabilities"
+    },
+    "meta": {
+      "$ref": "#/$defs/NodeMeta"
+    },
+    "max_concurrency": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Concurrent requests this provider serves. Null or absent: no change. The master clamps it to at least 1."
+    }
+  },
+  "x-route": {
+    "method": "PUT",
+    "path": "/nodes/{node_id}",
+    "constant": "NODE_PATH"
+  },
+  "$defs": {
+    "NodeRegistrationAnswer": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "const": "updated"
+        }
+      }
+    },
+    "NodeCapabilities": {
+      "description": "The provider's capability envelope. The master keeps it only at this schema version (otherwise it stores `{}`), and refuses it 400 unless `models`' keys are exactly the registration's `models`.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "models"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "x-constant": "CAPABILITIES_SCHEMA_VERSION"
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelCapability"
+          }
+        }
+      }
+    },
+    "ModelCapability": {
+      "description": "What one model on this node can do. `endpoints` absent means chat completions only (fail-closed for the Responses dialect).",
+      "type": "object",
+      "properties": {
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The relay's endpoint paths, e.g. `chat/completions`, `responses`."
+        },
+        "input_modalities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "output_modalities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "context_window": {
+          "type": "integer"
+        },
+        "max_output_tokens": {
+          "type": "integer"
+        },
+        "features": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "limits": {
+          "type": "object"
+        },
+        "provider_attempt_tokens": {
+          "type": "boolean",
+          "description": "The provider echoes `X-Grid-Provider-Attempt`; the relay then puts `provider_attempt_token` in its poll jobs."
+        }
+      }
+    },
+    "NodeMeta": {
+      "description": "Presentation metadata. An empty object means \"no change\".",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "name_chosen": {
+          "type": "boolean",
+          "description": "The operator chose `name`. Absent means NOT chosen, which is the private answer."
+        },
+        "engine": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "chip": {
+          "type": "string"
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "device_class": {
+          "type": "string"
+        },
+        "plan_type": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

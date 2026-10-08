@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grid"
-version = "0.3.54"
+version = "0.3.55"
 description = "Grid: one private OpenAI-compatible endpoint for the AI engines you already run."
 requires-python = ">=3.11"
 dependencies = [
@@ -33,6 +33,8 @@ dev = [
     # `dependencies`. It landed undeclared once: the author's machine had it, CI did not, and
     # the whole suite stopped at collection — 3562 tests never ran.
     "cryptography>=42",
+    # protocol/ (grid-protocol, ADR 0004): its tests validate every schema and the recorded real answers.
+    "jsonschema>=4.18",
 ]
 # The RL training plane (`grid train`) — the torch trainer wants a CUDA box; Apple Silicon runs
 # the same GRPO loop on MLX (`--backend mlx`). The rest of the CLI never needs
@@ -80,4 +82,5 @@ markers = [
 # Deselected by default — registering the marker was never enough, so a plain `pytest` was
 # spending the subscription. A later `-m canary` wins over this one.
 addopts = ["-m", "not canary"]
-pythonpath = ["."]
+# `protocol/` holds `grid-protocol` (ADR 0004), its own distribution; its tests run with this suite.
+pythonpath = [".", "protocol"]
