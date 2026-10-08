@@ -19,7 +19,7 @@ import json
 from importlib import resources
 from typing import Any
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 #: Every schema's ``$id`` is this base plus ``<name>.schema.json``. An identifier, not a place to fetch from.
 SCHEMA_BASE_URI = "https://grid.autonomous.ai/protocol/"
