@@ -1,6 +1,6 @@
 """Every `grid` in the field, against today's master behind the proxy (grid-platform ticket 13; ADR 0004).
 
-Each test runs once per released version (0.3.47–0.3.52) and once for the harness's pinned `grid`. Behaviour that a
+Each test runs once per released version (0.3.47–0.3.57) and once for the harness's pinned `grid`. Behaviour that a
 version was never built to have is asserted as THAT version's behaviour, so a change that breaks an old client is a
 failure here, and a client that changed on purpose names the version it changed in:
 
