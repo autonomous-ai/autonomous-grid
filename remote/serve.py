@@ -2358,7 +2358,7 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
             )
             if failure is not None:
                 _warn_api_auth_failure(api_kind, failure.status)
-                _try_submit_error(state, txn, f"engine error {failure.status}: {failure.text[:200]}")
+                _try_submit_error(state, txn, _engine_error(failure.status, failure.text))
         elif endpoint == "responses":
             # A NON-streaming responses job (issue 05). The vendor returns ONE whole response object,
             # so the dialect-agnostic whole-body forward serves it — block alignment is a streaming
@@ -2405,6 +2405,30 @@ def _try_submit_error(state: _ServeState, txn: str, message: str) -> None:
         except relay.RelayError as exc:
             print(f"\nCouldn't report job {txn} failure to the relay: {exc}", file=sys.stderr)
             return
+
+# A non-JSON error page (an HTML 502, a stack trace) is cut to this; a JSON body is kept whole up to
+# `_ENGINE_ERROR_JSON_LIMIT`, because a byte-cut JSON body stops parsing.
+_ENGINE_ERROR_TEXT_LIMIT = 200
+_ENGINE_ERROR_JSON_LIMIT = 4096
+
+
+def _engine_error(status: int, text: str) -> str:
+    """The `engine error <status>: <body>` string a failed forward reports to the relay.
+
+    The relay's terminal-error mapper parses `<body>` as the engine's OpenAI-style error and
+    re-renders it for the consumer. The old blanket `text[:200]` cut llama.cpp's
+    `exceed_context_size_error` mid-object (its message alone runs ~100 chars, and the body carries
+    `n_prompt_tokens`/`n_ctx` after it), so the mapper fell back to a bare string and the consumer got
+    `{"error": "engine error 400: {..."}` — which OpenAI SDKs reject as a type-validation failure,
+    hiding the one error a client like opencode answers by compacting. A body that parses is kept
+    whole (re-serialised compactly) when it fits; anything else is truncated as before."""
+    try:
+        compact = json.dumps(json.loads(text), separators=(",", ":"))
+    except ValueError:
+        compact = None
+    if compact is not None and len(compact) <= _ENGINE_ERROR_JSON_LIMIT:
+        return f"engine error {status}: {compact}"
+    return f"engine error {status}: {text[:_ENGINE_ERROR_TEXT_LIMIT]}"
 
 
 def _submit_response(state: _ServeState, txn: str, *, content: Any, stream: bool) -> None:
@@ -2703,7 +2727,7 @@ def _forward_codex(
         if failure.status == 401 and attempt == 1 and state.codex_seat.refresh(bundle.access_token):
             continue  # rotated — retry once with the fresh bearer (reactive D-d)
         _warn_codex_upstream(failure.status, failure.headers)
-        _try_submit_error(state, txn, f"engine error {failure.status}: {failure.text[:200]}")
+        _try_submit_error(state, txn, _engine_error(failure.status, failure.text))
         return
 
 
@@ -2751,7 +2775,7 @@ def _forward_whole(
         resp = client.post(f"{target_url}/{endpoint}", json=body, headers=headers)
     if resp.status_code != 200:
         _warn_api_auth_failure(api_kind, resp.status_code)
-        _try_submit_error(state, txn, f"engine error {resp.status_code}: {resp.text[:200]}")
+        _try_submit_error(state, txn, _engine_error(resp.status_code, resp.text))
         return
     # Every caller of this forward is a text dialect (chat, anthropic /messages, non-stream
     # responses, System One) — media never reaches here — so the reply always has a usage object to
@@ -2784,7 +2808,7 @@ def _forward_stream(
             if engine_resp.status_code != 200:
                 engine_resp.read()
                 _warn_api_auth_failure(api_kind, engine_resp.status_code)
-                _try_submit_error(state, txn, f"engine error {engine_resp.status_code}: {engine_resp.text[:200]}")
+                _try_submit_error(state, txn, _engine_error(engine_resp.status_code, engine_resp.text))
                 return
             # Pass the engine's SSE bytes straight through while its stream is open. A streamed 401 can't
             # replay the iterator, so `_submit_response` re-raises it; `handle_job` then reports via

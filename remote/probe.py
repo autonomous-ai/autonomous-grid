@@ -73,6 +73,7 @@ def capabilities(
     answers to) yet register under the alias (what consumers ask for).
 
     ``context_window`` (the engine's ``--ctx-size``) is advertised so the master can catalog it.
+    Left unset, the window the engine chose for itself is read from ``/props`` instead.
 
     ``endpoints`` and ``honours_output_cap`` carry the once-per-engine Responses discovery (issue 08):
     the caller runs ``probe_responses_endpoint`` ONCE for the engine's server and passes the same
@@ -80,6 +81,8 @@ def capabilities(
     Both default to the pre-Phase-2 hardware posture (chat pair, no cap feature), so a caller that has
     not probed the route is unchanged.
     """
+    if not context_window:
+        context_window = probe_context_window(llm_url)
     return envelope(
         advertise_as or model, probe_llama_capabilities(llm_url, model), context_window,
         endpoints=endpoints, honours_output_cap=honours_output_cap,
@@ -303,6 +306,30 @@ def _probe_props(llm_url: str, timeout: float | httpx.Timeout = _PROPS_TIMEOUT) 
     }
 
 
+def probe_context_window(llm_url: str, timeout: float | httpx.Timeout = _PROPS_TIMEOUT) -> int | None:
+    """The per-request window llama-server actually loaded, read from ``/props``.
+
+    With no ``--ctx-size`` the engine sizes its own window from free device memory at load, so the
+    operator never states a number and nothing gets advertised — consumers (opencode's compaction,
+    the auto-router) then treat the window as unknown and overrun it until the engine 400s
+    ``exceed_context_size_error``. ``default_generation_settings.n_ctx`` is the slot's window, i.e.
+    already the ``ctx/N`` share a request gets, so it is the same per-request number ``--ctx-size``
+    means. Anything that isn't a positive int (non-llama.cpp servers, an old build) is ``None`` —
+    unknown stays unknown, never defaulted."""
+    resp = _get(_props_url(llm_url), timeout=timeout)
+    if resp is None or resp.status_code != 200:
+        return None
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+    settings = payload.get("default_generation_settings") if isinstance(payload, dict) else None
+    n_ctx = settings.get("n_ctx") if isinstance(settings, dict) else None
+    if isinstance(n_ctx, int) and not isinstance(n_ctx, bool) and n_ctx > 0:
+        return n_ctx
+    return None
+
+
 def _probe_ollama_caps(llm_url: str, model: str, timeout: float | httpx.Timeout = _SHOW_TIMEOUT) -> dict[str, bool]:
     """Read Ollama's declared model capabilities from ``POST /api/show`` (``capabilities: [...]``).
 
@@ -522,7 +549,7 @@ def capability_entry(
     endpoints: list[str] | None = None, honours_output_cap: bool = False,
 ) -> dict[str, Any]:
     """Render one model's capability entry (matches the desktop/relay shape). ``context_window`` is
-    included ONLY when actually known (the engine's ``--ctx-size`` or an API whitelist entry) — an
+    included ONLY when actually known (``--ctx-size``, llama.cpp's ``/props``, or an API whitelist entry) — an
     unknown window is omitted, never defaulted, so the master (and the auto-router Advisor) treats
     absence as "unknown" rather than trusting a fabricated 128000. ``endpoints`` defaults to the
     hardware-engine pair; an API engine passes its catalog row's endpoints (issue 03) — chat plus
