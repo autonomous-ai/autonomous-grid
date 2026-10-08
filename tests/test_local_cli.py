@@ -7631,8 +7631,113 @@ def _mock_remote_spawn(monkeypatch, *, pid=4242):
 
     monkeypatch.setattr(cli.remote_provider.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", fake_started)
+    monkeypatch.setattr(cli.remote_provider, "_await_registration", lambda *a, **k: "registered")
     monkeypatch.setattr(cli.remote_provider.os, "kill", lambda p, s: spawned["signals"].append((p, s)))
     return spawned
+
+
+class _SpawnedEngine:
+    """A spawned engine child: alive until ``exit_after`` polls (never, by default)."""
+
+    def __init__(self, exit_after: int | None = None) -> None:
+        self.polls = 0
+        self.exit_after = exit_after
+
+    def poll(self):
+        self.polls += 1
+        return 1 if self.exit_after is not None and self.polls > self.exit_after else None
+
+
+def test_remote_engine_start_waits_until_the_child_registered(monkeypatch, tmp_path):
+    """DEV e2e F3 (operator, 2026-10-04): a model a grid has never served is refused 404 at once, so `grid join`
+    must not return before its engine is on the grid — or "join, then chat" asks for a model the relay has not
+    heard of. The child stamps `registered_at` on its run record when it registers; the join waits for that."""
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "pid": 4242})
+    reads = {"n": 0}
+    real_read = run_records.read_record
+
+    def registers_on_the_third_look(grid_id, engine_id):
+        reads["n"] += 1
+        if reads["n"] == 3:
+            run_records.write_record(grid_id, engine_id, {"engine_id": "remote", "pid": 4242, "registered_at": "2026-10-04T12:00:00Z"})
+        return real_read(grid_id, engine_id)
+
+    monkeypatch.setattr(run_records, "read_record", registers_on_the_third_look)
+
+    outcome = cli.remote_provider._await_registration(
+        _SpawnedEngine(), "n1", "remote", register_wait=10, poll_every=0.01)
+
+    assert outcome == "registered"
+    assert reads["n"] == 3
+
+
+def test_remote_engine_start_gives_up_waiting_and_says_still_starting(monkeypatch, tmp_path):
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "pid": 4242})
+
+    outcome = cli.remote_provider._await_registration(
+        _SpawnedEngine(), "n1", "remote", register_wait=0.1, poll_every=0.01)
+
+    assert outcome == "starting"
+
+
+def test_remote_engine_start_reports_a_child_that_died_before_registering(monkeypatch, tmp_path):
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "pid": 4242})
+
+    outcome = cli.remote_provider._await_registration(
+        _SpawnedEngine(exit_after=2), "n1", "remote", register_wait=10, poll_every=0.01)
+
+    assert outcome == "died"
+
+
+def test_remote_join_says_its_engine_is_still_starting_and_succeeds(monkeypatch, tmp_path, capsys):
+    """A local model load takes minutes: past the wait the join returns, saying where the models will show."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider, "_await_registration", lambda *a, **k: "starting")
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+
+    err = capsys.readouterr().err
+    assert "still starting" in err and "grid models" in err
+
+
+def test_remote_join_waits_for_registration_with_the_identity_lock_released(monkeypatch, tmp_path):
+    """The child takes the identity's record lock to stamp its registration during bring-up. A join waiting INSIDE
+    that lock stalled the registration it waited for — measured on DEV: the whole 60 s, then the engine came up the
+    moment the join let go. The wait must see the lock free."""
+    import fcntl
+
+    from shared import filelock, run_records
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    seen: dict = {}
+
+    def lock_is_free(proc, network_id, engine_id, **_kw):
+        lock = filelock.lock_path_for(run_records.record_path(network_id, engine_id))
+        with open(lock, "a+") as fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                seen["free"] = True
+            except BlockingIOError:
+                seen["free"] = False
+        return "registered"
+
+    monkeypatch.setattr(cli.remote_provider, "_await_registration", lock_is_free)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+
+    assert seen == {"free": True}
 
 
 def test_remote_join_serve_writes_record_and_spawns_remote_engine(monkeypatch, tmp_path):
@@ -9497,6 +9602,42 @@ def test_remote_join_noop_surfaces_last_reload_error(monkeypatch, tmp_path, caps
     out_err = capsys.readouterr()
     assert "nothing to append" in out_err.out
     assert "no key is stored for openai" in out_err.err  # the failure is surfaced, not silent
+
+
+def test_remote_join_rejoin_with_only_a_new_max_concurrency_respawns_to_apply_it(monkeypatch, tmp_path, capsys):
+    """DEV e2e F5 (B4b): `grid join … --max-concurrency 8` on an engine already serving at 1 answered "Already
+    serving …; nothing to append." and kept 1 — the flag silently ignored. A different explicit size is a change:
+    the pool is sized only at spawn, so the join respawns to apply it."""
+    import signal as _sig
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0  # hardware: 1 at a time
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    capsys.readouterr()
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--max-concurrency", "8"]) == 0
+
+    assert "nothing to append" not in capsys.readouterr().out
+    assert cli.provider._read_records("n1")["remote"]["max_concurrency"] == 8
+    assert terminated == [4242]                           # respawned to resize the pool...
+    assert (4242, _sig.SIGHUP) not in spawned["signals"]  # ...not hot-reloaded at the old size
+
+
+def test_remote_join_rejoin_with_the_same_max_concurrency_stays_a_noop(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--max-concurrency", "8"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--max-concurrency", "8"]) == 0
+
+    assert "nothing to append" in capsys.readouterr().out
+    assert terminated == []
 
 
 def test_remote_join_hardware_onto_api_only_respawns_for_concurrency_flip(monkeypatch, tmp_path):
@@ -23395,6 +23536,8 @@ def test_remote_start_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
         "network_id": "n-new", "name": "team", "network_type": "permissioned-public",
         "signaling_url": "https://relay.example", "status": "running",
     })
+    _disable_orphan_sweep(monkeypatch)
+    _sync_patch_fetch(monkeypatch, [])  # a token refresh that does not name the new grid yet: its record is kept
 
     assert cli.main(["start", "team"]) == 0
     out = capsys.readouterr().out
@@ -23406,6 +23549,58 @@ def test_remote_start_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
     nets = credentials.load_credentials()["networks"]  # persisted so ls/use/info see it
     assert [n["network_id"] for n in nets] == ["n-new"]
     assert nets[0]["signaling_url"] == "https://relay.example"
+
+
+def test_remote_start_create_stores_the_new_grids_token(monkeypatch, tmp_path, capsys):
+    """DEV e2e F11: the create reply carries no token, so a grid its creator had just made could not be stopped,
+    deleted or served from that home until a `grid sync`. The create now refreshes the grid list as sync does —
+    the WHOLE list, because a token fetch rotates every grid's refresh token."""
+    _seed_remote(monkeypatch, tmp_path, networks=[
+        {"network_id": "n-old", "name": "old", "access_token": "stale", "refresh_token": "stale-r"}])
+    _mock_lifecycle(monkeypatch, create={
+        "network_id": "n-new", "name": "team", "network_type": "permissioned-public",
+        "signaling_url": "https://relay.example", "status": "running",
+    })
+    _disable_orphan_sweep(monkeypatch)
+    fetches: list = []
+    _sync_patch_fetch(monkeypatch, [
+        {"network_id": "n-old", "name": "old", "access_token": "a-old", "refresh_token": "r-old"},
+        {"network_id": "n-new", "name": "team", "access_token": "a-new", "refresh_token": "r-new",
+         "lan_signaling_url": "https://relay.example"},
+    ], calls=fetches)
+
+    assert cli.main(["start", "team"]) == 0
+
+    from remote import credentials
+    nets = {n["network_id"]: n for n in credentials.load_credentials()["networks"]}
+    assert len(fetches) == 1
+    assert nets["n-new"]["access_token"] == "a-new", "the creator can act on the grid at once"
+    assert nets["n-old"]["refresh_token"] == "r-old", "every grid's rotated token is kept, not only the new one"
+
+
+def test_remote_start_create_succeeds_when_the_token_refresh_fails(monkeypatch, tmp_path, capsys):
+    """The grid exists once the control plane said so: a refresh that fails afterwards says how to finish, and the
+    create still reports the grid (a non-zero exit would invite a second `grid start` — a duplicate)."""
+    from remote import control_plane
+
+    _seed_remote(monkeypatch, tmp_path)
+    _mock_lifecycle(monkeypatch, create={
+        "network_id": "n-new", "name": "team", "network_type": "permissioned-public",
+        "signaling_url": "https://relay.example", "status": "running",
+    })
+
+    def refused(session_token, device_id, api_url=None):
+        raise SystemExit("GET /v1/grid/tokens failed (503): busy")
+
+    monkeypatch.setattr(control_plane, "fetch_tokens", refused)
+
+    assert cli.main(["start", "team"]) == 0
+
+    captured = capsys.readouterr()
+    assert "grid=team" in captured.out
+    assert "grid sync" in captured.err
+    from remote import credentials
+    assert [n["network_id"] for n in credentials.load_credentials()["networks"]] == ["n-new"]
 
 
 def test_remote_start_starts_when_name_known(monkeypatch, tmp_path, capsys):
@@ -23448,6 +23643,8 @@ def test_remote_start_type_on_create_sets_network_type(monkeypatch, tmp_path, ca
     calls = _mock_lifecycle(monkeypatch, create={
         "network_id": "n1", "name": "lab", "network_type": "permissioned-providers",
         "signaling_url": "https://r"})
+    _disable_orphan_sweep(monkeypatch)
+    _sync_patch_fetch(monkeypatch, [])
 
     assert cli.main(["start", "lab", "--type", "permissioned-providers"]) == 0
     capsys.readouterr()
