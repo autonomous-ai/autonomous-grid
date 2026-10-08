@@ -14,6 +14,7 @@ rule it exists for is about path derivations, not about which repository they po
 """
 from __future__ import annotations
 
+import ast
 import os
 import pathlib
 
@@ -208,3 +209,29 @@ def grid_src_private_server() -> pathlib.Path | None:
     """grid-src's `private_server` package — the relay's own source tree."""
     root = grid_src_root()
     return None if root is None else root / "grid_cli" / "private_server"
+
+
+#: The relay's own modules. Since grid-platform M2 ticket 07 the relay is one module per area (`relay_<area>.py`) behind
+#: a facade `relay.py` that defines nothing of its own; before it, `relay.py` alone. Both match, so a pin reads whichever
+#: grid-src is beside it.
+RELAY_MODULES = "relay*.py"
+
+
+def grid_src_relay_paths(package: pathlib.Path) -> list[pathlib.Path]:
+    """Every module of the relay in grid-src's ``package`` — refusing a package without `relay.py`, which is drift
+    (the resolver has already proved the package is there), never a reason to skip."""
+    paths = sorted(package.glob(RELAY_MODULES))
+    if package / "relay.py" not in paths:
+        raise AssertionError(f"{package} has no relay.py — teach this check where the relay went rather than skipping")
+    return paths
+
+
+def grid_src_relay_source(package: pathlib.Path) -> str:
+    """The relay's text, every module of it one after the other — for a literal it must still spell somewhere."""
+    return "\n".join(path.read_text() for path in grid_src_relay_paths(package))
+
+
+def grid_src_relay_tree(package: pathlib.Path) -> ast.Module:
+    """The relay's modules parsed as one: their top-level statements, in file order, in one `ast.Module`."""
+    body = [node for path in grid_src_relay_paths(package) for node in ast.parse(path.read_text()).body]
+    return ast.Module(body=body, type_ignores=[])

@@ -47,7 +47,7 @@ import re
 
 import pytest
 
-from tests.grid_src_repo import app_root, grid_apis_root, grid_src_private_server
+from tests.grid_src_repo import app_root, grid_apis_root, grid_src_private_server, grid_src_relay_tree
 
 # ── the canonical values, written here so neither side can be compared to itself ────────────────
 _COST_FIELD = "cost_credits"
@@ -207,7 +207,9 @@ def _is_required(field: ast.AnnAssign) -> bool:
 
 
 def _relay() -> ast.Module:
-    return _source(grid_src_private_server(), "relay.py")
+    """The relay's modules as one: one per area since grid-platform M2 ticket 07, `relay.py` alone before it."""
+    _sibling_file(grid_src_private_server(), "relay.py")  # skips when grid-src is absent, raises when it moved
+    return grid_src_relay_tree(grid_src_private_server())
 
 
 def _relay_sync() -> ast.Module:

@@ -127,15 +127,15 @@ def test_this_cli_calls_a_grid_in_the_canonical_asleep_state():
 
 
 def _boot_hold_default() -> float:
-    from tests.grid_src_repo import grid_src_private_server
+    from tests.grid_src_repo import grid_src_private_server, grid_src_relay_tree
 
     root = grid_src_private_server()
     if root is None:
         pytest.skip("the grid-src worktree is not beside this one; the lockstep cannot be checked here")
-    source = root / "relay.py"
-    # A literal, or (since grid-platform ticket 12) `float(protocol.BOOT_HOLD_SECONDS)`.
+    # A literal, or (since grid-platform ticket 12) `float(protocol.BOOT_HOLD_SECONDS)`. In whichever of the relay's
+    # modules holds it: one per area since grid-platform M2 ticket 07.
     values = [
-        protocol_value(node.value) for node in ast.parse(source.read_text()).body
+        protocol_value(node.value) for node in grid_src_relay_tree(root).body
         if isinstance(node, ast.Assign)
         and any(getattr(target, "id", None) == "DEFAULT_BOOT_HOLD_SECONDS" for target in node.targets)
     ]
