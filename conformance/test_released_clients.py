@@ -12,7 +12,9 @@ failure here, and a client that changed on purpose names the version it changed 
 * a joined provider on an asleep grid outlives the sleep and serves after the wake;
 * a joined provider on a deleted grid stops from 0.3.48 (`grid_deleted` ends an engine) and keeps retrying before it;
 * a joined provider whose node row is gone (pruned, lost, moved) is answered 404 on its next heartbeat, registers
-  again, and serves within one heartbeat and a registration (grid-platform ticket 23).
+  again, and serves within one heartbeat and a registration (grid-platform ticket 23);
+* `grid task` and `grid project` are told, in a sentence, that distributed tasks are retired: the relay's half of the
+  plane is deleted (grid-platform M2 ticket 04) and its routes answer `410 feature_retired`.
 """
 from __future__ import annotations
 
@@ -229,3 +231,20 @@ def test_a_provider_whose_node_row_is_gone_registers_again_and_serves(client, st
         # Criterion 1: one heartbeat (HEARTBEAT_INTERVAL_SECONDS, 30) to be answered 404, then the registration and a
         # poll — 45 s, which no version may need more than.
         _until(lambda: _served(_chat(stack)), 45, f"{joined.name} was not serving again 45 s after its row was deleted")
+
+
+# ── A retired feature ────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("argv", [("task", "list"), ("project", "list")])
+def test_the_retired_task_plane_is_refused_in_a_sentence(client, stack, argv):
+    """Every released `grid task` / `grid project` reaches a route of the deleted plane and must end on the 410's
+    sentence (`detail`, printed verbatim) and a failing exit — never a traceback, never an apparent success."""
+    _as_consumer(client, stack)
+
+    done = client.run(*argv, "--grid", stack.network_id)
+
+    said = done.stdout + done.stderr
+    assert done.returncode != 0, said
+    assert "is retired" in said, said
+    assert "Traceback" not in said, said
