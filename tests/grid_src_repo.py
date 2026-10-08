@@ -26,9 +26,27 @@ FEATS_DIR_NAME = "autonomous-grid-feats"
 #: the feature worktree is lost -- silently, as a skip.
 PARALLEL_SUFFIX = "_parallel"
 
+#: The private monorepo grid-src and grid-apis live in since grid-platform M2 ticket 01 (ADR 0010), each under its old
+#: name: `grid-platform/grid-src/`, `grid-platform/grid-apis/`.
+MONOREPO = "grid-platform"
+MONOREPO_PROJECTS = frozenset({"grid-src", "grid-apis"})
+
 
 def _mirror_candidates(here: pathlib.Path, repo: str) -> list[pathlib.Path]:
     """Where a checkout of ``repo`` could sit beside the checkout at ``here``, best guess first.
+
+    For grid-src and grid-apis, the monorepo's layout comes FIRST (its mirror, its feature fallback, its main clone,
+    each with the project's subdirectory), then the old repository's. The old repositories are read-only from the cut
+    on: reading one first would compare against code the monorepo has moved past, and a value that moved there would
+    read as one that was deleted.
+    """
+    if repo in MONOREPO_PROJECTS:
+        return [c / repo for c in _checkout_candidates(here, MONOREPO)] + _checkout_candidates(here, repo)
+    return _checkout_candidates(here, repo)
+
+
+def _checkout_candidates(here: pathlib.Path, repo: str) -> list[pathlib.Path]:
+    """Where a checkout of the repository ``repo`` could sit beside the checkout at ``here``, best guess first.
 
     Split out of `_sibling_root` so the layouts can be pinned as data: this function is the whole
     of the derivation, and the derivation is what decides whether the lockstep suites run at all.
@@ -105,8 +123,8 @@ def grid_apis_root() -> pathlib.Path | None:
     """grid-apis' checkout — the CONTROL PLANE — or ``None`` when it is not beside this worktree.
 
     A third repository joined the lockstep with ADR 0039's `os-community` literal: grid-apis
-    `grid_networks/store.py` holds a copy of it, alongside grid-src's two. `GRID_APIS_REPO`
-    overrides the derivation.
+    `grid_networks/store.py` holds a copy of it, alongside grid-src's two. Since the monorepo it is
+    `grid-platform/grid-apis/`, looked for first. `GRID_APIS_REPO` overrides the derivation.
     """
     return _sibling_root(pathlib.Path("grid_networks"), "grid-apis", "GRID_APIS_REPO")
 
@@ -144,7 +162,8 @@ def grid_src_root() -> pathlib.Path | None:
     worktree they are checked out into instead of skipping everywhere but one. The convention is
     `<repo>-feats/<slug>` beside `<repo>`, so a worktree of `autonomous-grid` at
     `…/autonomous-grid-feats/<slug>` looks for `…/grid-src-feats/<slug>` first and falls back to
-    the main `…/grid-src` checkout.
+    the main `…/grid-src` checkout — after the same three places in the grid-platform monorepo
+    (`…/grid-platform-feats/<slug>/grid-src`, then `…/grid-platform/grid-src`), which come first.
 
     ⚠️ `GRID_SRC_REPO` — the cross-repo E2E's own override — wins over both, so a machine that lays
     the repositories out differently can still run these. It is **validated**, and a bad one raises
