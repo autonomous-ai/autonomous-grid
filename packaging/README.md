@@ -32,15 +32,21 @@ notarization lands, add a `macos-*` binary back to the matrix and flip the macOS
    Nuitka can't cross-compile) via `packaging/build_binary.sh` plus the universal wheel, and
    publishes them with `SHA256SUMS` to the GitHub Release.
 
-Build the Linux binary locally to reproduce CI: `packaging/build_binary.sh` → `dist/grid`.
+Build the Linux binary locally to reproduce CI — in the same image, because the binary needs the glibc it
+was built on (an Ubuntu 24.04 build needs 2.38 and dies on Debian 12 / Ubuntu 22.04 / RHEL 9):
+
+```bash
+docker run --rm -v "$PWD:/src" -w /src python:3.12-bullseye \
+  bash -c 'apt-get update -qq && apt-get install -y -qq patchelf && GRID_BUILD_PYTHON=python3.12 bash packaging/build_binary.sh'
+```
 
 ### Release assets
 
-| Asset | Runner | Who installs it |
-|-------|--------|-----------------|
-| `grid-linux-x86_64`           | `ubuntu-latest`    | Linux x86_64 (binary) |
-| `grid-linux-arm64`            | `ubuntu-24.04-arm` | Linux aarch64 (binary) |
-| `grid-X.Y.Z-py3-none-any.whl` | (release job)      | **macOS** (`uv tool install`), and any uv/pip user |
+| Asset | Built in | Who installs it |
+|-------|----------|-----------------|
+| `grid-linux-x86_64`           | `python:3.12-bullseye` on `ubuntu-latest`    | Linux x86_64 with glibc ≥ 2.31 (binary) |
+| `grid-linux-arm64`            | `python:3.12-bullseye` on `ubuntu-24.04-arm` | Linux aarch64 with glibc ≥ 2.31 (binary) |
+| `grid-X.Y.Z-py3-none-any.whl` | (release job)      | **macOS** (`uv tool install`), any Linux that cannot run the binary (install.sh falls back to it), and any uv/pip user |
 | `SHA256SUMS`                  | (release job)      | integrity check the Linux path verifies |
 
 Drop a row from the matrix in `release.yml` to skip a Linux arch; the installer reports

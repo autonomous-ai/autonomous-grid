@@ -7,7 +7,7 @@ are therefore pinned here, where CI checks them on every push and PR.
 
 Two classes of test live in this file:
 
-1. Behaviour, driven through the real script. install_macos_wheel exports
+1. Behaviour, driven through the real script. install_wheel exports
    ~/.local/bin into the script's own PATH, so the post-install "Add <dir> to PATH"
    check must test the invoking shell's PATH (ORIG_PATH), not the augmented one —
    otherwise the hint is dead code on macOS and users get a success banner with
@@ -115,6 +115,97 @@ def test_installer_local_path_names_the_mode(tmp_path):
         "the local on-ramp must name the mode, or `grid start` refuses on a fresh install; "
         f"output was:\n{res.stdout}"
     )
+
+
+# --- Linux: a binary this machine cannot run falls back to the wheel ------------------------------
+#
+# Every release up to v0.3.56 built its Linux binaries on Ubuntu 24.04, so they need glibc 2.38 and die on Debian 12,
+# Ubuntu 22.04 and RHEL 9 (`version 'GLIBC_2.38' not found`). The installer used to install that binary anyway and
+# end on "installed but failed to run". It now tries the binary first and, when it cannot run here, installs the
+# wheel with uv — the same grid, as macOS always gets. And because install.sh is served from `main`, that covers
+# every release already published, not only the ones built after the build moved to an older glibc.
+
+STUB_UNAME_LINUX = """#!/bin/bash
+case "$1" in
+  -m) echo x86_64 ;;
+  *) echo Linux ;;
+esac
+"""
+
+# Serves the release's binary (the script in $STUB_BINARY) and no SHA256SUMS; anything else is a 404.
+STUB_CURL_LINUX = """#!/bin/bash
+out=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+case "$url" in
+  */grid-linux-x86_64) cp "$STUB_BINARY" "$out"; exit 0 ;;
+esac
+exit 22
+"""
+
+# Records that it ran, then installs a grid the way `uv tool install` does.
+STUB_UV_RECORDING = """#!/bin/bash
+echo "$*" >> "$HOME/uv-calls"
+if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
+  mkdir -p "$HOME/.local/bin"
+  printf '#!/bin/bash\\necho "grid 0.0.0-wheel"\\n' > "$HOME/.local/bin/grid"
+  chmod +x "$HOME/.local/bin/grid"
+fi
+exit 0
+"""
+
+BINARY_THIS_MACHINE_CANNOT_RUN = """#!/bin/bash
+echo "grid: /lib/x86_64-linux-gnu/libc.so.6: version \\`GLIBC_2.38' not found (required by grid)" >&2
+exit 1
+"""
+
+BINARY_THAT_RUNS = """#!/bin/bash
+echo "grid 9.9.9-binary"
+"""
+
+
+def _run_linux_installer(tmp_path: Path, binary: str) -> tuple[subprocess.CompletedProcess, Path]:
+    tmp = tmp_path.resolve()
+    home, stubbin = tmp / "home", tmp / "stubbin"
+    home.mkdir(exist_ok=True)
+    stubbin.mkdir(exist_ok=True)
+    _write_exe(stubbin / "uv", STUB_UV_RECORDING)
+    _write_exe(stubbin / "uname", STUB_UNAME_LINUX)
+    _write_exe(stubbin / "curl", STUB_CURL_LINUX)
+    _write_exe(tmp / "release-binary", binary)
+    env = {
+        "HOME": str(home),
+        "PATH": f"{home / '.local' / 'bin'}:{stubbin}:/usr/bin:/bin",
+        "STUB_BINARY": str(tmp / "release-binary"),
+        # The wheel the fallback installs; pinned so no release tag is resolved (no network).
+        "GRID_WHEEL_URL": "https://invalid.example/grid-0.0.0-py3-none-any.whl",
+    }
+    res = subprocess.run(["bash", str(INSTALL_SH)], env=env, capture_output=True, text=True, timeout=60)
+    return res, home
+
+
+def test_a_linux_binary_this_machine_cannot_run_falls_back_to_the_wheel(tmp_path):
+    res, home = _run_linux_installer(tmp_path, BINARY_THIS_MACHINE_CANNOT_RUN)
+
+    assert res.returncode == 0, f"installer failed:\n{res.stdout}\n{res.stderr}"
+    assert "GLIBC_2.38" in res.stdout, f"say WHY the binary was not used:\n{res.stdout}"
+    assert (home / "uv-calls").exists(), "the wheel must be installed with uv"
+    assert "grid 0.0.0-wheel" in res.stdout, f"the grid that answers must be the wheel's:\n{res.stdout}"
+    assert not (home / ".local" / "bin" / ".grid.new").exists(), "the binary that could not run is left behind"
+
+
+def test_a_linux_binary_that_runs_is_installed_and_uv_is_never_called(tmp_path):
+    res, home = _run_linux_installer(tmp_path, BINARY_THAT_RUNS)
+
+    assert res.returncode == 0, f"installer failed:\n{res.stdout}\n{res.stderr}"
+    assert "grid 9.9.9-binary" in res.stdout
+    assert not (home / "uv-calls").exists(), "uv must not be touched when the binary runs"
+    assert (home / ".local" / "bin" / "agrid").is_symlink()
 
 
 def _code_lines(text: str) -> list[tuple[int, str]]:
