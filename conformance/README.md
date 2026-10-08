@@ -6,7 +6,7 @@ grid-platform ticket 13 (ADR 0004). Built on ticket 12's `grid-protocol`: every 
 
 | Client | Installed from | Driven as |
 |---|---|---|
-| public `grid` 0.3.47 – 0.3.52 | each version's **release wheel** on GitHub Releases | the CLI a user runs |
+| public `grid` 0.3.47 – 0.3.57 | each version's **release wheel** on GitHub Releases | the CLI a user runs |
 | the harness's pinned `grid` | its version, read from the manifest the harness daemon follows | the same |
 | the harness daemon's own reads | `test_harness_reads.py`, checked against `grid-protocol` | credential-less HTTP, as `gridReader.ts` |
 
@@ -65,7 +65,8 @@ GRID_SRC_REPO=~/Projects/grid-src GRID_APIS_REPO=~/Projects/grid-apis \
 - Without the siblings it skips. With `GRID_CONFORMANCE_REQUIRED=1`, which CI sets, a missing sibling FAILS: pytest
   exits 0 on an all-skipped run.
 - `GRID_HARNESS_PIN` overrides the manifest's pin. `GRID_CONFORMANCE_CACHE` is where the venvs live.
-- About 10 minutes cold, most of it the per-version venvs; about 8 warm.
+- About 20 minutes warm for 11 releases and the harness pin (136 tests, measured 2026-10-08 on an M-series Mac);
+  it grows by about 1.6 minutes per release added. A cold run adds the per-version venvs.
 - **Every answer is checked against THIS checkout's `protocol/`**, not grid-src's pinned `grid-protocol`, so a schema
   changed here first is what the server is held to.
 

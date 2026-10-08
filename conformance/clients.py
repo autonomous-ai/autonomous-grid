@@ -27,7 +27,9 @@ if TYPE_CHECKING:
     from conformance.stack import Stack
 
 #: Every release still in the field. 0.3.47 is what the harness pinned until 2026-09-24; nothing older is supported.
-RELEASED = ("0.3.47", "0.3.48", "0.3.49", "0.3.50", "0.3.51", "0.3.52")
+RELEASED = (
+    "0.3.47", "0.3.48", "0.3.49", "0.3.50", "0.3.51", "0.3.52", "0.3.53", "0.3.54", "0.3.55", "0.3.56", "0.3.57",
+)
 WHEEL_URL = "https://github.com/autonomous-ai/autonomous-grid/releases/download/v{v}/grid-{v}-py3-none-any.whl"
 HARNESS_MANIFEST = "https://storage.googleapis.com/s3-autonomous-upgrade-3/harness/runtime/grid/metadata.json"
 #: `--no-wake` (grid-reads-without-waking issue 01) first shipped in 0.3.49; older releases refuse it at argparse.
