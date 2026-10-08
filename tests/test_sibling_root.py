@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import pathlib
 
-from tests.grid_src_repo import PARALLEL_SUFFIX, _mirror_candidates
+import pytest
+
+from tests.grid_src_repo import PARALLEL_SUFFIX, _mirror_candidates, _sibling_root
 
 
 #: A repository outside the monorepo: its derivation is the one the layouts below were written for, unchanged.
@@ -102,3 +104,40 @@ def test_a_parallel_ticket_worktree_mirrors_the_whole_path_in_the_monorepo_first
         "/P/grid-src-feats/m2",
         "/P/grid-src",
     ]
+
+
+# ── once a monorepo checkout exists, it decides ─────────────────────────────────────────────────────────
+
+
+def _layout(tmp_path: pathlib.Path, *, monorepo_holds_marker: bool | None) -> pathlib.Path:
+    """`P/autonomous-grid-feats/s` (the checkout asking), an old `P/grid-src` that holds the marker, and — unless
+    ``monorepo_holds_marker`` is None — a `P/grid-platform` clone whose `grid-src/` holds it or not."""
+    here = tmp_path / "autonomous-grid-feats" / "s"
+    here.mkdir(parents=True)
+    (tmp_path / "grid-src" / "grid_cli" / "private_server").mkdir(parents=True)
+    if monorepo_holds_marker is not None:
+        (tmp_path / "grid-platform" / ".git").mkdir(parents=True)
+        (tmp_path / "grid-platform" / "grid-src").mkdir()
+        if monorepo_holds_marker:
+            (tmp_path / "grid-platform" / "grid-src" / "grid_cli" / "private_server").mkdir(parents=True)
+    return here
+
+
+def _resolve(here: pathlib.Path) -> pathlib.Path | None:
+    return _sibling_root(pathlib.Path("grid_cli") / "private_server", "grid-src", "M2_TEST_UNSET_OVERRIDE",
+                         here=here)
+
+
+def test_the_monorepo_is_read_when_it_holds_the_project(tmp_path) -> None:
+    assert _resolve(_layout(tmp_path, monorepo_holds_marker=True)) == tmp_path / "grid-platform" / "grid-src"
+
+
+def test_a_monorepo_that_lost_the_project_fails_rather_than_reading_the_frozen_repository(tmp_path) -> None:
+    """The old repositories are read-only from the cut on: falling through to one would compare every pin against
+    code the monorepo has moved past, and a value that MOVED would read as one that never changed."""
+    with pytest.raises(AssertionError, match="moved"):
+        _resolve(_layout(tmp_path, monorepo_holds_marker=False))
+
+
+def test_with_no_monorepo_on_the_machine_the_old_checkout_still_answers(tmp_path) -> None:
+    assert _resolve(_layout(tmp_path, monorepo_holds_marker=None)) == tmp_path / "grid-src"

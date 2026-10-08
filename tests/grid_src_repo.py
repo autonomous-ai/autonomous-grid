@@ -41,8 +41,13 @@ def _mirror_candidates(here: pathlib.Path, repo: str) -> list[pathlib.Path]:
     read as one that was deleted.
     """
     if repo in MONOREPO_PROJECTS:
-        return [c / repo for c in _checkout_candidates(here, MONOREPO)] + _checkout_candidates(here, repo)
+        return [top / repo for top in _checkout_candidates(here, MONOREPO)] + _checkout_candidates(here, repo)
     return _checkout_candidates(here, repo)
+
+
+def _monorepo_checkout(here: pathlib.Path) -> pathlib.Path | None:
+    """The closest grid-platform checkout beside ``here`` (a work tree: its `.git` is a directory or a file), or None."""
+    return next((top for top in _checkout_candidates(here, MONOREPO) if (top / ".git").exists()), None)
 
 
 def _checkout_candidates(here: pathlib.Path, repo: str) -> list[pathlib.Path]:
@@ -83,7 +88,7 @@ def _checkout_candidates(here: pathlib.Path, repo: str) -> list[pathlib.Path]:
 
 
 def _sibling_root(
-    marker: pathlib.Path, repo: str, env_var: str, *, hint: str = ""
+    marker: pathlib.Path, repo: str, env_var: str, *, hint: str = "", here: pathlib.Path | None = None
 ) -> pathlib.Path | None:
     """A sibling checkout of ``repo``, or ``None`` when this machine has none beside this worktree.
 
@@ -97,6 +102,9 @@ def _sibling_root(
 
     ``marker`` is a directory that must exist under a candidate for it to count as that repository —
     the difference between "found it" and "found a directory with the right name".
+
+    ⚠️ **For grid-src and grid-apis, the closest grid-platform checkout DECIDES.** If it lacks the project's marker
+    this RAISES rather than falling back to the old checkouts, which are frozen from the cut on.
 
     ``env_var`` wins over both, and is **validated**: a bad one raises rather than skips, because an
     override pointing somewhere else is a person's configuration mistake, not evidence the
@@ -113,7 +121,17 @@ def _sibling_root(
                 + (f" — {hint}" if hint else ""))
         return root
 
-    here = pathlib.Path(__file__).resolve().parent.parent  # the autonomous-grid checkout
+    here = here or pathlib.Path(__file__).resolve().parent.parent  # the autonomous-grid checkout
+    if repo in MONOREPO_PROJECTS:
+        top = _monorepo_checkout(here)
+        if top is not None:
+            if (top / repo / marker).is_dir():
+                return top / repo
+            # ⚠️ Never fall through to the old repository here: it is read-only from the cut on, so every pin would
+            # compare against code the monorepo has moved past, and a value that MOVED would read as unchanged.
+            raise AssertionError(
+                f"{top} is a grid-platform checkout but has no {repo}/{marker}: it moved, so teach this resolver "
+                f"where it went rather than letting the pins read the frozen {repo} repository")
     for candidate in _mirror_candidates(here, repo):
         if (candidate / marker).is_dir():
             return candidate
