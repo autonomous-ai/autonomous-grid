@@ -90,9 +90,10 @@ def _sibling_root(
     Derived from THIS file's location rather than written out, so the checks run in whichever
     worktree they are checked out into instead of skipping everywhere but one. The convention is
     `<repo>-feats/<slug>` beside `<repo>`, so a worktree of `autonomous-grid` at
-    `…/autonomous-grid-feats/<slug>` looks for `…/<repo>-feats/<slug>` first and falls back to the
-    main `…/<repo>` checkout. `_mirror_candidates` holds the full rule, including the
-    parallel-ticket layout, and `tests/test_sibling_root.py` pins it.
+    `…/autonomous-grid-feats/<slug>` looks for `…/<repo>-feats/<slug>` and falls back to the main
+    `…/<repo>` checkout — and for grid-src and grid-apis, looks in the grid-platform monorepo first.
+    `_mirror_candidates` holds the full rule, including the parallel-ticket layout, and
+    `tests/test_sibling_root.py` pins it.
 
     ``marker`` is a directory that must exist under a candidate for it to count as that repository —
     the difference between "found it" and "found a directory with the right name".
@@ -162,7 +163,7 @@ def grid_src_root() -> pathlib.Path | None:
     worktree they are checked out into instead of skipping everywhere but one. The convention is
     `<repo>-feats/<slug>` beside `<repo>`, so a worktree of `autonomous-grid` at
     `…/autonomous-grid-feats/<slug>` looks for `…/grid-src-feats/<slug>` first and falls back to
-    the main `…/grid-src` checkout — after the same three places in the grid-platform monorepo
+    the main `…/grid-src` checkout — after the same places in the grid-platform monorepo
     (`…/grid-platform-feats/<slug>/grid-src`, then `…/grid-platform/grid-src`), which come first.
 
     ⚠️ `GRID_SRC_REPO` — the cross-repo E2E's own override — wins over both, so a machine that lays
