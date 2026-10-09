@@ -341,7 +341,7 @@ def _assert_unauthenticated(handler: ast.AST, allowed_args: list[str]) -> None:
 
 
 def test_the_overview_is_public_at_the_master():
-    _source(grid_src_private_server(), "relay.py", _SKIP_SRC)  # skips when grid-src is absent, raises when it moved
+    _source(grid_src_private_server(), "server.py", _SKIP_SRC)  # skips when grid-src is absent; the tree raises if it moved
     relay_tree = grid_src_relay_tree(grid_src_private_server())  # one module per area since grid-platform M2 ticket 07
     prefixes = [
         keyword.value.value for node in ast.walk(relay_tree)

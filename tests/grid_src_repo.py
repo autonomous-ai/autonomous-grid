@@ -211,18 +211,19 @@ def grid_src_private_server() -> pathlib.Path | None:
     return None if root is None else root / "grid_cli" / "private_server"
 
 
-#: The relay's own modules. Since grid-platform M2 ticket 07 the relay is one module per area (`relay_<area>.py`) behind
-#: a facade `relay.py` that defines nothing of its own; before it, `relay.py` alone. Both match, so a pin reads whichever
-#: grid-src is beside it.
+#: The relay's own modules. Since grid-platform M2 ticket 07 the relay is one module per area (`relay_<area>.py`), behind
+#: a facade `relay.py` that defined nothing of its own until M2 ticket 24 deleted it; before 07, `relay.py` alone. All
+#: three match, so a pin reads whichever grid-src is beside it.
 RELAY_MODULES = "relay*.py"
 
 
 def grid_src_relay_paths(package: pathlib.Path) -> list[pathlib.Path]:
-    """Every module of the relay in grid-src's ``package`` — refusing a package without `relay.py`, which is drift
-    (the resolver has already proved the package is there), never a reason to skip."""
+    """Every module of the relay in grid-src's ``package`` — refusing a package with neither `relay.py` (before M2
+    ticket 24) nor its routes' area `relay_routes.py` (since 07), which is drift (the resolver has already proved the
+    package is there), never a reason to skip."""
     paths = sorted(package.glob(RELAY_MODULES))
-    if package / "relay.py" not in paths:
-        raise AssertionError(f"{package} has no relay.py — teach this check where the relay went rather than skipping")
+    if not {package / "relay.py", package / "relay_routes.py"} & set(paths):
+        raise AssertionError(f"{package} has no relay — teach this check where the relay went rather than skipping")
     return paths
 
 

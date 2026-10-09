@@ -25,10 +25,12 @@ from tests.grid_src_repo import grid_src_relay_source
 
 def _relay_source(module: str) -> str:
     package = _grid_src_private_server()
-    if package is None or not (package / module).exists():
+    if package is None:
         pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
     if module == "relay.py":
-        return grid_src_relay_source(package)  # the relay is one module per area since grid-platform M2 ticket 07
+        return grid_src_relay_source(package)  # one module per area since grid-platform M2 ticket 07; it raises if moved
+    if not (package / module).exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
     return (package / module).read_text()
 
 

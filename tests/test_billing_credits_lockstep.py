@@ -208,7 +208,7 @@ def _is_required(field: ast.AnnAssign) -> bool:
 
 def _relay() -> ast.Module:
     """The relay's modules as one: one per area since grid-platform M2 ticket 07, `relay.py` alone before it."""
-    _sibling_file(grid_src_private_server(), "relay.py")  # skips when grid-src is absent, raises when it moved
+    _sibling_file(grid_src_private_server(), "server.py")  # skips when grid-src is absent; the tree raises if it moved
     return grid_src_relay_tree(grid_src_private_server())
 
 
