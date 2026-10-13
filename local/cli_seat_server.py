@@ -231,9 +231,12 @@ async def _stream(app: FastAPI, prepared, *, wire: str = "openai"):
                         "usage": payload.get("usage"), "grid_cli_seat": payload.get("grid_cli_seat")})
         except Exception as exc:  # noqa: BLE001
             # Every exception, not just SeatError: one that escapes here kills the connection
-            # mid-body, and the consumer sees a torn stream instead of a reason.
+            # mid-body, and the consumer sees a torn stream instead of a reason. And the stream
+            # ENDS here, as the Anthropic and Responses ones do: `[DONE]` says it finished, and a
+            # grid's relay settles a stream that ends `[DONE]` as answered and billed.
             yield _frame({"error": {"message": str(exc) or type(exc).__name__,
                                     "type": "cli_seat_error"}})
+            return
     yield "data: [DONE]\n\n"
 
 
