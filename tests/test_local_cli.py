@@ -7814,11 +7814,15 @@ def test_remote_join_at_a_root_url_serves_the_engine_from_its_v1(monkeypatch, tm
     assert f"serving {_LLAMA_SERVER}/v1" in capsys.readouterr().err  # the URL typed is not the one served: say so
 
 
-def test_remote_join_at_asks_v1_again_after_a_5xx_rather_than_settling_at_the_root(monkeypatch, tmp_path):
-    """A 5xx is no answer about the route — llama-server 503s every route while its model loads — so it pins nothing."""
+@pytest.mark.parametrize("no_answer", [_V1_LOADING, _V1_DOWN], ids=["5xx", "unreachable"])
+def test_remote_join_at_asks_v1_again_after_no_answer_rather_than_settling_at_the_root(
+    monkeypatch, tmp_path, no_answer
+):
+    """A 5xx is no answer about the route — llama-server 503s every route while its model loads — so it pins nothing;
+    nor does an engine that is not listening yet."""
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_remote_spawn(monkeypatch)
-    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [_V1_LOADING, 200]})
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [no_answer, 200]})
 
     assert _remote_join_at(monkeypatch, _LLAMA_SERVER, engine) == f"{_LLAMA_SERVER}/v1"
 
