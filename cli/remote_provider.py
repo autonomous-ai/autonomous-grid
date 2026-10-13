@@ -1066,16 +1066,20 @@ def _flat_spec(record: dict[str, object]) -> dict[str, object]:
 
 
 def _spec_key(spec: dict[str, object]) -> object:
-    """Identity of an engine for dedup/merge: its endpoint URL, or — for the built-in ``--serve`` engine,
-    which has no URL — a marker plus its model set, so re-joining the same built-in is recognised.
+    """Identity of an engine for dedup/merge: whether it is an API engine plus its endpoint URL, or — for the
+    built-in ``--serve`` engine, which has no URL — a marker plus its model set, so re-joining the same built-in is
+    recognised.
 
     An ``--at`` engine's URL is keyed without its trailing ``/`` and ``/v1``: a join serves ``<url>/v1`` only when
     the engine answers a model list there (`provider._at_engine_base`), so one engine can arrive under either
-    spelling, and is still one engine. An API engine's base is keyed exactly as it is."""
+    spelling, and is still one engine. An API engine's base is keyed exactly as it is, and apart: an ``--at``
+    engine at ``<gw>/v1`` is never the vendor's engine at ``<gw>``."""
     url = spec.get("endpoint_url")
     if not url:
         return ("__builtin__", tuple(spec.get("models") or []))
-    return url if spec.get("api_kind") else str(url).rstrip("/").removesuffix("/v1")
+    if spec.get("api_kind"):
+        return (True, url)
+    return (False, str(url).rstrip("/").removesuffix("/v1"))
 
 
 def _served_from_v1(spec: dict[str, object]) -> bool:
