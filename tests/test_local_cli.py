@@ -7863,6 +7863,19 @@ def test_remote_join_at_a_url_that_already_ends_in_v1_is_kept_and_nothing_is_ask
     assert engine.asked == []
 
 
+@pytest.mark.parametrize("at", ["192.168.1.10:8080", "http://192.168.1.10:notaport"], ids=["no-scheme", "bad-port"])
+def test_remote_join_at_a_url_httpx_cannot_send_is_kept_as_given_and_not_asked_again(monkeypatch, tmp_path, at):
+    """Real `httpx.get`, which refuses both before any I/O — one of them with `InvalidURL`, which is not an
+    `httpx.HTTPError`. The join keeps what was typed, as it always has, rather than a traceback or three asks."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: pytest.fail("asked again"))
+
+    assert cli.main(["join", "--at", at, "-m", "llama3"]) == 0
+
+    assert cli.provider._read_records("n1")["remote"]["endpoint_url"] == at
+
+
 def test_join_at_a_root_url_serves_the_engine_from_its_v1_on_a_local_grid(monkeypatch, tmp_path):
     """The same `--at`, the same native endpoint: a local grid's server forwards `/v1/completions` to the engine's
     `<endpoint_url>/completions` (`local/server._proxy_openai`)."""
