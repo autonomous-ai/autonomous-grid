@@ -7863,6 +7863,45 @@ def test_remote_join_at_a_url_that_already_ends_in_v1_is_kept_and_nothing_is_ask
     assert engine.asked == []
 
 
+def test_remote_rejoin_moves_an_engine_served_from_its_root_to_its_v1(monkeypatch, tmp_path):
+    """An identity serving a root URL — joined while its engine did not answer, or by a `grid` older than the `/v1`
+    rule — is moved to `/v1` by the re-join that finds the engine serving it there. Appended beside it instead, the
+    root engine would still take every request for the model (first detected wins), and the re-join would fix
+    nothing."""
+    import signal as _sig
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [_V1_DOWN, _V1_DOWN, _V1_DOWN, 200]})
+    assert _remote_join_at(monkeypatch, _LLAMA_SERVER, engine) == _LLAMA_SERVER  # the engine was not up yet
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["join", "--at", _LLAMA_SERVER, "-m", "llama3"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert [spec["endpoint_url"] for spec in record["engines"]] == [f"{_LLAMA_SERVER}/v1"]
+    assert record["endpoint_url"] == f"{_LLAMA_SERVER}/v1" and record["models"] == ["llama3"]
+    assert spawned["signals"] == [(4242, _sig.SIGHUP)]  # the live identity re-reads its record: it serves /v1 now
+
+
+def test_remote_rejoin_that_cannot_ask_the_engine_keeps_it_on_its_v1(monkeypatch, tmp_path, capsys):
+    """The other direction: a re-join while the engine is down keeps the root URL typed, and that must not put a root
+    engine beside the `/v1` one already serving. It is the same engine, and the re-join changes nothing."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [200, _V1_DOWN]})
+    assert _remote_join_at(monkeypatch, _LLAMA_SERVER, engine) == f"{_LLAMA_SERVER}/v1"
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    capsys.readouterr()
+
+    assert cli.main(["join", "--at", _LLAMA_SERVER, "-m", "llama3"]) == 0
+
+    assert [spec["endpoint_url"] for spec in cli.provider._read_records("n1")["remote"]["engines"]] == [
+        f"{_LLAMA_SERVER}/v1"
+    ]
+    assert "nothing to append" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("at", ["192.168.1.10:8080", "http://192.168.1.10:notaport"], ids=["no-scheme", "bad-port"])
 def test_remote_join_at_a_url_httpx_cannot_send_is_kept_as_given_and_not_asked_again(monkeypatch, tmp_path, at):
     """Real `httpx.get`, which refuses both before any I/O — one of them with `InvalidURL`, which is not an
