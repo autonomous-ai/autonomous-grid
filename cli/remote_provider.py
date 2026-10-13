@@ -1506,7 +1506,8 @@ def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, obj
     if args.at:
         if not args.models:
             raise SystemExit("--at requires at least one -m/--model naming what that engine serves.")
-        return [{"endpoint_url": args.at, "models": list(args.models), "engine_label": None}], False
+        endpoint_url = provider._at_engine_base(args.at)
+        return [{"endpoint_url": endpoint_url, "models": list(args.models), "engine_label": None}], False
     if args.serve:
         from pathlib import Path
 

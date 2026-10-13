@@ -22,6 +22,10 @@ can advertise several model names:
 grid join home --at http://192.168.1.10:11434/v1 -m llama3 -m qwen2.5-coder
 ```
 
+A URL without `/v1` is served under `/v1` when the engine lists its models there, and as
+given otherwise. llama-server answers chat at its root too, but its root `/completions` is
+its native endpoint, which no OpenAI client can read.
+
 > **`--at <url>` must be reachable from the grid server**, which proxies requests from
 > its own process:
 > - Use the engine machine's local IP, not `localhost` (localhost only works if the engine
