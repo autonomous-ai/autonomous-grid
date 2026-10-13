@@ -7783,9 +7783,11 @@ class _AtEngine:
     def __init__(self, routes: dict[str, list]):
         self.routes = {url: list(outcomes) for url, outcomes in routes.items()}
         self.asked: list[str] = []
+        self.options: list[dict] = []  # how each ask was made: its `timeout` and `follow_redirects`
 
-    def get(self, url, **_kwargs):
+    def get(self, url, **kwargs):
         self.asked.append(url)
+        self.options.append(kwargs)
         outcomes = self.routes.get(url, [404])
         outcome = outcomes.pop(0) if len(outcomes) > 1 else outcomes[0]
         if isinstance(outcome, Exception):
@@ -7811,7 +7813,36 @@ def test_remote_join_at_a_root_url_serves_the_engine_from_its_v1(monkeypatch, tm
 
     assert _remote_join_at(monkeypatch, _LLAMA_SERVER, engine) == f"{_LLAMA_SERVER}/v1"
     assert cli.provider._read_records("n1")["remote"]["endpoint_url"] == f"{_LLAMA_SERVER}/v1"
-    assert f"serving {_LLAMA_SERVER}/v1" in capsys.readouterr().err  # the URL typed is not the one served: say so
+    err = capsys.readouterr().err
+    assert f"serving {_LLAMA_SERVER}/v1" in err  # the URL typed is not the one served: say so
+    assert "Waiting" not in err  # an engine that answered at once was never waited for
+
+
+def test_remote_join_at_asks_with_a_short_connect_timeout_and_follows_no_redirect(monkeypatch, tmp_path):
+    """A blackholed engine costs each ask its CONNECT timeout, so that is what bounds the join's wait (three asks, one
+    second apart: about 8 s). And a 3xx must stay a 3xx — followed, it would be read as the route's own answer."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [200]})
+
+    assert _remote_join_at(monkeypatch, _LLAMA_SERVER, engine) == f"{_LLAMA_SERVER}/v1"
+
+    (options,) = engine.options
+    assert options["follow_redirects"] is False
+    assert options["timeout"] == httpx.Timeout(5.0, connect=2.0)
+
+
+def test_remote_join_at_says_it_is_waiting_before_each_ask_again(monkeypatch, tmp_path, capsys):
+    """Up to ~8 s of silence reads as a hung join. Said once per ask again — never before the first, so a join whose
+    engine answers stays as quiet as it was."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [_V1_LOADING, _V1_DOWN, 200]})
+
+    assert _remote_join_at(monkeypatch, _LLAMA_SERVER, engine) == f"{_LLAMA_SERVER}/v1"
+
+    waits = [line for line in capsys.readouterr().err.splitlines() if line.startswith("Waiting")]
+    assert waits == [f"Waiting for {_LLAMA_SERVER}/v1/models to answer…"] * 2
 
 
 @pytest.mark.parametrize("no_answer", [_V1_LOADING, _V1_DOWN], ids=["5xx", "unreachable"])
@@ -7919,20 +7950,33 @@ def test_remote_join_at_a_url_httpx_cannot_send_is_kept_as_given_and_not_asked_a
     assert cli.provider._read_records("n1")["remote"]["endpoint_url"] == at
 
 
-def test_join_at_a_root_url_serves_the_engine_from_its_v1_on_a_local_grid(monkeypatch, tmp_path):
-    """The same `--at`, the same native endpoint: a local grid's server forwards `/v1/completions` to the engine's
-    `<endpoint_url>/completions` (`local/server._proxy_openai`)."""
+def _local_join_at(monkeypatch, tmp_path, engine: _AtEngine) -> str:
+    """`grid join home --at <root> -m llama3` on a local grid against ``engine``; the URL its run record serves."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     monkeypatch.setattr(runtime, "detect_local_ip", lambda: "192.168.1.50")
     cfg = runtime.init_grid_config(name="home", port=8090)
     monkeypatch.setattr(cli.provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 4321})())
     monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *a, **k: "registered")
-    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [200]})
     monkeypatch.setattr(httpx, "get", engine.get)
+    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
 
     assert cli.main(["join", "home", "--at", _LLAMA_SERVER, "-m", "llama3", "--name", "mac"]) == 0
+    return cli.provider._read_records(cfg["grid_id"])["mac"]["endpoint_url"]
 
-    assert cli.provider._read_records(cfg["grid_id"])["mac"]["endpoint_url"] == f"{_LLAMA_SERVER}/v1"
+
+def test_join_at_a_root_url_serves_the_engine_from_its_v1_on_a_local_grid(monkeypatch, tmp_path):
+    """The same `--at`, the same native endpoint: a local grid's server forwards `/v1/completions` to the engine's
+    `<endpoint_url>/completions` (`local/server._proxy_openai`)."""
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [200]})
+
+    assert _local_join_at(monkeypatch, tmp_path, engine) == f"{_LLAMA_SERVER}/v1"
+
+
+def test_join_at_an_engine_that_never_answers_keeps_the_url_as_given_on_a_local_grid(monkeypatch, tmp_path):
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [_V1_DOWN]})
+
+    assert _local_join_at(monkeypatch, tmp_path, engine) == _LLAMA_SERVER
+    assert engine.asked == [f"{_LLAMA_SERVER}/v1/models"] * 3
 
 
 def test_remote_api_join_at_a_vendor_gateway_asks_nothing(monkeypatch, tmp_path):
@@ -8935,6 +8979,22 @@ def test_merge_engines_refreshes_codex_plan_type_on_rejoin():
     hw_incoming = [{"endpoint_url": "http://h:11434/v1", "models": ["llama3", "qwen"], "engine_label": None}]
     hw_merged, _ = cli.remote_provider._merge_engines(hw_base, hw_incoming)
     assert "plan_type" not in hw_merged[0]
+
+
+def test_merge_engines_keeps_an_at_engine_apart_from_an_api_engine_at_its_root():
+    """An `--at` engine is keyed without its `/v1` and an API engine by its exact base, so `<gw>/v1` and an API engine
+    at exactly `<gw>` must not meet: merged, the hardware models would join the vendor's engine and move it to `/v1`."""
+    gateway = "https://gw.example"
+    api = {"endpoint_url": gateway, "models": ["openai:gpt-5.5"], "engine_label": "openai", "api_kind": "openai"}
+    at = {"endpoint_url": f"{gateway}/v1", "models": ["llama3"], "engine_label": None}
+
+    for base, incoming in (([api], [at]), ([at], [api])):
+        merged, changed = cli.remote_provider._merge_engines(base, incoming)
+
+        assert changed
+        assert sorted((spec["endpoint_url"], tuple(spec["models"])) for spec in merged) == [
+            (gateway, ("openai:gpt-5.5",)), (f"{gateway}/v1", ("llama3",)),
+        ]
 
 
 def test_merge_engines_unions_codex_model_caps_keeping_a_dropped_models_caps():
