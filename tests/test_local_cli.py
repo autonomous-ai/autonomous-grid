@@ -7765,6 +7765,135 @@ def test_remote_join_at_serves_external_engine(monkeypatch, tmp_path):
     assert record["meta_name"] == "ext"  # --name in remote is the grid-page display name, not the record key
 
 
+# `grid join --at` without `/v1` (grid-platform M2 ticket 23, wave 9, torn-stream F3). llama-server answers `/models`
+# and `/chat/completions` at its ROOT as well as under `/v1`, but its root `/completions` is its NATIVE endpoint:
+# `data: {"content": …, "stop": …}` lines no OpenAI client parses, which the relay settled `completed` with an empty
+# answer. Chat worked at the same URL, so nothing warned. The rule is grid-src's (`provider_runtime/provider/
+# lifecycle._serves_v1`, grid-platform PR #26): `/v1` only on a model list there, and a 5xx pins nothing.
+_LLAMA_SERVER = "http://192.168.1.10:8080"
+_V1_LOADING = 503  # llama-server's answer on every route while its model loads
+_V1_DOWN = httpx.ConnectError("connection refused")
+
+
+class _AtEngine:
+    """`httpx.get` against a stand-in engine: each URL answers its outcomes in turn, the last one for ever after; a URL
+    it does not know answers 404. An outcome is a status (a 2xx carries a model list), a `(status, body)` pair, or an
+    exception to raise."""
+
+    def __init__(self, routes: dict[str, list]):
+        self.routes = {url: list(outcomes) for url, outcomes in routes.items()}
+        self.asked: list[str] = []
+
+    def get(self, url, **_kwargs):
+        self.asked.append(url)
+        outcomes = self.routes.get(url, [404])
+        outcome = outcomes.pop(0) if len(outcomes) > 1 else outcomes[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        status, body = outcome if isinstance(outcome, tuple) else (outcome, {"object": "list", "data": []})
+        return httpx.Response(status, json=body, request=httpx.Request("GET", url))
+
+
+def _remote_join_at(monkeypatch, at: str, engine: _AtEngine) -> str:
+    """`grid join --at <at> -m llama3` on a remote grid against ``engine``; the URL the run record serves it from."""
+    monkeypatch.setattr(httpx, "get", engine.get)
+    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
+
+    assert cli.main(["join", "--at", at, "-m", "llama3"]) == 0
+    return cli.provider._read_records("n1")["remote"]["engines"][0]["endpoint_url"]
+
+
+def test_remote_join_at_a_root_url_serves_the_engine_from_its_v1(monkeypatch, tmp_path, capsys):
+    """The finding: llama-server answers at its root too, so the root URL was served as given."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    engine = _AtEngine({f"{_LLAMA_SERVER}/models": [200], f"{_LLAMA_SERVER}/v1/models": [200]})
+
+    assert _remote_join_at(monkeypatch, _LLAMA_SERVER, engine) == f"{_LLAMA_SERVER}/v1"
+    assert cli.provider._read_records("n1")["remote"]["endpoint_url"] == f"{_LLAMA_SERVER}/v1"
+    assert f"serving {_LLAMA_SERVER}/v1" in capsys.readouterr().err  # the URL typed is not the one served: say so
+
+
+def test_remote_join_at_asks_v1_again_after_a_5xx_rather_than_settling_at_the_root(monkeypatch, tmp_path):
+    """A 5xx is no answer about the route — llama-server 503s every route while its model loads — so it pins nothing."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [_V1_LOADING, 200]})
+
+    assert _remote_join_at(monkeypatch, _LLAMA_SERVER, engine) == f"{_LLAMA_SERVER}/v1"
+
+
+@pytest.mark.parametrize("no_answer", [_V1_LOADING, _V1_DOWN], ids=["5xx", "unreachable"])
+def test_remote_join_at_keeps_the_url_as_given_when_v1_never_answers(monkeypatch, tmp_path, no_answer):
+    """Asked again a bounded number of times, then the URL typed is kept, as every join did before: an engine that is
+    not up yet still joins, as it always has, and is not refused for it."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [no_answer]})
+
+    assert _remote_join_at(monkeypatch, _LLAMA_SERVER, engine) == _LLAMA_SERVER
+    assert engine.asked == [f"{_LLAMA_SERVER}/v1/models"] * 3
+
+
+@pytest.mark.parametrize("answer", [
+    404,
+    301,                                       # httpx follows no redirect: a 3xx says nothing about the route's API
+    307,
+    401,
+    405,
+    (200, {"detail": "a web page, not a model list"}),
+], ids=["404", "301", "307", "401", "405", "200-not-a-model-list"])
+def test_remote_join_at_takes_v1_only_on_a_model_list_there(monkeypatch, tmp_path, answer):
+    """The positive control: `/v1` is never invented. A base that is not `/v1` (a vendor at its root, Gemini's
+    `/v1beta/openai`) answers anything but a model list there, and is asked once and kept as given."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [answer], f"{_LLAMA_SERVER}/models": [200]})
+
+    assert _remote_join_at(monkeypatch, _LLAMA_SERVER, engine) == _LLAMA_SERVER
+    assert engine.asked == [f"{_LLAMA_SERVER}/v1/models"]
+
+
+def test_remote_join_at_a_url_that_already_ends_in_v1_is_kept_and_nothing_is_asked(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [200]})
+
+    assert _remote_join_at(monkeypatch, f"{_LLAMA_SERVER}/v1/", engine) == f"{_LLAMA_SERVER}/v1/"
+    assert engine.asked == []
+
+
+def test_join_at_a_root_url_serves_the_engine_from_its_v1_on_a_local_grid(monkeypatch, tmp_path):
+    """The same `--at`, the same native endpoint: a local grid's server forwards `/v1/completions` to the engine's
+    `<endpoint_url>/completions` (`local/server._proxy_openai`)."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(runtime, "detect_local_ip", lambda: "192.168.1.50")
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    monkeypatch.setattr(cli.provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 4321})())
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *a, **k: "registered")
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [200]})
+    monkeypatch.setattr(httpx, "get", engine.get)
+
+    assert cli.main(["join", "home", "--at", _LLAMA_SERVER, "-m", "llama3", "--name", "mac"]) == 0
+
+    assert cli.provider._read_records(cfg["grid_id"])["mac"]["endpoint_url"] == f"{_LLAMA_SERVER}/v1"
+
+
+def test_remote_api_join_at_a_vendor_gateway_asks_nothing(monkeypatch, tmp_path):
+    """`--api <kind> --at` names a VENDOR gateway, whose base is given in full and whose model list needs the key:
+    the `/v1` rule is the hardware engine's alone."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    engine = _AtEngine({})
+    monkeypatch.setattr(httpx, "get", engine.get)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(200, json={"data": [{"id": "gpt-5.5"}]}))
+
+    assert cli.main(["join", "--api", "openai", "--at", "https://gateway.example.test"]) == 0
+
+    assert engine.asked == []
+
+
 def test_remote_join_api_unknown_kind_lists_supported(monkeypatch, tmp_path):
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_remote_spawn(monkeypatch)
