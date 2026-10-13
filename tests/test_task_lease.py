@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from tests.grid_src_repo import grid_src_private_server
+from tests.grid_src_repo import RELAY_MODULES, grid_src_private_server, grid_src_relay_tree
 
 
 class _FakeProc:
@@ -491,7 +491,7 @@ def test_the_auth_scheme_the_credential_helper_names_is_the_one_the_relay_parses
     """
     from remote import git_credential
 
-    literals = _relay_function_strings("_bearer_or_api_key", module="relay.py")
+    literals = _relay_function_strings("_bearer_or_api_key")
 
     assert f"{git_credential.AUTH_SCHEME} " in literals, (
         f"grid-src's `_bearer_or_api_key` no longer reads a "
@@ -499,11 +499,16 @@ def test_the_auth_scheme_the_credential_helper_names_is_the_one_the_relay_parses
         f"scheme the relay does not accept. Its literals are: {sorted(literals)}")
 
 
-def _relay_function_strings(name, module):
-    """Every string literal inside one of grid-src's functions, parsed rather than imported.
+def _relay_function_strings(name):
+    """Every string literal inside one of the relay's functions, parsed rather than imported.
 
     It reads the body of a function rather than a module-level assignment, because not every value
     in the cross-repo register is spelled as a named constant on both sides.
+
+    The function is looked up across the relay's whole module set (`grid_src_relay_tree`, the same
+    one the nine pins of `e984470` read), not in one named file: it named `relay.py`, which grid-
+    platform M2 ticket 24 deleted, and a missing FILE read as "grid-src is not beside this one" — so
+    this pin skipped, silently, with grid-src right there.
 
     The docstring is collected too, and is deliberately NOT filtered out. A function may name its
     own wire value in its prose — `_bearer_or_api_key` describes the `"Bearer "` prefix it strips —
@@ -516,15 +521,15 @@ def _relay_function_strings(name, module):
     """
     import ast
 
-    source = _relay_module(module)
-    if not source.exists():
-        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
-    for node in ast.walk(ast.parse(source.read_text())):
+    package = grid_src_private_server()
+    if package is None:
+        pytest.skip("grid-src is not beside this checkout; the lockstep cannot be checked here")
+    for node in ast.walk(grid_src_relay_tree(package)):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return {
                 child.value for child in ast.walk(node)
                 if isinstance(child, ast.Constant) and isinstance(child.value, str)}
-    raise AssertionError(f"{name} is no longer defined in grid-src's {module}")
+    raise AssertionError(f"{name} is no longer defined in any of grid-src's {RELAY_MODULES}")
 
 
 def test_a_verdict_before_the_agent_is_spawned_still_stops_the_renewer(monkeypatch):
@@ -941,26 +946,6 @@ def test_a_beat_is_never_started_after_close_was_called(monkeypatch):
     assert _wait_for(lambda: not renewer._thread.is_alive())
 
     assert beats == [], "a snapshot was started after the renewer had been closed"
-
-
-def _relay_module(name):
-    """One of grid-src's private_server modules, as a path. `_relay_function_strings` reads source
-    out of that package, and finding it is the part that quietly decides whether it runs at all.
-
-    Resolved by `tests/grid_src_repo.py` — the one path derivation this repo has — rather than
-    written out here. The absolute path that used to sit here named ONE worktree, and the failure
-    that costs is not the one it was written for: measured 2026-09-04 from a second worktree, the
-    named path still existed and sat on a DIFFERENT branch, so nothing skipped and every pin
-    asserted against the wrong checkout. Absent is loud; present-but-wrong is silent.
-
-    `GRID_SRC_REPO` still overrides, and is validated there rather than skipped past. Skipping here
-    stays the rule for a machine that simply has no grid-src beside this worktree: a developer
-    without it cannot check the duplicates.
-    """
-    package = grid_src_private_server()
-    if package is None:
-        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
-    return package / name
 
 
 def test_a_takeover_and_a_cancel_are_never_the_same_flag(monkeypatch):
