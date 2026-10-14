@@ -8,7 +8,8 @@ failure here, and a client that changed on purpose names the version it changed 
 * `--no-wake` on an asleep grid: from 0.3.49 a refusal whose `--json` envelope carries `grid_asleep`, never a wake;
   before it, argparse's exit 2 before anything is sent;
 * a signed-in read wakes an asleep grid;
-* `grid join --at` registers, heart-beats and polls, and a consumer's request through the proxy is served by it;
+* `grid join --at` registers, heart-beats and polls, and a consumer's request through the proxy is served by it — and
+  resumed again from its `X-Resume-Url`, whose transaction id is a UUIDv7 (grid-platform M2 ticket 08);
 * a joined provider on an asleep grid outlives the sleep and serves after the wake;
 * a joined provider on a deleted grid stops from 0.3.48 (`grid_deleted` ends an engine) and keeps retrying before it;
 * a joined provider whose node row is gone (pruned, lost, moved) is answered 404 on its next heartbeat, registers
@@ -24,6 +25,7 @@ import os
 import signal
 import subprocess
 import time
+import uuid
 
 import grid_protocol
 import httpx
@@ -194,6 +196,21 @@ def test_a_joined_provider_serves_a_request_through_the_proxy(client, stack):
 
         assert _served(answer), answer.text
         assert _streamed(streamed), streamed.text
+        _resumes_from_a_time_ordered_id(stack, answer)
+
+
+def _resumes_from_a_time_ordered_id(stack: Stack, answer: httpx.Response) -> None:
+    """The answer names its transaction and where to resume it, and the resume URL answers it again through the proxy.
+    The id is a UUIDv7 since grid-platform M2 ticket 08 (ADR 0009) and still the canonical UUID string on the wire."""
+    transaction_id = answer.headers["X-Transaction-Id"]
+    assert str(uuid.UUID(transaction_id)) == transaction_id, transaction_id
+    assert uuid.UUID(transaction_id).version == 7, f"{transaction_id} is not time-ordered (ADR 0009)"
+    assert answer.headers["X-Resume-Url"] == f"/relay/v1/result/{transaction_id}"
+
+    resumed = httpx.get(f"{stack.grid_url}{answer.headers['X-Resume-Url']}", timeout=60,
+                        headers={"Authorization": f"Bearer {stack.consumer_token()}"})
+
+    assert _served(resumed), resumed.text
 
 
 def test_a_provider_outlives_a_sleep_and_serves_after_the_wake(client, stack):
