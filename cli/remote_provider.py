@@ -1066,19 +1066,35 @@ def _flat_spec(record: dict[str, object]) -> dict[str, object]:
 
 
 def _spec_key(spec: dict[str, object]) -> object:
-    """Identity of an engine for dedup/merge: its endpoint URL, or — for the built-in ``--serve`` engine,
-    which has no URL — a marker plus its model set, so re-joining the same built-in is recognised."""
+    """Identity of an engine for dedup/merge: whether it is an API engine plus its endpoint URL, or — for the
+    built-in ``--serve`` engine, which has no URL — a marker plus its model set, so re-joining the same built-in is
+    recognised.
+
+    An ``--at`` engine's URL is keyed without its trailing ``/`` and ``/v1``: a join serves ``<url>/v1`` only when
+    the engine answers a model list there (`provider._at_engine_base`), so one engine can arrive under either
+    spelling, and is still one engine. An API engine's base is keyed exactly as it is, and apart: an ``--at``
+    engine at ``<gw>/v1`` is never the vendor's engine at ``<gw>``."""
     url = spec.get("endpoint_url")
-    return url if url else ("__builtin__", tuple(spec.get("models") or []))
+    if not url:
+        return ("__builtin__", tuple(spec.get("models") or []))
+    if spec.get("api_kind"):
+        return (True, url)
+    return (False, str(url).rstrip("/").removesuffix("/v1"))
+
+
+def _served_from_v1(spec: dict[str, object]) -> bool:
+    """Whether an engine is served from an OpenAI base ending in ``/v1``."""
+    return str(spec.get("endpoint_url") or "").rstrip("/").endswith("/v1")
 
 
 def _merge_engines(
     base: list[dict[str, object]], incoming: list[dict[str, object]]
 ) -> tuple[list[dict[str, object]], bool]:
     """Merge ``incoming`` specs into a fresh copy of ``base``. The same engine (by ``_spec_key``) unions its
-    models; a new engine is appended. Returns ``(merged, changed)`` where ``changed`` is True only when a
-    model or engine was actually added — so an idempotent re-join (including adding a model to an engine
-    already in the union) stays a no-op instead of silently dropping the request."""
+    models, and moves to ``/v1`` when the join found it serving there; a new engine is appended. Returns
+    ``(merged, changed)`` where ``changed`` is True only when a model or engine was actually added, or an engine
+    moved — so an idempotent re-join (including adding a model to an engine already in the union) stays a no-op
+    instead of silently dropping the request."""
     merged = [dict(spec) for spec in base]
     index = {_spec_key(spec): spec for spec in merged}
     changed = False
@@ -1093,6 +1109,12 @@ def _merge_engines(
             index[_spec_key(copy)] = copy
             changed = True
             continue
+        if _served_from_v1(spec) and not _served_from_v1(existing):
+            # The same engine, now named at its /v1: typed so, or found serving there (`provider._at_engine_base`).
+            # From its root, llama-server's `/completions` is its native endpoint. Never the other way: a join that
+            # could not ask the engine keeps the root URL typed, which says nothing about where it serves.
+            existing["endpoint_url"] = spec["endpoint_url"]
+            changed = True
         added = [m for m in (spec.get("models") or []) if m not in (existing.get("models") or [])]
         if existing.get("advertise_as") or spec.get("advertise_as"):
             existing["advertise_as"] = _merged_aliases(existing, spec, added)
@@ -1506,7 +1528,8 @@ def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, obj
     if args.at:
         if not args.models:
             raise SystemExit("--at requires at least one -m/--model naming what that engine serves.")
-        return [{"endpoint_url": args.at, "models": list(args.models), "engine_label": None}], False
+        endpoint_url = provider._at_engine_base(args.at)
+        return [{"endpoint_url": endpoint_url, "models": list(args.models), "engine_label": None}], False
     if args.serve:
         from pathlib import Path
 

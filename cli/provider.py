@@ -130,7 +130,9 @@ def cmd_join(args: argparse.Namespace) -> int:
     if args.at:
         if not args.models:
             raise SystemExit("--at requires at least one -m/--model naming what that engine serves.")
-        return _spawn_engine(cfg, args, endpoint_url=args.at, models=list(args.models), media=args.media)
+        return _spawn_engine(
+            cfg, args, endpoint_url=_at_engine_base(args.at), models=list(args.models), media=args.media
+        )
 
     if args.serve:
         return _spawn_engine(cfg, args, endpoint_url=None, models=[args.serve], media=args.media)
@@ -1056,6 +1058,16 @@ def _detect(advertise_host: str | None) -> list[Any]:
     from shared.system import detect
 
     return detect.detect_engines(advertise_host=advertise_host)
+
+
+def _at_engine_base(url: str) -> str:
+    """The base an ``--at`` engine is served from (`detect.openai_base`), said aloud when it is not the URL typed."""
+    from shared.system import detect
+
+    base = detect.openai_base(url)
+    if base != url:
+        print(f"Note: {url} serves its OpenAI API under /v1; serving {base}.", file=sys.stderr)
+    return base
 
 
 def _print_plan(detected: list[Any]) -> None:

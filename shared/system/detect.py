@@ -4,9 +4,14 @@ Used by `grid join` (no engine flags) to discover what this machine already
 serves. Each probe is a short, best-effort HTTP request to a well-known local
 port; anything unreachable is simply skipped. Probes run in the documented
 priority order: Ollama, LM Studio, vLLM, MLX, llama.cpp, ComfyUI.
+
+`openai_base` answers the same question for an engine named with `--at`: the
+base it serves its OpenAI API from.
 """
 from __future__ import annotations
 
+import sys
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -34,6 +39,14 @@ _PROBES: tuple[tuple[str, int, str], ...] = (
     ("llama.cpp", 8081, "openai"),
     ("comfyui", 8188, "comfyui"),
 )
+
+# How many times `openai_base` asks an engine whose `/v1` has not answered yet, and how far apart: one still loading
+# its model answers 5xx on every route, and one still starting refuses the connection. A host that never answers
+# costs each ask its connect timeout, so the join waits ~8 s for it (3 × 2 s + 2 × 1 s); one that accepts the
+# connection and then says nothing costs the read timeout instead.
+_V1_ATTEMPTS = 3
+_V1_RETRY_SECONDS = 1.0
+_V1_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
 
 
 def detect_engines(*, advertise_host: str | None = None, timeout: float = 0.75) -> list[DetectedEngine]:
@@ -98,3 +111,54 @@ def _read_json_list(url: str, container: str, key: str, timeout: float) -> list[
     if not isinstance(items, list):
         return None
     return [str(item[key]) for item in items if isinstance(item, dict) and item.get(key)]
+
+
+def openai_base(url: str) -> str:
+    """The base `grid join --at <url>` serves an engine from: ``<url>/v1`` when the engine serves its OpenAI API
+    there, else ``url`` as given.
+
+    llama-server answers ``/models`` and ``/chat/completions`` at its root as well as under ``/v1``, but its root
+    ``/completions`` is its NATIVE endpoint: lines no OpenAI client parses, which the relay settled ``completed`` with
+    an empty answer, while chat at the same URL warned nobody (grid-platform M2 ticket 23, wave 9, torn-stream F3).
+    So ``/v1`` is taken only on a model list there, never appended blindly: a base that is not ``/v1`` (a vendor at
+    its root, Gemini's ``/v1beta/openai``) answers otherwise and is kept. While ``/v1`` gives no answer at all, it is
+    asked again, so an engine still coming up is not settled at its root on the strength of one bad moment, and the
+    join says it is waiting; one that never answers keeps the URL as given, as every join did before. The same rule as grid-src's provider runtime
+    (``provider/lifecycle._reachable_engine_base``), which also refuses an engine that never answers; a join here
+    never has.
+    """
+    base = url.rstrip("/")
+    if base.endswith("/v1"):
+        return url
+    for attempt in range(_V1_ATTEMPTS):
+        if attempt:  # never before the first ask: a join whose engine answers stays quiet
+            print(f"Waiting for {base}/v1/models to answer…", file=sys.stderr)
+            time.sleep(_V1_RETRY_SECONDS)
+        serves_v1 = _serves_v1(base)
+        if serves_v1 is not None:
+            return f"{base}/v1" if serves_v1 else url
+    return url
+
+
+def _serves_v1(base: str) -> bool | None:
+    """Whether ``<base>/v1/models`` answers a model list (``{"data": [...]}``).
+
+    None when there was no answer to read — a transport error or a 5xx — and False on every other answer: a redirect
+    is not followed, so a 3xx says nothing about the route, and a page that is not a model list is not this API
+    either. A URL httpx cannot send at all is False too: asking it again would not change it.
+    """
+    try:
+        resp = httpx.get(f"{base}/v1/models", timeout=_V1_TIMEOUT, follow_redirects=False)
+    except (httpx.InvalidURL, httpx.UnsupportedProtocol):
+        return False
+    except httpx.HTTPError:
+        return None
+    if resp.status_code >= 500:
+        return None
+    if not resp.is_success:
+        return False
+    try:
+        listing = resp.json()
+    except ValueError:
+        return False
+    return isinstance(listing, dict) and isinstance(listing.get("data"), list)
