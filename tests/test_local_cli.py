@@ -8007,6 +8007,42 @@ def test_a_second_local_join_of_a_running_engine_is_refused_before_it_says_what_
     assert engine.asked == asked  # and the engine was asked nothing
 
 
+def _local_grid_with_spawn(monkeypatch, tmp_path) -> tuple[dict, list]:
+    """A local grid named `home` whose engine children are recorded rather than started; the list they land in."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(runtime, "detect_local_ip", lambda: "192.168.1.50")
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    spawned: list = []
+    popen = subprocess.Popen
+
+    def spawn(cmd, **kwargs):
+        if "__engine" not in cmd:  # a `ps` asked about a recorded pid, say
+            return popen(cmd, **kwargs)
+        spawned.append(cmd)
+        return type("P", (), {"pid": 4321})()
+
+    monkeypatch.setattr(cli.provider.subprocess, "Popen", spawn)
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *a, **k: "registered")
+    return cfg, spawned
+
+
+def test_a_local_seat_join_records_its_seat_options(monkeypatch, tmp_path):
+    """`grid join --api claude` on a local grid: the record carries the seat's options as the child reads them back
+    (`SeatOptions(**record["seat"])`). It raised `'SeatOptions' object has no attribute 'to_dict'` instead, before
+    any record was written — every local seat join, since the seat came in."""
+    from shared.agent import cli_seat
+
+    cfg, spawned = _local_grid_with_spawn(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli_seat, "assert_available", lambda spec: "/bin/claude")
+
+    assert cli.main(["join", "home", "--api", "claude", "--name", "seat", "--seat-concurrency", "2"]) == 0
+
+    seat = cli.provider._read_records(cfg["grid_id"])["seat"]["seat"]
+    assert cli_seat.SeatOptions(**seat) == cli_seat.SeatOptions(
+        port=api_catalog.local_seat_port("claude"), concurrency=2)
+    assert spawned and spawned[0][-3:] == ["__engine", cfg["grid_id"], "seat"]
+
+
 def test_remote_api_join_at_a_vendor_gateway_asks_nothing(monkeypatch, tmp_path):
     """`--api <kind> --at` names a VENDOR gateway, whose base is given in full and whose model list needs the key:
     the `/v1` rule is the hardware engine's alone."""

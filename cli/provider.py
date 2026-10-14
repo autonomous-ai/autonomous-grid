@@ -196,12 +196,13 @@ def cmd_join(args: argparse.Namespace) -> int:
     return rc
 
 
-def _seat_options(args: argparse.Namespace):
-    """The seat's options from the kind-agnostic `--seat-*` flags, defaulted per kind."""
+def _seat_options(args: argparse.Namespace) -> dict[str, Any]:
+    """The seat's options from the kind-agnostic `--seat-*` flags, defaulted per kind, as its run record keeps them
+    (the child reads them back with `SeatOptions(**record["seat"])`)."""
     from shared.agent import cli_seat
 
     kind = getattr(args, "api", None) or ""
-    return cli_seat.options_from_args(args, default_port=api_catalog.local_seat_port(kind))
+    return cli_seat.options_to_dict(cli_seat.options_from_args(args, default_port=api_catalog.local_seat_port(kind)))
 
 
 def _narrow_advertised(kind: str, advertised: list[str], requested: list[str]) -> list[str]:
@@ -449,7 +450,7 @@ def _spawn_engine(
         "api_base_url": api_base_url,
         "api_media_port": getattr(args, "media_port", 8190),
         # CLI seat (`--api <seat kind>`): one options object, not six loose keys.
-        "seat": _seat_options(args).to_dict() if api_catalog.local_seat_port(api_kind or "") else None,
+        "seat": _seat_options(args) if api_catalog.local_seat_port(api_kind or "") else None,
         "started_at": runtime.utc_now(),
     }
     _write_record(grid_id, engine_id, record)
