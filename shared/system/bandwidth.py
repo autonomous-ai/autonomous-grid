@@ -17,21 +17,32 @@ import re
 _APPLE_GBPS = {
     (1, "base"): 67, (1, "pro"): 200, (1, "max"): 400, (1, "ultra"): 800,
     (2, "base"): 100, (2, "pro"): 200, (2, "max"): 400, (2, "ultra"): 800,
-    (3, "base"): 100, (3, "pro"): 150, (3, "max"): 400, (3, "ultra"): 800,
+    (3, "base"): 100, (3, "pro"): 150, (3, "max"): 400, (3, "ultra"): 819,
     (4, "base"): 120, (4, "pro"): 273, (4, "max"): 546, (4, "ultra"): 1092,
     (5, "base"): 153, (5, "pro"): 307, (5, "max"): 614, (5, "ultra"): 1228,
 }
 _APPLE_TIER_DEFAULT = {"base": 100, "pro": 200, "max": 400, "ultra": 800}
+# A binned Max shares its chip name with the full one but ships a narrower memory bus. The GPU core
+# count is the only thing that tells them apart: (generation, tier, gpu cores) -> GB/s.
+_APPLE_BINNED_GBPS = {(3, "max", 30): 300, (4, "max", 32): 410, (5, "max", 32): 460}
 
 # NVIDIA VRAM bandwidth by name fragment (longest/most-specific match wins). Datacenter + desktop.
 _NVIDIA_GBPS = (
-    ("h200", 4800), ("h100", 3350), ("a100", 2039), ("v100", 900),
-    ("a6000", 768), ("a40", 696), ("a10", 600), ("l40", 864), ("l4", 300), ("t4", 320),
+    ("b200", 7700), ("h200", 4800), ("h100", 3350), ("a100", 2039), ("a100-pcie-40gb", 1555),
+    ("v100", 900), ("gb10", 273),
+    ("a6000", 768), ("a5000", 768), ("a4000", 448), ("a40", 696), ("a10", 600), ("l40", 864),
+    ("l4", 300), ("t4", 320),
     # RTX PRO 6000 Blackwell: Workstation / Max-Q 1792, Server Edition clocks its GDDR7 lower.
-    ("pro 6000", 1792), ("pro 6000 blackwell server", 1597), ("6000 ada", 960),
-    ("5090", 1792), ("4090", 1008), ("4080", 717), ("4070 ti", 672), ("4070", 504),
-    ("4060", 272), ("3090 ti", 1008), ("3090", 936), ("3080", 760), ("3070", 448),
-    ("3060", 360), ("2080 ti", 616), ("2080", 448), ("2070", 448), ("2060", 336),
+    ("pro 6000", 1792), ("pro 6000 blackwell server", 1597), ("pro 5000", 1344), ("pro 4500", 896),
+    ("pro 4000", 672), ("6000 ada", 960), ("5000 ada", 576), ("4000 ada", 360), ("2000 ada", 224),
+    # A laptop part shares its desktop sibling's number but not its bus, so it needs its own row.
+    ("5090", 1792), ("5080", 960), ("5080 laptop", 896), ("5070 ti", 896), ("5070 ti laptop", 672),
+    ("5070", 672), ("5070 laptop", 384), ("5060 ti", 448), ("5060", 448), ("5060 laptop", 384),
+    ("4090", 1008), ("4080 super", 736), ("4080", 717), ("4070 ti super", 672), ("4070 ti", 504),
+    ("4070", 504), ("4060 ti", 288), ("4060", 272),
+    ("3090 ti", 1008), ("3090", 936), ("3080 ti", 912), ("3080", 760), ("3070 ti", 608),
+    ("3070", 448), ("3060 ti", 448), ("3060", 360),
+    ("2080 ti", 616), ("2080", 448), ("2070", 448), ("2060", 336),
 )
 
 # Intel MacBook memory bandwidth by CPU model fragment. LPDDR/DDR is soldered on every MacBook so
@@ -104,8 +115,9 @@ def _cpu_compute_gflops(physical_cores: int | None) -> float | None:
     return physical_cores * _CPU_GFLOPS_PER_CORE
 
 
-def _apple_bandwidth(chip: str) -> float | None:
-    """Bandwidth for an Apple chip string like ``"Apple M3 Max"`` / ``"M1 Ultra"`` / ``"M2"``."""
+def _apple_bandwidth(chip: str, gpu_cores: int | None = None) -> float | None:
+    """Bandwidth for an Apple chip string like ``"Apple M3 Max"`` / ``"M1 Ultra"`` / ``"M2"``;
+    ``gpu_cores`` picks out a binned part, which the name alone cannot."""
     if not chip:
         return None
     text = chip.lower()
@@ -114,7 +126,8 @@ def _apple_bandwidth(chip: str) -> float | None:
         return None
     gen = int(m.group(1))
     tier = next((t for t in ("ultra", "max", "pro") if t in text), "base")
-    return _APPLE_GBPS.get((gen, tier)) or _APPLE_TIER_DEFAULT[tier]
+    return (_APPLE_BINNED_GBPS.get((gen, tier, gpu_cores)) or _APPLE_GBPS.get((gen, tier))
+            or _APPLE_TIER_DEFAULT[tier])
 
 
 def _nvidia_bandwidth(name: str) -> float | None:
@@ -146,12 +159,12 @@ def _cpu_bandwidth(brand: str) -> float | None:
 def estimate(device_class: str, chip: str, gpus: list[dict]) -> float | None:
     """Best-effort memory bandwidth (GB/s) for the machine, or ``None`` when the part isn't recognised.
 
-    Apple reads from the chip name (unified memory); NVIDIA from the fastest recognised card's VRAM;
+    Apple reads from the chip name and, for a binned Max, its GPU core count (unified memory); NVIDIA from the fastest recognised card's VRAM;
     Intel MacBooks from the CPU model fragment (LPDDR/DDR is soldered so each model has one config);
     anything else (AMD CPUs, generic PCs, unknown parts) falls back to the caller's per-backend default.
     """
     if device_class == "apple-silicon":
-        return _apple_bandwidth(chip)
+        return _apple_bandwidth(chip, (gpus or [{}])[0].get("core_count"))
     if device_class == "nvidia":
         rates = [r for g in (gpus or []) if (r := _nvidia_bandwidth(g.get("name") or "")) is not None]
         return max(rates) if rates else None
