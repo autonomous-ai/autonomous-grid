@@ -8043,6 +8043,71 @@ def test_a_local_seat_join_records_its_seat_options(monkeypatch, tmp_path):
     assert spawned and spawned[0][-3:] == ["__engine", cfg["grid_id"], "seat"]
 
 
+def _seed_named_engine(monkeypatch, grid_id: str, engine_id: str, *, running: bool) -> None:
+    """A record of ``engine_id`` that names an engine still running, or one that died (`pid: 0` names no process),
+    which a join of the same name replaces."""
+    if running:
+        _seed_stoppable_local_engine(monkeypatch, grid_id, engine_id)
+    else:
+        _seed_local_engine(grid_id, engine_id)
+
+
+@pytest.mark.parametrize("running", [True, False], ids=["refused", "a-dead-engine-of-that-name"])
+def test_a_refused_local_seat_join_neither_looks_for_the_cli_nor_warns(monkeypatch, tmp_path, capsys, running):
+    """`grid join --api claude --name seat` while `seat` runs is refused before the CLI is looked for and before the
+    warning that anyone on the LAN can spend the subscription: both belong to a join that goes ahead."""
+    from shared.agent import cli_seat
+
+    cfg, spawned = _local_grid_with_spawn(monkeypatch, tmp_path)
+    _seed_named_engine(monkeypatch, cfg["grid_id"], "seat", running=running)
+    looked: list = []
+    monkeypatch.setattr(cli_seat, "assert_available", lambda spec: looked.append(spec.binary) or "/bin/claude")
+    join = ["join", "home", "--api", "claude", "--name", "seat"]
+
+    if running:
+        with pytest.raises(SystemExit, match="'seat' is already joined to home"):
+            cli.main(join)
+    else:
+        assert cli.main(join) == 0
+
+    assert ("Warning" in capsys.readouterr().err) is not running
+    assert bool(looked) is not running and bool(spawned) is not running
+
+
+@pytest.mark.parametrize("running", [True, False], ids=["refused", "a-dead-engine-of-that-name"])
+def test_a_refused_local_api_media_join_neither_asks_for_a_key_nor_warns(monkeypatch, tmp_path, capsys, running):
+    """`grid join --api doggi --at <gateway> --name gw` while `gw` runs is refused before the hidden prompt for an
+    API key — a secret typed for a join that was never going to happen — and before the LAN warning."""
+    import getpass
+
+    cfg, spawned = _local_grid_with_spawn(monkeypatch, tmp_path)
+    _seed_named_engine(monkeypatch, cfg["grid_id"], "gw", running=running)
+    monkeypatch.delenv("DOGGI_API_KEY", raising=False)
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
+    prompted: list = []
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: prompted.append(prompt) or "a-key")
+    join = ["join", "home", "--api", "doggi", "--at", "https://doggi.example.com", "--name", "gw"]
+
+    if running:
+        with pytest.raises(SystemExit, match="'gw' is already joined to home"):
+            cli.main(join)
+    else:
+        assert cli.main(join) == 0
+
+    assert ("Warning" in capsys.readouterr().err) is not running
+    assert bool(prompted) is not running and bool(spawned) is not running
+
+
+def test_a_local_serve_join_of_a_running_engine_is_refused(monkeypatch, tmp_path):
+    """The refusal every other local join still meets inside `_spawn_engine` — the built-in engine's among them."""
+    cfg, spawned = _local_grid_with_spawn(monkeypatch, tmp_path)
+    _seed_stoppable_local_engine(monkeypatch, cfg["grid_id"], "mac")
+
+    with pytest.raises(SystemExit, match="'mac' is already joined to home"):
+        cli.main(["join", "home", "--serve", "model.gguf", "--name", "mac"])
+    assert spawned == []
+
+
 def test_remote_api_join_at_a_vendor_gateway_asks_nothing(monkeypatch, tmp_path):
     """`--api <kind> --at` names a VENDOR gateway, whose base is given in full and whose model list needs the key:
     the `/v1` rule is the hardware engine's alone."""

@@ -229,6 +229,8 @@ def _spawn_cli_seat_engine(cfg: dict[str, Any], args: argparse.Namespace) -> int
 
     kind = args.api
     spec = seat_for(kind)
+    # Refused before the CLI is looked for, and before the warning: both belong to a join that goes ahead.
+    engine_id = _joinable_engine_id(cfg, args)
     try:
         cli_seat.assert_available(spec)
     except cli_seat.SeatError as exc:
@@ -243,7 +245,7 @@ def _spawn_cli_seat_engine(cfg: dict[str, Any], args: argparse.Namespace) -> int
         file=sys.stderr,
     )
     return _spawn_engine(
-        cfg, args, endpoint_url=None, models=advertised, media=False, api_kind=kind,
+        cfg, args, endpoint_url=None, models=advertised, engine_id=engine_id, media=False, api_kind=kind,
     )
 
 
@@ -353,6 +355,8 @@ def _spawn_api_media_engine(cfg: dict[str, Any], args: argparse.Namespace) -> in
             f"(e.g. --at https://your-{kind}-endpoint)."
         )
 
+    # Refused before a key is asked for, and before the warning: both belong to a join that goes ahead.
+    engine_id = _joinable_engine_id(cfg, args)
     key = _resolve_api_media_key(kind, whitelist, args)
 
     # With no -m, serve the whole whitelist for this kind — same default as the remote join.
@@ -368,7 +372,7 @@ def _spawn_api_media_engine(cfg: dict[str, Any], args: argparse.Namespace) -> in
         file=sys.stderr,
     )
     return _spawn_engine(
-        cfg, args, endpoint_url=None, models=advertised, media=False,
+        cfg, args, endpoint_url=None, models=advertised, engine_id=engine_id, media=False,
         api_kind=kind, api_base_url=base_url, api_key=key,
     )
 
