@@ -127,21 +127,25 @@ def test_this_cli_calls_a_grid_in_the_canonical_asleep_state():
 
 
 def _boot_hold_default() -> float:
-    from tests.grid_src_repo import grid_src_private_server
+    from tests.grid_src_repo import grid_src_private_server, grid_src_relay_tree
 
     root = grid_src_private_server()
     if root is None:
         pytest.skip("the grid-src worktree is not beside this one; the lockstep cannot be checked here")
-    source = root / "relay.py"
-    # A literal, or (since grid-platform ticket 12) `float(protocol.BOOT_HOLD_SECONDS)`.
+    # A literal, or (since grid-platform ticket 12) `float(protocol.BOOT_HOLD_SECONDS)`. In whichever of the relay's
+    # modules holds it (one per area since grid-platform M2 ticket 07), or — since M2 ticket 09, where the boot hold
+    # became a grid's SETTING — in `grid_context.py`. An older grid-src has no `grid_context.py`; a newer one must
+    # define it exactly once across both.
+    context = root / "grid_context.py"
+    body = grid_src_relay_tree(root).body + (ast.parse(context.read_text()).body if context.is_file() else [])
     values = [
-        protocol_value(node.value) for node in ast.parse(source.read_text()).body
+        protocol_value(node.value) for node in body
         if isinstance(node, ast.Assign)
         and any(getattr(target, "id", None) == "DEFAULT_BOOT_HOLD_SECONDS" for target in node.targets)
     ]
     assert len(values) == 1 and isinstance(values[0], (int, float)), (
-        f"grid-src's relay.py no longer defines DEFAULT_BOOT_HOLD_SECONDS as a number ({values!r}) — "
-        f"teach this check where the boot hold's default went rather than letting it pass")
+        f"grid-src defines DEFAULT_BOOT_HOLD_SECONDS {len(values)} time(s) across the relay's modules and "
+        f"grid_context.py ({values!r}) — teach this check where the boot hold's default went rather than letting it pass")
     return float(values[0])
 
 

@@ -45,7 +45,7 @@ from cli import remote_grid, remote_overview
 from remote import relay
 from shared import paths, run_records, user_agent
 from tests._remote_seed import seed_remote_grid
-from tests.grid_src_repo import grid_apis_root, grid_src_private_server, harness_root
+from tests.grid_src_repo import grid_apis_root, grid_src_private_server, grid_src_relay_tree, harness_root
 from tests.protocol_ast import protocol_value
 
 from grid_protocol import _codegen
@@ -341,7 +341,8 @@ def _assert_unauthenticated(handler: ast.AST, allowed_args: list[str]) -> None:
 
 
 def test_the_overview_is_public_at_the_master():
-    relay_tree = _tree(grid_src_private_server(), "relay.py", _SKIP_SRC)
+    _source(grid_src_private_server(), "server.py", _SKIP_SRC)  # skips when grid-src is absent; the tree raises if it moved
+    relay_tree = grid_src_relay_tree(grid_src_private_server())  # one module per area since grid-platform M2 ticket 07
     prefixes = [
         keyword.value.value for node in ast.walk(relay_tree)
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "APIRouter"
