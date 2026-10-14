@@ -958,6 +958,33 @@ def test_the_openai_stream_stays_data_only():
     assert "data: [DONE]" in body
 
 
+def test_a_seat_that_fails_mid_stream_ends_on_its_error_never_on_done():
+    """`[DONE]` is how an OpenAI stream says it FINISHED, and the grid's relay settles a stream that
+    ends `[DONE]` as `completed` (grid-platform M2 ticket 23's torn-stream rule). The chat stream sent
+    it after its own error frame, so a seat run that failed was billed and recorded as answered. The
+    Anthropic and Responses streams already stopped at their error; this one now does too. The
+    positive control is the test above: a run that succeeds still ends `[DONE]`."""
+    from fastapi.testclient import TestClient
+
+    from local.cli_seat_server import create_app
+    from shared.agent.seats import seat_for
+
+    def run(binary, prepared, timeout, on_delta):
+        on_delta("half an ans")
+        raise cli_seat.SeatError("the CLI exited 1")
+
+    base = seat_for("codex-cli")
+    spec = base.__class__(**{**base.__dict__, "run": run})
+    app = create_app(spec=spec, binary="/fake/bin", options=cli_seat.SeatOptions())
+    body = TestClient(app).post("/chat/completions", json={
+        "model": "codex-cli:gpt-5.6-terra", "stream": True,
+        "messages": [{"role": "user", "content": "hi"}]}).text
+
+    frames = [line[6:] for line in body.split("\n") if line.startswith("data: ")]
+    assert "[DONE]" not in frames, frames
+    assert json.loads(frames[-1])["error"]["type"] == "cli_seat_error", frames
+
+
 # the seat serves /responses (OpenAI Responses API dialect)
 
 def test_the_codex_cli_catalog_row_declares_responses():
