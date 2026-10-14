@@ -471,25 +471,41 @@ def test_the_harness_ignores_a_record_before_the_master_forgets_its_nodes():
 #: How the harness spells a run record's folder (`join(home, 'run', 'engines', gridId)`). A function that
 #: builds it is a function that reads grid's run records — which is what scopes the pin below.
 _HARNESS_RUN_RECORD_PATH = "'run', 'engines'"
-#: `localModels.owned` (the Model Manager's own engines) and `readRunRecords` (`servedHere`), measured
-#: 2026-10-07. One more or one fewer is a move to teach this check, never a pass on what is left in scope.
+#: `localModels.engineRecords` (the Model Manager's own engines — `owned` until harness #1297, 2026-10-13) and
+#: `readRunRecords` (`servedHere`), measured 2026-10-07 and again 2026-10-14. One more or one fewer is a move to
+#: teach this check, never a pass on what is left in scope.
 _HARNESS_RUN_RECORD_READERS = 2
 #: The harness's OWN record of an engine it started in another app (`AppEngineRecord`, `app-engines.json`,
 #: written by the harness itself — PR #569), read in the same file through a variable also named `record`.
-#: A block that names it reads that record, not grid's.
+#: A block that names it in its CODE reads that record, not grid's — a comment that names it is not a read.
 _HARNESS_APP_RECORD = re.compile(r"\b(?:AppEngineRecord|readAppRecords)\b")
+#: So does a block that takes it as its `record` parameter — `record: AppEngineRecord`, or a type made of it
+#: (`Pick<AppEngineRecord, 'modelId'>`) — which a function or a class method says in its header, not its body
+#: (harness `bee01667f`, 2026-10-12: `isJevRecord`, `retire`). Matched against each TOP-LEVEL parameter on its
+#: own: never another parameter beside it, nor the `record` of a callback among them
+#: (`each?: (record: AppEngineRecord) => void`).
+_HARNESS_APP_RECORD_PARAMETER = re.compile(r"record\s*\??\s*:\s*(?:\w+\s*<\s*)?AppEngineRecord\b")
+#: And so does a block that calls a function of the same file DECLARED to return it — `readAppRecords`' role,
+#: played by one the file defines (`withOwnVram`'s `this.records()`, same commit). The declared type must BE
+#: the record: one, a list of them, a promise of either, maybe `| undefined` or `| null`. One that merely
+#: mentions it (`Map<string, AppEngineRecord>`, `AppEngineRecord | Record<string, any>`) hands out more.
+_HARNESS_APP_RECORDS = r"AppEngineRecord\s*(?:\[\s*\])?(?:\s*\|\s*(?:undefined|null))*"
+_HARNESS_APP_RECORD_RETURN = re.compile(
+    rf"\s*:\s*(?:Promise\s*<\s*{_HARNESS_APP_RECORDS}\s*>|{_HARNESS_APP_RECORDS})"
+    r"(?:\s*\|\s*(?:undefined|null))*\s*(?:=>)?\s*")
 #: A read of a record's field. A block's keys are matched in its RAW source — a `${record.x}` in a template
 #: literal stays visible, and a comment that mentions one can only err toward failing.
 _RECORD_READ = re.compile(r"\brecord\.(\w+)")
 #: Comments, then string and template literals: blanked before braces are matched, so none can unbalance
 #: them. Whichever starts first wins, which is how a `//` inside a URL string stays a string.
 _TS_NOT_CODE = re.compile(r"//[^\n]*|/\*[\s\S]*?\*/|'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"|`(?:\\.|[^`\\])*`")
-#: A function's name, from its header — everything since the last `;`, `{` or `}` at its own level, which
-#: spans several statements in a file written without semicolons. The `$` is what picks the function's own
-#: name out of that: the identifier right before the parameter list that ends the header (parentheses nested
-#: two deep inside it, as a callback parameter's own callback is).
+#: A function's name, its parameter list and what follows that (its return type), from its header —
+#: everything since the last `;`, `{` or `}` at its own level, which spans several statements in a file
+#: written without semicolons. The `$` is what picks the function's own name out of that: the identifier
+#: right before the parameter list that ends the header (parentheses nested two deep inside it, as a callback
+#: parameter's own callback is).
 _TS_NAMED = re.compile(
-    r"(\w+)\s*(?:=\s*(?:async\s*)?)?(?:<[^()]*>)?\s*\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)[^()]*$")
+    r"(\w+)\s*(?:=\s*(?:async\s*)?)?(?:<[^()]*>)?\s*(\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))([^()]*)$")
 
 
 class _TsBlock(NamedTuple):
@@ -497,6 +513,8 @@ class _TsBlock(NamedTuple):
     line: int
     start: int  # the offset of its `{` in the file
     source: str  # raw, comments and strings included
+    parameters: str  # its header's parameter list, comments and strings blanked; "" when unnamed
+    returns: str  # what its header says after the parameter list — its return type; "" when unnamed
 
 
 class _TsOpen(NamedTuple):
@@ -555,8 +573,9 @@ def _ts_top_level_blocks(source: str) -> list[_TsBlock]:
             block = opened.pop()
             if block.kind == "block" and not block.nested:
                 named = _TS_NAMED.search(block.header)
-                found.append(_TsBlock(named.group(1) if named else "(unnamed)", line(block.start), block.start,
-                                      source[block.start:offset + 1]))
+                name, parameters, returns = named.groups() if named else ("(unnamed)", "", "")
+                found.append(_TsBlock(name, line(block.start), block.start, source[block.start:offset + 1],
+                                      parameters, returns))
             if block.kind != "signature" and (not opened or opened[-1].kind == "class"):
                 header_from = offset + 1
     assert not opened, (f"an unmatched `{{` on line {line(opened[-1].start)} (after `{opened[-1].header[-80:]}`) "
@@ -578,7 +597,7 @@ def _harness_run_record_scope(source: str) -> list[_TsBlock]:
     readers = [block for block in blocks if _HARNESS_RUN_RECORD_PATH in block.source]
     assert len(readers) == _HARNESS_RUN_RECORD_READERS, (
         f"expected {_HARNESS_RUN_RECORD_READERS} functions that find run records under run/engines/<grid id> "
-        f"(`owned`, `readRunRecords`), found {[f'{b.name} (line {b.line})' for b in readers]} — the reading "
+        f"(`engineRecords`, `readRunRecords`), found {[f'{b.name} (line {b.line})' for b in readers]} — the reading "
         f"moved: teach this check where it went rather than letting it pass on what is left")
     for reader in readers:
         assert _RECORD_READ.search(reader.source), (
@@ -586,19 +605,58 @@ def _harness_run_record_scope(source: str) -> list[_TsBlock]:
             f"the reads moved out of this check's reach: teach it where they went")
     handed = {called for reader in readers for called in re.findall(r"\b(\w+)\(\s*record\s*\)", reader.source)}
     scope = readers + [block for block in blocks if block.name in handed]
+    own = _harness_app_record_blocks(blocks, code)
     unclassified = [f"{block.name} (line {block.line})" for block in blocks
-                    if block not in scope and _RECORD_READ.search(block.source)
-                    and not _HARNESS_APP_RECORD.search(block.source)]
+                    if block not in scope and _RECORD_READ.search(block.source) and block not in own]
     assert not unclassified, (
         f"{unclassified} read `record.<field>`, but none of them finds run records under run/engines/<grid "
-        f"id>, is handed one by a function that does, or reads the harness's own `AppEngineRecord` — teach "
-        f"this check which record that is rather than leaving its keys unchecked")
+        f"id>, is handed one by a function that does, or reads the harness's own `AppEngineRecord` (names it, "
+        f"takes it as its `record` parameter, or calls a function declared to return it) — teach this check "
+        f"which record that is rather than leaving its keys unchecked")
     return scope
+
+
+def _harness_app_record_blocks(blocks: list[_TsBlock], code: str) -> list[_TsBlock]:
+    """The blocks that read the harness's own `AppEngineRecord` rather than grid's run record: those whose code
+    names it, that take it as their `record` parameter, or whose code calls a function of this file declared to
+    return it — by its name, or as `this.<name>()`, never as another object's method of the same name. Only
+    consulted for a block outside the scope: a reader, or a helper a reader hands its record to, is checked
+    whatever it also reads."""
+    accessors = [re.escape(block.name) for block in blocks if _HARNESS_APP_RECORD_RETURN.fullmatch(block.returns)]
+    calls = re.compile(rf"(?<![\w.])(?:this\.)?(?:{'|'.join(accessors)})\s*\(") if accessors else None
+
+    def reads_the_harness_record(block: _TsBlock) -> bool:
+        body = code[block.start:block.start + len(block.source)]  # comments and strings blanked
+        return bool(_HARNESS_APP_RECORD.search(body)
+                    or any(_HARNESS_APP_RECORD_PARAMETER.match(parameter)
+                           for parameter in _ts_top_level_parameters(block.parameters))
+                    or (calls is not None and calls.search(body)))
+
+    return [block for block in blocks if reads_the_harness_record(block)]
+
+
+def _ts_top_level_parameters(parameters: str) -> list[str]:
+    """A header's parameter list (its parentheses included) split at its own commas — never at one inside a
+    parameter's type or default value, a callback's parameter list among them. An arrow's `=>` is no `>`, and a
+    `<` left open (a comparison in a default) only ever merges parameters, which nothing then matches."""
+    inner = parameters[1:-1].replace("=>", "  ")
+    depth = dict.fromkeys("([{<", 0)
+    opener = {")": "(", "]": "[", "}": "{", ">": "<"}
+    found, start = [], 0
+    for offset, char in enumerate(inner):
+        if char in depth:
+            depth[char] += 1
+        elif char in opener:
+            depth[opener[char]] -= 1
+        elif char == "," and depth["("] == depth["["] == depth["{"] == 0 and depth["<"] <= 0:
+            found.append(inner[start:offset])
+            start = offset + 1
+    return [parameter.strip() for parameter in [*found, inner[start:]]]
 
 
 def test_the_harness_reads_only_run_record_fields_grid_join_writes():
     """Not skipped: the harness reads run records TODAY, from the same layout — in the functions that build
-    their folder's path (`localModels.owned`, `readRunRecords`) and in the helpers those hand a record to
+    their folder's path (`localModels.engineRecords`, `readRunRecords`) and in the helpers those hand a record to
     (`recordPid`). A key they read that `grid join` stopped writing is a model that silently stops being
     recognised as this computer's own.
 
@@ -608,18 +666,160 @@ def test_the_harness_reads_only_run_record_fields_grid_join_writes():
     `alias`, `engine`, `grid`, `modelId` and `name` as keys `grid join` had stopped writing. A reader that
     moves is reported as a move, never a pass on whatever is left in scope: exactly
     `_HARNESS_RUN_RECORD_READERS` readers are demanded, each reading the record itself; any other block
-    reading a `record.<field>` must be one about the harness's own record, or it fails as unclassified; and
-    a read in no block at all fails too — it is outside every function body, or in one this check's reading
-    of TypeScript dropped. Only that spelling is seen — `record?.x`, `record['x']` and destructuring are
-    not, as before."""
+    reading a `record.<field>` must be one about the harness's own record — naming it, taking it as its
+    `record` parameter, or calling a function of the file declared to return it (`this.records()`; harness
+    `bee01667f`, 2026-10-12) — or it fails as unclassified; and a read in no block at all fails too — it is
+    outside every function body, or in one this check's reading of TypeScript dropped. Only that spelling is
+    seen — `record?.x`, `record['x']` and destructuring are not, as before."""
     root = harness_root()
     if root is None:
         pytest.skip(_SKIP_HARNESS)
     source = _source(root, "cli/src/lib/localModels.ts", _SKIP_HARNESS).read_text()
-    read = {field for block in _harness_run_record_scope(source) for field in _RECORD_READ.findall(block.source)}
-    unknown = sorted(read - _record_keys())
+    unknown = _harness_unwritten_reads(source)
     assert not unknown, f"the harness reads {unknown}, which `grid join` does not write into a run record"
     assert "'.heartbeat'" in source, "the harness no longer reads the heartbeat sidecar beside a record"
+
+
+def _harness_unwritten_reads(source: str) -> list[str]:
+    """The fields the run-record readers in ``source`` read that `grid join` does not write."""
+    read = {field for block in _harness_run_record_scope(source) for field in _RECORD_READ.findall(block.source)}
+    return sorted(read - _record_keys())
+
+
+#: `localModels.ts` in miniature, as harness `main` spells it since 2026-10-12: two readers of grid's run
+#: records (`engineRecords`, `readRunRecords`) and the helper one hands a record to (`recordPid`), beside
+#: three blocks that read the harness's OWN record without naming it in their body — through a parameter
+#: annotation (`isJevRecord`, and `retire`, a class method) and through `this.records()` (`withOwnVram`).
+_LOCAL_MODELS_IN_MINIATURE = """\
+import { readAppRecords, type AppEngineRecord } from './appModels.js'
+
+/** A Jev engine's record: forgotten. */
+export function isJevRecord(record: Pick<AppEngineRecord, 'modelId'>): boolean {
+  return record.modelId.startsWith('jev:')
+}
+
+export class LocalModels {
+  private readonly home: string
+  constructor(private readonly options: Options) { this.home = options.home }
+
+  private async withOwnVram(device: Record<string, any>): Promise<Record<string, any>> {
+    const records = await this.records()
+    return { ...device, pids: records.map(record => record.pid), binaries: records.map(record => record.binary) }
+  }
+
+  private async engineRecords(gridId: string): Promise<Owned[]> {
+    const folder = join(this.home, 'run', 'engines', gridId)
+    const record = JSON.parse(await readFile(join(folder, 'remote.json'), 'utf8'))
+    return [{ pid: recordPid(record), node: record.node_id }]
+  }
+
+  private async records(): Promise<AppEngineRecord[]> {
+    return (await readAppRecords(this.options.stateDir)).filter(record => !isJevRecord(record))
+  }
+
+  /** A Jev engine still running: stopped. */
+  private async retire(record: AppEngineRecord): Promise<void> {
+    await this.run(['--remote', 'leave', record.grid, '--engine', record.alias])
+  }
+}
+
+function recordPid(record: Record<string, any>): number | null {
+  return typeof record.pid === 'number' ? record.pid : null
+}
+
+async function readRunRecords(home: string, grid: string): Promise<Record<string, any>[]> {
+  const folder = join(home, 'run', 'engines', grid)
+  return (await readdir(folder)).map(name => {
+    const record = readJson(join(folder, name))
+    return { name: record.meta_name, models: record.models }
+  })
+}
+"""
+
+
+@pytest.mark.parametrize("edits", [
+    (),
+    # `record` need not be the first parameter, and the record may be optional.
+    (("retire(record: AppEngineRecord)", "retire(why: string, record?: AppEngineRecord)"),),
+    # A list of them, or one or none, is still the harness's record.
+    (("records(): Promise<AppEngineRecord[]>", "records(): Promise<AppEngineRecord | undefined>"),),
+], ids=["as-written", "a-later-optional-parameter", "an-accessor-of-one-or-none"])
+def test_the_run_record_pin_knows_the_harness_record_by_its_annotation_and_its_accessor(edits):
+    """Not skipped, and needs no harness: the blocks that read `AppEngineRecord` without naming it in their
+    body are told apart from grid's run records, and only the readers' fields are checked."""
+    source = _LOCAL_MODELS_IN_MINIATURE
+    for original, edited in edits:
+        assert source.count(original) == 1, original
+        source = source.replace(original, edited)
+    scope = _harness_run_record_scope(source)
+    assert sorted(block.name for block in scope) == ["engineRecords", "readRunRecords", "recordPid"]
+    assert _harness_unwritten_reads(source) == []
+
+
+def _handed_with_a_callback(callback: str) -> tuple[tuple[str, str], ...]:
+    """A helper the reader hands its record to beside another argument, which `handed` does not see — so it is
+    checked only if nothing ties it to the harness's record. Its only `AppEngineRecord` is a CALLBACK's."""
+    return (
+        ("node: record.node_id }]", "node: record.node_id, ...describe(record, this.home) }]"),
+        ("function recordPid(", f"function describe(record: Record<string, any>, home: string, each?: {callback}): "
+                                "Record<string, any> {\n  return { label: record.node_label, home }\n}\n\n"
+                                "function recordPid("),
+    )
+
+
+@pytest.mark.parametrize(("edits", "unclassified"), [
+    # A `record` parameter typed as anything else is somebody else's record.
+    ((("retire(record: AppEngineRecord)", "retire(record: RunRecord)"),), "retire"),
+    # The annotation must be on `record`, not on another parameter beside it…
+    ((("retire(record: AppEngineRecord)", "retire(own: AppEngineRecord, record: RunRecord)"),), "retire"),
+    # …nor on a `record` parameter of a callback among them, wherever it sits in that callback's own list.
+    (_handed_with_a_callback("(record: AppEngineRecord) => void"), "describe"),
+    (_handed_with_a_callback("(index: number, record: AppEngineRecord) => void"), "describe"),
+    # A function not declared to return the harness's record hands out nobody knows what…
+    ((("records(): Promise<AppEngineRecord[]>", "records(): Promise<Record<string, any>[]>"),), "withOwnVram"),
+    # …and one declared to return something that merely MENTIONS it hands out something else.
+    ((("records(): Promise<AppEngineRecord[]>", "records(): Promise<AppEngineRecord | Record<string, any>>"),),
+     "withOwnVram"),
+    ((("records(): Promise<AppEngineRecord[]>", "records(): Map<string, AppEngineRecord>"),), "withOwnVram"),
+    # Only this class's own `records()` is that function — another object's method of the same name is not.
+    ((("await this.records()", "await this.options.records()"),), "withOwnVram"),
+    # A call is code: a comment that names one is not…
+    ((("await this.records()", "await this.options.records() // not this.records()"),), "withOwnVram"),
+    # …and neither is a comment that names the record or its reader.
+    ((("retire(record: AppEngineRecord): Promise<void> {",
+       "retire(record: RunRecord): Promise<void> { // not readAppRecords' record"),), "retire"),
+], ids=["another-type", "another-parameter", "a-callbacks-parameter", "a-callbacks-second-parameter",
+        "an-untyped-accessor", "a-mixed-accessor", "a-map-accessor", "another-objects-accessor",
+        "a-comment-naming-the-call", "a-comment-naming-the-record"])
+def test_the_run_record_pin_refuses_a_record_it_cannot_tie_to_the_harness(edits, unclassified):
+    source = _LOCAL_MODELS_IN_MINIATURE
+    for original, edited in edits:
+        assert source.count(original) == 1, original
+        source = source.replace(original, edited)
+    with pytest.raises(AssertionError, match=rf"\b{unclassified} \(line \d+\)"):
+        _harness_run_record_scope(source)
+
+
+#: Two fields `grid join` does not write, one read by a reader and one by the helper it hands its record to.
+_UNWRITTEN_READS = {"node: record.node_id": "node: record.node_label",
+                    "typeof record.pid === 'number'": "typeof record.process_id === 'number'"}
+
+
+@pytest.mark.parametrize(("original", "edited"), [
+    (None, None),
+    # A helper a reader hands its record to stays in scope, whatever its parameter claims.
+    ("recordPid(record: Record<string, any>)", "recordPid(record: AppEngineRecord)"),
+    # So does a reader that also reads the harness's own record.
+    ("const folder = join(this.home, 'run', 'engines', gridId)",
+     "const folder = join(this.home, 'run', 'engines', gridId); await this.records()"),
+], ids=["as-written", "a-handed-helper-typed-as-the-harness-record", "a-reader-that-also-reads-its-own"])
+def test_the_run_record_pin_still_reports_a_field_grid_join_does_not_write(original, edited):
+    source = _LOCAL_MODELS_IN_MINIATURE if original is None else _LOCAL_MODELS_IN_MINIATURE.replace(original, edited)
+    for written, unwritten in _UNWRITTEN_READS.items():
+        assert written in source
+        source = source.replace(written, unwritten)
+    assert original is None or edited in source
+    assert _harness_unwritten_reads(source) == ["node_label", "process_id"]
 
 
 def test_the_harness_viewer_reads_the_listings_this_cli_prints():
