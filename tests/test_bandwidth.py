@@ -28,6 +28,14 @@ def test_nvidia_reads_the_fastest_recognised_card_most_specific_first():
     # "4070 Ti" must win over the "4070" substring.
     assert bandwidth.estimate("nvidia", "", [{"name": "NVIDIA GeForce RTX 4070 Ti"}]) == 672
     assert bandwidth.estimate("nvidia", "", [{"name": "NVIDIA A100-SXM4-80GB"}]) == 2039
+    # The RTX PRO 6000 name shares no fragment with the GeForce cards; Server Edition is slower.
+    assert bandwidth.estimate("nvidia", "", [
+        {"name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"}]) == 1792
+    assert bandwidth.estimate("nvidia", "", [
+        {"name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"}]) == 1792
+    assert bandwidth.estimate("nvidia", "", [
+        {"name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"}]) == 1597
+    assert bandwidth.estimate("nvidia", "", [{"name": "NVIDIA RTX 6000 Ada Generation"}]) == 960
     # Multi-GPU: the fastest card sets the pace.
     assert bandwidth.estimate("nvidia", "", [
         {"name": "NVIDIA RTX 3060"}, {"name": "NVIDIA RTX 4090"}]) == 1008
@@ -73,6 +81,8 @@ def test_nvidia_compute_reads_the_fastest_recognised_card():
         "nvidia", [{"name": "NVIDIA H100 80GB HBM3"}], None) == 990_000.0
     assert bandwidth.estimate_compute_gflops(
         "nvidia", [{"name": "NVIDIA GeForce RTX 4090"}], None) == 165_000.0
+    assert bandwidth.estimate_compute_gflops(
+        "nvidia", [{"name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"}], None) == 500_000.0
     assert bandwidth.estimate_compute_gflops("nvidia", [{"name": "Some Unknown Card"}], None) is None
 
 
