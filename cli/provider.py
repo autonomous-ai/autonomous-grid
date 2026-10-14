@@ -130,8 +130,12 @@ def cmd_join(args: argparse.Namespace) -> int:
     if args.at:
         if not args.models:
             raise SystemExit("--at requires at least one -m/--model naming what that engine serves.")
+        # Refused before the engine is asked anything: `_at_engine_base` asks it, waits for it, and says which
+        # URL it serves — all of which belong to a join that goes ahead.
+        engine_id = _joinable_engine_id(cfg, args)
         return _spawn_engine(
-            cfg, args, endpoint_url=_at_engine_base(args.at), models=list(args.models), media=args.media
+            cfg, args, endpoint_url=_at_engine_base(args.at), models=list(args.models), engine_id=engine_id,
+            media=args.media,
         )
 
     if args.serve:
@@ -192,12 +196,13 @@ def cmd_join(args: argparse.Namespace) -> int:
     return rc
 
 
-def _seat_options(args: argparse.Namespace):
-    """The seat's options from the kind-agnostic `--seat-*` flags, defaulted per kind."""
+def _seat_options(args: argparse.Namespace) -> dict[str, Any]:
+    """The seat's options from the kind-agnostic `--seat-*` flags, defaulted per kind, as its run record keeps them
+    (the child reads them back with `SeatOptions(**record["seat"])`)."""
     from shared.agent import cli_seat
 
     kind = getattr(args, "api", None) or ""
-    return cli_seat.options_from_args(args, default_port=api_catalog.local_seat_port(kind))
+    return cli_seat.options_to_dict(cli_seat.options_from_args(args, default_port=api_catalog.local_seat_port(kind)))
 
 
 def _narrow_advertised(kind: str, advertised: list[str], requested: list[str]) -> list[str]:
@@ -224,6 +229,8 @@ def _spawn_cli_seat_engine(cfg: dict[str, Any], args: argparse.Namespace) -> int
 
     kind = args.api
     spec = seat_for(kind)
+    # Refused before the CLI is looked for, and before the warning: both belong to a join that goes ahead.
+    engine_id = _joinable_engine_id(cfg, args)
     try:
         cli_seat.assert_available(spec)
     except cli_seat.SeatError as exc:
@@ -238,7 +245,7 @@ def _spawn_cli_seat_engine(cfg: dict[str, Any], args: argparse.Namespace) -> int
         file=sys.stderr,
     )
     return _spawn_engine(
-        cfg, args, endpoint_url=None, models=advertised, media=False, api_kind=kind,
+        cfg, args, endpoint_url=None, models=advertised, engine_id=engine_id, media=False, api_kind=kind,
     )
 
 
@@ -348,6 +355,8 @@ def _spawn_api_media_engine(cfg: dict[str, Any], args: argparse.Namespace) -> in
             f"(e.g. --at https://your-{kind}-endpoint)."
         )
 
+    # Refused before a key is asked for, and before the warning: both belong to a join that goes ahead.
+    engine_id = _joinable_engine_id(cfg, args)
     key = _resolve_api_media_key(kind, whitelist, args)
 
     # With no -m, serve the whole whitelist for this kind — same default as the remote join.
@@ -363,7 +372,7 @@ def _spawn_api_media_engine(cfg: dict[str, Any], args: argparse.Namespace) -> in
         file=sys.stderr,
     )
     return _spawn_engine(
-        cfg, args, endpoint_url=None, models=advertised, media=False,
+        cfg, args, endpoint_url=None, models=advertised, engine_id=engine_id, media=False,
         api_kind=kind, api_base_url=base_url, api_key=key,
     )
 
@@ -414,9 +423,7 @@ def _spawn_engine(
     api_key: str | None = None,
 ) -> int:
     grid_id = cfg["grid_id"]
-    engine_id = engine_id or getattr(args, "name", None) or f"engine-{uuid.uuid4().hex[:8]}"
-    if _record_path(grid_id, engine_id).exists() and _record_alive(grid_id, engine_id):
-        raise SystemExit(f"Engine {engine_id!r} is already joined to {cfg['name']}. Use a different --name.")
+    engine_id = _joinable_engine_id(cfg, args, engine_id)
 
     record = {
         "engine_id": engine_id,
@@ -447,7 +454,7 @@ def _spawn_engine(
         "api_base_url": api_base_url,
         "api_media_port": getattr(args, "media_port", 8190),
         # CLI seat (`--api <seat kind>`): one options object, not six loose keys.
-        "seat": _seat_options(args).to_dict() if api_catalog.local_seat_port(api_kind or "") else None,
+        "seat": _seat_options(args) if api_catalog.local_seat_port(api_kind or "") else None,
         "started_at": runtime.utc_now(),
     }
     _write_record(grid_id, engine_id, record)
@@ -480,6 +487,14 @@ def _spawn_engine(
 
     _report_join(cfg, args, engine_id, models, endpoint_url, log_path, status)
     return 0
+
+
+def _joinable_engine_id(cfg: dict[str, Any], args: argparse.Namespace, engine_id: str | None = None) -> str:
+    """The id a join records its engine under — refused while an engine of that id is joined and running."""
+    engine_id = engine_id or getattr(args, "name", None) or f"engine-{uuid.uuid4().hex[:8]}"
+    if _record_path(cfg["grid_id"], engine_id).exists() and _record_alive(cfg["grid_id"], engine_id):
+        raise SystemExit(f"Engine {engine_id!r} is already joined to {cfg['name']}. Use a different --name.")
+    return engine_id
 
 
 def serves_vision(args) -> bool:
