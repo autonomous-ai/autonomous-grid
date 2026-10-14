@@ -65,6 +65,12 @@ def test_nvidia_names_that_contain_a_shorter_fragment_get_their_own_number():
         ("NVIDIA GeForce RTX 5070 Laptop GPU", 384), ("NVIDIA GeForce RTX 5060 Laptop GPU", 384),
         ("NVIDIA RTX PRO 5000 Blackwell", 1344), ("NVIDIA RTX 5000 Ada Generation", 576),
         ("NVIDIA RTX 4000 Ada Generation", 360), ("NVIDIA GB10", 273), ("NVIDIA B200", 7700),
+        ("NVIDIA H100 PCIe", 2000), ("NVIDIA H100 NVL", 3900), ("NVIDIA H100 80GB HBM3", 3350),
+        ("NVIDIA A100 80GB PCIe", 1935), ("Quadro P4000", 243), ("Tesla P40", 346),
+        ("Quadro RTX 6000", 672), ("NVIDIA RTX 6000 Ada Generation", 960),
+        ("NVIDIA TITAN Xp", 547), ("NVIDIA GeForce GTX TITAN X", 336), ("NVIDIA TITAN X (Pascal)", 480),
+        ("NVIDIA GeForce RTX 2060 SUPER", 448), ("NVIDIA GeForce RTX 2080 SUPER", 496),
+        ("NVIDIA GeForce RTX 3060 Laptop GPU", 336), ("NVIDIA RTX A2000", 288),
     ):
         assert bandwidth.estimate("nvidia", "", [{"name": name}]) == gbps, name
 
