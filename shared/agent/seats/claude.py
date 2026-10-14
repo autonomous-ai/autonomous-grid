@@ -222,6 +222,10 @@ def decode(proc, tmpdir):
     parses *successfully*, so keying the event scan off a JSONDecodeError meant a valid array
     yielded no envelope and every non-streaming request failed with the message below — while the
     answer sat in the array unread.
+
+    A single object is the bare result only when it says so, or says nothing: a `claude` that died
+    after printing ONE stream-json event (`system`, `stream_event`) leaves stdout of that same shape,
+    and read as the envelope it was an empty answer reported as finished.
     """
     raw = (proc.stdout or "").strip()
     try:
@@ -229,7 +233,7 @@ def decode(proc, tmpdir):
     except (TypeError, ValueError):
         parsed = None
     if isinstance(parsed, dict):
-        envelope = parsed
+        envelope = parsed if parsed.get("type", "result") == "result" else None
     elif isinstance(parsed, list):
         envelope = _last_result(parsed)
     else:

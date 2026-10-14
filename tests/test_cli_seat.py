@@ -372,6 +372,27 @@ def test_claude_decode_surfaces_the_error_message():
         claude.decode(proc, Path("/tmp"))
 
 
+# A `claude` that dies after printing ONE stream-json event leaves stdout that parses as a single
+# JSON object, the same shape as older builds' bare result object. Read as the envelope, it was an
+# answer with no text that the seat reported as finished (`finish_reason: stop`), and that a grid
+# settled as completed. Only a result is an envelope.
+@pytest.mark.parametrize("event", [
+    {"type": "system", "subtype": "init", "session_id": "s"},
+    {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+                                       "delta": {"type": "text_delta", "text": "partial "}}},
+], ids=["init-only", "one-delta"])
+def test_claude_decode_refuses_a_run_that_died_after_one_event(event):
+    proc = SimpleNamespace(stdout=json.dumps(event), stderr="crashed", returncode=1)
+    with pytest.raises(cli_seat.SeatError, match="no result envelope"):
+        claude.decode(proc, Path("/tmp"))
+
+
+def test_claude_decode_still_reads_a_bare_result_that_names_its_type():
+    proc = SimpleNamespace(stdout=json.dumps({"type": "result", "result": "ok", "is_error": False}),
+                           stderr="", returncode=0)
+    assert claude.decode(proc, Path("/tmp")).text == "ok"
+
+
 def test_claude_parses_the_usage_screen():
     snapshot = claude.parse_usage(
         "Current session: 7% used · resets Jul 29 at 4pm (Asia/Saigon)\n"
