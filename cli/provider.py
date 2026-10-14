@@ -130,8 +130,12 @@ def cmd_join(args: argparse.Namespace) -> int:
     if args.at:
         if not args.models:
             raise SystemExit("--at requires at least one -m/--model naming what that engine serves.")
+        # Refused before the engine is asked anything: `_at_engine_base` asks it, waits for it, and says which
+        # URL it serves — all of which belong to a join that goes ahead.
+        engine_id = _joinable_engine_id(cfg, args)
         return _spawn_engine(
-            cfg, args, endpoint_url=_at_engine_base(args.at), models=list(args.models), media=args.media
+            cfg, args, endpoint_url=_at_engine_base(args.at), models=list(args.models), engine_id=engine_id,
+            media=args.media,
         )
 
     if args.serve:
@@ -414,9 +418,7 @@ def _spawn_engine(
     api_key: str | None = None,
 ) -> int:
     grid_id = cfg["grid_id"]
-    engine_id = engine_id or getattr(args, "name", None) or f"engine-{uuid.uuid4().hex[:8]}"
-    if _record_path(grid_id, engine_id).exists() and _record_alive(grid_id, engine_id):
-        raise SystemExit(f"Engine {engine_id!r} is already joined to {cfg['name']}. Use a different --name.")
+    engine_id = _joinable_engine_id(cfg, args, engine_id)
 
     record = {
         "engine_id": engine_id,
@@ -480,6 +482,14 @@ def _spawn_engine(
 
     _report_join(cfg, args, engine_id, models, endpoint_url, log_path, status)
     return 0
+
+
+def _joinable_engine_id(cfg: dict[str, Any], args: argparse.Namespace, engine_id: str | None = None) -> str:
+    """The id a join records its engine under — refused while an engine of that id is joined and running."""
+    engine_id = engine_id or getattr(args, "name", None) or f"engine-{uuid.uuid4().hex[:8]}"
+    if _record_path(cfg["grid_id"], engine_id).exists() and _record_alive(cfg["grid_id"], engine_id):
+        raise SystemExit(f"Engine {engine_id!r} is already joined to {cfg['name']}. Use a different --name.")
+    return engine_id
 
 
 def serves_vision(args) -> bool:

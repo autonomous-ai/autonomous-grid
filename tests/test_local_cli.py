@@ -7979,6 +7979,34 @@ def test_join_at_an_engine_that_never_answers_keeps_the_url_as_given_on_a_local_
     assert engine.asked == [f"{_LLAMA_SERVER}/v1/models"] * 3
 
 
+def test_a_second_local_join_of_a_running_engine_is_refused_before_it_says_what_it_would_serve(
+    monkeypatch, tmp_path, capsys
+):
+    """`grid join --at <root> --name mac` again while `mac` is joined and running is refused — and refused FIRST.
+    The `/v1` ask and its "serving …/v1" note belong to a join that goes ahead: printed ahead of the refusal, the
+    note read as the join going ahead, and an engine still loading held the refusal back behind up to three asks."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(runtime, "detect_local_ip", lambda: "192.168.1.50")
+    runtime.init_grid_config(name="home", port=8090)
+    # The child is this process, so the first join's record names an engine of ours that is running.
+    monkeypatch.setattr(cli.provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": os.getpid()})())
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *a, **k: "registered")
+    engine = _AtEngine({f"{_LLAMA_SERVER}/v1/models": [200]})
+    monkeypatch.setattr(httpx, "get", engine.get)
+    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
+    join = ["join", "home", "--at", _LLAMA_SERVER, "-m", "llama3", "--name", "mac"]
+
+    assert cli.main(join) == 0
+    assert f"serving {_LLAMA_SERVER}/v1" in capsys.readouterr().err  # a join that goes ahead says what it serves
+    asked = list(engine.asked)
+
+    with pytest.raises(SystemExit, match="'mac' is already joined to home"):
+        cli.main(join)
+
+    assert "serving" not in capsys.readouterr().err
+    assert engine.asked == asked  # and the engine was asked nothing
+
+
 def test_remote_api_join_at_a_vendor_gateway_asks_nothing(monkeypatch, tmp_path):
     """`--api <kind> --at` names a VENDOR gateway, whose base is given in full and whose model list needs the key:
     the `/v1` rule is the hardware engine's alone."""
