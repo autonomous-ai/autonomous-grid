@@ -196,15 +196,36 @@ def mutate_record(grid_id: str, engine_id: str, mutate: Callable[[dict[str, Any]
     """
     path = record_path(grid_id, engine_id)
     with file_lock(path):
-        record = jsonio.load_json(path)
-        if not record:
-            return False
-        updated = dict(record)
-        mutate(updated)
-        if updated == record:
-            return False  # nothing changed — don't rewrite the file on every healthy tick
-        write_record(grid_id, engine_id, updated)
-        return True
+        return _mutate_held(grid_id, engine_id, path, mutate)
+
+
+def try_mutate_record(grid_id: str, engine_id: str, mutate: Callable[[dict[str, Any]], None]) -> bool:
+    """``mutate_record`` that never waits: when another holder has the lock, it writes nothing and
+    returns ``False``. It raises as ``mutate_record`` does.
+
+    For a write on a served job's path. The lock's other holder can be a `grid leave`, or a `grid join`
+    respawning the identity, and either holds it across its whole teardown of the very process that is
+    writing — so a job that waited here would sit out the drain and be dropped instead of finishing.
+    Only for a fact the next write restates anyway.
+    """
+    path = record_path(grid_id, engine_id)
+    with try_file_lock(path) as acquired:
+        return acquired and _mutate_held(grid_id, engine_id, path, mutate)
+
+
+def _mutate_held(
+    grid_id: str, engine_id: str, path: Path, mutate: Callable[[dict[str, Any]], None],
+) -> bool:
+    """The body of ``mutate_record``, for a caller already holding ``path``'s lock."""
+    record = jsonio.load_json(path)
+    if not record:
+        return False
+    updated = dict(record)
+    mutate(updated)
+    if updated == record:
+        return False  # nothing changed — don't rewrite the file on every healthy tick
+    write_record(grid_id, engine_id, updated)
+    return True
 
 
 def match_engine(

@@ -300,8 +300,12 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             media_proc = prepared["proc"]
             comfyui_started = bool(prepared["comfyui_started"])
             if comfyui_started:
-                # Persist ownership so `grid leave` reaps only a ComfyUI THIS engine started.
-                run_records.update_record(grid_id, engine_id, comfyui_started=True)
+                # Persist ownership so `grid leave` reaps only a ComfyUI THIS engine started. Under the
+                # record lock: this lands in the window where a concurrent leave deletes the record, and
+                # an unlocked write could re-create it. Best-effort, because a lost flag costs only the
+                # reap after a SIGKILL (the `finally` below stops the ComfyUI this process started).
+                _bookkeep("comfyui_started", run_records.mutate_record, grid_id, engine_id,
+                          lambda rec: rec.update(comfyui_started=True))
             media_url = f"http://127.0.0.1:{media_port}"
             media_models = list(prepared["models"])
             union_models, capabilities = _merge_media(union_models, capabilities, media_models)
@@ -1576,13 +1580,14 @@ class _ServeState:
             self._codex_quota = quota
         # Persist to the engine's run record (remote.json) so the snapshot survives a respawn and can
         # be inspected — or hand-edited to simulate a tier/usage — for debugging. Best-effort and off
-        # the lock: a telemetry write must never fail a served job. `network_id` IS the record's
-        # grid_id, and `update_record` is a documented no-op once the record is gone — so a child
-        # whose record was already reaped needs no guard of its own here.
-        try:
-            run_records.update_record(self.network_id, self.engine_id, codex_rate_limits=quota)
-        except Exception as exc:  # noqa: BLE001 — persistence is optional, never fatal
-            _warn(f"could not persist codex quota to the run record ({exc})")
+        # `_lock`: a telemetry write must never fail a served job. `network_id` IS the record's
+        # grid_id. `try_mutate_record`, because this runs on a served job's path: it never waits on a
+        # `grid leave` tearing this process down, and never re-creates a record that leave reaped. A
+        # write skipped under contention (a CLI command, or another of this process's own threads
+        # writing the record) is skipped silently, and restated by the next response that carries
+        # quota headers; until then only the persisted copy, which a respawn restores, lags.
+        _bookkeep("codex_rate_limits", run_records.try_mutate_record, self.network_id, self.engine_id,
+                  lambda rec: rec.update(codex_rate_limits=quota))
 
     @property
     def models(self) -> list[str]:
