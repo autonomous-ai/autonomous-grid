@@ -822,6 +822,12 @@ and the model names go into that app's own process environment and nowhere else 
 your shell, never written to a config file. Closing the app is the entire cleanup, which is why there
 is no `--restore`. One **launch target** ships today: `claude` (Claude Code).
 
+> **Deprecated (2026-10-25).** `grid launch claude` is no longer used and gets no further fixes. It
+> still ships and works as documented below; nothing has been removed. One known issue will not be
+> fixed: a Claude Code `settings.json` nested about 10,000 levels deep or more (on Python 3.12.9,
+> 9,997 reads and 9,998 raises), such as one committed to a checkout you launch from, ends the
+> launch, and `--print-env`, with a `RecursionError` traceback instead of a warning.
+
 Bare `grid launch` lists the targets and exits 0 — it is discovery, not an error:
 
 ```text

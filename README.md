@@ -548,6 +548,9 @@ Walkthrough: [docs/codex-quickstart.md](docs/codex-quickstart.md).
 
 ### Run Claude Code on your grid
 
+> **Deprecated (2026-10-25):** `grid launch claude` is no longer used and gets no further fixes. It
+> still works; see [docs/cli.md](docs/cli.md#launch).
+
 ```bash
 grid launch claude
 ```
