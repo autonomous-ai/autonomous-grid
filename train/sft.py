@@ -25,6 +25,8 @@ import sys
 import time
 from pathlib import Path
 
+from shared import release
+
 from .config import ConfigError, TrainRunConfig
 from .run import artifacts_root
 
@@ -210,7 +212,7 @@ def run_sft_torch(cfg: TrainRunConfig, examples: list[dict], run_dir: Path, *,
         import trl
     except ImportError as exc:
         raise ConfigError(
-            f"missing training dependency ({exc.name}) — pip install 'grid[train]'"
+            f"missing training dependency ({exc.name}) — {release.train_install_command()}"
         ) from exc
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(cfg.model_name)

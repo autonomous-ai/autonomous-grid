@@ -26,6 +26,8 @@ import random
 import time
 from pathlib import Path
 
+from shared import release
+
 from .hello_task import (
     SYSTEM_PROMPT,
     group_advantages,
@@ -44,8 +46,7 @@ def _import_stack():
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except ImportError as exc:
         raise SystemExit(
-            f"grid train (torch): missing dependency ({exc.name}) — pip install 'grid[train]' "
-            "(or: pip install torch transformers peft)."
+            f"grid train (torch): missing dependency ({exc.name}) — {release.train_install_command()}"
         ) from exc
     return torch, LoraConfig, get_peft_model, AutoModelForCausalLM, AutoTokenizer
 

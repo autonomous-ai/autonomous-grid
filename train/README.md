@@ -225,8 +225,9 @@ them on sight — the step-0 baseline — was printed to the terminal and never 
 Nothing here needs a GPU, a key, or an account. The first command is a complete training run.
 
 ```bash
-python -m train.torch_grpo_hello     # any machine — CPU is fine, ~6 minutes
-python -m train.mlx.grpo_hello       # the same task and model, on Apple Silicon in ~1 minute
+PY="$(uv tool dir)/grid/bin/python"   # grid's own Python; a plain `python` cannot import it
+"$PY" -m train.torch_grpo_hello      # any machine — CPU is fine, ~6 minutes
+"$PY" -m train.mlx.grpo_hello        # the same task and model, on Apple Silicon in ~1 minute
 
 grid train where                     # which grids training can use (LAN and hosted)
 grid train ui                        # watch the curves → http://127.0.0.1:8321
@@ -363,8 +364,11 @@ walkthrough on one Mac is [`docs/start-on-a-mac.md`](../docs/start-on-a-mac.md);
 version is [`docs/two-node-training.md`](../docs/two-node-training.md); how inference routing
 relates to all this is [`docs/topologies.md`](../docs/topologies.md).
 
-Heavy dependencies (torch, TRL, peft) live behind `pip install 'grid[train]'` and are imported
-lazily, so the rest of the CLI — and every test in this repo — runs without them.
+Heavy dependencies (torch, TRL, peft) live behind the `grid[train]` extra and are imported lazily,
+so the rest of the CLI — and every test in this repo — runs without them. The extra installs from
+this repository's release wheel, never from PyPI, where `grid` is an unrelated package:
+`shared/release.train_install_command` builds the one command every message prints, and
+[`docs/start-on-a-mac.md`](../docs/start-on-a-mac.md) step 0 shows it.
 
 ## Not built yet
 

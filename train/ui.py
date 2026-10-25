@@ -162,7 +162,7 @@ def _run_section(run: dict) -> str:
 def render_page(runs: list[dict]) -> str:
     body = "".join(_run_section(r) for r in runs) or (
         "<p class='muted'>No training runs yet. Start one with <code>grid train run</code> "
-        "or <code>python -m train.torch_grpo_hello</code>.</p>"
+        "or <code>\"$(uv tool dir)/grid/bin/python\" -m train.torch_grpo_hello</code>.</p>"
     )
     legend = (
         '<p class="legend"><span class="chip s1bg"></span> train reward (sampled group mean) '

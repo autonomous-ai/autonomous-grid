@@ -13,6 +13,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+from shared import release
+
 from .config import ConfigError, DataConfig, RewardsConfig
 
 
@@ -69,7 +71,7 @@ def _load_environment(data: DataConfig):
         import verifiers
     except ImportError as exc:
         raise ConfigError(
-            "[data].verifiers_env needs the `verifiers` package — pip install 'grid[train]'"
+            f"[data].verifiers_env needs the `verifiers` package — {release.train_install_command()}"
         ) from exc
     try:
         return verifiers.load_environment(data.verifiers_env, **(data.verifiers_env_args or {}))

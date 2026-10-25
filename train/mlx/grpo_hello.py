@@ -35,7 +35,7 @@ Correctness notes, deliberate and load-bearing:
   which applies 0.01 weight decay), and how "all linear layers" is reached — `all-linear` in
   peft against every transformer block here.
 
-Requires Apple Silicon (`pip install mlx-lm`). Verified against mlx-lm 0.31.3 APIs, and run on
+Requires Apple Silicon and the training extra (`shared.release.train_install_command`). Verified against mlx-lm 0.31.3 APIs, and run on
 an M2 Max: 0.216 -> 0.845 held-out in 62s over 60 steps.
 """
 from __future__ import annotations

@@ -18,6 +18,8 @@ import dataclasses
 import importlib.util
 import platform
 
+from shared import release
+
 
 @dataclasses.dataclass(frozen=True)
 class Machine:
@@ -149,13 +151,13 @@ def capability(machines: list[Machine] | None = None) -> Capability:
         return Capability(
             False, False, "none",
             "One thing to install first.",
-            "Run `pip install mlx-lm` in a terminal, then reload this page. It is Apple's own "
-            "training library and takes about a minute.",
+            f"Run `{release.train_install_command()}` in a terminal, then reload this page. It "
+            "brings Apple's own training library and takes about a minute.",
         )
     return Capability(
         False, False, "none",
         "One thing to install first.",
-        "Run `pip install 'grid[train]'` in a terminal, then reload this page.",
+        f"Run `{release.train_install_command()}` in a terminal, then reload this page.",
     )
 
 
