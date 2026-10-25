@@ -14,25 +14,35 @@ found them, so do not skip it.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/autonomous-ai/autonomous-grid/main/install.sh | sh
-pip install "grid[train]"          # torch, transformers, trl, peft
-pip install mlx-lm                 # the Apple-Silicon trainer and rollout engine
+v=$(grid --version | awk '{print $2}')
+uv tool install --force "grid[train] @ https://github.com/autonomous-ai/autonomous-grid/releases/download/v$v/grid-$v-py3-none-any.whl"
 grid train doctor                  # what this computer can do right now
 ```
+
+The middle two lines add the training libraries to the `grid` you just installed, from the same
+release: torch, transformers, trl and peft, and on Apple Silicon mlx-lm, the trainer and rollout
+engine. `grid update` keeps them, and every "missing dependency" message prints the same line.
+
+Not with `pip`: `grid` on PyPI is an unrelated package with no `train` extra, and
+the installer puts `grid` in a uv tool environment, which has no `pip` of its own.
 
 `doctor` answers for two rungs separately. Expect the first to be ready and the second to say it
 needs an engine — that is correct on a fresh machine, and stage one is what you want first.
 
-Those two installs disagree about `transformers` — mlx-lm wants the 5.x line, and the torch
-trainer was written against 4.x. Both are exercised on one Mac now (4.57 and 5.14), so the order
-you install them in doesn't matter.
+mlx-lm wants the 5.x line of `transformers`, and the torch trainer was written against 4.x. Both
+have been exercised on one Mac (4.57 and 5.14), and the one install resolves a single version for
+both.
 
 ## 1. The one-minute proof (optional, but do it once)
 
 Before any of your own data, watch a model actually learn:
 
 ```bash
-python -m train.mlx.grpo_hello
+"$(uv tool dir)/grid/bin/python" -m train.mlx.grpo_hello
 ```
+
+That is `grid`'s own Python. The installer keeps `grid` in a uv tool environment, so a plain
+`python` cannot import it.
 
 A small model is asked to reverse the words in a sentence, scored on how close it gets, and
 updated. On an **M2 Max this climbs from about 0.22 to between 0.53 and 0.76 in roughly a minute**
@@ -125,7 +135,7 @@ see it".
 
 | What you see | What it means |
 |---|---|
-| `doctor` says stage one is not ready | `pip install "grid[train]"`, or on Apple Silicon `pip install mlx-lm` |
+| `doctor` says stage one is not ready | run the `uv tool install` line from step 0 |
 | "only 12 usable tickets" | the export has the wrong columns, or too little history — the report says which |
 | the run stops with "out of memory" | pick a smaller starting model on the machines step |
 | "no meaningful gain" | it trained and lost. More history helps; more steps usually don't |

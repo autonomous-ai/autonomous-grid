@@ -19,6 +19,8 @@ import dataclasses
 import json
 from pathlib import Path
 
+from shared import release
+
 DEFAULT_CONFIG = "grid-train.toml"
 
 
@@ -68,8 +70,10 @@ def cmd_train_doctor(args: argparse.Namespace) -> int:
     print("Dependencies")
     for name, version in report["deps"].items():
         mark = "ok " if version else "-- "
-        note = version or ("optional" if name == "verifiers" else "missing — pip install 'grid[train]'")
+        note = version or ("optional" if name == "verifiers" else "missing")
         print(f"  {mark}{name:<12} {note}")
+    if not all(version for name, version in report["deps"].items() if name != "verifiers"):
+        print(f"  install them: {release.train_install_command()}")
     endpoint = report["endpoint"]
     print("Rollout endpoint")
     print(f"  {'ok ' if endpoint['ok'] else 'NO '}{endpoint['model']}  ·  {endpoint['detail']}")
@@ -127,7 +131,7 @@ def _imitation_ready(report: dict) -> tuple[bool, str]:
         return True, "MLX on this Mac's own chip"
     if all(report["deps"].get(m) for m in ("torch", "transformers", "trl", "peft")):
         return True, "torch on this machine"
-    return False, "missing the trainer — pip install 'grid[train]'"
+    return False, "missing the trainer — install it with the command under Dependencies"
 
 
 def _healthy(report: dict) -> bool:

@@ -18,13 +18,13 @@ import shutil
 import time
 from pathlib import Path
 
-from shared import paths
+from shared import paths, release
 
 from .config import ConfigError, TrainRunConfig
 from .rewards import load_prompts, load_reward_funcs
 from .rollout import build_rollout_func, probe_endpoint
 
-_INSTALL_HINT = "pip install 'grid[train]'  (CUDA box; see docs/adr/0019-rl-training-plane.md)"
+_INSTALL_HINT = f"{release.train_install_command()}  (CUDA box; see docs/adr/0019-rl-training-plane.md)"
 
 
 def _import_stack():
@@ -239,7 +239,7 @@ def doctor(cfg: TrainRunConfig) -> dict:
     # which wants CUDA. On an M2 Max it spent 84 CPU-minutes stuck at "Loading weights: 0/338"
     # and never reached step 1, while the reachable MLX engine beside it served nothing.
     # Reporting only the engine told that machine it was "ready" for a run it cannot finish.
-    trainer = {"ok": False, "detail": "torch is not installed — `pip install 'grid[train]'`"}
+    trainer = {"ok": False, "detail": "torch is not installed"}
     if report["deps"].get("torch"):
         import torch
         if torch.cuda.is_available():

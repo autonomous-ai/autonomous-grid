@@ -17,7 +17,9 @@
 #   GRID_INSTALL_DIR=~/bin    Linux binary location (default: ~/.local/bin)
 #   GRID_REPO_OWNER / _NAME   source repo (default: autonomous-ai / autonomous-grid)
 #   GRID_BASE_URL=https://…   Linux: fetch the binary + SHA256SUMS from a mirror
-#   GRID_WHEEL_URL / GRID_PACKAGE   the wheel path (macOS, or Linux's fallback): this wheel URL / PyPI name
+#   GRID_WHEEL_URL / GRID_PACKAGE   the wheel path (macOS, or Linux's fallback): this wheel URL / any
+#                                   requirement `uv tool install` takes. Not a bare PyPI name: `grid` on
+#                                   PyPI is an unrelated package.
 set -euo pipefail
 
 # The user's real PATH, captured before this script augments its own (install_wheel

@@ -26,6 +26,8 @@ import argparse
 import threading
 from pathlib import Path
 
+from shared import release
+
 
 def _import_mlx():
     try:
@@ -35,7 +37,7 @@ def _import_mlx():
     except ImportError as exc:
         raise SystemExit(
             f"rollout_server: missing dependency ({exc.name}) — needs an Apple Silicon Mac "
-            "with `pip install mlx-lm`."
+            f"with the training extra: {release.train_install_command()}"
         ) from exc
     return mx, load, make_prompt_cache
 

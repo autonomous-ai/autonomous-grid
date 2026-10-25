@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from shared import release
+
 
 def import_mlx():
     """Import the MLX stack, or exit with the one instruction that fixes it."""
@@ -41,7 +43,7 @@ def import_mlx():
     except ImportError as exc:
         raise SystemExit(
             f"grid train (mlx): missing dependency ({exc.name}) — needs an Apple Silicon Mac "
-            "with `pip install mlx-lm` (or `pip install 'grid[train]'`)."
+            f"with the training extra: {release.train_install_command()}"
         ) from exc
     return mx, nn, optim, load, make_prompt_cache, linear_to_lora_layers
 

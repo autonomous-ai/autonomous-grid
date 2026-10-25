@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import builtins
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -39,7 +40,7 @@ from typing import Any
 
 import httpx
 
-from shared import jsonio, paths
+from shared import jsonio, paths, release
 from shared._version import __version__
 
 # How old the cached answer must be before another check is worth a spawn — and how long a shown
@@ -56,14 +57,6 @@ _DOWNLOAD_TIMEOUT_S = 120.0
 _USER_AGENT = "grid-cli-update"
 
 _TAG_RE = re.compile(r"^v?(\d+(?:\.\d+)*)")
-
-
-def _repo() -> tuple[str, str]:
-    """(owner, repo) of the releases to track — the same env knobs install.sh honours."""
-    return (
-        os.environ.get("GRID_REPO_OWNER", "autonomous-ai"),
-        os.environ.get("GRID_REPO_NAME", "autonomous-grid"),
-    )
 
 
 def _version_key(version: str) -> tuple[int, ...]:
@@ -141,7 +134,7 @@ def fetch_latest_version(client: httpx.Client | None = None) -> str | None:
     Redirect-of-``/releases/latest`` first, Atom feed second — install.sh:``latest_release_tag``
     ported to httpx, for the rate-limit reason in the module docstring. Never raises.
     """
-    owner, repo = _repo()
+    owner, repo = release.repo()
     own_client = client is None
     if own_client:
         client = httpx.Client(timeout=_CHECK_TIMEOUT_S, follow_redirects=False)
@@ -357,11 +350,6 @@ def _os_tag() -> str:
     )
 
 
-def _release_base(version: str) -> str:
-    owner, repo = _repo()
-    return f"https://github.com/{owner}/{repo}/releases/download/v{version}"
-
-
 def _fetch_bytes(url: str, client: httpx.Client | None = None) -> bytes | None:
     """GET a release asset whole, or ``None`` on any failure (404 is a normal answer here: the
     SHA256SUMS file is optional, exactly as install.sh treats it)."""
@@ -406,7 +394,7 @@ def _update_binary(latest: str) -> None:
     inode, the ``agrid`` symlink (same directory, name ``grid``) keeps resolving, and there is no
     window where the path holds a partial file."""
     asset = f"grid-{_os_tag()}-{_arch_tag()}"
-    base = _release_base(latest)
+    base = release.release_base(latest)
     payload = _fetch_bytes(f"{base}/{asset}")
     if payload is None:
         raise SystemExit(
@@ -448,10 +436,20 @@ def _update_binary(latest: str) -> None:
         ) from None
 
 
+def _has_train_extra() -> bool:
+    """Whether this install carries ``grid[train]``. ``trl`` comes only with that extra, and this
+    process runs from the environment ``uv tool install`` is about to rebuild."""
+    return importlib.util.find_spec("trl") is not None
+
+
 def _update_wheel(latest: str) -> None:
     """The uv-tool shape (macOS's install path, and any wheel install): hand the release wheel
-    back to ``uv tool install --force``, exactly as install.sh:``install_macos_wheel`` does."""
-    wheel_url = f"{_release_base(latest)}/grid-{latest}-py3-none-any.whl"
+    back to ``uv tool install --force``, exactly as install.sh:``install_macos_wheel`` does.
+
+    With the ``train`` extra when this install has it: the reinstall replaces the requirement
+    whole, so the plain wheel would drop torch and the rest without a word (measured, uv 0.11.12)."""
+    wheel_url = release.wheel_url(latest)
+    requirement = release.train_requirement(latest) if _has_train_extra() else wheel_url
     uv = shutil.which("uv") or (Path.home() / ".local" / "bin" / "uv")
     uv = str(uv)
     if not Path(uv).is_file():
@@ -461,7 +459,7 @@ def _update_wheel(latest: str) -> None:
             "curl -fsSL https://grid.autonomous.ai/install.sh | bash"
         )
     try:
-        result = subprocess.run([uv, "tool", "install", "--force", wheel_url])
+        result = subprocess.run([uv, "tool", "install", "--force", requirement])
     except OSError as exc:
         raise SystemExit(f"could not run `{uv} tool install`: {exc}") from None
     if result.returncode != 0:
