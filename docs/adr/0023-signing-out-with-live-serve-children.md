@@ -21,7 +21,7 @@ them. Two other flows reach the same state — `grid sync` and `grid login` both
 wholesale, so a grid dropping out of either takes its token with it while its child keeps polling.
 
 Scope: **this CLI only.** No wire value, no master or control-plane slice, nothing for the lockstep
-register in `CLAUDE.md`. Evidence and design: `.scratch/grid-leave/` (PRD follow-up F11, issue 13).
+register (now `docs/lockstep-register.md` in the private grid-platform monorepo). Evidence and design: `.scratch/grid-leave/` (PRD follow-up F11, issue 13).
 
 Choices a future reader will otherwise re-litigate:
 

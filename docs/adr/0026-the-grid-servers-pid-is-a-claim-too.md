@@ -35,7 +35,7 @@ a success message regardless. It belongs to a still-open sibling follow-up and i
 untouched here; a future reader must not take this ADR as closing the class.
 
 Scope: **this CLI only.** No wire value, no master or control-plane slice, nothing for the lockstep
-register in `CLAUDE.md`.
+register (now `docs/lockstep-register.md` in the private grid-platform monorepo).
 
 Choices a future reader will otherwise re-litigate:
 

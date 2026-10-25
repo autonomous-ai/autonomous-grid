@@ -17,7 +17,7 @@ from that box minutes later. The operator had to leave and re-join by hand, and 
 had to come from `/proc`, because nothing on disk said anything at all.
 
 Scope: **this CLI only.** No wire value, no master or control-plane slice, nothing for the lockstep
-register in `CLAUDE.md`. Bring-up means spawn → first successful registration; the steady-state
+register (now `docs/lockstep-register.md` in the private grid-platform monorepo). Bring-up means spawn → first successful registration; the steady-state
 poll and heartbeat loops already survive relay outages and log their retries, and are untouched.
 Evidence and design: `.scratch/grid-leave/` (PRD follow-up F9, issue 11 — Layer 3 of the approved
 three-layer proposal).

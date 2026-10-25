@@ -18,7 +18,7 @@ both probed healthy from that same box minutes later; the child never recovered 
 leave-and-rejoined by hand.
 
 Scope: **this CLI only.** No wire value, no master or control-plane slice, nothing for the lockstep
-register in `CLAUDE.md`. This is the *local-record* slice of the same truth
+register (now `docs/lockstep-register.md` in the private grid-platform monorepo). This is the *local-record* slice of the same truth
 [ADR 0019](./0019-engine-health-in-the-heartbeat.md) carries on the wire — kept where the CLI can
 read it offline, with no protocol change. Evidence and design: `.scratch/grid-leave/` (PRD follow-up
 F8, issue 10 — Layer 2 of the approved three-layer proposal; issue 08 was Layer 1, issue 11 is
@@ -36,7 +36,7 @@ Choices a future reader will otherwise re-litigate:
   the record — no lock, no parse, no content.
 
 - **The sidecar's absence is the upgrade marker.** This is why the change needs no version field, no
-  capability flag, and no `CLAUDE.md` lockstep entry. A child that reports service truth creates the
+  capability flag, and no lockstep-register entry. A child that reports service truth creates the
   sidecar in its startup self-stamp; therefore *no sidecar ⇒ the running child is not a build that
   reports ⇒ the gate says nothing new and behaves exactly as it did*. The same rule catches the case
   a version field would have got wrong: the self-stamp is best-effort, so a **new** build whose stamp
