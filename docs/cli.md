@@ -13,7 +13,7 @@ engine    a running instance joined to a grid: Ollama, LM Studio, vLLM, MLX, lla
 kind      an engine's type (ollama, vllm, mlx, llama.cpp, comfyui) — filter auto-detect with --kind
 join      connect this machine or engine to a grid
 model     a live capability exposed by joined engines
-mode      which world the CLI targets: `local` (default) or `remote`
+mode      which world the CLI targets: `local` or `remote` (the default; see Modes)
 launch    start an app already pointed at your grid; the app it starts is a launch target
 pack      a bundled starting point for training on business data (`grid train packs`)
 adapter   the small add-on layer a training run produces (LoRA) — what moves between machines
@@ -102,8 +102,8 @@ with `grid join`, and use them with `grid chat -m <model> "…"`.
 
 ## Modes
 
-Grid runs in one of two modes. **`local`** (the default) is everything documented here: an
-unauthenticated in-memory grid on your local network. **`remote`** is a signed-in thin client to
+Grid runs in one of two modes. **`local`** is an unauthenticated in-memory grid on your local
+network. It is the default only on a machine that already holds local grids (below). **`remote`** is a signed-in thin client to
 autonomous's hosted relay: sign in with `grid login`, then bring up and manage hosted **remote
 grids** with the same `start`/`stop`/`ls`/`info` verbs, serve them (`join`/`leave`), consume them
 (`chat`/`image`/`edit`/`video`), price your served models (`grid price`), and manage who may join or
@@ -821,6 +821,12 @@ grid launch <target> [grid] -- <app args…>     # forward everything after `--`
 and the model names go into that app's own process environment and nowhere else — never exported to
 your shell, never written to a config file. Closing the app is the entire cleanup, which is why there
 is no `--restore`. One **launch target** ships today: `claude` (Claude Code).
+
+> **Deprecated (2026-10-25).** `grid launch claude` is no longer used and gets no further fixes. It
+> still ships and works as documented below; nothing has been removed. One known issue will not be
+> fixed: a Claude Code `settings.json` nested about 10,000 levels deep or more (on Python 3.12.9,
+> 9,997 reads and 9,998 raises), such as one committed to a checkout you launch from, ends the
+> launch, and `--print-env`, with a `RecursionError` traceback instead of a warning.
 
 Bare `grid launch` lists the targets and exits 0 — it is discovery, not an error:
 

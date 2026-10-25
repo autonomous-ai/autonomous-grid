@@ -19,7 +19,7 @@ on a stale pid and printed the same line — but the CLI now *knows* and did not
 
 Filed as `.scratch/grid-leave/` issue 17 (PRD follow-up F15) by issue 08's review gate, which
 deliberately did not widen into local. Scope: **this CLI only** — no wire value, no master or
-control-plane slice, nothing for the lockstep register in `CLAUDE.md`.
+control-plane slice, nothing for the lockstep register (now `docs/lockstep-register.md` in the private grid-platform monorepo).
 
 Choices a future reader will otherwise re-litigate:
 

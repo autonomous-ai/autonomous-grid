@@ -1,5 +1,8 @@
 # Claude Code quickstart — run Claude Code on your own grid
 
+> **Deprecated (2026-10-25):** `grid launch claude` is no longer used and gets no further fixes. It
+> still works as written here; see [cli.md](./cli.md#launch).
+
 This walks the whole path end to end: install `grid`, sign in, choose a remote grid, and start
 **Claude Code** already pointed at it. One command does the last part:
 

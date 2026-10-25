@@ -13,8 +13,7 @@ and what a scan that saw a fraction of the box is allowed to claim.
 
 Found by issue 06's review gate, filed together as `.scratch/grid-leave/` issue 15 (PRD follow-up
 F13) because fixing them separately would have traded the same thing off three times. Scope: **this
-CLI only** — no wire value, no master or control-plane slice, nothing for the lockstep register in
-`CLAUDE.md`.
+CLI only** — no wire value, no master or control-plane slice, nothing for the lockstep register (now `docs/lockstep-register.md` in the private grid-platform monorepo).
 
 Choices a future reader will otherwise re-litigate:
 

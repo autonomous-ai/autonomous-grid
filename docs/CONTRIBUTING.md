@@ -37,38 +37,55 @@ monkeypatching subprocess launches).
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full component map and request-flow
 walkthroughs. In short:
 
-- `server.py` — the grid server / OpenAI-compatible proxy
-- `cli/` — the CLI, split by command group (`parser.py` builds the command tree;
-  `grid.py` holds `start`/`stop`/`info`, `provider.py` holds the `join`/`leave` engine
-  lifecycle, `engine.py` holds built-in-engine setup, `models.py` and `request.py` the rest)
-- `provider/`, `models/`, `engine/`, `system/` — engine-side media, model management,
-  built-in engine lifecycle, and host/GPU detection
+- `cli/` — the CLI, split by command group. `parser.py` builds the command tree and
+  `dispatch.py` sends each command to its mode's handler. `grid.py` holds `start`/`stop`/`info`,
+  `provider.py` the `join`/`leave` engine lifecycle, `engine.py` built-in-engine setup, and
+  `models.py` and `request.py` the rest; the `remote_*.py` modules are the remote-mode handlers.
+- `local/` — local mode: the grid server and OpenAI-compatible proxy (`local/server.py`) and the
+  engine-side media server
+- `remote/` — remote mode: the control-plane and relay clients, and the serve child that serves
+  a remote grid (`remote/serve.py`)
+- `shared/` — what both modes use: the model catalog and media bundles (`shared/models/`),
+  engine-side media (`shared/media/`), built-in engines (`shared/engine/`), host and GPU
+  detection (`shared/system/`), and the run records
+- `train/` — `grid train`
 
 ## Common contributions
 
 These are well-bounded and make great first PRs:
 
-**Add a model to the catalog** — edit `models/catalog.py`. The catalog is
+**Add a model to the catalog** — edit `shared/models/catalog.py`. The catalog is
 platform-aware (Apple Silicon vs NVIDIA); add the entry and it shows up in
 `grid catalog` and `grid pull <name>`.
 
-**Add a media bundle** — edit `models/media_bundles.py`. A bundle is a tuple of
+**Add a media bundle** — edit `shared/models/media_bundles.py`. A bundle is a tuple of
 `FileSpec(hf_repo, hf_path, subdir)` entries plus a `comfyui:*` capability name. Wire
-any new ComfyUI workflow JSON into `provider/media_handler.py`.
+any new ComfyUI workflow JSON into `shared/media/media_handler.py`.
 
-**Add a CLI command** — add the subparser in `cli/parser.py`'s `build_parser()` (keep it
-in sync with `docs/cli.md`), write a `cmd_<name>(args) -> int` handler in the matching
-group module (e.g. `cli/grid.py`), and connect them with `set_defaults(handler=cmd_<name>)`.
-Re-export the handler from `cli/__init__.py`. Existing `cmd_*` functions are the template.
+**Add a CLI command** — four places, and existing `cmd_*` functions are the template:
 
-**Tune engine gating** — `provider/media_gating.py` decides which media bundles a host
+1. Write a `cmd_<name>(args) -> int` handler in the matching group module (e.g. `cli/grid.py`).
+2. Add the subparser in `cli/parser.py`'s `build_parser()` and connect it with
+   `set_defaults(handler=cmd_<name>)`.
+3. Import the handler **in `cli/parser.py`** (the block at the top, or inside the group's builder).
+   Without it, `build_parser()` raises `NameError`, so every test that builds the parser fails.
+   Re-exporting it from `cli/__init__.py` is a convention, not a requirement.
+4. Give the command a mode class in `cli/dispatch.py`: `AGNOSTIC` (the same in both modes),
+   `GATED` (it answers "not available in remote mode yet" until you add its remote handler to
+   `REMOTE_HANDLERS`), or `REMOTE_ONLY`. `test_every_command_is_classified_for_dispatch` fails on
+   a command with none.
+
+Then document its contract in `docs/cli.md`.
+
+**Tune engine gating** — `shared/media/media_gating.py` decides which media bundles a host
 advertises based on VRAM.
 
 ## Vocabulary
 
 User-facing output and docs use **grid / engine / app** (see `docs/cli.md`). Avoid
-`provider`, `consumer`, `signaling`, and `network` as product nouns — they only survive
-as implementation details (`node` in the registry, the `provider/` package name).
+`provider`, `consumer`, `signaling`, and `network` as product nouns. They are implementation
+terms: fine in wire values (`role: "provider"`, `node_id`) and in code, and the `grid members`
+role values are the one sanctioned exception on the surface.
 
 ## Code style
 
@@ -76,8 +93,10 @@ as implementation details (`node` in the registry, the `provider/` package name)
   docstrings explaining *why*.
 - Prefer small, focused functions; keep the CLI handlers thin and push logic into the
   relevant top-level module or package.
-- Keep the local-only, unauthenticated assumptions intact (see ARCHITECTURE.md). Don't add
-  network calls that leave the local or features that require auth.
+- Keep each mode's assumptions intact ([ADR 0001](adr/0001-mode-state-and-dispatch.md)).
+  `local` mode is unauthenticated and stays on your own network: don't add calls that leave it,
+  or features that need a sign-in, to `local/`. `remote` mode is the signed-in client of the
+  hosted control plane and relay.
 - Vendored files (annotated in their docstrings) should keep edits bracketed and minimal.
 
 ## Commits & pull requests

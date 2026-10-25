@@ -20,7 +20,7 @@ service works" — and this ADR applies it at grid scope. Grill log + measured e
 Scope: this CLI **and** grid-src (the relay + the public overview); grid-apis has **no slice** —
 the field never leaves the master. One new hand-duplicated wire value with no compile-time link
 between the copies: the `load` key **`unhealthy_models`**, which joins the endpoint-path literal,
-the per-model `endpoints` list, `output_cap` and `stream_only` in `CLAUDE.md`'s lockstep register.
+the per-model `endpoints` list, `output_cap` and `stream_only` in the lockstep register (now `docs/lockstep-register.md` in the private grid-platform monorepo).
 Written **before** any code lands: the decisions below are normative, not descriptive.
 
 Choices a future reader will otherwise re-litigate:

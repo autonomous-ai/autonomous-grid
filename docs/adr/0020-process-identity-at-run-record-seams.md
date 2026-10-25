@@ -23,7 +23,7 @@ process tree the operator owns — the CLI's own bookkeeping turned into a weapo
 with "Could not stop the engine(s) …" (measured: 26.8s spent attacking a bystander).
 
 Scope: **this CLI only.** No wire value, no master or control-plane slice, nothing for the lockstep
-register in `CLAUDE.md`. Evidence and the locked design: `.scratch/grid-leave/` (PRD follow-up F6,
+register (now `docs/lockstep-register.md` in the private grid-platform monorepo). Evidence and the locked design: `.scratch/grid-leave/` (PRD follow-up F6,
 issue 08 — Layer 1 of the approved three-layer proposal; issue 10 is Layer 2, issue 11 Layer 3).
 
 Choices a future reader will otherwise re-litigate:
