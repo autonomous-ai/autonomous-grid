@@ -22,15 +22,24 @@ notarization lands, add a `macos-*` binary back to the matrix and flip the macOS
 
 ## Cutting a release
 
-1. Bump the version in **both** `shared/_version.py` (what `grid --version` prints) and
-   `pyproject.toml` (the wheel) to the same `X.Y.Z`.
-2. Tag and push:
+1. Bump the version in `pyproject.toml` to `X.Y.Z`. That is the only place it lives:
+   `shared/_version.py` reads it back from the installed package's metadata, so `grid --version`
+   cannot drift from the wheel. Bump the patch by default.
+2. Tag with an **annotated** tag whose message is the release notes, and push it to the public
+   repository (`autonomous-ai/autonomous-grid`; check `git remote -v`, since a clone's `origin` may
+   be another repository):
    ```bash
-   git tag v0.1.0 && git push origin v0.1.0
+   git tag -a vX.Y.Z --cleanup=verbatim -F notes.md && git push <public-remote> vX.Y.Z
    ```
-3. `.github/workflows/release.yml` then builds the two Linux binaries (one per runner —
+   `release.yml` refuses a lightweight tag (`git tag vX.Y.Z`), because it has no message to
+   publish as the notes, and it refuses an empty message.
+3. `.github/workflows/release.yml` then runs the test suite and builds the two Linux binaries (one per runner —
    Nuitka can't cross-compile) via `packaging/build_binary.sh` plus the universal wheel, and
-   publishes them with `SHA256SUMS` to the GitHub Release.
+   publishes them with `SHA256SUMS` to the GitHub Release, only if the suite and both builds are
+   green.
+4. Add the new version to `conformance/clients.py` `RELEASED`, and to the range in
+   `conformance/README.md`, in a pull request of its own. Nothing fails without it: the conformance
+   job simply never tests that release.
 
 Build the Linux binary locally to reproduce CI — in the same image, because the binary needs the glibc it
 was built on (an Ubuntu 24.04 build needs 2.38 and dies on Debian 12 / Ubuntu 22.04 / RHEL 9):

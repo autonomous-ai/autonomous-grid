@@ -13,7 +13,7 @@ engine    a running instance joined to a grid: Ollama, LM Studio, vLLM, MLX, lla
 kind      an engine's type (ollama, vllm, mlx, llama.cpp, comfyui) — filter auto-detect with --kind
 join      connect this machine or engine to a grid
 model     a live capability exposed by joined engines
-mode      which world the CLI targets: `local` (default) or `remote`
+mode      which world the CLI targets: `local` or `remote` (the default; see Modes)
 launch    start an app already pointed at your grid; the app it starts is a launch target
 pack      a bundled starting point for training on business data (`grid train packs`)
 adapter   the small add-on layer a training run produces (LoRA) — what moves between machines
@@ -102,8 +102,8 @@ with `grid join`, and use them with `grid chat -m <model> "…"`.
 
 ## Modes
 
-Grid runs in one of two modes. **`local`** (the default) is everything documented here: an
-unauthenticated in-memory grid on your local network. **`remote`** is a signed-in thin client to
+Grid runs in one of two modes. **`local`** is an unauthenticated in-memory grid on your local
+network. It is the default only on a machine that already holds local grids (below). **`remote`** is a signed-in thin client to
 autonomous's hosted relay: sign in with `grid login`, then bring up and manage hosted **remote
 grids** with the same `start`/`stop`/`ls`/`info` verbs, serve them (`join`/`leave`), consume them
 (`chat`/`image`/`edit`/`video`), price your served models (`grid price`), and manage who may join or
