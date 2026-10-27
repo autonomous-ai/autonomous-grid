@@ -22,7 +22,7 @@ uv tool install -e . --force # optional: put the `grid` command on your PATH
 ## Running tests
 
 ```bash
-uv run --extra dev pytest
+uv run --extra dev pytest -n auto   # one worker per core, as CI runs it; drop -n auto to run serially
 ```
 
 > The `--extra dev` is required: plain `uv run pytest` fails because `pytest` lives in
