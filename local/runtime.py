@@ -19,6 +19,7 @@ import httpx
 from local import config
 from shared import detach, logging_setup, paths, run_records
 
+_IS_WINDOWS = sys.platform == "win32"
 
 GRID_TYPE = "lan-permissionless"
 DEFAULT_PORT = 8090
@@ -558,6 +559,12 @@ def _is_executable(path: Path) -> bool:
 
 
 def _cli_subprocess_command() -> list[str]:
+    if _IS_WINDOWS:
+        # Windows installs the wheel, so the interpreter is always there — and it is the one program in
+        # the install Windows trusts: uv's `grid.exe` is unsigned and rewritten per install, and Smart App
+        # Control blocks some installs' copy outright, which took every child spawned through it down too
+        # (measured, Windows 11, v0.3.60). The install's own `python.exe` is signed by the PSF.
+        return [sys.executable, "-m", "cli"]
     argv0 = sys.argv[0] if sys.argv else ""
     candidates: list[Path] = []
     if argv0:
