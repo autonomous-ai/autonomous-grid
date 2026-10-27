@@ -62,6 +62,15 @@ def test_installer_takes_the_same_knobs_as_install_sh():
         assert knob in INSTALL_SH.read_text(encoding="utf-8"), knob
 
 
+def test_installer_refuses_to_reinstall_under_a_running_grid():
+    """A running grid holds its install's files open on Windows: `uv tool install --force` then fails
+    half-way and leaves a grid that cannot even `grid stop` (measured on Windows 11). Look first."""
+    code = _code()
+    check, install = code.find("Win32_Process"), code.find("tool install --force")
+    assert 0 <= check < install, "the running-grid check must come before the reinstall"
+    assert "grid stop" in _script()
+
+
 def test_installer_ends_with_the_same_next_steps_as_install_sh():
     sh = INSTALL_SH.read_text(encoding="utf-8")
     for line in ("grid login       # sign in, then pick from the grids you can use",

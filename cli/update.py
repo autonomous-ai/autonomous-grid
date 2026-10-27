@@ -451,12 +451,34 @@ def _has_train_extra() -> bool:
     return importlib.util.find_spec("trl") is not None
 
 
+def _running_grid_pids() -> list[int]:
+    """Live grid servers and engine children this computer has recorded: the ``server_pid`` of each
+    local grid config and the ``pid`` of each engine run record."""
+    from local import config
+    from shared import run_records
+
+    pids = [int(cfg.get("server_pid") or 0) for cfg in config.iter_grid_configs()]
+    for record in (paths.run_dir() / "engines").glob("*/*.json"):
+        try:
+            pids.append(int(json.loads(record.read_text(encoding="utf-8")).get("pid") or 0))
+        except (OSError, ValueError, AttributeError):
+            continue  # a record being rewritten this instant, or not one at all
+    return [pid for pid in pids if pid > 0 and run_records.pid_alive(pid)]
+
+
 def _update_wheel(latest: str) -> None:
     """The uv-tool shape (macOS's install path, and any wheel install): hand the release wheel
     back to ``uv tool install --force``, exactly as install.sh:``install_macos_wheel`` does.
 
     With the ``train`` extra when this install has it: the reinstall replaces the requirement
     whole, so the plain wheel would drop torch and the rest without a word (measured, uv 0.11.12)."""
+    if _IS_WINDOWS and (running := _running_grid_pids()):
+        raise SystemExit(
+            f"a grid from this install is still running (pid {', '.join(map(str, running))}). On Windows "
+            "it holds the install's files open, and updating under it would leave a grid that cannot "
+            "start. Stop it first — `grid leave --all` for engines, `grid stop` for the grid — then run "
+            "`grid update` again."
+        )
     wheel_url = release.wheel_url(latest)
     requirement = release.train_requirement(latest) if _has_train_extra() else wheel_url
     uv = shutil.which("uv") or (Path.home() / ".local" / "bin" / ("uv.exe" if _IS_WINDOWS else "uv"))

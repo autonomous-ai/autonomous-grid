@@ -314,6 +314,58 @@ def test_messages_on_windows_name_the_powershell_installer(grid_home, monkeypatc
     assert "install.sh | bash" in update._reinstall_hint()
 
 
+def _running_grid(grid_home, server_pid: int = 0, engine_pid: int = 0) -> None:
+    from local import config
+    from shared import run_records
+
+    config.save_grid_config("ag-home", {"grid_id": "ag-home", "name": "home", "server_pid": server_pid})
+    if engine_pid:
+        run_records.write_record("ag-home", "win", {"engine_id": "win", "grid_id": "ag-home", "pid": engine_pid})
+
+
+@pytest.mark.parametrize("server_pid, engine_pid", [(4242, 0), (0, 4343)])
+def test_update_on_windows_refuses_while_a_grid_runs(grid_home, monkeypatch, server_pid, engine_pid):
+    """On Windows a running grid holds its install's files open: `uv tool install --force` then fails
+    half-way, deleting the packages but not the locked `Scripts` — a grid that cannot even `grid stop`
+    (measured on Windows 11). So the update refuses before touching anything."""
+    from shared import run_records
+
+    monkeypatch.setattr(update, "_IS_WINDOWS", True)
+    _running_grid(grid_home, server_pid, engine_pid)
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid in (4242, 4343))
+    runs = _uv_runs(monkeypatch)
+    with pytest.raises(SystemExit, match="grid stop"):
+        update._update_wheel("0.4.0")
+    assert runs == []
+
+
+def test_update_on_windows_goes_ahead_when_nothing_runs(grid_home, monkeypatch):
+    from shared import run_records
+
+    monkeypatch.setattr(update, "_IS_WINDOWS", True)
+    monkeypatch.setattr(update.shutil, "which", lambda name: r"C:\uv\uv.exe")
+    monkeypatch.setattr(update.Path, "is_file", lambda self: True)
+    _running_grid(grid_home, server_pid=4242, engine_pid=4343)
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)
+    runs = _uv_runs(monkeypatch)
+    update._update_wheel("0.4.0")
+    assert len(runs) == 1
+
+
+def test_update_off_windows_does_not_check_for_a_running_grid(grid_home, monkeypatch):
+    """POSIX replaces files under a running process safely; the update there stays as it was."""
+    from shared import run_records
+
+    monkeypatch.setattr(update, "_IS_WINDOWS", False)
+    monkeypatch.setattr(update.shutil, "which", lambda name: "/opt/uv/bin/uv")
+    monkeypatch.setattr(update.Path, "is_file", lambda self: True)
+    _running_grid(grid_home, server_pid=4242)
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: True)
+    runs = _uv_runs(monkeypatch)
+    update._update_wheel("0.4.0")
+    assert len(runs) == 1
+
+
 # The self-contained binary — and so its in-place swap — exists for Linux and macOS only; Windows
 # installs the wheel (`_update_wheel`, tested above).
 binary_platforms_only = pytest.mark.skipif(sys.platform == "win32", reason="no Windows binary is published")

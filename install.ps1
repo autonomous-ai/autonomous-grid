@@ -127,6 +127,18 @@ if ($env:GRID_WHEEL_URL) {
     $source = "https://github.com/$Owner/$Repo/releases/download/$tag/grid-$ver-py3-none-any.whl"
 }
 
+# A grid already running from this install holds its files open: `uv tool install --force` would then
+# fail half-way, removing the packages but not the locked Scripts folder, and leave a grid that cannot
+# even `grid stop` (measured on Windows 11). So look before replacing anything.
+$toolRoot = (& $uv tool dir).Trim()
+$running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ExecutablePath -and $_.ExecutablePath.StartsWith("$toolRoot\grid\", [StringComparison]::OrdinalIgnoreCase)
+})
+if ($running.Count -gt 0) {
+    Fail ("grid is running from this install (pid " + (($running | ForEach-Object { $_.ProcessId }) -join ', ') +
+          "). Stop it first - 'grid leave --all' for engines, 'grid stop' for the grid - then run this again.")
+}
+
 Say 'Installing grid...'
 & $uv tool install --force --python $python $source | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail "uv tool install failed for $source" }
