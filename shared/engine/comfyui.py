@@ -18,6 +18,7 @@ import platform
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ import httpx
 
 from shared import logging_setup, paths
 from shared.system import gpu as gpu_probe
+
+_IS_WINDOWS = sys.platform == "win32"
 
 
 logger = logging.getLogger(__name__)
@@ -540,6 +543,15 @@ def stop_running(port: int = COMFYUI_PORT_DEFAULT) -> int:
         print(f"ComfyUI PID file for port {port} is malformed; discarding.")
         pid_path.unlink(missing_ok=True)
         return 1
+    if _IS_WINDOWS:
+        # `os.kill(pid, 15)` here is TerminateProcess on the launcher alone: the interpreter under it
+        # keeps the port. The tree goes the way every Windows teardown takes it (absolute-path taskkill).
+        from shared import run_records
+
+        run_records.kill_group(pid)
+        pid_path.unlink(missing_ok=True)
+        print(f"Stopped ComfyUI pid={pid} (port {port}).")
+        return 0
     try:
         os.kill(pid, 15)
     except ProcessLookupError:
