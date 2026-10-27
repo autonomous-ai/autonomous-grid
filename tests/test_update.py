@@ -173,6 +173,9 @@ def test_notice_quiet_when_already_current_or_cache_broken(grid_home, capsys):
 
 
 def test_spawn_when_due_not_when_fresh(grid_home, monkeypatch):
+    from shared import detach
+
+    monkeypatch.setattr(detach, "_IS_WINDOWS", False)  # the POSIX spawn; Windows has its own test below
     calls: list[tuple[list[str], dict]] = []
     monkeypatch.setattr(
         update.subprocess, "Popen",
@@ -311,6 +314,12 @@ def test_messages_on_windows_name_the_powershell_installer(grid_home, monkeypatc
     assert "install.sh | bash" in update._reinstall_hint()
 
 
+# The self-contained binary — and so its in-place swap — exists for Linux and macOS only; Windows
+# installs the wheel (`_update_wheel`, tested above).
+binary_platforms_only = pytest.mark.skipif(sys.platform == "win32", reason="no Windows binary is published")
+
+
+@binary_platforms_only
 def test_binary_swap_verifies_then_replaces(grid_home, monkeypatch):
     payload = b"NEW-GRID-BINARY"
     asset = f"grid-{update._os_tag()}-{update._arch_tag()}"
@@ -335,6 +344,7 @@ def test_binary_swap_verifies_then_replaces(grid_home, monkeypatch):
     assert not list(grid_home.glob(".grid.new-*"))  # and leaves no orphan behind
 
 
+@binary_platforms_only
 def test_binary_swap_refuses_on_checksum_mismatch(grid_home, monkeypatch):
     asset = f"grid-{update._os_tag()}-{update._arch_tag()}"
 
@@ -353,6 +363,7 @@ def test_binary_swap_refuses_on_checksum_mismatch(grid_home, monkeypatch):
     assert binary.read_bytes() == b"OLD"  # refused = untouched, the whole point of the verification
 
 
+@binary_platforms_only
 def test_binary_swap_reports_a_download_404(grid_home, monkeypatch):
     monkeypatch.setattr(update, "_fetch_bytes", lambda url, client=None: None)
     monkeypatch.setattr(update, "_installed_binary_path", lambda: pytest.fail("must not touch the binary"))
