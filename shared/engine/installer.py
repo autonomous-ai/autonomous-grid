@@ -173,7 +173,23 @@ def install_windows_prebuilt(kind: str) -> Path:
             sources.append(fetch_and_extract(f"{build.label} runtime", url, sha256, runtime_tmp))
         prefix = paths.llama_prefix_dir()
         if prefix.exists():
-            shutil.rmtree(prefix)
+            # Moved aside, not deleted in place. A serving llama-server.exe is locked, so an rmtree here
+            # would remove the DLLs it can and then fail on the exe — an engine that cannot start again.
+            # Windows does let a running exe's folder be renamed (measured on Windows 11): the engine keeps
+            # serving from the old files, the new ones land in place, and the next start uses them —
+            # what replacing files under a running process gives macOS and Linux. Whatever stays locked
+            # in `.old` goes at the next install. A rename that is refused (a scanner holding a file)
+            # has touched nothing.
+            old = prefix.with_name(prefix.name + ".old")
+            shutil.rmtree(old, ignore_errors=True)
+            try:
+                os.replace(prefix, old)
+            except PermissionError:
+                raise SystemExit(
+                    "llama.cpp is in use by an engine on this computer. Stop it first "
+                    "(`grid leave --all`), then run `grid engine install llama.cpp` again."
+                ) from None
+            shutil.rmtree(old, ignore_errors=True)
         prefix.mkdir(parents=True, exist_ok=True)
         for source in sources:
             for item in [*source.glob("*.exe"), *source.glob("*.dll")]:

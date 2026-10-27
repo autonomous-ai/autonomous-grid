@@ -99,6 +99,25 @@ def test_llama_server_bin_is_unchanged_off_windows(monkeypatch, tmp_path):
     assert paths.llama_server_bin() == paths.bin_dir() / "llama-server"
 
 
+def test_reinstall_whose_move_aside_is_refused_deletes_nothing(windows, monkeypatch):
+    """A serving llama-server.exe is locked on Windows: deleting its folder file by file would remove
+    the DLLs it can and then fail on the exe, leaving an engine that cannot start again. The folder is
+    moved aside first (Windows allows that under a running exe — measured); when even the move is
+    refused, nothing has been deleted."""
+    _fake_release(monkeypatch)
+    installer.install_windows_prebuilt("cpu")
+    prefix = paths.llama_prefix_dir()
+    before = sorted(p.name for p in prefix.iterdir())
+
+    def in_use(src, dst):
+        raise PermissionError(13, "The process cannot access the file because it is being used")
+
+    monkeypatch.setattr(installer.os, "replace", in_use)
+    with pytest.raises(SystemExit, match="grid leave"):
+        installer.install_windows_prebuilt("cpu")
+    assert sorted(p.name for p in prefix.iterdir()) == before
+
+
 def test_has_gpu_backend_reads_windows_dll_names(windows):
     prefix = paths.llama_prefix_dir()
     prefix.mkdir(parents=True)
