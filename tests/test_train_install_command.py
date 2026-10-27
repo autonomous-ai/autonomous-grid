@@ -111,6 +111,7 @@ def test_grid_update_keeps_the_training_extra(monkeypatch, tmp_path):
     """Without this, `grid update` reinstalls the plain wheel and the trainer silently goes."""
     from cli import update
 
+    monkeypatch.setattr(update, "_IS_WINDOWS", False)  # the POSIX argv; Windows adds --python (tests/test_update.py)
     uv = tmp_path / "uv"
     uv.write_text("")
     monkeypatch.setattr(update.shutil, "which", lambda name: str(uv))

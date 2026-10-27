@@ -51,8 +51,9 @@ grid [--local | --remote] <command>      # override the active mode for one comm
 ```
 
 `grid update` upgrades the CLI itself in place: the Linux binary verifies the new release against
-its SHA256SUMS before replacing itself, a uv-installed wheel (the macOS path) re-runs
-`uv tool install`. A grid that is already running keeps serving the old version until you restart
+its SHA256SUMS before replacing itself, a uv-installed wheel (the macOS and Windows path) re-runs
+`uv tool install` — on Windows with the same signed Python the CLI already runs on, since Smart App
+Control blocks the unsigned interpreters uv would otherwise download. A grid that is already running keeps serving the old version until you restart
 it. It also tells you it is stale on its own: once a day, in the background, any `grid` command
 refreshes a cached "what is the newest version" answer, and when the cache is behind it prints one
 line on stderr after the command's output. That notice never appears in `--json` output, in

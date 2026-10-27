@@ -7,6 +7,7 @@ argv, its workspace and its credential posture are the parts this feature keeps 
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -16,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import task_repo, task_sandbox, task_worktree
+
+_IS_WINDOWS = sys.platform == "win32"
 
 def default_workspace_root(platform: str | None = None) -> str:
     """Where task workspaces go when nobody said (issue 62). Per PLATFORM, and that is now allowed.
@@ -33,8 +36,15 @@ def default_workspace_root(platform: str | None = None) -> str:
     `/var` is root-owned on macOS, so a provider without `sudo` cannot use `/var/grid` and fails
     EVERY task on it. `/Users/Shared` is the short, outside-`$HOME` place a normal account can write
     — see `ensure_default_workspace_root` for what that costs and how it is paid for.
+
+    Windows: `/var/grid` would be `C:\\var\\grid`, and a folder made at the root of a drive inherits an
+    ACL other local accounts can read. `%LOCALAPPDATA%` is private to the account by default.
     """
-    return "/Users/Shared/grid" if (platform or sys.platform) == "darwin" else "/var/grid"
+    platform = platform or sys.platform
+    if platform == "win32":
+        local = os.environ.get("LOCALAPPDATA") or ntpath.join(os.path.expanduser("~"), "AppData", "Local")
+        return ntpath.join(local, "grid")
+    return "/Users/Shared/grid" if platform == "darwin" else "/var/grid"
 
 
 DEFAULT_WORKSPACE_ROOT = default_workspace_root()
@@ -922,6 +932,11 @@ def _require_a_private_directory(root: Path) -> None:
         raise OSError(
             f"the default task workspace root {root} exists and is not a directory; name one "
             f"yourself with --tasks-root.")
+    if _IS_WINDOWS:
+        # No `os.getuid`, and `st_mode` reports every directory as 0o777: both checks below are a
+        # no-op by construction there (ADR 0027). The default root lives in the account's own
+        # `%LOCALAPPDATA%`, whose ACL is what keeps it private.
+        return
     if info.st_uid != os.getuid():
         raise OSError(
             f"the default task workspace root {root} belongs to another account (uid "

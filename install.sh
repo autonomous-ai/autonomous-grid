@@ -149,6 +149,9 @@ install_wheel() {
 case "$(uname -s)" in
   Linux)  install_linux_binary || { info "Installing the Python wheel with uv instead (the same grid)…"; install_wheel; } ;;
   Darwin) install_wheel ;;
+  # Git Bash / MSYS / Cygwin on Windows: the wheel needs a Windows-native Python, so say which command.
+  MINGW*|MSYS*|CYGWIN*)
+    die "this is the macOS/Linux installer. On Windows, in PowerShell:  powershell -ExecutionPolicy ByPass -c \"irm https://grid.autonomous.ai/install.ps1 | iex\"" ;;
   *) die "unsupported OS: $(uname -s) — macOS and Linux only (Windows: see the docs)" ;;
 esac
 

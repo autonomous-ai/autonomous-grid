@@ -7,6 +7,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -17,6 +18,8 @@ import httpx
 
 from shared import paths
 from shared.system import arch
+
+_IS_WINDOWS = sys.platform == "win32"
 
 
 @dataclass(frozen=True)
@@ -91,6 +94,107 @@ LINUX_BUILDS: dict[tuple[str, str], LinuxBuild] = {
         sha256="4d9c1187ae7bd3acb2555815424adbc6238aed6e666f6ae12c9c3c6dac297dbb",
     ),
 }
+
+
+@dataclass(frozen=True)
+class WindowsBuild:
+    """A pinned official llama.cpp release build for Windows. ``extra`` holds further archives that
+    unpack into the same directory — the CUDA runtime DLLs, which upstream ships as a separate zip so
+    a machine with the CUDA toolkit installed need not download them twice."""
+
+    label: str
+    url: str
+    sha256: str
+    extra: tuple[tuple[str, str], ...] = ()
+
+
+# Digests are GitHub's own for each release asset (`gh api repos/ggml-org/llama.cpp/releases/tags/<rel>`
+# → `assets[].digest`). CUDA 12.4 rather than 13.x: CUDA 13 drops pre-Turing cards and needs a ≥580
+# driver, and 12.4 is what upstream's own Windows instructions point at. Unlike Linux, Windows gets
+# real CUDA binaries upstream, so an NVIDIA box is not sent to Vulkan here.
+WINDOWS_BUILDS: dict[tuple[str, str], WindowsBuild] = {
+    ("cuda", "x86_64"): WindowsBuild(
+        label="windows-cuda-12.4-x64",
+        url=f"{_RELEASE_BASE}/llama-{LLAMA_RELEASE}-bin-win-cuda-12.4-x64.zip",
+        sha256="07d7454de48a373f7aeaa08957f549f15d2d9c1b334192ffe38a0221414cd851",
+        extra=((
+            f"{_RELEASE_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip",
+            "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+        ),),
+    ),
+    ("vulkan", "x86_64"): WindowsBuild(
+        label="windows-vulkan-x64",
+        url=f"{_RELEASE_BASE}/llama-{LLAMA_RELEASE}-bin-win-vulkan-x64.zip",
+        sha256="8a856ec574da8b0f69c61e1dd2f9ff894b751ffaac9e442aac4711e72c9fb8eb",
+    ),
+    ("cpu", "x86_64"): WindowsBuild(
+        label="windows-cpu-x64",
+        url=f"{_RELEASE_BASE}/llama-{LLAMA_RELEASE}-bin-win-cpu-x64.zip",
+        sha256="11bcb3aea659bce73f62305e3812764f935d90f44de1e70cd2b68aa3c9f41b8d",
+    ),
+    ("cpu", "aarch64"): WindowsBuild(
+        label="windows-cpu-arm64",
+        url=f"{_RELEASE_BASE}/llama-{LLAMA_RELEASE}-bin-win-cpu-arm64.zip",
+        sha256="701e0b42286ad59430c6404447f044110effcbc43d1374376d4e508cf0a98015",
+    ),
+}
+
+
+def is_windows() -> bool:
+    return _IS_WINDOWS
+
+
+def pick_windows_build(kind: str, machine: str) -> WindowsBuild:
+    """The official Windows build for this backend and architecture."""
+    build = WINDOWS_BUILDS.get((kind, machine))
+    if not build:
+        raise SystemExit(f"No prebuilt llama.cpp for Windows {machine!r} ({kind}).")
+    return build
+
+
+def install_windows_prebuilt(kind: str) -> Path:
+    """Install llama.cpp on Windows from the official release zip(s), verified like every other build.
+
+    Every ``.exe`` and ``.dll`` of the release goes into one directory and stays there: Windows loads a
+    program's DLLs from the program's own directory, and the pinned path is the exe itself
+    (`paths.llama_server_bin`) — no symlink, which would need admin rights or Developer Mode."""
+    paths.ensure_all()
+    build = pick_windows_build(kind, arch.normalized_machine())
+    with tempfile.TemporaryDirectory(prefix="grid-engine-") as tmpdir:
+        extracted = fetch_and_extract(build.label, build.url, build.sha256, Path(tmpdir))
+        server = _locate_llama_server(extracted)
+        if not server:
+            raise SystemExit(f"Extracted archive did not contain llama-server.exe: {build.label}")
+        sources = [server.parent]
+        for index, (url, sha256) in enumerate(build.extra):
+            # Its own directory: `fetch_and_extract` always unpacks into `<tmp>/extract`.
+            runtime_tmp = Path(tmpdir) / f"runtime-{index}"
+            runtime_tmp.mkdir()
+            sources.append(fetch_and_extract(f"{build.label} runtime", url, sha256, runtime_tmp))
+        prefix = paths.llama_prefix_dir()
+        if prefix.exists():
+            # Moved aside, not deleted in place. A serving llama-server.exe is locked, so an rmtree here
+            # would remove the DLLs it can and then fail on the exe — an engine that cannot start again.
+            # Windows does let a running exe's folder be renamed (measured on Windows 11): the engine keeps
+            # serving from the old files, the new ones land in place, and the next start uses them —
+            # what replacing files under a running process gives macOS and Linux. Whatever stays locked
+            # in `.old` goes at the next install. A rename that is refused (a scanner holding a file)
+            # has touched nothing.
+            old = prefix.with_name(prefix.name + ".old")
+            shutil.rmtree(old, ignore_errors=True)
+            try:
+                os.replace(prefix, old)
+            except PermissionError:
+                raise SystemExit(
+                    "llama.cpp is in use by an engine on this computer. Stop it first "
+                    "(`grid leave --all`), then run `grid engine install llama.cpp` again."
+                ) from None
+            shutil.rmtree(old, ignore_errors=True)
+        prefix.mkdir(parents=True, exist_ok=True)
+        for source in sources:
+            for item in [*source.glob("*.exe"), *source.glob("*.dll")]:
+                shutil.copy2(item, prefix / item.name)
+    return paths.llama_server_bin()
 
 
 def pick_linux_build(kind: str, machine: str) -> LinuxBuild:
@@ -410,9 +514,10 @@ def _extract(archive: Path, dest: Path) -> None:
 
 
 def _locate_llama_server(root: Path) -> Path | None:
-    for path in root.rglob("llama-server"):
-        if path.is_file():
-            return path
+    for name in ("llama-server", "llama-server.exe"):  # the Windows zips carry the `.exe`
+        for path in root.rglob(name):
+            if path.is_file():
+                return path
     return None
 
 

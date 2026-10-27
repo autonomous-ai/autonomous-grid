@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-from shared import logging_setup, paths
+from shared import detach, logging_setup, paths
 from shared.agent import cli_seat
 
 from .media_runtime import (
@@ -29,13 +29,12 @@ def start_seat_server(*, kind: str, options, binary: str) -> subprocess.Popen:
     paths.ensure_all()
     log_path = paths.logs_dir() / f"cli_seat_{kind}_{options.port}.log"
     log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
-    proc = subprocess.Popen(
+    proc = detach.popen(
         _cli_subprocess_command()
         + ["__cli-seat-server", "--binary", binary]
         + cli_seat.options_child_argv(options, kind),
         stdout=log,
         stderr=subprocess.STDOUT,
-        start_new_session=True,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
     wait_for_child_server(proc, options.port, log_path, label=f"{kind} seat")

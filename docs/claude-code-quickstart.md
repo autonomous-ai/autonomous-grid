@@ -37,6 +37,7 @@ boundary, not a missing flag.
 
 ```bash
 curl -fsSL https://grid.autonomous.ai/install.sh | bash   # macOS / Linux
+# Windows (PowerShell): powershell -ExecutionPolicy ByPass -c "irm https://grid.autonomous.ai/install.ps1 | iex"
 grid mode remote                                          # persist remote mode
 grid login                                                # device-code sign-in to the hosted relay
 ```

@@ -22,7 +22,10 @@ Two classes of test live in this file:
 
 import stat
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SH = REPO_ROOT / "install.sh"
@@ -216,6 +219,21 @@ def _code_lines(text: str) -> list[tuple[int, str]]:
     one — and on these lines anything past a `#` is prose.
     """
     return [(n, line.split("#", 1)[0]) for n, line in enumerate(text.splitlines(), 1)]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="drives bash with stubbed tools, like the tests above")
+def test_installer_on_windows_names_the_powershell_installer(tmp_path):
+    """Git Bash / MSYS on Windows reports `MINGW64_NT-…`: send that person to install.ps1 by name
+    instead of "see the docs". (`uname` is stubbed, so this runs anywhere bash does.)"""
+    tmp = tmp_path.resolve()
+    stubbin = tmp / "stubbin"
+    stubbin.mkdir()
+    _write_exe(stubbin / "uname", '#!/bin/bash\ncase "$1" in -m) echo x86_64 ;; *) echo MINGW64_NT-10.0-26100 ;; esac\n')
+    _write_exe(stubbin / "curl", STUB_CURL)
+    res = subprocess.run(["bash", str(INSTALL_SH)], env={"HOME": str(tmp), "PATH": f"{stubbin}:/usr/bin:/bin"},
+                         capture_output=True, text=True, timeout=60)
+    assert res.returncode != 0
+    assert 'irm https://grid.autonomous.ai/install.ps1 | iex' in res.stderr
 
 
 def test_installer_is_valid_bash():

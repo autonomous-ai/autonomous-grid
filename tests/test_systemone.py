@@ -445,7 +445,8 @@ def test_a_child_older_than_system_one_is_respawned_rather_than_reloaded():
 
     external = [{"endpoint_url": "http://127.0.0.1:50104/v1", "models": ["laya-english"]}]
     record = {"engines": external}
-    current = {"engine_id": "remote", "reload_signal": "sighup", "serves_systemone": True, "engines": []}
+    current = {"engine_id": "remote", "reload_signal": remote_provider._reload_signal(), "serves_systemone": True,
+               "engines": []}
     older = {key: value for key, value in current.items() if key != "serves_systemone"}
     assert remote_provider._hot_reloadable([current], external, record) is True
     assert remote_provider._hot_reloadable([older], external, record) is False
@@ -461,7 +462,7 @@ def test_an_engine_joins_or_leaves_beside_a_running_built_in_by_reload_not_respa
     qwen = {"endpoint_url": None, "models": ["Qwen-Q5.gguf"],
             "launch": {"endpoint_port": 64101, "ctx_size": 262144, "parallel": 1}}
     kev = {"endpoint_url": "http://127.0.0.1:50872/v1", "models": ["kev-0.8b"]}
-    live = {"engine_id": "remote", "reload_signal": "sighup", "serves_systemone": True,
+    live = {"engine_id": "remote", "reload_signal": remote_provider._reload_signal(), "serves_systemone": True,
             "reloads_builtins": True, "engines": [qwen]}
     assert remote_provider._hot_reloadable([live], [qwen, kev], {"engines": [qwen, kev]}) is True
     assert remote_provider._hot_reloadable(

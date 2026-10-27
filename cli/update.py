@@ -40,7 +40,7 @@ from typing import Any
 
 import httpx
 
-from shared import jsonio, paths, release
+from shared import detach, jsonio, paths, release
 from shared._version import __version__
 
 # How old the cached answer must be before another check is worth a spawn — and how long a shown
@@ -55,6 +55,18 @@ _CHECK_TIMEOUT_S = 5.0
 _DOWNLOAD_TIMEOUT_S = 120.0
 
 _USER_AGENT = "grid-cli-update"
+
+_IS_WINDOWS = sys.platform == "win32"
+
+
+def _reinstall_hint(version: str | None = None) -> str:
+    """The installer command for this OS, for every message that sends someone back to it: the
+    PowerShell one on Windows (which has no `curl … | bash`), install.sh everywhere else."""
+    if _IS_WINDOWS:
+        pin = f"$env:GRID_VERSION='{version}'; " if version else ""
+        return f'powershell -ExecutionPolicy ByPass -c "{pin}irm https://grid.autonomous.ai/install.ps1 | iex"'
+    pin = f"GRID_VERSION={version} " if version else ""
+    return f"curl -fsSL https://grid.autonomous.ai/install.sh | {pin}bash"
 
 _TAG_RE = re.compile(r"^v?(\d+(?:\.\d+)*)")
 
@@ -249,12 +261,11 @@ def maybe_spawn_check(args: argparse.Namespace | None, *, json_requested: bool =
         argv = _self_command("__update-check")
         if not argv:
             return
-        subprocess.Popen(  # noqa: S603 — fixed argv, no shell; detached so the user's command exits first
+        detach.popen(  # noqa: S603 — fixed argv, no shell; detached so the user's command exits first
             argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
         )
     except Exception:
         pass
@@ -307,8 +318,7 @@ def cmd_update(args: argparse.Namespace) -> int:
     if latest is None:
         raise SystemExit(
             "could not resolve the latest grid release from github.com — check your network, or "
-            "install a known version with:  curl -fsSL https://grid.autonomous.ai/install.sh | "
-            "GRID_VERSION=X.Y.Z bash"
+            f"install a known version with:  {_reinstall_hint('X.Y.Z')}"
         )
     if not is_newer(latest, current):
         print(f"grid {current} is the latest version.")
@@ -383,8 +393,7 @@ def _installed_binary_path() -> Path:
         if candidate and Path(candidate).is_file():
             return Path(candidate)
     raise SystemExit(
-        "could not locate the installed grid binary to replace — rerun the installer:  "
-        "curl -fsSL https://grid.autonomous.ai/install.sh | bash"
+        f"could not locate the installed grid binary to replace — rerun the installer:  {_reinstall_hint()}"
     )
 
 
@@ -399,7 +408,7 @@ def _update_binary(latest: str) -> None:
     if payload is None:
         raise SystemExit(
             f"the {latest} release has no {asset} asset to download — if that is wrong, rerun the "
-            "installer instead:  curl -fsSL https://grid.autonomous.ai/install.sh | bash"
+            f"installer instead:  {_reinstall_hint()}"
         )
     # Hard-fail on a mismatch; only a release shipping no SHA256SUMS at all skips verification —
     # byte-for-byte install.sh's rule, so `grid update` and the installer cannot disagree about
@@ -442,24 +451,52 @@ def _has_train_extra() -> bool:
     return importlib.util.find_spec("trl") is not None
 
 
+def _running_grid_pids() -> list[int]:
+    """Live grid servers and engine children this computer has recorded: the ``server_pid`` of each
+    local grid config and the ``pid`` of each engine run record."""
+    from local import config
+    from shared import run_records
+
+    pids = [int(cfg.get("server_pid") or 0) for cfg in config.iter_grid_configs()]
+    for record in (paths.run_dir() / "engines").glob("*/*.json"):
+        try:
+            pids.append(int(json.loads(record.read_text(encoding="utf-8")).get("pid") or 0))
+        except (OSError, ValueError, AttributeError):
+            continue  # a record being rewritten this instant, or not one at all
+    return [pid for pid in pids if pid > 0 and run_records.pid_alive(pid)]
+
+
 def _update_wheel(latest: str) -> None:
     """The uv-tool shape (macOS's install path, and any wheel install): hand the release wheel
     back to ``uv tool install --force``, exactly as install.sh:``install_macos_wheel`` does.
 
     With the ``train`` extra when this install has it: the reinstall replaces the requirement
     whole, so the plain wheel would drop torch and the rest without a word (measured, uv 0.11.12)."""
+    if _IS_WINDOWS and (running := _running_grid_pids()):
+        raise SystemExit(
+            f"a grid from this install is still running (pid {', '.join(map(str, running))}). On Windows "
+            "it holds the install's files open, and updating under it would leave a grid that cannot "
+            "start. Stop it first — `grid leave --all` for engines, `grid stop` for the grid — then run "
+            "`grid update` again."
+        )
     wheel_url = release.wheel_url(latest)
     requirement = release.train_requirement(latest) if _has_train_extra() else wheel_url
-    uv = shutil.which("uv") or (Path.home() / ".local" / "bin" / "uv")
+    uv = shutil.which("uv") or (Path.home() / ".local" / "bin" / ("uv.exe" if _IS_WINDOWS else "uv"))
     uv = str(uv)
     if not Path(uv).is_file():
         raise SystemExit(
             "this grid was not installed as a self-contained binary, and no `uv` was found to "
-            "reinstall the wheel with — install uv (https://astral.sh/uv) or rerun the installer:  "
-            "curl -fsSL https://grid.autonomous.ai/install.sh | bash"
+            f"reinstall the wheel with — install uv (https://astral.sh/uv) or rerun the installer:  "
+            f"{_reinstall_hint()}"
         )
+    argv = [uv, "tool", "install", "--force"]
+    if _IS_WINDOWS:
+        # Keep the interpreter this grid already runs on. Left to choose, uv may fetch its own CPython
+        # build, which is unsigned — and Smart App Control blocks unsigned binaries, so the upgrade
+        # would leave a grid that cannot start (measured on Windows 11 with it in enforce mode).
+        argv += ["--python", getattr(sys, "_base_executable", None) or sys.executable]
     try:
-        result = subprocess.run([uv, "tool", "install", "--force", requirement])
+        result = subprocess.run([*argv, requirement])
     except OSError as exc:
         raise SystemExit(f"could not run `{uv} tool install`: {exc}") from None
     if result.returncode != 0:
