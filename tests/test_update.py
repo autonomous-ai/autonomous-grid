@@ -257,6 +257,60 @@ def test_update_routes_wheel_installs_to_uv(grid_home, monkeypatch):
     assert seen == ["0.4.0"]
 
 
+def _uv_runs(monkeypatch) -> list[list[str]]:
+    runs: list[list[str]] = []
+    monkeypatch.setattr(update, "_has_train_extra", lambda: False)
+    monkeypatch.setattr(update.subprocess, "run", lambda argv, **kw: runs.append(argv) or
+                        update.subprocess.CompletedProcess(argv, 0))
+    return runs
+
+
+def test_posix_update_argv_is_unchanged(grid_home, monkeypatch):
+    monkeypatch.setattr(update, "_IS_WINDOWS", False)
+    monkeypatch.setattr(update.shutil, "which", lambda name: "/opt/uv/bin/uv")
+    runs = _uv_runs(monkeypatch)
+    monkeypatch.setattr(update.Path, "is_file", lambda self: True)
+    update._update_wheel("0.4.0")
+    assert runs == [["/opt/uv/bin/uv", "tool", "install", "--force", update.release.wheel_url("0.4.0")]]
+
+
+def test_update_wheel_on_windows_finds_uv_exe(grid_home, monkeypatch, tmp_path):
+    monkeypatch.setattr(update, "_IS_WINDOWS", True)
+    monkeypatch.setattr(update.shutil, "which", lambda name: None)
+    monkeypatch.setattr(update.Path, "home", classmethod(lambda cls: tmp_path))
+    uv_exe = tmp_path / ".local" / "bin" / "uv.exe"
+    uv_exe.parent.mkdir(parents=True)
+    uv_exe.write_bytes(b"MZ")
+    runs = _uv_runs(monkeypatch)
+    update._update_wheel("0.4.0")
+    assert runs[0][0] == str(uv_exe)
+
+
+def test_update_wheel_on_windows_keeps_the_running_python(grid_home, monkeypatch):
+    """Smart App Control blocks the unsigned CPython builds uv downloads, so a reinstall that let uv
+    pick its own interpreter could leave a grid that cannot start. Keep the one this grid runs on."""
+    monkeypatch.setattr(update, "_IS_WINDOWS", True)
+    monkeypatch.setattr(update.shutil, "which", lambda name: r"C:\Users\me\.local\bin\uv.exe")
+    monkeypatch.setattr(update.Path, "is_file", lambda self: True)
+    monkeypatch.setattr(update.sys, "_base_executable", r"C:\Python312\python.exe", raising=False)
+    runs = _uv_runs(monkeypatch)
+    update._update_wheel("0.4.0")
+    argv = runs[0]
+    assert argv[argv.index("--python") + 1] == r"C:\Python312\python.exe"
+    assert argv[-1] == update.release.wheel_url("0.4.0")
+
+
+def test_messages_on_windows_name_the_powershell_installer(grid_home, monkeypatch):
+    monkeypatch.setattr(update, "_IS_WINDOWS", True)
+    assert "install.ps1" in update._reinstall_hint() and "curl" not in update._reinstall_hint()
+    monkeypatch.setattr(update, "fetch_latest_version", lambda: None)
+    with pytest.raises(SystemExit, match="install.ps1"):
+        update.cmd_update(_ns(command="update"))
+
+    monkeypatch.setattr(update, "_IS_WINDOWS", False)
+    assert "install.sh | bash" in update._reinstall_hint()
+
+
 def test_binary_swap_verifies_then_replaces(grid_home, monkeypatch):
     payload = b"NEW-GRID-BINARY"
     asset = f"grid-{update._os_tag()}-{update._arch_tag()}"

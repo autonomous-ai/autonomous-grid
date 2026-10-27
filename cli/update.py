@@ -56,6 +56,18 @@ _DOWNLOAD_TIMEOUT_S = 120.0
 
 _USER_AGENT = "grid-cli-update"
 
+_IS_WINDOWS = sys.platform == "win32"
+
+
+def _reinstall_hint(version: str | None = None) -> str:
+    """The installer command for this OS, for every message that sends someone back to it: the
+    PowerShell one on Windows (which has no `curl … | bash`), install.sh everywhere else."""
+    if _IS_WINDOWS:
+        pin = f"$env:GRID_VERSION='{version}'; " if version else ""
+        return f'powershell -ExecutionPolicy ByPass -c "{pin}irm https://grid.autonomous.ai/install.ps1 | iex"'
+    pin = f"GRID_VERSION={version} " if version else ""
+    return f"curl -fsSL https://grid.autonomous.ai/install.sh | {pin}bash"
+
 _TAG_RE = re.compile(r"^v?(\d+(?:\.\d+)*)")
 
 
@@ -306,8 +318,7 @@ def cmd_update(args: argparse.Namespace) -> int:
     if latest is None:
         raise SystemExit(
             "could not resolve the latest grid release from github.com — check your network, or "
-            "install a known version with:  curl -fsSL https://grid.autonomous.ai/install.sh | "
-            "GRID_VERSION=X.Y.Z bash"
+            f"install a known version with:  {_reinstall_hint('X.Y.Z')}"
         )
     if not is_newer(latest, current):
         print(f"grid {current} is the latest version.")
@@ -382,8 +393,7 @@ def _installed_binary_path() -> Path:
         if candidate and Path(candidate).is_file():
             return Path(candidate)
     raise SystemExit(
-        "could not locate the installed grid binary to replace — rerun the installer:  "
-        "curl -fsSL https://grid.autonomous.ai/install.sh | bash"
+        f"could not locate the installed grid binary to replace — rerun the installer:  {_reinstall_hint()}"
     )
 
 
@@ -398,7 +408,7 @@ def _update_binary(latest: str) -> None:
     if payload is None:
         raise SystemExit(
             f"the {latest} release has no {asset} asset to download — if that is wrong, rerun the "
-            "installer instead:  curl -fsSL https://grid.autonomous.ai/install.sh | bash"
+            f"installer instead:  {_reinstall_hint()}"
         )
     # Hard-fail on a mismatch; only a release shipping no SHA256SUMS at all skips verification —
     # byte-for-byte install.sh's rule, so `grid update` and the installer cannot disagree about
@@ -449,16 +459,22 @@ def _update_wheel(latest: str) -> None:
     whole, so the plain wheel would drop torch and the rest without a word (measured, uv 0.11.12)."""
     wheel_url = release.wheel_url(latest)
     requirement = release.train_requirement(latest) if _has_train_extra() else wheel_url
-    uv = shutil.which("uv") or (Path.home() / ".local" / "bin" / "uv")
+    uv = shutil.which("uv") or (Path.home() / ".local" / "bin" / ("uv.exe" if _IS_WINDOWS else "uv"))
     uv = str(uv)
     if not Path(uv).is_file():
         raise SystemExit(
             "this grid was not installed as a self-contained binary, and no `uv` was found to "
-            "reinstall the wheel with — install uv (https://astral.sh/uv) or rerun the installer:  "
-            "curl -fsSL https://grid.autonomous.ai/install.sh | bash"
+            f"reinstall the wheel with — install uv (https://astral.sh/uv) or rerun the installer:  "
+            f"{_reinstall_hint()}"
         )
+    argv = [uv, "tool", "install", "--force"]
+    if _IS_WINDOWS:
+        # Keep the interpreter this grid already runs on. Left to choose, uv may fetch its own CPython
+        # build, which is unsigned — and Smart App Control blocks unsigned binaries, so the upgrade
+        # would leave a grid that cannot start (measured on Windows 11 with it in enforce mode).
+        argv += ["--python", getattr(sys, "_base_executable", None) or sys.executable]
     try:
-        result = subprocess.run([uv, "tool", "install", "--force", requirement])
+        result = subprocess.run([*argv, requirement])
     except OSError as exc:
         raise SystemExit(f"could not run `{uv} tool install`: {exc}") from None
     if result.returncode != 0:
