@@ -80,13 +80,79 @@ def test_stdio_is_switched_to_utf8_when_its_encoding_is_ascii(monkeypatch):
 
 @pytest.mark.parametrize("encoding", ["utf-8", "cp1252", "latin-1", "utf-16"])
 def test_any_other_encoding_is_left_alone(monkeypatch, encoding):
-    """Only ASCII is switched: a Windows console's code page, say, already holds "—" and "…"."""
+    """Only ASCII is switched off Windows. (On Windows a pipe on a legacy code page is the next bug —
+    see the tests below.)"""
     monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    monkeypatch.setattr(stdio, "_IS_WINDOWS", False)
     stream = io.TextIOWrapper(io.BytesIO(), encoding=encoding)
 
     stdio.use_utf8_in_an_ascii_locale([stream])
 
     assert stream.encoding == encoding
+
+
+class _Console(io.BytesIO):
+    def isatty(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("encoding", ["cp1252", "cp437", "cp850"])
+def test_windows_pipe_on_a_legacy_code_page_switches_to_utf8(monkeypatch, encoding):
+    """`grid ls | findstr x`: a pipe gets the ANSI code page, which cannot hold "✓" (cp437 not even
+    "—"), and `print` raised UnicodeEncodeError. A real console writes UTF-16 and is never touched."""
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    monkeypatch.setattr(stdio, "_IS_WINDOWS", True)
+    streams = [io.TextIOWrapper(io.BytesIO(), encoding=encoding),
+               io.TextIOWrapper(io.BytesIO(), encoding=encoding, errors="backslashreplace")]
+
+    stdio.use_utf8_in_an_ascii_locale(streams)
+
+    assert [s.encoding for s in streams] == ["utf-8", "utf-8"]
+    assert [s.errors for s in streams] == ["strict", "backslashreplace"], "the error handler is kept"
+    print("✓ — …", file=streams[0])
+
+
+def test_windows_piped_input_keeps_its_code_page(monkeypatch):
+    """`type notes.txt | grid …`: the bytes really are in the producer's code page, so input is not
+    re-decoded as UTF-8."""
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    monkeypatch.setattr(stdio, "_IS_WINDOWS", True)
+    stream = io.TextIOWrapper(io.BufferedReader(io.BytesIO("café".encode("cp1252"))), encoding="cp1252")
+
+    stdio.use_utf8_in_an_ascii_locale([stream])
+
+    assert stream.encoding == "cp1252"
+    assert stream.read() == "café"
+
+
+def test_windows_console_is_left_alone(monkeypatch):
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    monkeypatch.setattr(stdio, "_IS_WINDOWS", True)
+    stream = io.TextIOWrapper(_Console(), encoding="cp1252")
+
+    stdio.use_utf8_in_an_ascii_locale([stream])
+
+    assert stream.encoding == "cp1252"
+
+
+def test_windows_utf8_pipe_is_left_alone(monkeypatch):
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    monkeypatch.setattr(stdio, "_IS_WINDOWS", True)
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", errors="replace")
+
+    stdio.use_utf8_in_an_ascii_locale([stream])
+
+    assert (stream.encoding, stream.errors) == ("utf-8", "replace")
+
+
+def test_windows_pipe_with_pythonioencoding_is_left_alone(monkeypatch):
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+    monkeypatch.setattr(stdio, "_IS_WINDOWS", True)
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+
+    stdio.use_utf8_in_an_ascii_locale([stream])
+
+    assert stream.encoding == "cp1252"
 
 
 def test_an_encoding_the_person_asked_for_is_left_alone(monkeypatch):
