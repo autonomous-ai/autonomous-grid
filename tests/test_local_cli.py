@@ -3292,6 +3292,7 @@ def _pin_fake_release(monkeypatch, archive: Path, sha256: str) -> None:
 def test_install_macos_prebuilt_unpacks_beside_its_libraries_and_links(monkeypatch, tmp_path):
     grid_home = tmp_path / "grid-home"
     monkeypatch.setenv("GRID_HOME", str(grid_home))
+    monkeypatch.setattr(paths, "_IS_WINDOWS", False)  # the macOS layout (a symlink in bin/)
     archive, sha256 = _fake_llama_release(tmp_path)
     _pin_fake_release(monkeypatch, archive, sha256)
 
@@ -4113,6 +4114,9 @@ def test_run_engine_media_only_skips_local_llama_server(monkeypatch, tmp_path):
 
 
 def test_join_at_writes_record_and_spawns_detached(monkeypatch, tmp_path):
+    from shared import detach
+
+    monkeypatch.setattr(detach, "_IS_WINDOWS", False)  # asserts the POSIX spawn; tests/test_detach.py has Windows'
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     monkeypatch.setattr(runtime, "detect_local_ip", lambda: "192.168.1.50")
     cfg = runtime.init_grid_config(name="home", port=8090)
@@ -10388,6 +10392,8 @@ def test_remote_join_pre_handler_singleton_respawns_not_sighup(monkeypatch, tmp_
     handler) RESPAWNS — a raw SIGHUP would terminate that process and drop every in-flight request."""
     from shared import run_records as _rr
 
+    monkeypatch.setattr(cli.remote_provider, "_IS_WINDOWS", False)  # the SIGHUP stamp; Windows stamps request-file
+
     _seed_running_remote_grid(monkeypatch, tmp_path)
     spawned = _mock_remote_spawn(monkeypatch)
     terminated = []
@@ -12283,6 +12289,7 @@ def test_remote_leave_shrink_reports_a_dead_respawn(monkeypatch, tmp_path):
 def test_remote_leave_shrink_respawn_refreshes_reload_signal(monkeypatch, tmp_path):
     """A leave-shrink respawn from a pre-handler identity stamps reload_signal so future ops hot-reload
     (self-heal, matching the join side — reviewer MEDIUM)."""
+    monkeypatch.setattr(cli.remote_provider, "_IS_WINDOWS", False)  # the SIGHUP stamp; Windows stamps request-file
     _seed_remote_identity(monkeypatch, tmp_path, [
         {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
         {"endpoint_url": "http://h:8000/v1", "models": ["mistral"], "engine_label": "vllm"},
@@ -30960,6 +30967,8 @@ def test_apple_silicon_reads_memory_in_use_without_psutil(monkeypatch):
 
     from shared.system import host
 
+    monkeypatch.setattr(host, "_IS_WINDOWS", False)  # the macOS path; Windows has its own probe
+
     monkeypatch.setitem(sys.modules, "psutil", None)  # `import psutil` now raises ImportError
     monkeypatch.setattr(host.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(host.subprocess, "check_output", lambda *a, **k: _VM_STAT_ARM64.encode())
@@ -30976,6 +30985,8 @@ def test_memory_in_use_is_absent_rather_than_guessed_when_vm_stat_cannot_be_read
     import sys
 
     from shared.system import host
+
+    monkeypatch.setattr(host, "_IS_WINDOWS", False)  # the macOS path; Windows has its own probe
 
     monkeypatch.setitem(sys.modules, "psutil", None)
     monkeypatch.setattr(host, "_sysctl", lambda name: "137438953472")
