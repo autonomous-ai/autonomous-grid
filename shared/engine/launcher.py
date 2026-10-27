@@ -311,8 +311,21 @@ def start_llm(
     if gguf.has_mtp_head(model_path):
         cmd.extend(["--spec-type", "draft-mtp", "--spec-draft-n-max", str(profile.spec_draft_n_max)])
 
-    proc = subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh)
+    proc = _spawn_llama_server(cmd, log_fh)
     return LlamaProcess(proc=proc, port=port, log=log, ctx_size=ctx_size, parallel=parallel)
+
+
+def _spawn_llama_server(cmd: list[str], log_fh) -> subprocess.Popen:
+    """Start llama-server; a Windows App Control block names the file instead of raising a traceback
+    (llama.cpp's Windows build is unsigned, so Smart App Control may refuse it)."""
+    try:
+        return subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh)
+    except OSError as exc:
+        from shared import app_control
+
+        if app_control.blocked(exc):
+            raise SystemExit(app_control.explain(cmd[0])) from None
+        raise
 
 
 def _ctx_hint(proc: LlamaProcess) -> str:
