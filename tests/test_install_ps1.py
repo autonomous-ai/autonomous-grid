@@ -18,6 +18,18 @@ def _script() -> str:
     return INSTALL_PS1.read_text(encoding="utf-8")
 
 
+# Where the Windows installer is actually served. grid.autonomous.ai's Worker serves install.sh only, and
+# answers 404 for install.ps1 (checked 2026-10-27), so every Windows install line must point here.
+INSTALL_PS1_URL = "https://raw.githubusercontent.com/autonomous-ai/autonomous-grid/main/install.ps1"
+
+
+def test_every_windows_install_line_points_at_a_url_that_serves_install_ps1():
+    for path in ("README.md", "docs/claude-code-quickstart.md", "cli/update.py", "install.sh", "install.ps1"):
+        text = (REPO_ROOT / path).read_text(encoding="utf-8")
+        assert "grid.autonomous.ai/install.ps1" not in text, f"{path} names a URL that answers 404"
+        assert INSTALL_PS1_URL in text, path
+
+
 def test_installer_is_ascii():
     """Windows PowerShell 5.1 reads a BOM-less script as the ANSI code page, so one "—" or "✓" in a
     string turns into mojibake — or an unbalanced quote — when the file is run locally."""

@@ -1,6 +1,6 @@
 # Grid CLI installer for Windows.
 #
-#   powershell -ExecutionPolicy ByPass -c "irm https://grid.autonomous.ai/install.ps1 | iex"
+#   powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/autonomous-ai/autonomous-grid/main/install.ps1 | iex"
 #
 # The Windows twin of install.sh's wheel path (the one macOS takes): the universal release wheel,
 # installed with uv, gives you `grid` (+ the `agrid` alias). Two things are Windows-only:

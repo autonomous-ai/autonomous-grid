@@ -151,7 +151,7 @@ case "$(uname -s)" in
   Darwin) install_wheel ;;
   # Git Bash / MSYS / Cygwin on Windows: the wheel needs a Windows-native Python, so say which command.
   MINGW*|MSYS*|CYGWIN*)
-    die "this is the macOS/Linux installer. On Windows, in PowerShell:  powershell -ExecutionPolicy ByPass -c \"irm https://grid.autonomous.ai/install.ps1 | iex\"" ;;
+    die "this is the macOS/Linux installer. On Windows, in PowerShell:  powershell -ExecutionPolicy ByPass -c \"irm https://raw.githubusercontent.com/autonomous-ai/autonomous-grid/main/install.ps1 | iex\"" ;;
   *) die "unsupported OS: $(uname -s) — macOS and Linux only (Windows: see the docs)" ;;
 esac
 
