@@ -9,8 +9,14 @@ from __future__ import annotations
 import os
 import platform
 import re
+import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
+
+# Windows has neither ``os.sysconf`` nor ``os.statvfs``, so without the optional psutil every fallback
+# below used to read zeros there — 0 GB of RAM, which fits no model. It gets its own probes instead.
+_IS_WINDOWS = sys.platform == "win32"
 
 
 @dataclass
@@ -117,7 +123,53 @@ def cpu_brand() -> str:
                         return line.split(":", 1)[1].strip()
         except OSError:
             pass
+    if system == "Windows":
+        brand = _win_cpu_name()
+        if brand:
+            return brand
     return platform.processor() or platform.machine() or "unknown"
+
+
+def _win_cpu_name() -> str | None:
+    """The marketing name Windows records for CPU 0 ("Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz").
+    `platform.processor()` there is the family/model/stepping line instead, which names no product."""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+            value, _kind = winreg.QueryValueEx(key, "ProcessorNameString")
+    except (ImportError, OSError):
+        return None
+    return str(value).strip() or None
+
+
+def _win_memory_status() -> tuple[int, int, float] | None:
+    """``(total, available, percent in use)`` from ``GlobalMemoryStatusEx``, or None when it fails.
+    The same three numbers psutil reports on Windows, read the way psutil reads them."""
+    import ctypes
+    from ctypes import wintypes
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", wintypes.DWORD),
+            ("dwMemoryLoad", wintypes.DWORD),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    status = MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(MemoryStatusEx)
+    try:
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+    except (AttributeError, OSError):
+        return None
+    return int(status.ullTotalPhys), int(status.ullAvailPhys), float(status.dwMemoryLoad)
 
 
 def _memory_snapshot() -> tuple[int, int, float]:
@@ -128,6 +180,10 @@ def _memory_snapshot() -> tuple[int, int, float]:
         return int(mem.total), int(mem.available), float(mem.percent)
     except Exception:
         pass
+    if _IS_WINDOWS:
+        status = _win_memory_status()
+        if status:
+            return status
     if hasattr(os, "sysconf"):
         try:
             page_size = int(os.sysconf("SC_PAGE_SIZE"))
@@ -216,7 +272,11 @@ def memory_used_mb() -> float | None:
         mem = psutil.virtual_memory()
         used = int(mem.total) - int(mem.available)
     except Exception:  # noqa: BLE001 — a probe, never a failure path
-        used = _vm_stat_used_bytes()
+        if _IS_WINDOWS:
+            status = _win_memory_status()  # a real measurement, unlike the sysconf fallback
+            used = status[0] - status[1] if status else None
+        else:
+            used = _vm_stat_used_bytes()
     if used is None or used <= 0:
         return None
     return used / (1024 * 1024)
@@ -264,6 +324,8 @@ def _disk_snapshot(home_dir: str):
             free = usage.f_frsize * usage.f_bavail
 
         return Disk()
+    if _IS_WINDOWS:
+        return shutil.disk_usage(home_dir)  # GetDiskFreeSpaceExW: the same total/free pair
 
     class Disk:
         total = 0
