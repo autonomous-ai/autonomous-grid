@@ -5827,6 +5827,7 @@ def test_task_root_check_skips_owner_and_mode_on_windows(monkeypatch, tmp_path):
         task_agent._require_a_private_directory(not_a_dir)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits: Windows reports every directory as 0o777")
 def test_task_root_check_still_refuses_a_shared_directory_off_windows(monkeypatch, tmp_path):
     from remote import task_agent
 
