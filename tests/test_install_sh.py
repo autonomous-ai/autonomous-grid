@@ -233,7 +233,7 @@ def test_installer_on_windows_names_the_powershell_installer(tmp_path):
     res = subprocess.run(["bash", str(INSTALL_SH)], env={"HOME": str(tmp), "PATH": f"{stubbin}:/usr/bin:/bin"},
                          capture_output=True, text=True, timeout=60)
     assert res.returncode != 0
-    assert 'irm https://grid.autonomous.ai/install.ps1 | iex' in res.stderr
+    assert 'irm https://raw.githubusercontent.com/autonomous-ai/autonomous-grid/main/install.ps1 | iex' in res.stderr
 
 
 def test_installer_is_valid_bash():

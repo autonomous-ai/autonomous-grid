@@ -65,7 +65,9 @@ def _reinstall_hint(version: str | None = None) -> str:
     PowerShell one on Windows (which has no `curl … | bash`), install.sh everywhere else."""
     if _IS_WINDOWS:
         pin = f"$env:GRID_VERSION='{version}'; " if version else ""
-        return f'powershell -ExecutionPolicy ByPass -c "{pin}irm https://grid.autonomous.ai/install.ps1 | iex"'
+        # GitHub, not grid.autonomous.ai: that host serves install.sh only (404 for install.ps1).
+        return ('powershell -ExecutionPolicy ByPass -c "'
+                f'{pin}irm https://raw.githubusercontent.com/autonomous-ai/autonomous-grid/main/install.ps1 | iex"')
     pin = f"GRID_VERSION={version} " if version else ""
     return f"curl -fsSL https://grid.autonomous.ai/install.sh | {pin}bash"
 
