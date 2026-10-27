@@ -29,7 +29,7 @@ from remote import (
     codex_auth, codex_oauth, task_capacity, task_opt_in, throughput,
 )
 from shared.handlers import HANDLERS
-from shared import run_records
+from shared import control_signal, run_records
 from shared.system import node_hardware
 from shared.filelock import file_lock
 from shared.media import media_gating  # stdlib-only module; safe to import eagerly
@@ -37,6 +37,16 @@ from shared.models import api_catalog
 
 # One engine's probe result: (normalized llm_url, advertised models, upstream models, caps envelope).
 _EngineResults = list[tuple[str, list[str], list[str], dict[str, Any]]]
+
+_IS_WINDOWS = sys.platform == "win32"
+
+
+def _park_seconds() -> float:
+    """How long the main thread parks between checks of ``state.stop``. A lock wait is not
+    interruptible on Windows, so the ``KeyboardInterrupt`` a stop request raises (`shared.control_signal`)
+    would sit out the whole park; a second bounds it there. POSIX keeps its 60s — SIGTERM interrupts
+    the wait itself."""
+    return 1.0 if _IS_WINDOWS else 60
 
 
 # Engine read budget when the relay doesn't advertise one (older relay); matches its default.
@@ -231,6 +241,9 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _on_term)
+    # Windows delivers no SIGTERM to this console-less child and has no SIGHUP: `grid leave` and a re-join
+    # ask with files instead. The reload handler joins this watch once the reload watcher exists.
+    control_watch = control_signal.install_stop(grid_id, engine_id)
     # Block SIGHUP for the whole startup window: its default disposition is *terminate*, and a concurrent
     # re-join may `os.kill(pid, SIGHUP)` while we're still in engine bring-up/probe — before the handler
     # exists. Blocked, that signal is queued (not fatal) and delivered once we unblock, after the reload
@@ -332,6 +345,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             api_kind_by_url=_api_kinds_by_url(record),
             handlers=handlers,
         )
+        state.control_watch = control_watch
         # The codex fail-fast, after the state exists and before anything advertises: a codex spec
         # with no stored seat dies HERE naming the fix (still inside the try, so the record is
         # reaped like any died-before-registering engine), never as N per-job 401s.
@@ -1551,6 +1565,8 @@ class _ServeState:
         self._lock = threading.Lock()  # guards the snapshot swap + token + inflight (short sections)
         self._register_lock = threading.Lock()  # serializes reload-register vs heartbeat-404 re-register
         self.reload_requested = threading.Event()  # SIGHUP sets this; the reload loop waits on it
+        # Windows' stand-in for SIGTERM/SIGHUP (`shared.control_signal.Watch`); None on POSIX.
+        self.control_watch: control_signal.Watch | None = None
         self._refresh_lock = threading.Lock()  # serializes refreshes WITHOUT blocking token() readers
         self._access_token = access_token
         self._refresh_token = refresh_token
@@ -3228,7 +3244,7 @@ def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = Non
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGHUP})
     try:
         while not state.stop.is_set():
-            state.stop.wait(60)  # park; a worker/heartbeat may set stop, or SIGTERM unwinds here
+            state.stop.wait(_park_seconds())  # park; a worker/heartbeat may set stop, or SIGTERM unwinds here
     finally:
         state.stop.set()
         state.tasks_stop.set()  # retire task serving with the engine, not only on its own signal
@@ -3339,6 +3355,8 @@ def _start_reload_watcher(
         def _on_sighup(_signum, _frame):  # noqa: ANN001 — only sets the event; never raises, so PEP 475
             state.reload_requested.set()   # retries the interrupted long-poll
         signal.signal(signal.SIGHUP, _on_sighup)
+    if state.control_watch is not None:  # Windows: no SIGHUP, the re-join leaves a request file instead
+        state.control_watch.on("reload", state.reload_requested.set)
     thread = threading.Thread(target=_reload_loop, args=(state, engine_id), daemon=True)
     thread.start()
     return thread

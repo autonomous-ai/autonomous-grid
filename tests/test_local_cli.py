@@ -17014,6 +17014,70 @@ def test_serve_start_reload_watcher_installs_handler_and_thread(monkeypatch, tmp
             _sig.signal(_sig.SIGHUP, orig)
 
 
+def test_serve_start_reload_watcher_takes_reload_requests_on_windows(monkeypatch, tmp_path):
+    """Windows has no SIGHUP: the reload watcher registers `reload` on the child's control watch, and a
+    request then sets the same flag the SIGHUP handler sets (shared.control_signal)."""
+    from remote import serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(serve, "_reload_loop", lambda s, e: s.stop.wait(5))
+    registered: dict[str, object] = {}
+
+    class FakeWatch:
+        def on(self, kind, handler):
+            registered[kind] = handler
+
+    state.control_watch = FakeWatch()
+    thread = serve._start_reload_watcher(state, "remote", [], [], {"media": False})
+    try:
+        registered["reload"]()
+        assert state.reload_requested.is_set()
+    finally:
+        state.stop.set()
+        thread.join(2)
+
+
+def test_serve_child_installs_the_stop_watch_beside_its_sigterm_handler(monkeypatch, tmp_path):
+    from remote import serve
+    from shared import control_signal
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    record = {"grid_id": "n1", "signaling_url": "https://relay.example", "media": False, "engines": []}
+    monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
+    monkeypatch.setattr(serve.credentials, "node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(serve.signal, "signal", lambda *a: None)  # keep pytest's own handlers
+
+    class Installed(Exception):
+        pass
+
+    class WentPastIt(Exception):
+        pass
+
+    def install_stop(grid_id, engine_id):
+        raise Installed((grid_id, engine_id))
+
+    def past_it(*_a):  # the next step after the SIGTERM handler: never serve for real in a test
+        raise WentPastIt("the stop watch was not installed beside the SIGTERM handler")
+
+    monkeypatch.setattr(control_signal, "install_stop", install_stop)
+    monkeypatch.setattr(serve.signal, "pthread_sigmask", past_it, raising=False)
+    with pytest.raises(Installed) as caught:
+        serve.run_remote_engine_from_record("n1", "remote")
+    assert caught.value.args[0] == ("n1", "remote")
+
+
+def test_serve_park_wakes_every_second_on_windows_only(monkeypatch):
+    """A lock wait is not interruptible on Windows, so a stop request's KeyboardInterrupt would wait
+    out the whole park; POSIX keeps its 60s."""
+    from remote import serve
+
+    monkeypatch.setattr(serve, "_IS_WINDOWS", False)
+    assert serve._park_seconds() == 60
+    monkeypatch.setattr(serve, "_IS_WINDOWS", True)
+    assert serve._park_seconds() == 1.0
+
+
 def test_remote_engine_startup_missing_api_key_everywhere_exits_naming_fix(monkeypatch, tmp_path, capsys):
     """A respawned serve process whose record carries an API spec but whose key is gone from BOTH
     the key store and the environment must exit non-zero naming the re-join fix (in the engine log)

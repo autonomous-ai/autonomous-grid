@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import httpx
 
 from local import config
-from shared import detach, logging_setup, paths, run_records
+from shared import control_signal, detach, logging_setup, paths, run_records
 from shared.handlers import HANDLERS
 from shared.models import api_catalog
 from local import runtime
@@ -870,6 +870,8 @@ def run_engine_from_record(grid_id: str, engine_id: str) -> int:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _on_term)
+    # Windows delivers no SIGTERM to this console-less child: `grid leave` asks with a file instead.
+    control_signal.install_stop(grid_id, engine_id)
     return _run_engine(args)
 
 

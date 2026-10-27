@@ -42,6 +42,16 @@ if TYPE_CHECKING:  # runtime imports of remote.* stay lazy (see the module docst
 # keys the record (it can't mint a second identity); it is the grid-page display name (record["meta_name"]).
 _REMOTE_IDENTITY = run_records.REMOTE_IDENTITY
 
+_IS_WINDOWS = sys.platform == "win32"
+
+
+def _reload_signal() -> str:
+    """How this build's serve child takes a hot reload, stamped as ``reload_signal`` on the record it
+    spawns: SIGHUP on POSIX; a request file on Windows, which has no SIGHUP (`shared.control_signal`).
+    ``_hot_reloadable`` trusts only this platform's value, so a child that cannot read the request —
+    one an older build spawned on Windows — is respawned onto this build instead of left unreloaded."""
+    return "request-file" if _IS_WINDOWS else "sighup"
+
 # One-shot vendor model-listing call at `join --api` (key validation + whitelist intersection).
 _VENDOR_LIST_TIMEOUT = 15.0
 
@@ -1297,7 +1307,7 @@ def _hot_reloadable(
     singleton = live[0]
     if singleton.get("engine_id") != _REMOTE_IDENTITY:
         return False
-    if singleton.get("reload_signal") != "sighup":  # a pre-Slice-2 process has no SIGHUP handler (C1)
+    if singleton.get("reload_signal") != _reload_signal():  # a pre-Slice-2 process has no SIGHUP handler (C1)
         return False
     # A child older than System One support neither probes nor serves decision models: one reloaded into
     # it would be advertised as chat and every decision refused, while the join had said it was serving.
@@ -1351,6 +1361,19 @@ def _signal_reload(pid: int) -> None:
     os.kill(pid, signal.SIGHUP)
 
 
+def _request_reload(network_id: str, singleton: dict[str, object]) -> None:
+    """Windows' ``_signal_reload``: there is no SIGHUP, so leave a reload request for the serve child's
+    `shared.control_signal.Watch` (keyed by grid, never by pid). Like a delivered signal it is not waited
+    on — a request written during the child's bring-up stays queued until its reload watcher exists,
+    which is what the blocked SIGHUP gives POSIX. A singleton already gone raises the same
+    ``ProcessLookupError`` ``os.kill`` would, so the caller respawns and says so."""
+    if not run_records.record_alive(singleton):
+        raise ProcessLookupError(run_records.recorded_pid(singleton))
+    from shared import control_signal
+
+    control_signal.request(network_id, _REMOTE_IDENTITY, "reload")
+
+
 def _hot_reload_identity(
     network_id: str, record: dict[str, object], live: list[dict[str, object]]
 ) -> bool:
@@ -1402,7 +1425,10 @@ def _hot_reload_identity(
     service_truth.carry_service_truth(record, singleton)
     run_records.write_record(network_id, _REMOTE_IDENTITY, record)
     try:
-        _signal_reload(pid)
+        if _IS_WINDOWS:
+            _request_reload(network_id, singleton)
+        else:
+            _signal_reload(pid)
         return True
     except ProcessLookupError:  # the process died between the liveness check and the signal — respawn
         _respawn_identity(network_id, record, [])
@@ -1644,7 +1670,7 @@ def _build_record(
         "engine_id": engine_id,
         # Written by a build whose serve loop installs the SIGHUP reload handler, so a later `grid
         # join`/`leave` can hot-reload this identity in place instead of stop-respawning it (ADR 0010 C1).
-        "reload_signal": "sighup",
+        "reload_signal": _reload_signal(),
         "node_id": f"node-{uuid.uuid4().hex[:12]}",
         "grid_id": network_id,  # the remote network_id doubles as the run record's grid_id
         "meta_name": meta_name,  # grid-page display name (--name, or hostname); NOT the record key
@@ -2310,7 +2336,7 @@ def _leave_one_engine(
     # a job for the just-dropped model now forwards to the survivor instead of erroring; existing semantics.)
     record = dict(next(iter(survivors)))
     record["engine_id"] = _REMOTE_IDENTITY
-    record["reload_signal"] = "sighup"  # stamp it so a pre-handler identity self-heals on leave (like join)
+    record["reload_signal"] = _reload_signal()  # stamp it so a pre-handler identity self-heals on leave (like join)
     record["engines"] = remaining
     record["models"] = list(dict.fromkeys(m for spec in remaining for m in spec.get("models") or []))
     record["endpoint_url"] = remaining[0]["endpoint_url"] if len(remaining) == 1 else None

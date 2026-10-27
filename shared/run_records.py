@@ -77,8 +77,20 @@ def heartbeat_path(grid_id: str, engine_id: str) -> Path:
     return paths.engines_dir(grid_id) / f"{engine_id}.heartbeat"
 
 
+# The requests a detached child takes from a file instead of a signal (`shared.control_signal`): Windows
+# delivers no SIGTERM to a console-less child and has no SIGHUP at all.
+CONTROL_KINDS = ("stop", "reload")
+
+
+def control_path(grid_id: str, engine_id: str, kind: str) -> Path:
+    """A stop/reload request sidecar, beside the record — not ``.json`` for the reason
+    ``heartbeat_path`` gives. Addressed by (grid, engine), never by pid: on Windows the recorded pid can
+    be uv's ``grid.exe`` launcher rather than the Python child that reads the request."""
+    return paths.engines_dir(grid_id) / f"{engine_id}.{kind}"
+
+
 def remove_record(grid_id: str, engine_id: str) -> None:
-    """Drop one engine's on-disk footprint — the record **and** its heartbeat sidecar.
+    """Drop one engine's on-disk footprint — the record, its heartbeat sidecar and any request sidecar.
 
     One function rather than an unlink at each site on purpose: the sidecar has to go wherever the
     record goes, and the sites are scattered (the leave teardown, the child's own died-before-
@@ -88,6 +100,8 @@ def remove_record(grid_id: str, engine_id: str) -> None:
     incident this feature came from."""
     record_path(grid_id, engine_id).unlink(missing_ok=True)
     heartbeat_path(grid_id, engine_id).unlink(missing_ok=True)
+    for kind in CONTROL_KINDS:
+        control_path(grid_id, engine_id, kind).unlink(missing_ok=True)
 
 
 def write_record(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
@@ -558,6 +572,36 @@ def terminate_pid(pid: int) -> bool:
     return stopped_running(pid)
 
 
+# How long a Windows child has to pick up a stop request before it is treated as one that never will
+# (an old build, a wedged child, a stranger): its watch polls every 0.2s, so a second is five chances.
+_STOP_ACK_SECONDS = 1.0
+
+
+def _ask_to_stop(record: dict[str, Any], pid: int) -> None:
+    """Windows' SIGTERM: ask the child named by ``record`` to stop, and give it the grace to do so.
+
+    ``terminate_pid`` on Windows can only ``taskkill /F /T`` — a forced kill, so the engine never
+    unregisters and stays advertised until its node TTL runs out, where POSIX's SIGTERM lets it leave
+    cleanly. The child's `shared.control_signal.Watch` turns this request into the same
+    ``KeyboardInterrupt`` its SIGTERM handler raises; the forced kill after it is then a no-op on a dead
+    pid, or the backstop when the request went unanswered.
+
+    Here, not in ``terminate_pid``: that one is token-free and also takes the orphan sweep's argv
+    matches, which name no record and would only wait out the acknowledgement window for nothing.
+    """
+    grid_id, engine_id = record.get("grid_id"), record.get("engine_id")
+    if not (isinstance(grid_id, str) and grid_id and isinstance(engine_id, str) and engine_id):
+        return  # a record that names no engine (the grid server's identity) has no watch to ask
+    from shared import control_signal  # it imports this module
+
+    control_signal.request(grid_id, engine_id, "stop")
+    if not control_signal.acknowledged(grid_id, engine_id, "stop", timeout=_STOP_ACK_SECONDS):
+        return
+    deadline = time.time() + _STOP_GRACE_SECONDS
+    while time.time() < deadline and pid_alive(pid):
+        time.sleep(0.2)
+
+
 def discard_own_record(grid_id: str, engine_id: str) -> bool:
     """Drop the run record of an engine child that is exiting **before it ever registered** — unless
     that record now points at a *different, live* process. Returns whether it removed the record.
@@ -881,6 +925,8 @@ def terminate_recorded(record: dict[str, Any]) -> Teardown:
 
     stopped_as_ours = False
     if verdict in (RecordVerdict.LIVE_OURS, RecordVerdict.LIVE_UNVERIFIED):
+        if _IS_WINDOWS:
+            _ask_to_stop(record, pid)
         if not terminate_pid(pid):
             return Teardown(survivor=pid, verified=True)  # survived SIGKILL — loud, and it IS ours
         stopped_as_ours = True
