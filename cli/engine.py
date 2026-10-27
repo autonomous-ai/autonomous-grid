@@ -84,6 +84,26 @@ def cmd_engine_list(args: argparse.Namespace) -> int:
     return provider.cmd_engines(args)
 
 
+def _install_llama_cpp_windows(args: argparse.Namespace, installer, gpus: list) -> int:
+    """Windows gets upstream's own CUDA build — unlike Linux, where CUDA has to be compiled — so there
+    is nothing to build here, and `--from-source` / `--target-sm` (which pick a CUDA architecture to
+    compile for) have no meaning."""
+    if args.from_source or args.target_sm:
+        raise SystemExit(
+            "On Windows the official build already includes CUDA for NVIDIA GPUs; "
+            "run `grid engine install llama.cpp` without --from-source / --target-sm."
+        )
+    if gpus:
+        print(f"Detected GPUs: {', '.join(item.compute_cap_sm for item in gpus)}")
+        installer.install_windows_prebuilt("cuda")
+        print("\n✓ Engine installed — it uses your NVIDIA GPU via CUDA.")
+    else:
+        installer.install_windows_prebuilt("cpu")
+        print("\n✓ Engine installed — no GPU detected, so it runs on the CPU.")
+    print("\nNext:  grid catalog")
+    return 0
+
+
 def _install_llama_cpp(args: argparse.Namespace) -> int:
     from shared.engine import installer
 
@@ -100,6 +120,9 @@ def _install_llama_cpp(args: argparse.Namespace) -> int:
         return 0
 
     from shared.system import gpu
+
+    if installer.is_windows():
+        return _install_llama_cpp_windows(args, installer, gpu.enumerate_gpus())
 
     gpus = gpu.enumerate_gpus()
     sm_required = (args.target_sm,) if args.target_sm else tuple(item.compute_cap_sm for item in gpus)

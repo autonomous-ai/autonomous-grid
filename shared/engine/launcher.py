@@ -118,13 +118,15 @@ def has_gpu_backend() -> bool:
     # this function would then report as "layout not recognised" — i.e. as a GPU build.
     engine_dir = paths.llama_server_bin().resolve().parent
     try:
-        names = [entry.name.lower() for entry in engine_dir.iterdir()]
+        # Windows names the same libraries without the `lib` prefix (`ggml-cpu-haswell.dll`), so the
+        # prefix is folded away before matching.
+        names = [entry.name.lower().removeprefix("lib") for entry in engine_dir.iterdir()]
     except OSError:
         return True
-    if not any(name.startswith("libggml-cpu") for name in names):
+    if not any(name.startswith("ggml-cpu") for name in names):
         return True  # not a layout we recognise — do not infer anything from it
     return any(
-        name.startswith(f"libggml-{backend}") for name in names for backend in _GPU_BACKENDS
+        name.startswith(f"ggml-{backend}") for name in names for backend in _GPU_BACKENDS
     )
 
 

@@ -242,6 +242,11 @@ def bin_dir() -> Path:
 
 
 def llama_server_bin() -> Path:
+    """The one path the rest of Grid runs llama-server from. On Windows it is the installed exe itself:
+    Windows loads a program's DLLs from the program's own directory, so the exe must stay beside them,
+    and a symlink to it needs admin rights or Developer Mode."""
+    if _IS_WINDOWS:
+        return llama_prefix_dir() / "llama-server.exe"
     return bin_dir() / "llama-server"
 
 
