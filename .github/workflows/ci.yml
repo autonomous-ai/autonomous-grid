@@ -41,9 +41,10 @@ jobs:
   # exiting 0 on a non-terminating error, taskkill /F /T — is precisely what a mocked subprocess
   # cannot vouch for. This job is the only place it runs for real.
   #
-  # Deliberately ONE file, not the suite: the rest of tests/ has never been run on Windows and fails
-  # there for unrelated reasons (POSIX-only signals and locking). Widening it is its own piece of
-  # work, and a job that is allowed to be red would prove nothing, so this one blocks.
+  # Not the whole suite yet: most of tests/ has never been run on Windows. The files listed are the ones
+  # the Windows port is pinned by (spawning detached children, stop/reload requests, host facts, the
+  # llama.cpp install, piped output, the installer) — run for real here, where their skipif-win32 tests
+  # reach the kernel. A job that is allowed to be red would prove nothing, so this one blocks.
   test-windows:
     runs-on: windows-latest
     steps:
@@ -59,3 +60,43 @@ jobs:
         run: uv run --extra dev python -c "import sys; sys.exit(0 if sys.platform == 'win32' else 1)"
       - name: Pytest (Windows-native orphan sweep)
         run: uv run --extra dev pytest tests/test_windows_orphan_sweep.py -q
+      - name: Pytest (the Windows port)
+        run: >-
+          uv run --extra dev pytest -q
+          tests/test_detach.py tests/test_control_signal.py tests/test_host_windows.py
+          tests/test_engine_installer_windows.py tests/test_comfyui_windows.py
+          tests/test_stdio_encoding.py tests/test_install_ps1.py
+
+  # install.ps1 the way a person runs it, against the wheel built from this commit, then the first
+  # thing anyone does with it: start a local grid in the background, reach it, stop it. That is the
+  # detached `__server` child, its health check and its teardown on real Windows.
+  install-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Build the wheel
+        run: uv build --wheel
+      - name: Install with install.ps1
+        shell: powershell
+        run: |
+          $env:GRID_WHEEL_URL = (Get-ChildItem dist\grid-*-py3-none-any.whl | Select-Object -First 1).FullName
+          & .\install.ps1
+          $bin = (uv tool dir --bin).Trim()
+          "$bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: grid start, reach it, grid stop
+        shell: powershell
+        run: |
+          $env:GRID_HOME = Join-Path $env:RUNNER_TEMP 'grid-home'
+          grid --version
+          grid mode local
+          grid start --port 18090
+          if ($LASTEXITCODE -ne 0) { throw 'grid start failed' }
+          $answer = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18090/grid/info
+          if ($answer.StatusCode -ne 200) { throw "grid did not answer: $($answer.StatusCode)" }
+          grid info
+          grid stop
+          if ($LASTEXITCODE -ne 0) { throw 'grid stop failed' }
