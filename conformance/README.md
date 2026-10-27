@@ -6,7 +6,7 @@ grid-platform ticket 13 (ADR 0004). Built on ticket 12's `grid-protocol`: every 
 
 | Client | Installed from | Driven as |
 |---|---|---|
-| public `grid` 0.3.47 – 0.3.59 | each version's **release wheel** on GitHub Releases | the CLI a user runs |
+| public `grid` 0.3.47 – 0.3.60 | each version's **release wheel** on GitHub Releases | the CLI a user runs |
 | the harness's pinned `grid` | its version, read from the manifest the harness daemon follows | the same |
 | the harness daemon's own reads | `test_harness_reads.py`, checked against `grid-protocol` | credential-less HTTP, as `gridReader.ts` |
 
