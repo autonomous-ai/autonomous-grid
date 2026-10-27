@@ -56,14 +56,14 @@ def start(workspace_path: Path, config_path: Path, *, verb: str = "run",
     # Not [sys.executable, "-m", "cli", ...]: on the shipped Linux binary there is no Python at
     # runtime, so Popen succeeds, the child exits 2 on "-m", and the page blames the model choice
     # for a broken launcher. Same helper the scheduler and every other subprocess here uses.
+    from shared import detach
     from train.schedule import _cli_argv
 
-    process = subprocess.Popen(
+    process = detach.popen(  # survives the server; Ctrl-C on the server won't kill training
         [*_cli_argv(), "train", verb, "--config", str(config_path), *(extra or [])],
         stdout=handle,
         stderr=subprocess.STDOUT,
         cwd=str(workspace_path),
-        start_new_session=True,  # survives the server; Ctrl-C on the server won't kill training
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
     record = {"pid": process.pid, "started": time.time(), "config": str(config_path),

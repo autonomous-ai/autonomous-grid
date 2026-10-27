@@ -40,7 +40,7 @@ from typing import Any
 
 import httpx
 
-from shared import jsonio, paths, release
+from shared import detach, jsonio, paths, release
 from shared._version import __version__
 
 # How old the cached answer must be before another check is worth a spawn — and how long a shown
@@ -249,12 +249,11 @@ def maybe_spawn_check(args: argparse.Namespace | None, *, json_requested: bool =
         argv = _self_command("__update-check")
         if not argv:
             return
-        subprocess.Popen(  # noqa: S603 — fixed argv, no shell; detached so the user's command exits first
+        detach.popen(  # noqa: S603 — fixed argv, no shell; detached so the user's command exits first
             argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
         )
     except Exception:
         pass

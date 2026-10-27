@@ -8,7 +8,7 @@ from pathlib import Path
 
 import httpx
 
-from shared import logging_setup, paths
+from shared import detach, logging_setup, paths
 
 
 def start_media_server(*, port: int, comfyui_url: str) -> subprocess.Popen:
@@ -17,7 +17,7 @@ def start_media_server(*, port: int, comfyui_url: str) -> subprocess.Popen:
     paths.ensure_all()
     log_path = paths.logs_dir() / f"media_provider_{port}.log"
     log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
-    proc = subprocess.Popen(
+    proc = detach.popen(
         _cli_subprocess_command() + [
             "__media-server",
             "--port",
@@ -27,7 +27,6 @@ def start_media_server(*, port: int, comfyui_url: str) -> subprocess.Popen:
         ],
         stdout=log,
         stderr=subprocess.STDOUT,
-        start_new_session=True,
     )
     wait_for_media_server(proc, port, log_path)
     return proc
@@ -45,7 +44,7 @@ def start_api_media_server(*, port: int, api_kind: str, base_url: str, api_key: 
     paths.ensure_all()
     log_path = paths.logs_dir() / f"media_api_{api_kind}_{port}.log"
     log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
-    proc = subprocess.Popen(
+    proc = detach.popen(
         _cli_subprocess_command() + [
             "__api-media-server",
             "--port", str(port),
@@ -54,7 +53,6 @@ def start_api_media_server(*, port: int, api_kind: str, base_url: str, api_key: 
         ],
         stdout=log,
         stderr=subprocess.STDOUT,
-        start_new_session=True,
         env={**os.environ, "GRID_API_MEDIA_KEY": api_key, "PYTHONUNBUFFERED": "1"},
     )
     wait_for_media_server(proc, port, log_path)

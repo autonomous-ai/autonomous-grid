@@ -192,6 +192,19 @@ def test_spawn_when_due_not_when_fresh(grid_home, monkeypatch):
     assert len(calls) == 1  # fresh cache → no spawn
 
 
+def test_spawn_on_windows_detaches_with_creation_flags(grid_home, monkeypatch):
+    """`start_new_session` is ignored on Windows, so the check must go through `shared.detach`."""
+    from shared import detach
+
+    monkeypatch.setattr(detach, "_IS_WINDOWS", True)
+    calls: list[dict] = []
+    monkeypatch.setattr(update.subprocess, "Popen", lambda argv, **kw: calls.append(kw) or object())
+    update.maybe_spawn_check(_ns())
+    assert len(calls) == 1
+    assert calls[0]["creationflags"] & detach.CREATE_NO_WINDOW
+    assert "start_new_session" not in calls[0]
+
+
 def test_spawn_suppressions_touch_no_process(grid_home, monkeypatch):
     def boom(*a, **k):
         raise AssertionError("a suppressed run must not spawn anything")

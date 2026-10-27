@@ -27,7 +27,7 @@ from typing import NamedTuple
 import uuid
 from typing import TYPE_CHECKING
 
-from shared import logging_setup, orphan_sweep, paths, run_records
+from shared import detach, logging_setup, orphan_sweep, paths, run_records
 from shared.filelock import file_lock
 from shared.models import api_catalog
 
@@ -1699,11 +1699,10 @@ def _spawn_remote_engine(
     # and reordering those two statements must not silently reopen issue 19's hole.
     paths.ensure_dir(log_path.parent)
     log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
-    return subprocess.Popen(
+    return detach.popen(
         runtime.cli_command() + [run_records.REMOTE_ENGINE_MARKER, network_id, engine_id],
         stdout=log,
         stderr=subprocess.STDOUT,
-        start_new_session=True,
         env={**os.environ, "PYTHONUNBUFFERED": "1", **(env_overrides or {})},
     )
 

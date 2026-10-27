@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 import httpx
 
 from local import config
-from shared import logging_setup, paths, run_records
+from shared import detach, logging_setup, paths, run_records
 
 
 GRID_TYPE = "lan-permissionless"
@@ -167,11 +167,10 @@ def start_grid(cfg: dict[str, Any]) -> int:
     log_path = paths.grid_dir(cfg["grid_id"]) / "server.err"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = logging_setup.cap_and_open_append(log_path, logging_setup.ERR_LOG_MAX_BYTES)
-    proc = subprocess.Popen(
+    proc = detach.popen(
         _cli_subprocess_command() + ["__server", cfg["grid_id"]],
         stdout=log,
         stderr=subprocess.STDOUT,
-        start_new_session=True,
     )
     cfg.update(_stamp_server(proc.pid))
     cfg["updated_at"] = utc_now()
