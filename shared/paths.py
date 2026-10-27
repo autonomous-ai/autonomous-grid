@@ -5,6 +5,7 @@ import os
 import stat
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -229,8 +230,16 @@ def grids_dir() -> Path:
     return grid_home() / "grids"
 
 
+def _dir_name(grid_id: str) -> str:
+    """``grid_id`` as one directory name. A grid joined by URL has the URL as its id
+    (`local/config.select_grid`): POSIX takes it as-is and keeps its paths, where existing records
+    live, but Windows refuses the ``:`` (WinError 123), so there it is URL-encoded
+    (``http%3A%2F%2Fhost%3A8090``). An ordinary id like ``ag-home-…`` encodes to itself."""
+    return quote(grid_id, safe="") if _IS_WINDOWS else grid_id
+
+
 def grid_dir(grid_id: str) -> Path:
-    return grids_dir() / grid_id
+    return grids_dir() / _dir_name(grid_id)
 
 
 def ensure_base() -> None:
@@ -281,7 +290,7 @@ def run_dir() -> Path:
 
 
 def engines_dir(grid_id: str) -> Path:
-    return run_dir() / "engines" / grid_id
+    return run_dir() / "engines" / _dir_name(grid_id)
 
 
 def llama_log(port: int) -> Path:
