@@ -21,6 +21,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    # `pytest -n auto` — the suite is process-isolated (tmp GRID_HOME per test), and CI runs it on
+    # every runner core: measured 554s serial → 166s on 4 workers, same results.
+    "pytest-xdist>=3.6",
     "ruff>=0.6",
     # tests/test_train_adapters.py builds synthetic tensors — no torch, no mlx, no download — so it
     # is cheap enough to always run, and it covers the peft <-> MLX key mapping and transpose a

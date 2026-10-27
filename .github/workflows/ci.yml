@@ -33,8 +33,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      # One worker per runner core (4 on ubuntu-latest). The suite is process-isolated — every test
+      # gets its own GRID_HOME — so splitting it changes nothing but the wall clock.
       - name: Pytest
-        run: uv run --extra dev pytest
+        run: uv run --extra dev pytest -n auto
 
   # `grid leave`'s orphan sweep shells out to PowerShell/WMI on Windows, and that command's real
   # behaviour — the -EncodedCommand round-trip, the console code-page decode, PowerShell's habit of
