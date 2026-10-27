@@ -72,7 +72,10 @@ class Watch:
     """The child's side: poll for requests and hand each to its handler."""
 
     def __init__(self, grid_id: str, engine_id: str, interval: float) -> None:
-        self._grid_id, self._engine_id, self._interval = grid_id, engine_id, interval
+        # Resolved once: a process has one GRID_HOME, and reading it again on every poll is how a
+        # watch left running in one test took another test's stop request.
+        self._paths = {kind: run_records.control_path(grid_id, engine_id, kind) for kind in run_records.CONTROL_KINDS}
+        self._interval = interval
         self._handlers: dict[str, Callable[[], None]] = {}
         self._closed = threading.Event()
         self._thread = threading.Thread(target=self._run, name="grid-control-watch", daemon=True)
@@ -105,7 +108,7 @@ class Watch:
     def _run(self) -> None:
         while not self._closed.wait(self._interval):
             for kind, handler in list(self._handlers.items()):
-                path = run_records.control_path(self._grid_id, self._engine_id, kind)
+                path = self._paths[kind]
                 try:
                     path.unlink()
                 except FileNotFoundError:

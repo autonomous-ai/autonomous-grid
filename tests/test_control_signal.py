@@ -93,6 +93,25 @@ def test_a_reload_written_before_the_watch_starts_is_delivered_once_registered(g
         watch.close()
 
 
+def test_a_watch_keeps_the_directory_it_started_in(grid_home, windows, monkeypatch, tmp_path):
+    """A watch resolves its request files once, at start. Re-reading GRID_HOME on every poll let a
+    watch left running in one test pick up a stop request written under another test's GRID_HOME —
+    it interrupted a pytest worker on real Windows."""
+    calls: list[str] = []
+    watch = control_signal.Watch.start(GRID, ENGINE, interval=0.01)
+    try:
+        watch.on("stop", lambda: calls.append("stop"))
+        other_home = tmp_path / "other-home"
+        monkeypatch.setenv("GRID_HOME", str(other_home))
+        run_records.record_path(GRID, ENGINE).parent.mkdir(parents=True)
+        control_signal.request(GRID, ENGINE, "stop")
+        time.sleep(0.1)
+        assert calls == [], "a request under a different GRID_HOME is not this watch's"
+        assert run_records.control_path(GRID, ENGINE, "stop").exists()
+    finally:
+        watch.close()
+
+
 def test_acknowledged_false_removes_the_unconsumed_file(grid_home, windows):
     control_signal.request(GRID, ENGINE, "stop")
     started = time.monotonic()
