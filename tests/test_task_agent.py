@@ -5582,6 +5582,15 @@ def test_the_default_root_is_per_platform(platform, expected):
     assert task_agent.default_workspace_root(platform) == expected
 
 
+def test_the_default_root_on_windows_is_inside_the_profile(monkeypatch):
+    """`/var/grid` on Windows is `C:\\var\\grid`, and a folder made at the root of a drive inherits an
+    ACL other local accounts can read. `%LOCALAPPDATA%` is private to the account by default."""
+    from remote import task_agent
+
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\someone\AppData\Local")
+    assert task_agent.default_workspace_root("win32") == r"C:\Users\someone\AppData\Local\grid"
+
+
 @pytest.mark.parametrize("platform", ["darwin", "linux"])
 def test_both_platform_defaults_leave_transcript_headroom(platform):
     """Measured for BOTH, not just the one this test happens to run on — a default that flattened
@@ -5793,3 +5802,37 @@ def test_the_sandbox_package_probe_does_not_run_with_the_sandbox_off(monkeypatch
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
 
     task_agent.preflight_before_serving()
+
+
+# ------------------------------------------------------------------ Windows
+
+
+def test_task_root_check_skips_owner_and_mode_on_windows(monkeypatch, tmp_path):
+    """Windows has no `os.getuid`, and `os.stat` reports every directory as 0o777 — so the POSIX owner
+    and mode checks either crashed or refused every folder with `chmod` advice. They are a no-op there
+    by construction (ADR 0027); privacy on Windows is the profile directory's ACL."""
+    from remote import task_agent
+
+    monkeypatch.setattr(task_agent, "_IS_WINDOWS", True)
+    monkeypatch.delattr(task_agent.os, "getuid", raising=False)
+    root = tmp_path / "tasks"
+    root.mkdir()
+    root.chmod(0o777)
+
+    task_agent._require_a_private_directory(root)  # no raise
+
+    not_a_dir = tmp_path / "file"
+    not_a_dir.write_text("x")
+    with pytest.raises(OSError, match="is not a directory"):
+        task_agent._require_a_private_directory(not_a_dir)
+
+
+def test_task_root_check_still_refuses_a_shared_directory_off_windows(monkeypatch, tmp_path):
+    from remote import task_agent
+
+    monkeypatch.setattr(task_agent, "_IS_WINDOWS", False)
+    root = tmp_path / "tasks"
+    root.mkdir()
+    root.chmod(0o755)
+    with pytest.raises(OSError, match="can be read by other accounts"):
+        task_agent._require_a_private_directory(root)
