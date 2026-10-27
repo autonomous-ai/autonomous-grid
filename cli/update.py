@@ -25,6 +25,7 @@ the same reason install.sh:56 does it this way.
 from __future__ import annotations
 
 import argparse
+import base64
 import builtins
 import hashlib
 import importlib.util
@@ -40,7 +41,7 @@ from typing import Any
 
 import httpx
 
-from shared import detach, jsonio, paths, release
+from shared import detach, jsonio, paths, release, win_paths
 from shared._version import __version__
 
 # How old the cached answer must be before another check is worth a spawn — and how long a shown
@@ -330,8 +331,11 @@ def cmd_update(args: argparse.Namespace) -> int:
         return 0
     if _is_binary_build():
         _update_binary(latest)
-    else:
-        _update_wheel(latest)
+    elif not _update_wheel(latest):
+        # Windows: the install cannot be replaced while this command runs from it (`_reinstall_after_exit`).
+        print(f"Updating grid {current} → {latest}: it finishes in this window a few seconds after this "
+              "command exits.")
+        return 0
     print(f"Updated grid {current} → {latest}.")
     print("Any grid already running keeps serving the old version until you restart it "
           "(`grid stop`, then `grid start`).")
@@ -466,12 +470,15 @@ def _running_grid_pids() -> list[int]:
     return [pid for pid in pids if pid > 0 and run_records.pid_alive(pid)]
 
 
-def _update_wheel(latest: str) -> None:
+def _update_wheel(latest: str) -> bool:
     """The uv-tool shape (macOS's install path, and any wheel install): hand the release wheel
     back to ``uv tool install --force``, exactly as install.sh:``install_macos_wheel`` does.
 
     With the ``train`` extra when this install has it: the reinstall replaces the requirement
-    whole, so the plain wheel would drop torch and the rest without a word (measured, uv 0.11.12)."""
+    whole, so the plain wheel would drop torch and the rest without a word (measured, uv 0.11.12).
+
+    Returns whether the CLI is already replaced: ``False`` on Windows, where the reinstall finishes
+    once this command exits (``_reinstall_after_exit``)."""
     if _IS_WINDOWS and (running := _running_grid_pids()):
         raise SystemExit(
             f"a grid from this install is still running (pid {', '.join(map(str, running))}). On Windows "
@@ -489,15 +496,60 @@ def _update_wheel(latest: str) -> None:
             f"reinstall the wheel with — install uv (https://astral.sh/uv) or rerun the installer:  "
             f"{_reinstall_hint()}"
         )
-    argv = [uv, "tool", "install", "--force"]
     if _IS_WINDOWS:
-        # Keep the interpreter this grid already runs on. Left to choose, uv may fetch its own CPython
-        # build, which is unsigned — and Smart App Control blocks unsigned binaries, so the upgrade
-        # would leave a grid that cannot start (measured on Windows 11 with it in enforce mode).
-        argv += ["--python", getattr(sys, "_base_executable", None) or sys.executable]
+        _reinstall_after_exit(uv, getattr(sys, "_base_executable", None) or sys.executable, requirement, latest)
+        return False
     try:
-        result = subprocess.run([*argv, requirement])
+        result = subprocess.run([uv, "tool", "install", "--force", requirement])
     except OSError as exc:
         raise SystemExit(f"could not run `{uv} tool install`: {exc}") from None
     if result.returncode != 0:
         raise SystemExit(f"`uv tool install` failed for {wheel_url} (exit {result.returncode}).")
+    return True
+
+
+def _ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _reinstall_after_exit(uv: str, python: str, requirement: str, latest: str) -> None:
+    """Windows: hand the reinstall to a PowerShell step that runs once this install is closed.
+
+    Windows cannot replace a file in use, and this process runs from the very install uv replaces:
+    `uv tool install --force` from here failed half-way ("failed to remove directory ...\\Scripts: Access
+    is denied", after deleting the packages) and left a grid that could not start (`No module named cli`,
+    measured on Windows 11). So the step, outside the install, waits until no process runs from it (this
+    one, its venv launcher, uv's grid.exe), reinstalls, keeps the .cmd launchers install.ps1 put in place
+    of a grid.exe Smart App Control blocked, and reports in this same terminal."""
+    prefix = sys.prefix.rstrip("\\") + "\\"
+    # The interpreter this grid already runs on: left to choose, uv may fetch its own CPython build,
+    # which is unsigned, and Smart App Control blocks it (measured on Windows 11 in enforce mode).
+    command = f"& {_ps_quote(uv)} tool install --force --python {_ps_quote(python)} {_ps_quote(requirement)}"
+    script = "\n".join([
+        "$ErrorActionPreference = 'Continue'",
+        f"$prefix = {_ps_quote(prefix)}",
+        f"$bin = (& {_ps_quote(uv)} tool dir --bin).Trim()",
+        "$deadline = (Get-Date).AddSeconds(60)",
+        "do {",
+        "    $busy = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and (",
+        "        $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or",
+        "        $_.ExecutablePath -ieq \"$bin\\grid.exe\" -or $_.ExecutablePath -ieq \"$bin\\agrid.exe\") })",
+        "    if ($busy.Count -gt 0) { Start-Sleep -Milliseconds 300 }",
+        "} while ($busy.Count -gt 0 -and (Get-Date) -lt $deadline)",
+        f"$out = {command} 2>&1 | Out-String",
+        "if ($LASTEXITCODE -ne 0) { Write-Host \"grid update failed (uv exit $LASTEXITCODE):\"; Write-Host $out }",
+        "else {",
+        "    foreach ($name in 'grid', 'agrid') {",
+        "        if ((Test-Path -LiteralPath \"$bin\\$name.cmd\") -and (Test-Path -LiteralPath \"$bin\\$name.exe\")) {",
+        "            Move-Item -Force -LiteralPath \"$bin\\$name.exe\" -Destination \"$bin\\$name.exe.blocked\"",
+        "        }",
+        "    }",
+        f"    Write-Host 'Updated grid {__version__} -> {latest}.'",
+        "}",
+    ])
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    powershell = win_paths.system32_tool("WindowsPowerShell\\v1.0\\powershell.exe")  # by absolute path (ADR 0024)
+    subprocess.Popen(  # noqa: S603 — fixed script; shares this terminal so it can report back
+        [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+        stdin=subprocess.DEVNULL,
+    )
