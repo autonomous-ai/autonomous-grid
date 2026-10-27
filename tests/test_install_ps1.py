@@ -71,6 +71,24 @@ def test_installer_refuses_to_reinstall_under_a_running_grid():
     assert "grid stop" in _script()
 
 
+def test_installer_falls_back_to_a_cmd_launcher_when_grid_exe_is_blocked():
+    """uv's grid.exe is unsigned and rewritten per install; Smart App Control blocks some installs' copy
+    (measured on Windows 11, v0.3.60). The same install's python.exe is PSF-signed, so a .cmd launcher
+    that runs it takes over — only when the .exe was actually blocked."""
+    code = _code()
+    assert "Application Control" in code, "the fallback keys on the block itself, not on every install"
+    assert "-m cli %*" in _script()  # on the npm line, whose `#_undefined_#` `_code` would cut
+    assert ".exe.blocked" in code, "the blocked .exe is moved aside, or `grid` still resolves to it"
+    for name in ("grid", "agrid"):
+        assert f"'{name}'" in code
+
+
+def test_the_cmd_launcher_suppresses_the_terminate_batch_job_prompt():
+    """npm cmd-shim's form: ending the batch context before the program runs means Ctrl+C never asks
+    "Terminate batch job (Y/N)?" (measured on Windows 11 with Ctrl+Break, against a plain .cmd)."""
+    assert "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & " in _script()
+
+
 def test_installer_ends_with_the_same_next_steps_as_install_sh():
     sh = INSTALL_SH.read_text(encoding="utf-8")
     for line in ("grid login       # sign in, then pick from the grids you can use",

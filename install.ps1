@@ -147,6 +147,33 @@ $binDir = (& $uv tool dir --bin).Trim()
 $grid = Join-Path $binDir 'grid.exe'
 if (-not (Test-Path -LiteralPath $grid)) { Fail "installed, but $grid is missing" }
 
+# uv's grid.exe is unsigned and rewritten per install, and Smart App Control blocks some installs' copy
+# outright (measured on Windows 11). The install's own python.exe is signed by the PSF, so when Windows
+# refuses the .exe, grid/agrid become .cmd launchers that run it - and the blocked .exe is moved aside,
+# or `grid` would still resolve to it (.EXE comes before .CMD in PATHEXT). A .exe that runs is kept,
+# and launchers left from an earlier blocked install are removed.
+$blocked = $false
+try { & $grid --version *> $null } catch { $blocked = ("$_" -match 'Application Control') }
+$venvPython = Join-Path $toolRoot 'grid\Scripts\python.exe'
+foreach ($name in 'grid', 'agrid') {
+    $exe = Join-Path $binDir "$name.exe"
+    $cmd = Join-Path $binDir "$name.cmd"
+    $aside = Join-Path $binDir "$name.exe.blocked"
+    if ($blocked) {
+        # npm cmd-shim's form: ending the batch context before python runs means Ctrl+C never asks
+        # "Terminate batch job (Y/N)?" (measured against a plain .cmd).
+        $launch = 'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "' + $venvPython + '" -m cli %*'
+        [IO.File]::WriteAllLines($cmd, @('@ECHO off', 'SETLOCAL', $launch), [Text.Encoding]::ASCII)
+        if (Test-Path -LiteralPath $exe) { Move-Item -Force -LiteralPath $exe -Destination $aside }
+    } else {
+        Remove-Item -Force -LiteralPath $cmd, $aside -ErrorAction SilentlyContinue
+    }
+}
+if ($blocked) {
+    $grid = Join-Path $binDir 'grid.cmd'
+    Say 'Windows (Smart App Control) blocked grid.exe; grid starts through its signed Python instead.'
+}
+
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (-not (($userPath -split ';') -contains $binDir)) {
     Say "Add $binDir to PATH:  uv tool update-shell   (then open a new terminal)"

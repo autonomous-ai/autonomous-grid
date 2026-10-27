@@ -28,6 +28,8 @@ import os
 import subprocess
 from typing import Any
 
+from shared import app_control
+
 _IS_WINDOWS = os.name == "nt"
 
 # Literal values from WinBase.h rather than ``subprocess.CREATE_*``: those attributes exist only on
@@ -48,9 +50,14 @@ def popen(argv: list[str], **kwargs: Any) -> subprocess.Popen:
     if not _IS_WINDOWS:
         return subprocess.Popen(argv, start_new_session=True, **kwargs)
     try:
-        return subprocess.Popen(argv, creationflags=WINDOWS_FLAGS, **kwargs)
+        try:
+            return subprocess.Popen(argv, creationflags=WINDOWS_FLAGS, **kwargs)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != _ERROR_ACCESS_DENIED:
+                raise
+        # The job this process runs in does not allow breakaway: detach from the console all the same.
+        return subprocess.Popen(argv, creationflags=WINDOWS_FLAGS & ~CREATE_BREAKAWAY_FROM_JOB, **kwargs)
     except OSError as exc:
-        if getattr(exc, "winerror", None) != _ERROR_ACCESS_DENIED:
-            raise
-    # The job this process runs in does not allow breakaway: detach from the console all the same.
-    return subprocess.Popen(argv, creationflags=WINDOWS_FLAGS & ~CREATE_BREAKAWAY_FROM_JOB, **kwargs)
+        if app_control.blocked(exc):
+            raise SystemExit(app_control.explain(argv[0])) from None
+        raise

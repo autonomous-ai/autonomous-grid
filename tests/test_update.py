@@ -277,6 +277,24 @@ def test_posix_update_argv_is_unchanged(grid_home, monkeypatch):
     assert runs == [["/opt/uv/bin/uv", "tool", "install", "--force", update.release.wheel_url("0.4.0")]]
 
 
+def _handed_off(monkeypatch) -> list[str]:
+    """The PowerShell step `grid update` hands the Windows reinstall to, decoded; asserts that the
+    update itself ran no uv (it cannot replace the install it runs from)."""
+    import base64
+
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(update.subprocess, "Popen", lambda argv, **kw: spawned.append(argv) or object())
+    monkeypatch.setattr(update.win_paths, "system32_tool", lambda rel: "C:\\Windows\\System32\\" + rel)
+    runs = _uv_runs(monkeypatch)
+    assert update._update_wheel("0.4.0") is False, "on Windows the reinstall finishes after grid exits"
+    assert runs == [], "uv must not run from inside the install it replaces"
+    assert len(spawned) == 1
+    argv = spawned[0]
+    assert argv[0].lower().endswith("windowspowershell\\v1.0\\powershell.exe"), "by absolute path (ADR 0024)"
+    script = base64.b64decode(argv[argv.index("-EncodedCommand") + 1]).decode("utf-16-le")
+    return script
+
+
 def test_update_wheel_on_windows_finds_uv_exe(grid_home, monkeypatch, tmp_path):
     monkeypatch.setattr(update, "_IS_WINDOWS", True)
     monkeypatch.setattr(update.shutil, "which", lambda name: None)
@@ -284,9 +302,7 @@ def test_update_wheel_on_windows_finds_uv_exe(grid_home, monkeypatch, tmp_path):
     uv_exe = tmp_path / ".local" / "bin" / "uv.exe"
     uv_exe.parent.mkdir(parents=True)
     uv_exe.write_bytes(b"MZ")
-    runs = _uv_runs(monkeypatch)
-    update._update_wheel("0.4.0")
-    assert runs[0][0] == str(uv_exe)
+    assert f"& '{uv_exe}' tool install --force" in _handed_off(monkeypatch)
 
 
 def test_update_wheel_on_windows_keeps_the_running_python(grid_home, monkeypatch):
@@ -296,11 +312,36 @@ def test_update_wheel_on_windows_keeps_the_running_python(grid_home, monkeypatch
     monkeypatch.setattr(update.shutil, "which", lambda name: r"C:\Users\me\.local\bin\uv.exe")
     monkeypatch.setattr(update.Path, "is_file", lambda self: True)
     monkeypatch.setattr(update.sys, "_base_executable", r"C:\Python312\python.exe", raising=False)
-    runs = _uv_runs(monkeypatch)
-    update._update_wheel("0.4.0")
-    argv = runs[0]
-    assert argv[argv.index("--python") + 1] == r"C:\Python312\python.exe"
-    assert argv[-1] == update.release.wheel_url("0.4.0")
+    script = _handed_off(monkeypatch)
+    assert r"--python 'C:\Python312\python.exe'" in script
+    assert f"'{update.release.wheel_url('0.4.0')}'" in script
+
+
+def test_windows_update_waits_for_this_install_to_close_then_keeps_the_cmd_fallback(grid_home, monkeypatch):
+    """Windows cannot replace files in use: run from inside the install, `uv tool install --force` failed
+    half-way and left `No module named cli` (measured on Windows 11). So the reinstall waits until no
+    process runs from this install, and a .cmd fallback (grid.exe blocked) stays in force afterwards."""
+    monkeypatch.setattr(update, "_IS_WINDOWS", True)
+    monkeypatch.setattr(update.shutil, "which", lambda name: r"C:\uv\uv.exe")
+    monkeypatch.setattr(update.Path, "is_file", lambda self: True)
+    monkeypatch.setattr(update.sys, "prefix", r"C:\tools\grid")
+    script = _handed_off(monkeypatch)
+    assert "Win32_Process" in script and r"C:\tools\grid" in script, "waits on this install's processes"
+    assert script.index("Win32_Process") < script.index("tool install --force")
+    assert "foreach ($name in 'grid', 'agrid')" in script and "$name.cmd" in script and ".exe.blocked" in script
+    assert "Updated grid" in script
+    assert not any(line.strip().lower().startswith("exit") for line in script.splitlines()), \
+        "it runs in the person's terminal: an exit would close nothing, but must not be relied on"
+    script.encode("ascii")  # Windows PowerShell 5.1 decodes nothing else reliably
+
+
+def test_cmd_update_on_windows_says_it_finishes_after_this_command(grid_home, monkeypatch, capsys):
+    monkeypatch.setattr(update, "fetch_latest_version", lambda: "0.4.0")
+    monkeypatch.setattr(update, "_is_binary_build", lambda: False)
+    monkeypatch.setattr(update, "_update_wheel", lambda latest: False)
+    assert update.cmd_update(_ns(command="update")) == 0
+    out = capsys.readouterr().out
+    assert "0.3.34 → 0.4.0" in out and "finishes" in out and "Updated grid" not in out
 
 
 def test_messages_on_windows_name_the_powershell_installer(grid_home, monkeypatch):
@@ -347,9 +388,7 @@ def test_update_on_windows_goes_ahead_when_nothing_runs(grid_home, monkeypatch):
     monkeypatch.setattr(update.Path, "is_file", lambda self: True)
     _running_grid(grid_home, server_pid=4242, engine_pid=4343)
     monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)
-    runs = _uv_runs(monkeypatch)
-    update._update_wheel("0.4.0")
-    assert len(runs) == 1
+    assert "tool install --force" in _handed_off(monkeypatch)
 
 
 def test_update_off_windows_does_not_check_for_a_running_grid(grid_home, monkeypatch):
