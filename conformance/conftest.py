@@ -20,20 +20,15 @@ import pytest
 # `grid-protocol` wheel grid-src happens to pin: a schema changed here first must be what the server is held to.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "protocol"))
 
-from conformance.clients import RELEASED, Client, harness_pin, install
+from conformance.clients import Client, harness_pin, install, released, versions
 from conformance.stack import Stack, locate_siblings
 
-
-def _versions() -> list[str]:
-    pin = harness_pin()
-    return [*RELEASED, *([pin] if pin not in RELEASED else [])]
-
-
-VERSIONS = _versions()
+VERSIONS = versions()
 
 
 def pytest_report_header(config) -> list[str]:
-    return [f"conformance: released {', '.join(RELEASED)}; harness pin {harness_pin()}"]
+    chosen = os.environ.get("GRID_CONFORMANCE_CLIENTS") or "all"
+    return [f"conformance: released ({chosen}) {', '.join(released())}; harness pin {harness_pin()}"]
 
 
 @pytest.fixture(scope="session")
