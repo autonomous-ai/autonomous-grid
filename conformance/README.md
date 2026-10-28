@@ -6,7 +6,7 @@ grid-platform ticket 13 (ADR 0004). Built on ticket 12's `grid-protocol`: every 
 
 | Client | Installed from | Driven as |
 |---|---|---|
-| public `grid` 0.3.47 – 0.3.61 | each version's **release wheel** on GitHub Releases | the CLI a user runs |
+| public `grid` 0.3.47 – 0.3.61 (a pull request: the ones in the field, below) | each version's **release wheel** on GitHub Releases | the CLI a user runs |
 | the harness's pinned `grid` | its version, read from the manifest the harness daemon follows | the same |
 | the harness daemon's own reads | `test_harness_reads.py`, checked against `grid-protocol` | credential-less HTTP, as `gridReader.ts` |
 
@@ -85,6 +85,24 @@ tests each half against the other.
 ## Changing it
 
 - **A new public release:** add it to `clients.RELEASED` when the harness pins it, or when anything in the field
-  can run it. Drop a version only when nothing can.
+  can run it, and to `clients.IN_THE_FIELD` (the newest always is; `tests/test_conformance_clients.py` refuses it
+  missing). Drop a version only when nothing can.
+
+## Which releases a run tests
+
+`GRID_CONFORMANCE_CLIENTS` picks the set: `all` (the default) is every release in `RELEASED`; `field` is
+`IN_THE_FIELD`, the releases PROD has seen. The harness's pin runs in both. grid-platform's `conformance.yml` runs
+`field` on a pull request (each release costs every PR's conformance jobs minutes) and `all` on its weekly schedule and
+on a dispatch, so a release PROD has stopped seeing is still tested once a week. Any other value fails the run.
+
+`IN_THE_FIELD` is a measurement, so re-take it rather than guess. Read only on PROD: count in `awk`, never `sort` there
+(it spills to a temp file on a big input), and nothing redirected on the box:
+
+```bash
+ssh root@<PROD> 'cd /var/log/nginx && zcat -f grid.autonomous.ai-access.log* api-grid.autonomous.ai-access.log* \
+  | awk "match(\$0, /grid-cli\/[0-9]+\.[0-9]+\.[0-9]+/) { n[substr(\$0, RSTART, RLENGTH)]++ } END { for (v in n) print n[v], v }"'
+```
+
+nginx keeps ~14 days. A release that read no longer shows can leave `IN_THE_FIELD`; it stays in `RELEASED`.
 - **A client that changed behaviour on purpose:** gate the assertion on the version it changed in (`parse(version) >=
   …`), so the old behaviour stays pinned for the old clients.

@@ -31,6 +31,12 @@ RELEASED = (
     "0.3.47", "0.3.48", "0.3.49", "0.3.50", "0.3.51", "0.3.52", "0.3.53", "0.3.54", "0.3.55", "0.3.56", "0.3.57",
     "0.3.58", "0.3.59", "0.3.60", "0.3.61",
 )
+#: The releases a pull request's run tests (`GRID_CONFORMANCE_CLIENTS=field`): those PROD saw in its 14 days of nginx
+#: logs to 2026-10-28 (`grid-cli/<v>` on grid.* and api-grid.*), and always the newest. A CLI at or below 0.3.48 sends no
+#: version, so 0.3.47 and 0.3.48 cannot be seen; they, and every release PROD did not see, run in the full run only.
+IN_THE_FIELD = ("0.3.49", "0.3.52", "0.3.53", "0.3.54", "0.3.55", "0.3.57", "0.3.58", "0.3.59", "0.3.61")
+#: `GRID_CONFORMANCE_CLIENTS`: which releases run. Unset is the full run.
+CLIENT_SETS = {"all": RELEASED, "field": IN_THE_FIELD}
 WHEEL_URL = "https://github.com/autonomous-ai/autonomous-grid/releases/download/v{v}/grid-{v}-py3-none-any.whl"
 HARNESS_MANIFEST = "https://storage.googleapis.com/s3-autonomous-upgrade-3/harness/runtime/grid/metadata.json"
 #: `--no-wake` (grid-reads-without-waking issue 01) first shipped in 0.3.49; older releases refuse it at argparse.
@@ -58,6 +64,22 @@ def harness_pin() -> str:
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         raise RuntimeError(f"could not read the harness's grid pin from {HARNESS_MANIFEST} ({exc}); "
                            "set GRID_HARNESS_PIN") from exc
+
+
+def released() -> tuple[str, ...]:
+    """The releases this run tests: `GRID_CONFORMANCE_CLIENTS` (`all`, the default, or `field`). Any other value
+    raises: a misspelt set must not quietly run every release, or none."""
+    name = os.environ.get("GRID_CONFORMANCE_CLIENTS") or "all"
+    if name not in CLIENT_SETS:
+        raise RuntimeError(f"GRID_CONFORMANCE_CLIENTS={name!r}: expected one of {', '.join(CLIENT_SETS)}")
+    return CLIENT_SETS[name]
+
+
+def versions() -> list[str]:
+    """Every client this run tests: :func:`released`, and the harness's pin when it is not among them."""
+    pin = harness_pin()
+    chosen = released()
+    return [*chosen, *([pin] if pin not in chosen else [])]
 
 
 def _cache() -> Path:
