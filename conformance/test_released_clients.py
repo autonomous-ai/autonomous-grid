@@ -1,21 +1,23 @@
-"""Every `grid` in the field, against today's master behind the proxy (grid-platform ticket 13; ADR 0004).
+"""Every `grid` in the field, against what serves every grid (grid-platform ticket 13; ADR 0004; M5 ticket 07): a grid
+created by rows on a relay pool, behind grid-apis' real proxy (`conftest.py`, `stack.py`).
 
 Each test runs once per released version (0.3.47–0.3.61) and once for the harness's pinned `grid`. Behaviour that a
 version was never built to have is asserted as THAT version's behaviour, so a change that breaks an old client is a
 failure here, and a client that changed on purpose names the version it changed in:
 
-* reads (`models`, `engines`, `stats`) of an awake grid answer;
-* `--no-wake` on an asleep grid: from 0.3.49 a refusal whose `--json` envelope carries `grid_asleep`, never a wake;
-  before it, argparse's exit 2 before anything is sent;
-* a signed-in read wakes an asleep grid;
+* reads (`models`, `engines`, `stats`) of a running grid answer;
 * `grid join --at` registers, heart-beats and polls, and a consumer's request through the proxy is served by it — and
   resumed again from its `X-Resume-Url`, whose transaction id is a UUIDv7 (grid-platform M2 ticket 08);
-* a joined provider on an asleep grid outlives the sleep and serves after the wake;
 * a joined provider on a deleted grid stops from 0.3.48 (`grid_deleted` ends an engine) and keeps retrying before it;
 * a joined provider whose node row is gone (pruned, lost, moved) is answered 404 on its next heartbeat, registers
   again, and serves within one heartbeat and a registration (grid-platform ticket 23);
 * `grid task` and `grid project` are told, in a sentence, that distributed tasks are retired: the relay's half of the
   plane is deleted (grid-platform M2 ticket 04) and its routes answer `410 feature_retired`.
+
+What a sleeping grid did (`--no-wake` refused `grid_asleep`, a signed-in read woke it, a provider outlived its sleep)
+went with M5 ticket 07: no grid sleeps on a relay pool. Their pool counterparts — `--no-wake` reading as without it, a
+provider parked by its owner's stop and serving after the start — are grid-platform's pool target's
+(`conformance_pool/test_pool.py`), which calls the checks below.
 """
 from __future__ import annotations
 
@@ -27,12 +29,10 @@ import subprocess
 import time
 import uuid
 
-import grid_protocol
 import httpx
 import pytest
-from grid_protocol.constants import GRID_ASLEEP_CODE
 
-from conformance.clients import Client, envelope, parse
+from conformance.clients import Client, parse
 from conformance.stack import (
     ENGINE_ANSWER,
     ENGINE_MODEL,
@@ -60,40 +60,13 @@ def _as_provider(client: Client, stack: Stack) -> None:
 
 @pytest.mark.parametrize("read", READS)
 def test_a_read_of_an_awake_grid_answers(client, stack, read):
+    """A running grid (the name is the one grid-platform's pool target calls it by)."""
     _as_consumer(client, stack)
 
     done = client.run("--remote", read, stack.network_id, "--json")
 
     assert done.returncode == 0, done.stderr
     json.loads(done.stdout)  # a JSON answer, whatever its shape in this version
-
-
-@pytest.mark.parametrize("read", READS)
-def test_no_wake_on_an_asleep_grid_never_wakes_it(client, stack, read):
-    _as_consumer(client, stack)
-    stack.set_state("asleep", last_known={"nodes": [], "ids": []})
-
-    done = client.run("--remote", read, stack.network_id, "--no-wake", "--json")
-
-    if client.has_no_wake:
-        assert done.returncode != 0
-        answer = envelope(done)
-        assert answer is not None, done.stderr
-        grid_protocol.validator("cli-error").validate(answer)
-        assert answer["error"]["code"] == GRID_ASLEEP_CODE, answer
-    else:
-        assert done.returncode == 2 and "--no-wake" in done.stderr, "older than 0.3.49: refused at argparse"
-    assert stack.state()["state"] == "asleep", "a read under --no-wake must never wake a grid"
-
-
-def test_a_signed_in_read_wakes_an_asleep_grid(client, stack):
-    _as_consumer(client, stack)
-    stack.set_state("asleep", last_known={"nodes": [], "ids": []})
-
-    done = client.run("--remote", "models", stack.network_id, "--json", timeout=120)
-
-    assert done.returncode == 0, done.stderr
-    assert stack.state()["state"] == "running" and stack.state().get("woken", 0) >= 1
 
 
 # ── A provider ───────────────────────────────────────────────────────────────────────────────────
@@ -211,17 +184,6 @@ def _resumes_from_a_time_ordered_id(stack: Stack, answer: httpx.Response) -> Non
                         headers={"Authorization": f"Bearer {stack.consumer_token()}"})
 
     assert _served(resumed), resumed.text
-
-
-def test_a_provider_outlives_a_sleep_and_serves_after_the_wake(client, stack):
-    with _Joined(client, stack) as joined:
-        stack.set_state("asleep", last_known={"nodes": [], "ids": []})
-        time.sleep(12)  # past a parked provider's 10 s probe
-        assert joined.engine_alive(), "a sleeping grid must never end an engine (it parks from 0.3.48)"
-
-        stack.set_state("running")
-
-        _until(lambda: _served(_chat(stack)), 90, "the provider never served again after the wake")
 
 
 def test_a_provider_on_a_deleted_grid(client, stack):

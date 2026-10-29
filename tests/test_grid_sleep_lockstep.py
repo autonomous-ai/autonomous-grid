@@ -3,9 +3,14 @@
 grid-apis' proxy answers a request to a grid that is not up with a code beside ``detail``, and this
 CLI's provider acts on three of them: it PARKS on ``grid_asleep`` (issue 02) and ``grid_stopped`` (the
 owner stopped the grid, issue 04), and STOPS on ``grid_deleted`` (issue 04). And the control plane's
-status endpoint says ``asleep`` for a grid its reaper slept, which this CLI calls rather than refusing
+status endpoint said ``asleep`` for a grid its reaper slept, which this CLI calls rather than refusing
 (`cli/remote_grid.resolve_relay_base`, issue 04). There is no import path between the two, so each value
 is hand-duplicated and kept in step by editing both sides — and by this file.
+
+**No grid sleeps since grid-platform M5 ticket 07**: the proxy's legacy path, its `grid_asleep` answer and the control
+plane's sleep states (`grid_sleep_state`) are gone from grid-apis, so those two pins are retired there. This CLI keeps
+PARSING both — released clients do, and this CLI's own halves below still pin them — while `grid_stopped` and
+`grid_deleted` stay pinned on both sides.
 
 **Every skew direction degrades to today's behaviour**, which is what makes the rollout order a
 convenience: an unknown code is transient, and a missing one is too. The exception is ``asleep``, whose
@@ -33,16 +38,18 @@ from remote import relay
 from tests.grid_src_repo import grid_apis_root
 from tests.protocol_ast import protocol_value
 
-#: (grid-apis `grid_proxy` constant, this CLI's `remote.relay` constant, the canonical value).
+#: (grid-apis `grid_proxy` constant, this CLI's `remote.relay` constant, the canonical value): the codes grid-apis'
+#: proxy still answers with.
 PROXY_CODES = [
-    ("GRID_ASLEEP_CODE", "GRID_ASLEEP_CODE", protocol_constants.GRID_ASLEEP_CODE),
     ("GRID_STOPPED_CODE", "GRID_STOPPED_CODE", protocol_constants.GRID_STOPPED_CODE),
     ("GRID_DELETED_CODE", "GRID_DELETED_CODE", protocol_constants.GRID_DELETED_CODE),
 ]
+#: What this CLI acts on: those, and `grid_asleep`, which only a legacy master's grid was answered (until grid-platform
+#: M5 ticket 07) and which released clients still parse.
+CLI_CODES = [*PROXY_CODES, ("GRID_ASLEEP_CODE", "GRID_ASLEEP_CODE", protocol_constants.GRID_ASLEEP_CODE)]
 CANONICAL_ASLEEP_STATE = "asleep"
 
 PROXY_MODULE = "grid_proxy.py"
-STATE_MODULE = pathlib.Path("grid_networks") / "grid_sleep_state.py"
 SKIP_NO_APIS = "the grid-apis worktree is not beside this one; the lockstep cannot be checked here"
 
 
@@ -104,17 +111,10 @@ def test_the_proxy_sends_each_code_beside_detail_where_this_cli_reads_it(
         f"or reshaped, this CLI stops finding the code")
 
 
-def test_the_control_plane_says_asleep_in_the_word_this_cli_calls():
-    values = _module_constant(_tree(STATE_MODULE), "ASLEEP")
-    assert values == [CANONICAL_ASLEEP_STATE], (
-        f"grid-apis' `grid_sleep_state.ASLEEP` is {values!r}. Renamed there alone, this CLI refuses every "
-        f"sleeping grid with 'run `grid start` first' — edit BOTH sides")
-
-
 # --- this CLI's halves: need no sibling worktree, so they are the ones that run in CI -------------------
 
 
-@pytest.mark.parametrize(("_apis_name", "cli_name", "canonical"), PROXY_CODES)
+@pytest.mark.parametrize(("_apis_name", "cli_name", "canonical"), CLI_CODES)
 def test_this_cli_acts_on_the_canonical_code(_apis_name, cli_name, canonical):
     assert getattr(relay, cli_name) == canonical
 

@@ -10,7 +10,6 @@ its own `GRID_HOME`, holding the credentials a signed-in user would have for the
 from __future__ import annotations
 
 import functools
-import json
 import os
 import platform
 import shutil
@@ -154,18 +153,3 @@ class Client:
         }
         (grid_home / "credentials.toml").write_text(tomli_w.dumps(credentials))
         (grid_home / "credentials.toml").chmod(0o600)
-
-
-def envelope(proc: subprocess.CompletedProcess) -> dict | None:
-    """The `--json` error envelope a failed command wrote: ONE JSON line on stderr (`grid-protocol` `cli-error`), which a
-    human-readable line may follow. None when there is none."""
-    for line in proc.stderr.splitlines():
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                answer = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(answer, dict) and "error" in answer:
-                return answer
-    return None

@@ -1,13 +1,15 @@
-"""The harness daemon's own reads, replayed against the master behind the proxy (grid-platform ticket 13).
+"""The harness daemon's own reads, replayed against a grid on a relay pool behind the proxy (grid-platform ticket 13;
+M5 ticket 07).
 
 The harness polls every grid a person can see with two CREDENTIAL-LESS reads, the overview and provider discovery
-(harness `cli/src/lib/gridReader.ts`), and reads `code` and `last_known` off the proxy's refusal. Its types are
-generated from `grid-protocol`'s schemas (ticket 12), so this driver checks every answer against the same schemas: no
-harness checkout is needed, and a field the server renames fails here, not in somebody's model list.
+(harness `cli/src/lib/gridReader.ts`), and reads `code` off the proxy's refusal. Its types are generated from
+`grid-protocol`'s schemas (ticket 12), so this driver checks every answer against the same schemas: no harness checkout
+is needed, and a field the server renames fails here, not in somebody's model list.
 
-Every refusal code a client branches on is driven too, with its status, and none of these reads may wake a grid. So
-are the relay's own two answers to a request no engine can serve now: `no_providers_available` (retryable) for a model
-the grid has served, and `model_not_found` (at once) for one no engine on it ever served (DEV e2e F3).
+Every refusal code a grid on a relay pool can answer is driven too, with its status. So are the relay's own two answers
+to a request no engine can serve now: `no_providers_available` (retryable) for a model the grid has served, and
+`model_not_found` (at once) for one no engine on it ever served (DEV e2e F3). (`grid_asleep` with `last_known`, and
+`grid_master_down`, were a legacy master's; they went with M5 ticket 07 — the released clients still parse them.)
 """
 from __future__ import annotations
 
@@ -25,9 +27,7 @@ import httpx
 import pytest
 from grid_protocol.constants import (
     FEATURE_RETIRED_CODE,
-    GRID_ASLEEP_CODE,
     GRID_DELETED_CODE,
-    GRID_MASTER_DOWN_CODE,
     GRID_STOPPED_CODE,
     MODEL_NOT_FOUND_CODE,
     NO_PROVIDERS_AVAILABLE_CODE,
@@ -35,10 +35,9 @@ from grid_protocol.constants import (
 )
 
 from conformance.clients import Client, harness_pin, install
-from conformance.stack import ENGINE_MODEL, INFERENCE_SCOPES, PROVIDER_SCOPES, Stack
+from conformance.stack import ENGINE_MODEL, INFERENCE_SCOPES, PROVIDER_SCOPES, Stack, locate_siblings
 
 READS = {"overview": "relay/v1/grid/overview", "discover": "nodes/discover"}
-RECORD = {"nodes": [{"name": "conformance-sleeper", "engine": "vllm", "models": [ENGINE_MODEL]}], "ids": [ENGINE_MODEL]}
 
 
 def _get(stack: Stack, read: str) -> httpx.Response:
@@ -122,22 +121,6 @@ def test_an_awake_grid_answers_in_the_shape_the_harness_reads(stack, provider, r
         assert ENGINE_MODEL in raw, body
 
 
-@pytest.mark.parametrize("read", sorted(READS))
-def test_an_asleep_grid_refuses_with_grid_asleep_and_is_not_woken(stack, read):
-    stack.set_state("asleep", last_known=RECORD)
-
-    answer = _get(stack, read)
-
-    assert answer.status_code == REFUSAL_STATUS[GRID_ASLEEP_CODE], answer.text
-    body = answer.json()
-    grid_protocol.validator("refusal", "GridAsleep").validate(body)
-    assert body["code"] == GRID_ASLEEP_CODE
-    if read == "overview":
-        grid_protocol.validator("last-known").validate(body["last_known"])
-        assert body["last_known"]["ids"] == RECORD["ids"]
-    assert stack.state()["state"] == "asleep", "a credential-less read must never wake a grid"
-
-
 @pytest.mark.parametrize("state, code, definition", [
     ("stopped", GRID_STOPPED_CODE, "GridStopped"),
     ("deleted", GRID_DELETED_CODE, "GridDeleted"),
@@ -154,16 +137,6 @@ def test_a_grid_that_is_not_up_answers_its_code(stack, state, code, definition):
     assert stack.state()["state"] == state
 
 
-def test_a_running_grid_whose_master_is_down_answers_grid_master_down(stack):
-    with stack.master_held_down():
-        answer = _get(stack, "overview")
-
-    assert answer.status_code == REFUSAL_STATUS[GRID_MASTER_DOWN_CODE], answer.text
-    body = answer.json()
-    grid_protocol.validator("refusal", "GridMasterDown").validate(body)
-    assert body["code"] == GRID_MASTER_DOWN_CODE
-
-
 @pytest.mark.parametrize("path", ["relay/v1/media/jobs", "relay/v1/tasks", "relay/v1/projects", "relay/v1/git/p/info/refs"])
 def test_a_retired_feature_is_refused_by_the_proxy(stack, path):
     answer = httpx.get(f"{stack.grid_url}/{path}", timeout=30)
@@ -175,9 +148,9 @@ def test_a_retired_feature_is_refused_by_the_proxy(stack, path):
 
 
 def _chat(stack: Stack, model: str, *, openai_errors: bool) -> httpx.Response:
-    """A consumer's request through the proxy. The master answers a failure in OpenAI's envelope, with its `code`, when
+    """A consumer's request through the proxy. The relay answers a failure in OpenAI's envelope, with its `code`, when
     the caller asked for OpenAI errors (the error-format header; an `lga_sk_` key does too); otherwise `{"detail": …}`
-    with no code (`grid-protocol` `openai-error`). Long enough for a woken master's boot hold and the retry budget."""
+    with no code (`grid-protocol` `openai-error`). Long enough for the relay's retry budget."""
     headers = {"Authorization": f"Bearer {stack.consumer_token()}"}
     if openai_errors:
         headers["X-Error-Format"] = "openai"
@@ -196,11 +169,12 @@ def _record_if_asked(stack: Stack, definition: str, answer: httpx.Response) -> N
         return subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
                               check=False).stdout.strip() or "unknown"
 
+    siblings = locate_siblings()
     recording = {
         "schema": "openai-error", "definition": definition, "request": "POST /relay/v1/chat/completions",
         "status": answer.status_code,
-        "source": f"grid-src @ {commit(stack.siblings.grid_src)}, its master behind grid-apis @ "
-                  f"{commit(stack.siblings.grid_apis)}'s proxy (conformance/test_harness_reads.py)",
+        "source": f"grid-src @ {commit(siblings.grid_src)}, a relay instance behind grid-apis @ "
+                  f"{commit(siblings.grid_apis)}'s proxy (conformance/test_harness_reads.py)",
         "body": answer.json(),
     }
     path = Path(folder) / f"openai-error--{definition}--conformance.json"
