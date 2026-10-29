@@ -1,12 +1,16 @@
-"""Fixtures for the conformance suite (grid-platform ticket 13). Run it by naming the directory:
+"""Fixtures for the conformance suite (grid-platform ticket 13; M5 ticket 07). Run it by naming the directory:
 
     GRID_SRC_REPO=… GRID_APIS_REPO=… <grid-src>/.venv/bin/python -m pytest conformance
 
-It runs under grid-src's interpreter, which has what it needs (pytest, httpx, PyJWT, cryptography, grid-protocol).
+It runs under grid-src's interpreter, which has what it needs (pytest, httpx, PyJWT, cryptography, grid-protocol, and
+what the pool target imports). The server side is what serves every grid — relay instances on two relay pools, the
+projector, grid-apis' real proxy — and is grid-platform's own pool conformance target, taken from the sibling grid-src
+(`conformance.stack.pool_target_from`): its `pools` fixture is the session's stack, and each test asks its checks of a
+grid of its own, created by rows on one of those pools.
 
 ⚠️ **A conformance run that cannot find the server must FAIL in CI, not skip.** pytest exits 0 when every test
 skips, so a CI job whose sibling checkout went missing would report green forever. With `GRID_CONFORMANCE_REQUIRED=1`
-(both workflows set it) the missing sibling is an error; on a laptop without them it is a skip.
+the missing sibling is an error; on a laptop without them it is a skip.
 """
 from __future__ import annotations
 
@@ -21,37 +25,35 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "protocol"))
 
 from conformance.clients import Client, harness_pin, install, released, versions
-from conformance.stack import Stack, locate_siblings
+from conformance.stack import locate_siblings, pool_target_from
 
 VERSIONS = versions()
+SIBLINGS = locate_siblings()
+#: The sibling grid-src's pool target, or None without the siblings (the `siblings` fixture then skips or fails).
+POOL_TARGET = pool_target_from(SIBLINGS) if SIBLINGS is not None else None
+if POOL_TARGET is not None:
+    pools = POOL_TARGET.pools  # the session's relay pools, projector and proxy: a fixture, registered from here
 
 
 def pytest_report_header(config) -> list[str]:
     chosen = os.environ.get("GRID_CONFORMANCE_CLIENTS") or "all"
-    return [f"conformance: released ({chosen}) {', '.join(released())}; harness pin {harness_pin()}"]
+    stack = f"the pool target of {SIBLINGS.grid_src}" if SIBLINGS is not None else "no siblings"
+    return [f"conformance: released ({chosen}) {', '.join(released())}; harness pin {harness_pin()}; {stack}"]
 
 
 @pytest.fixture(scope="session")
 def siblings():
-    found = locate_siblings()
-    if found is None:
+    if SIBLINGS is None:
         if os.environ.get("GRID_CONFORMANCE_REQUIRED") == "1":
             pytest.fail("grid-src and grid-apis are required (GRID_SRC_REPO, GRID_APIS_REPO), and one is missing")
         pytest.skip("grid-src or grid-apis is not beside this checkout; set GRID_SRC_REPO and GRID_APIS_REPO")
-    return found
+    return SIBLINGS
 
 
-@pytest.fixture(scope="session")
-def stack(siblings, tmp_path_factory):
-    with Stack.up(siblings, tmp_path_factory.mktemp("stack")) as running:
-        yield running
-
-
-@pytest.fixture(autouse=True)
-def grid_starts_awake(request):
-    """Every test starts on an awake grid, whatever the previous one left."""
-    if "stack" in request.fixturenames:
-        request.getfixturevalue("stack").set_state("running")
+@pytest.fixture
+def stack(siblings, request):
+    """A grid of its own, created by rows on the first relay pool, permissionless: what a released CLI joins."""
+    return POOL_TARGET.PoolGrid(request.getfixturevalue("pools"), POOL_TARGET.POOLS[0], POOL_TARGET.BORN)
 
 
 @pytest.fixture(scope="session")
@@ -70,4 +72,3 @@ def client(request, executables, tmp_path) -> Client:
 def pytest_generate_tests(metafunc):
     if "client" in metafunc.fixturenames:
         metafunc.parametrize("client", VERSIONS, ids=[f"grid-{v}" for v in VERSIONS], indirect=True)
-
