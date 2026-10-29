@@ -25,7 +25,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "protocol"))
 
 from conformance.clients import Client, harness_pin, install, released, versions
-from conformance.stack import locate_siblings, pool_target_from
+from conformance.stack import locate_siblings, pool_target_from, use_a_relay_database
 
 VERSIONS = versions()
 SIBLINGS = locate_siblings()
@@ -50,8 +50,14 @@ def siblings():
     return SIBLINGS
 
 
+@pytest.fixture(scope="session")
+def relay_database(siblings):
+    """The relay database's superuser URL, set before the pool target's `pools` makes the stack."""
+    use_a_relay_database()
+
+
 @pytest.fixture
-def stack(siblings, request):
+def stack(siblings, relay_database, request):
     """A grid of its own, created by rows on the first relay pool, permissionless: what a released CLI joins."""
     return POOL_TARGET.PoolGrid(request.getfixturevalue("pools"), POOL_TARGET.POOLS[0], POOL_TARGET.BORN)
 

@@ -189,7 +189,7 @@ class Stack(Protocol):
     engine_url: str
 
     def state(self) -> dict: ...
-    def set_state(self, state: str, *, last_known: dict | None = None) -> None: ...
+    def set_state(self, state: str) -> None: ...
     def consumer_token(self, email: str = ...) -> str: ...
     def provider_token(self, email: str = ...) -> str: ...
     def delete_node(self, name: str) -> int: ...
@@ -197,7 +197,8 @@ class Stack(Protocol):
 
 #: Where a PostgreSQL's server binaries may be when `initdb` is not on PATH: Debian's (the CI runner's: PostgreSQL 16,
 #: its service disabled) and Homebrew's.
-_SERVER_BINARIES = ("/usr/lib/postgresql/*/bin", "/opt/homebrew/opt/postgresql@*/bin", "/usr/local/opt/postgresql@*/bin")
+_SERVER_BINARIES = ("/usr/lib/postgresql/*/bin", "/opt/homebrew/opt/postgresql@*/bin",
+                    "/usr/local/opt/postgresql@*/bin")
 
 
 def throwaway_postgres() -> str:
@@ -228,16 +229,23 @@ def throwaway_postgres() -> str:
 
 
 def pool_target_from(siblings: Siblings) -> ModuleType:
-    """The sibling grid-src's pool conformance target (`conformance_pool/pool_target.py`), imported with what it reads:
-    this checkout as its `CONFORMANCE_ROOT`, the siblings as its relay instances' and proxy's checkouts, and a superuser
-    URL (`GRID_TEST_POSTGRES_URL`, else :func:`throwaway_postgres`). Its `pools` fixture is the session's stack and its
+    """The sibling grid-src's pool conformance target (`conformance_pool/pool_target.py`), imported with what it reads
+    at import: this checkout as its `CONFORMANCE_ROOT`, and the siblings as its relay instances' and proxy's
+    checkouts. Its `pools` fixture is the session's stack (it needs :func:`use_a_relay_database` first) and its
     `PoolGrid` a grid on it."""
     os.environ.setdefault("CONFORMANCE_ROOT", str(ROOT))
     os.environ.setdefault("GRID_SRC_REPO", str(siblings.grid_src))
     os.environ.setdefault("GRID_APIS_REPO", str(siblings.grid_apis))
-    if not os.environ.get("GRID_TEST_POSTGRES_URL"):
-        os.environ["GRID_TEST_POSTGRES_URL"] = throwaway_postgres()
     sys.path.insert(0, str(siblings.grid_src / "conformance_pool"))
     import pool_target
 
     return pool_target
+
+
+def use_a_relay_database() -> None:
+    """The superuser URL the pool target's relay database is made on (grid-src `relay_pg.URL`, read when it bootstraps,
+    not when it is imported): `GRID_TEST_POSTGRES_URL`, else :func:`throwaway_postgres` — started here, so a run that
+    makes no stack (`--collect-only`, a skip) starts none."""
+    import relay_pg  # on the path once the pool target is imported
+
+    relay_pg.URL = os.environ.get("GRID_TEST_POSTGRES_URL") or throwaway_postgres()
