@@ -7,7 +7,7 @@ is checked against its schemas.
 
 | Client | Installed from | Driven as |
 |---|---|---|
-| public `grid` 0.3.47 – 0.3.61 (a pull request: the ones in the field, below) | each version's **release wheel** on GitHub Releases | the CLI a user runs |
+| public `grid` 0.3.47 – 0.3.62 (a pull request: the ones in the field, below) | each version's **release wheel** on GitHub Releases | the CLI a user runs |
 | the harness's pinned `grid` | its version, read from the manifest the harness daemon follows | the same |
 | the harness daemon's own reads | `test_harness_reads.py`, checked against `grid-protocol` | credential-less HTTP, as `gridReader.ts` |
 
