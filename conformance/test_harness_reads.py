@@ -149,8 +149,8 @@ def test_a_retired_feature_is_refused_by_the_proxy(stack, path):
 
 def _chat(stack: Stack, model: str, *, openai_errors: bool) -> httpx.Response:
     """A consumer's request through the proxy. The relay answers a failure in OpenAI's envelope, with its `code`, when
-    the caller asked for OpenAI errors (the error-format header; an `lga_sk_` key does too); otherwise `{"detail": …}`
-    with no code (`grid-protocol` `openai-error`). Long enough for the relay's retry budget."""
+    the caller asked for OpenAI errors (the error-format header; an `lga_sk_` key does too); otherwise a refusal before
+    the queue, which is what these tests reach, is `{"detail": …}` with no code (`grid-protocol` `openai-error`). Long enough for the relay's retry budget."""
     headers = {"Authorization": f"Bearer {stack.consumer_token()}"}
     if openai_errors:
         headers["X-Error-Format"] = "openai"

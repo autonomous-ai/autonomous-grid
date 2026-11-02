@@ -466,9 +466,10 @@ export interface ErrorReportAnswer {
 
 /**
  * OpenAI's error envelope. A master answers an inference request's failure in it when the caller asked for
- * OpenAI errors (a Bearer `lga_sk_` key, or the error-format header); otherwise the same failure is
- * `{"detail": <message>}` with no code. `/messages` answers in Anthropic's envelope instead. Keys a master
- * adds go BESIDE `error`, never inside it.
+ * OpenAI errors (a Bearer `lga_sk_` key, or the error-format header); otherwise a refusal before the queue is
+ * `{"detail": <message>}` with no code, and on chat/completions and completions a failure after it is this
+ * envelope with `detail` beside it. `/messages` answers in Anthropic's envelope instead. Keys a master adds
+ * go BESIDE `error`, never inside it.
  */
 export interface OpenAIError {
   error: {
