@@ -30,10 +30,12 @@ RELEASED = (
     "0.3.47", "0.3.48", "0.3.49", "0.3.50", "0.3.51", "0.3.52", "0.3.53", "0.3.54", "0.3.55", "0.3.56", "0.3.57",
     "0.3.58", "0.3.59", "0.3.60", "0.3.61", "0.3.62",
 )
-#: The releases a pull request's run tests (`GRID_CONFORMANCE_CLIENTS=field`): those PROD saw in its 14 days of nginx
-#: logs to 2026-10-28 (`grid-cli/<v>` on grid.* and api-grid.*), and always the newest. A CLI at or below 0.3.48 sends no
-#: version, so 0.3.47 and 0.3.48 cannot be seen; they, and every release PROD did not see, run in the full run only.
-IN_THE_FIELD = ("0.3.49", "0.3.52", "0.3.53", "0.3.54", "0.3.55", "0.3.57", "0.3.58", "0.3.59", "0.3.61", "0.3.62")
+#: The releases a pull request's run tests (`GRID_CONFORMANCE_CLIENTS=field`): those seen with at least 100 requests in
+#: PROD's 14 days of nginx logs (`grid-cli/<v>` on grid.* and api-grid.*), and always the newest. Measured 2026-11-02:
+#: 0.3.61 1,381,333; 0.3.59 828,363; 0.3.53 119,089; 0.3.52 37,231; 0.3.55 1,266; 0.3.58 888; 0.3.62 not seen yet (the
+#: newest, released that day). Below the line, in the full run only: 0.3.49 53, 0.3.57 3, 0.3.54 1. So is every release
+#: PROD did not see, and 0.3.47 and 0.3.48, which send no version and cannot be seen.
+IN_THE_FIELD = ("0.3.52", "0.3.53", "0.3.55", "0.3.58", "0.3.59", "0.3.61", "0.3.62")
 #: `GRID_CONFORMANCE_CLIENTS`: which releases run. Unset is the full run.
 CLIENT_SETS = {"all": RELEASED, "field": IN_THE_FIELD}
 WHEEL_URL = "https://github.com/autonomous-ai/autonomous-grid/releases/download/v{v}/grid-{v}-py3-none-any.whl"
