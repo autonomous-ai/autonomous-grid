@@ -95,9 +95,10 @@ the pool target already asked every released client the same checks.)
 ## Which releases a run tests
 
 `GRID_CONFORMANCE_CLIENTS` picks the set: `all` (the default) is every release in `RELEASED`; `field` is
-`IN_THE_FIELD`, the releases PROD has seen. The harness's pin runs in both. grid-platform's `conformance.yml` runs
-`field` on a pull request (each release costs every PR's conformance jobs minutes) and `all` on its weekly schedule and
-on a dispatch, so a release PROD has stopped seeing is still tested once a week. Any other value fails the run.
+`IN_THE_FIELD`, the releases PROD saw at least 100 times in 14 days, and always the newest. The harness's pin runs in
+both. grid-platform's `conformance.yml` runs `field` on a pull request (each release costs every PR's conformance jobs
+minutes) and `all` on its weekly schedule and on a dispatch, so a release below that line is still tested once a week.
+Any other value fails the run.
 
 `IN_THE_FIELD` is a measurement, so re-take it rather than guess. Read only on PROD: count in `awk`, never `sort` there
 (it spills to a temp file on a big input), and nothing redirected on the box:
@@ -107,6 +108,8 @@ ssh root@<PROD> 'cd /var/log/nginx && zcat -f grid.autonomous.ai-access.log* api
   | awk "match(\$0, /grid-cli\/[0-9]+\.[0-9]+\.[0-9]+/) { n[substr(\$0, RSTART, RLENGTH)]++ } END { for (v in n) print n[v], v }"'
 ```
 
-nginx keeps ~14 days. A release that read no longer shows can leave `IN_THE_FIELD`; it stays in `RELEASED`.
+nginx keeps ~14 days. A release under 100 requests in that read leaves `IN_THE_FIELD`, unless it is the newest; it stays
+in `RELEASED`. A version with no release tag is not a release: `grid-cli/0.4.0` in the read of 2026-11-02 was 54
+requests, 53 of them with test-fixture values, none answered 2xx, and it has no wheel to install.
 - **A client that changed behaviour on purpose:** gate the assertion on the version it changed in (`parse(version) >=
   …`), so the old behaviour stays pinned for the old clients.
