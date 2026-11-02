@@ -43185,3 +43185,42 @@ def test_the_serve_loops_own_refresh_carries_the_os_claim(monkeypatch, tmp_path)
     stored = next(n for n in credentials.load_credentials()["networks"] if n["network_id"] == "n1")
     assert stored["access_token"] == "AT-2"
     assert stored["refresh_token"] == "RT-2"
+
+
+@pytest.mark.parametrize("is_stream", [False, True])
+def test_serve_submits_an_engines_whole_refusal_not_its_first_200_chars(monkeypatch, tmp_path, is_stream):
+    """A vLLM context refusal runs past 200 characters. Cut there it is no longer JSON, so the relay cannot read its
+    `error.message` and the consumer sees the number cut in half: `for a total of at least 262` (PROD, 2026-11-02)."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    vendor_message = ("This model's maximum context length is 262144 tokens. However, you requested 20000 output "
+                      "tokens and your prompt contains at least 242145 input tokens, for a total of at least "
+                      "262145 tokens. Please reduce the length of the input prompt or the number of requested "
+                      "output tokens.")
+    _mock_serve_engine(monkeypatch, lambda request: httpx.Response(400, json={"error": {"message": vendor_message}}))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "openai:gpt-5.5", "max_tokens": 24}, "is_stream": is_stream})
+
+    assert captured["error"].startswith("engine error 400: ")
+    assert json.loads(captured["error"][len("engine error 400: "):])["error"]["message"] == vendor_message
+
+
+def test_serve_still_bounds_what_it_submits_of_an_engines_refusal(monkeypatch, tmp_path):
+    """An engine's body is untrusted and unbounded: only what fits the cap goes in a job's error."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    _mock_serve_engine(monkeypatch, lambda request: httpx.Response(400, text="x" * 100_000))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "openai:gpt-5.5", "max_tokens": 24}, "is_stream": False})
+
+    assert captured["error"] == "engine error 400: " + "x" * serve.ENGINE_ERROR_BODY_MAX_CHARS

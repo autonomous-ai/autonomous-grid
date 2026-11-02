@@ -2379,7 +2379,7 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
             )
             if failure is not None:
                 _warn_api_auth_failure(api_kind, failure.status)
-                _try_submit_error(state, txn, f"engine error {failure.status}: {failure.text[:200]}")
+                _try_submit_error(state, txn, _engine_error(failure.status, failure.text))
         elif endpoint == "responses":
             # A NON-streaming responses job (issue 05). The vendor returns ONE whole response object,
             # so the dialect-agnostic whole-body forward serves it — block alignment is a streaming
@@ -2598,6 +2598,16 @@ def _warn_codex_upstream(status: int, headers: Any) -> None:
         _warn_api_auth_failure(api_catalog.CODEX_KIND, status)
 
 
+#: How much of an engine's non-200 body a job's error carries. Roomy enough for a whole refusal, because the relay reads
+#: its `error.message` out of the JSON and hands that to the consumer; the body itself is untrusted and unbounded.
+ENGINE_ERROR_BODY_MAX_CHARS = 4096
+
+
+def _engine_error(status: int, body: str) -> str:
+    """A job's error for an engine's non-200: the shape grid-src `relay_streams._ENGINE_ERROR_RE` parses."""
+    return f"engine error {status}: {body[:ENGINE_ERROR_BODY_MAX_CHARS]}"
+
+
 @dataclass(frozen=True)
 class _UpstreamFailure:
     """One engine's non-200 on the responses path, drained and bound so it outlives the response
@@ -2724,7 +2734,7 @@ def _forward_codex(
         if failure.status == 401 and attempt == 1 and state.codex_seat.refresh(bundle.access_token):
             continue  # rotated — retry once with the fresh bearer (reactive D-d)
         _warn_codex_upstream(failure.status, failure.headers)
-        _try_submit_error(state, txn, f"engine error {failure.status}: {failure.text[:200]}")
+        _try_submit_error(state, txn, _engine_error(failure.status, failure.text))
         return
 
 
@@ -2772,7 +2782,7 @@ def _forward_whole(
         resp = client.post(f"{target_url}/{endpoint}", json=body, headers=headers)
     if resp.status_code != 200:
         _warn_api_auth_failure(api_kind, resp.status_code)
-        _try_submit_error(state, txn, f"engine error {resp.status_code}: {resp.text[:200]}")
+        _try_submit_error(state, txn, _engine_error(resp.status_code, resp.text))
         return
     # Every caller of this forward is a text dialect (chat, anthropic /messages, non-stream
     # responses, System One) — media never reaches here — so the reply always has a usage object to
@@ -2805,7 +2815,7 @@ def _forward_stream(
             if engine_resp.status_code != 200:
                 engine_resp.read()
                 _warn_api_auth_failure(api_kind, engine_resp.status_code)
-                _try_submit_error(state, txn, f"engine error {engine_resp.status_code}: {engine_resp.text[:200]}")
+                _try_submit_error(state, txn, _engine_error(engine_resp.status_code, engine_resp.text))
                 return
             # Pass the engine's SSE bytes straight through while its stream is open. A streamed 401 can't
             # replay the iterator, so `_submit_response` re-raises it; `handle_job` then reports via
