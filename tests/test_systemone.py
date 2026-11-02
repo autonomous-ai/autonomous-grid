@@ -130,6 +130,7 @@ def _stub_engine(monkeypatch, *, deciders=(), chatters=None):
         return dict(NO_FEATURES)
 
     monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: False)
+    monkeypatch.setattr(probe, "stated_context_windows", lambda url: {})
     monkeypatch.setattr(probe, "probe_systemone", systemone)
     monkeypatch.setattr(probe, "probe_chats", chats)
     monkeypatch.setattr(probe, "probe_llama_capabilities", features)

@@ -1019,6 +1019,10 @@ def _probe_spec_caps(
     when the spec serves no models. An API spec (``api_kind``) takes its caps from the static whitelist
     instead — no probe ever targets the vendor — via the same seam so startup and reload can't drift;
     the codex kind additionally passes ``model_caps`` (its live-probe caps persisted in the record).
+
+    ``ctx_size`` wins; without one each model takes the window its engine states (``probe.stated_context_windows``), read
+    once for the whole engine by the upstream name. ⚠️ A stated window switches on what an unknown one never does: the
+    relay compacts for the engine, and a large request to ``auto`` prefers an engine it fits (grid-src ``fits_window``).
     """
     if api_kind:
         return _static_api_caps(api_kind, advertised, model_caps=model_caps)
@@ -1041,6 +1045,7 @@ def _probe_spec_caps(
     # engine pick up Responses" — the probe verdict is otherwise silent, and a False sticks until re-join.
     _debug(f"responses probe {llm_url!r}: {'serves' if serves_responses else 'does not serve'} /responses")
     endpoints = ["chat/completions", "completions"] + (["responses"] if serves_responses else [])
+    stated_windows = {} if ctx_size else probe.stated_context_windows(llm_url)
     caps_models: dict[str, Any] = {}
     for index, (advertised_model, upstream_model) in enumerate(zip(advertised, upstream, strict=True)):
         if deadline is not None and time.monotonic() >= deadline:
@@ -1056,7 +1061,8 @@ def _probe_spec_caps(
                 continue
             model_endpoints = [*endpoints, _SYSTEMONE_ENDPOINT]
         env = probe.capabilities(
-            llm_url, upstream_model, advertise_as=advertised_model, context_window=ctx_size,
+            llm_url, upstream_model, advertise_as=advertised_model,
+            context_window=ctx_size or stated_windows.get(upstream_model),
             endpoints=model_endpoints, honours_output_cap=serves_responses,
         )
         caps_models.update((env or {}).get("models") or {})

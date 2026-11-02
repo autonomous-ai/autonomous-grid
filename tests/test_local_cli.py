@@ -18791,6 +18791,7 @@ def _stub_hardware_probe(monkeypatch, *, serves_responses):
         return serves_responses
 
     monkeypatch.setattr(probe, "probe_responses_endpoint", _responses)
+    monkeypatch.setattr(probe, "stated_context_windows", lambda url: {})
     monkeypatch.setattr(probe, "probe_llama_capabilities", lambda url, model: {
         "vision": False, "json_object": False, "json_schema": False,
         "tools": False, "parallel_tool_calls": False,
