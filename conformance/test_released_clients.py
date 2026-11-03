@@ -1,7 +1,7 @@
 """Every `grid` in the field, against what serves every grid (grid-platform ticket 13; ADR 0004; M5 ticket 07): a grid
 created by rows on a relay pool, behind grid-apis' real proxy (`conftest.py`, `stack.py`).
 
-Each test runs once per released version (0.3.47–0.3.62) and once for the harness's pinned `grid`. Behaviour that a
+Each test runs once per released version (0.3.47–0.3.63) and once for the harness's pinned `grid`. Behaviour that a
 version was never built to have is asserted as THAT version's behaviour, so a change that breaks an old client is a
 failure here, and a client that changed on purpose names the version it changed in:
 
