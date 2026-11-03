@@ -485,7 +485,9 @@ The `grid join` flag set is the union of both modes, gated by mode:
   / `--all`, `--advertise-as` (or inline `-m real=pub`), `--endpoint-port` (alias `--llama-port`),
   the llama tuning flags (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`
   — `--ctx-size N` is the window **one request** may use, so a Grid-launched llama-server reserves
-  N × its slot count of KV cache up front),
+  N × its slot count of KV cache up front; on `--at` without it, the window is what the engine states in its `/models`
+  when it states one (vLLM's `max_model_len`), else unknown. A known window lets the grid shorten a conversation that
+  would overflow it),
   `--heartbeat-interval` (seconds between heartbeats, default 15), `--api-key <key>` (overrides the
   env var and the key store, and warns that it is visible in shell history), and the media flags
   `--media` / `--bundle <bundle>` / `--comfyui-port` / `--media-port`.

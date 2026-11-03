@@ -35,6 +35,7 @@ _PROPS_TIMEOUT = httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=3.0)
 _SHOW_TIMEOUT = httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=3.0)
 _BENCHMARK_TIMEOUT = httpx.Timeout(connect=3.0, read=60.0, write=10.0, pool=3.0)
 _RESPONSES_PROBE_TIMEOUT = httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=3.0)
+_STATED_WINDOW_KEY = "max_model_len"  # vLLM's `/v1/models` entry
 
 # A minimal valid image for the live vision probe — we only test whether the engine ACCEPTS image
 # input, not the answer, so any decodable pixel works. Bump the size if a specific engine rejects
@@ -72,7 +73,8 @@ def capabilities(
     the advertised list, so an aliased external engine must probe by its real name (what the engine
     answers to) yet register under the alias (what consumers ask for).
 
-    ``context_window`` (the engine's ``--ctx-size``) is advertised so the master can catalog it.
+    ``context_window`` (the engine's ``--ctx-size``, else what its ``/models`` states) is advertised so the master can
+    catalog it.
 
     ``endpoints`` and ``honours_output_cap`` carry the once-per-engine Responses discovery (issue 08):
     the caller runs ``probe_responses_endpoint`` ONCE for the engine's server and passes the same
@@ -361,6 +363,33 @@ def _probe_lmstudio_caps(llm_url: str, llm_model: str, timeout: float | httpx.Ti
     return {}
 
 
+def stated_context_windows(llm_url: str, timeout: float | httpx.Timeout = _PROPS_TIMEOUT) -> dict[str, int]:
+    """The window each model's own ``/models`` entry states, by its exact ``id``; what it does not state is absent.
+
+    Only vLLM's ``max_model_len`` is read: the one key measured on a real engine. The answer is remote input, so a value
+    that is not a positive int (a ``bool`` is an int here, and ``true`` is not a 1-token window) and any answer of the
+    wrong shape read as unknown, never as an error: a window only sharpens what an engine already serves.
+    """
+    resp = _get(f"{llm_url.rstrip('/')}/models", timeout=timeout)
+    if resp is None or resp.status_code != 200:
+        return {}
+    try:
+        payload = resp.json()
+    except (ValueError, RecursionError):
+        return {}
+    entries = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return {}
+    windows: dict[str, int] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        stated = entry.get(_STATED_WINDOW_KEY)
+        if isinstance(stated, int) and not isinstance(stated, bool) and stated > 0:
+            windows[entry["id"]] = stated
+    return windows
+
+
 def _probe_models(llm_url: str, llm_model: str, timeout: float | httpx.Timeout = _PROPS_TIMEOUT) -> set[str]:
     resp = _get(f"{llm_url.rstrip('/')}/models", timeout=timeout)
     if resp is None or resp.status_code != 200:
@@ -522,7 +551,8 @@ def capability_entry(
     endpoints: list[str] | None = None, honours_output_cap: bool = False,
 ) -> dict[str, Any]:
     """Render one model's capability entry (matches the desktop/relay shape). ``context_window`` is
-    included ONLY when actually known (the engine's ``--ctx-size`` or an API whitelist entry) — an
+    included ONLY when actually known (the engine's ``--ctx-size``, what its ``/models`` states, or an API
+    whitelist entry) — an
     unknown window is omitted, never defaulted, so the master (and the auto-router Advisor) treats
     absence as "unknown" rather than trusting a fabricated 128000. ``endpoints`` defaults to the
     hardware-engine pair; an API engine passes its catalog row's endpoints (issue 03) — chat plus
