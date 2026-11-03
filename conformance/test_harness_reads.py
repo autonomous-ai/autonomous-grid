@@ -149,13 +149,27 @@ def test_a_retired_feature_is_refused_by_the_proxy(stack, path):
 
 def _chat(stack: Stack, model: str, *, openai_errors: bool) -> httpx.Response:
     """A consumer's request through the proxy. The relay answers a failure in OpenAI's envelope, with its `code`, when
-    the caller asked for OpenAI errors (the error-format header; an `lga_sk_` key does too); otherwise a refusal before
-    the queue, which is what these tests reach, is `{"detail": …}` with no code (`grid-protocol` `openai-error`). Long enough for the relay's retry budget."""
+    the caller asked for OpenAI errors (the error-format header; an `lga_sk_` key does too); otherwise the same envelope
+    with `detail` beside it (`grid-protocol` `openai-error`; `_default_envelope`). Long enough for the relay's retry
+    budget."""
     headers = {"Authorization": f"Bearer {stack.consumer_token()}"}
     if openai_errors:
         headers["X-Error-Format"] = "openai"
     return httpx.post(f"{stack.grid_url}/relay/v1/chat/completions", timeout=90, headers=headers,
                       json={"model": model, "messages": [{"role": "user", "content": "x"}]})
+
+
+def _default_envelope(body: dict, definition: str, code: str) -> str:
+    """A caller that did not ask for OpenAI errors: `detail`, a sentence. A relay since grid-platform's
+    `both_envelopes_response` (2026-11-03) puts OpenAI's envelope beside it, the same sentence and its code, for an SDK
+    that reads only `error.message`; one before it sent `detail` alone. Both pass while either serves, and an envelope
+    that is there must be the whole of it. Returns the sentence."""
+    assert isinstance(body.get("detail"), str), body
+    if "error" in body:
+        grid_protocol.validator("openai-error", definition).validate(body)
+        assert body["error"]["code"] == code
+        assert body["error"]["message"] == body["detail"], body
+    return body["detail"]
 
 
 def _record_if_asked(stack: Stack, definition: str, answer: httpx.Response) -> None:
@@ -196,7 +210,7 @@ def test_a_model_the_grid_has_served_whose_engine_is_gone_is_no_providers_availa
         grid_protocol.validator("openai-error", "NoProvidersAvailable").validate(body)
         assert body["error"]["code"] == NO_PROVIDERS_AVAILABLE_CODE
     else:
-        assert isinstance(body.get("detail"), str) and "error" not in body
+        _default_envelope(body, "NoProvidersAvailable", NO_PROVIDERS_AVAILABLE_CODE)
 
 
 @ENVELOPES
@@ -216,6 +230,5 @@ def test_a_model_no_engine_on_the_grid_ever_served_is_model_not_found(stack, pro
         message = body["error"]["message"]
         _record_if_asked(stack, "ModelNotFound", answer)
     else:
-        assert isinstance(body.get("detail"), str) and "error" not in body
-        message = body["detail"]
+        message = _default_envelope(body, "ModelNotFound", MODEL_NOT_FOUND_CODE)
     assert never_served not in message, "the requested name is never echoed"

@@ -466,10 +466,11 @@ export interface ErrorReportAnswer {
 
 /**
  * OpenAI's error envelope. A master answers an inference request's failure in it when the caller asked for
- * OpenAI errors (a Bearer `lga_sk_` key, or the error-format header); otherwise a refusal before the queue is
- * `{"detail": <message>}` with no code, and on chat/completions and completions a failure after it is this
- * envelope with `detail` beside it. `/messages` answers in Anthropic's envelope instead. Keys a master adds
- * go BESIDE `error`, never inside it.
+ * OpenAI errors (a Bearer `lga_sk_` key, or the error-format header); otherwise, on chat/completions,
+ * completions and responses, it is this envelope with `detail` beside it: the same sentence, or before the
+ * queue the refusal's own `detail` (a dict for a few). On responses there is no opting in: every caller gets
+ * both. `/messages` answers in Anthropic's envelope instead. Keys a master adds go BESIDE `error`, never
+ * inside it.
  */
 export interface OpenAIError {
   error: {
@@ -507,7 +508,8 @@ export interface NoProvidersAvailable {
  * refused at once (after a woken master's boot hold) rather than as the retryable NoProvidersAvailable, which
  * a grid that has served the model, a grid that has never had an engine, and a master that cannot tell keep.
  * The message names what the grid serves now and never echoes the requested name. A caller that did not ask
- * for OpenAI errors gets `{"detail": <message>}`. Displayed, never parsed: the public CLI must not parse it.
+ * for OpenAI errors gets this envelope with `detail` beside it. Displayed, never parsed: the public CLI must
+ * not parse it.
  */
 export interface ModelNotFound {
   error: {
@@ -522,8 +524,8 @@ export interface ModelNotFound {
 
 /**
  * The master holding the request ended it while retiring or stopping: send it again. A non-stream request is
- * answered 503 with this envelope (or `{"detail": <message>}` for a caller that did not ask for OpenAI
- * errors). A chat stream ends with `data: {"error": <this envelope's error>}`. A Responses stream ends with a
+ * answered 503 with this envelope (with `detail` beside it for a caller that did not ask for OpenAI errors).
+ * A chat stream ends with `data: {"error": <this envelope's error>}`. A Responses stream ends with a
  * `response.failed` event whose `response.error.code` is `server_error`: the Responses code set is closed, so
  * this name never reaches a Responses client. The public CLI must not parse it.
  */
