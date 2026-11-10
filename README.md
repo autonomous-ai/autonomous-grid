@@ -721,3 +721,4 @@ Local state lives under `~/.grid` (override with `GRID_HOME`).
 ## License
 
 MIT — see [LICENSE](LICENSE).
+<!-- superagent test -->
