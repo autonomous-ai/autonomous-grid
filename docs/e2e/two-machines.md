@@ -1,1 +1,1 @@
-hello from machine 2
+hello from machine 2.
